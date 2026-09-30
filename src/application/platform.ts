@@ -1978,6 +1978,95 @@ export class Platform {
     return { paused: mission.isPaused };
   }
 
+  async parkMission(
+    missionId: string,
+    input: { reason: string; reviewer: string },
+  ): Promise<{ parked: boolean; reason: string }> {
+    return this.#tx(async () => {
+      const { mission } = await this.#locate(missionId);
+      const reason = input?.reason?.trim();
+      const reviewer = input?.reviewer?.trim();
+      if (!reason || !reviewer) throw new PlatformRuleError('INVALID_PARK_REQUEST', 'park 需要非空 reason 与 reviewer。');
+      if (mission.isParked) return { parked: true, reason: mission.parkReason ?? reason };
+      if (mission.status === 'completed' || mission.status === 'cancelled' || mission.status === 'failed') {
+        throw new PlatformRuleError('MISSION_TERMINAL', `Mission ${missionId} 已终态，不能 park。`);
+      }
+      const ref = mission.workspaceRef;
+      const workspace = this.#workspace;
+      const cwd = ref?.projectRoot && workspace?.worktreePath?.(mission.id, ref.projectRoot);
+      if (!workspace || !ref?.projectRoot || !ref.branch || ref.branch === '(in-place)' || !cwd || cwd === ref.projectRoot) {
+        throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 修改中的 Mission 需要可信隔离 workspace。');
+      }
+      const accepted = mission.workItems.filter((item) => item.status === 'accepted');
+      const authorized = new Set<string>();
+      for (const item of accepted) {
+        const paths = item.order?.allowedScope;
+        if (!Array.isArray(paths) || paths.length === 0 || paths.some((path) => typeof path !== 'string' || !path.trim())) {
+          throw new PlatformRuleError('CHECKPOINT_SCOPE_REQUIRED', `已验收工作项 ${item.id} 缺少冻结的 allowedScope。`);
+        }
+        for (const path of paths) authorized.add(path);
+      }
+      if (accepted.length > 0) {
+        if (!workspace.checkpoint) {
+          throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 已验收成果需要 checkpoint 能力。');
+        }
+        await workspace.checkpoint(cwd, mission.id, 'park', [...authorized].sort());
+      } else {
+        if (!workspace.assertMissionWorktreeClean) {
+          throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', '零验收项 park 需要 Mission worktree 洁净检查能力。');
+        }
+        await workspace.assertMissionWorktreeClean(mission.id, ref.projectRoot);
+      }
+      mission.park(reason);
+      await this.#event(mission, 'mission.parked', { reason, reviewer, checkpointedWorkItems: accepted.map((item) => item.id) });
+      return { parked: true, reason };
+    });
+  }
+
+  async resumeParkedMission(
+    missionId: string,
+    input: { reason: string; reviewer: string; answer?: string },
+  ): Promise<{ parked: boolean; conflictFiles: string[]; targetHead: string }> {
+    const reason = input?.reason?.trim();
+    const reviewer = input?.reviewer?.trim();
+    if (!reason || !reviewer) throw new PlatformRuleError('INVALID_PARK_REQUEST', '续跑需要非空 reason 与 reviewer。');
+    const { mission, project } = await this.#locate(missionId);
+    if (!mission.isParked) throw new PlatformRuleError('MISSION_NOT_PARKED', `Mission ${missionId} 未挂起。`);
+    if (input.answer !== undefined) {
+      if (typeof input.answer !== 'string' || !input.answer.trim()) {
+        throw new PlatformRuleError('INVALID_ESCALATION_ANSWER', '升级答复不能为空。');
+      }
+      if (mission.openEscalations.length === 0) {
+        throw new PlatformRuleError('NO_OPEN_ESCALATION', `Mission ${missionId} 没有待答复的升级。`);
+      }
+    }
+    const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
+    if (holder) throw new PlatformRuleError('PROJECT_BUSY', `Mission ${holder.id} 占用项目改动名额。`);
+    const ref = mission.workspaceRef;
+    const workspace = this.#workspace;
+    const cwd = ref?.projectRoot && workspace?.worktreePath?.(mission.id, ref.projectRoot);
+    if (!workspace?.syncMissionWithTarget || !workspace.worktreePath || !ref?.projectRoot || !ref.branch ||
+        ref.branch === '(in-place)' || !cwd || cwd === ref.projectRoot || !ref.targetBranch || ref.targetBranch === '(in-place)') {
+      throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', '续跑需要可信 Mission worktree 与目标分支。');
+    }
+    const synced = await workspace.syncMissionWithTarget({ missionId, projectRoot: ref.projectRoot, targetBranch: ref.targetBranch });
+    await this.#tx(async () => {
+      const current = await this.#locate(missionId);
+      current.mission.recordWorkspace({ ...current.mission.workspaceRef!, baseRevision: synced.targetHead });
+      if (synced.conflictFiles.length) {
+        current.mission.unpark();
+        await this.#event(current.mission, 'mission.resume_sync_conflict', {
+          reason, reviewer, conflictFiles: synced.conflictFiles, baseRevision: synced.targetHead,
+        });
+      } else {
+        current.mission.unpark();
+        await this.#event(current.mission, 'mission.resumed_from_park', { reason, reviewer, baseRevision: synced.targetHead });
+      }
+      if (input.answer?.trim()) await this.#answerEscalation(missionId, input.answer.trim());
+    });
+    return { parked: false, conflictFiles: synced.conflictFiles, targetHead: synced.targetHead };
+  }
+
   async resumeMission(missionId: string): Promise<{ paused: boolean }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#resumeMission(missionId));
@@ -2187,6 +2276,37 @@ export class Platform {
     // 在界面上长得一模一样。
     await this.#locate(missionId);
     return this.#activity.list(missionId);
+  }
+
+  /** Persist the dispatched work-item snapshot associated with an observed Git conflict. */
+  async recordConflictDispatchBarrier(
+    missionId: string,
+    conflictFiles: readonly string[],
+  ): Promise<readonly string[]> {
+    return this.#tx(async () => {
+      const { mission } = await this.#locate(missionId);
+      const events = await this.#activity.list(missionId);
+      let barrier: readonly string[] | undefined;
+      for (const event of events) {
+        if (event.kind === 'mission.conflict_dispatch_barrier') {
+          const data = event.data as { workItemIds?: unknown };
+          barrier = Array.isArray(data.workItemIds) ? data.workItemIds as string[] : [];
+        } else if (event.kind === 'mission.conflict_dispatch_cleared') {
+          barrier = undefined;
+        }
+      }
+      if (conflictFiles.length === 0) {
+        if (barrier !== undefined) await this.#event(mission, 'mission.conflict_dispatch_cleared', {});
+        return [];
+      }
+      if (barrier !== undefined) return [...barrier];
+      const workItemIds = mission.workItems.filter((item) => item.status === 'dispatched').map((item) => item.id);
+      await this.#event(mission, 'mission.conflict_dispatch_barrier', {
+        conflictFiles: [...conflictFiles],
+        workItemIds,
+      });
+      return workItemIds;
+    });
   }
 
   /* ============================ L2 协调者面 ============================ */
@@ -5506,6 +5626,8 @@ export interface MissionView {
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
+  parked: boolean;
+  parkReason: string | undefined;
   /**
    * 同 Project 里**别的**哪条 Mission 正占着改动名额（不变量 C）。没有就是
    * undefined；自己占着也是 undefined —— 这一格回答的是"谁挡着我"。
@@ -5978,6 +6100,8 @@ function viewOf(mission: Mission): MissionView {
     updatedAt: mission.updatedAt,
     paused: mission.isPaused,
     isMutating: mission.isMutating,
+    parked: mission.isParked,
+    parkReason: mission.parkReason,
     // 只有 getMissionView 那一层算得出来（要看兄弟 Mission）。这里给 undefined
     // 而不是省略：省略会让类型上是可选的东西在运行时变成"没查过"和"查了没有"
     // 分不开。

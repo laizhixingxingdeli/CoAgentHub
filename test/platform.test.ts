@@ -10,6 +10,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -30,12 +31,12 @@ const ORDER: WorkOrder = {
   contextRefs: [],
 };
 
-function makePlatform() {
+function makePlatform(workspace?: WorkspaceManager) {
   const clock = new FixedClock();
   const activity = new InMemoryActivityLog(clock);
   const projects = new InMemoryProjectRepository();
   const ids = new SequentialIds();
-  const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids });
+  const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids, workspace });
   return { platform, activity, projects };
 }
 
@@ -93,6 +94,120 @@ async function upToSubmitted() {
   });
   return { platform, activity, coord, exec, workItemId };
 }
+
+describe('Mission park', () => {
+  test('conflict dispatch barrier freezes old dispatched work items until cleared', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'BARRIER', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('BARRIER');
+    await platform.updatePlan('BARRIER', coord, PLAN);
+    const oldItem = await platform.createWorkItem('BARRIER', coord, { title: 'old', order: ORDER });
+    await platform.dispatchWorkItems('BARRIER', coord, [oldItem.workItemId]);
+
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', ['src/foo.ts']), [oldItem.workItemId]);
+    const newItem = await platform.createWorkItem('BARRIER', coord, { title: 'resolution', order: ORDER });
+    await platform.dispatchWorkItems('BARRIER', coord, [newItem.workItemId]);
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', ['src/foo.ts']), [oldItem.workItemId]);
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', []), []);
+    const view = await platform.getMissionView('BARRIER');
+    assert.equal(view.workItems.find((item) => item.id === oldItem.workItemId)?.status, 'dispatched');
+    assert.equal(view.workItems.find((item) => item.id === newItem.workItemId)?.status, 'dispatched');
+  });
+
+  test('resume 同一 Mission 前先同步目标 HEAD 并保留已验收成果', async () => {
+    const calls: string[] = [];
+    let platform: Platform;
+    const workspace = {
+      worktreePath: () => '/fake/mission-worktree',
+      checkpoint: async (_cwd: string, _missionId: string, _reason: string, _paths: string[]) => { calls.push('checkpoint'); },
+      syncMissionWithTarget: async () => {
+        calls.push('sync');
+        assert.equal((await platform.getMissionView('M1')).parked, true);
+        return { targetHead: 'new-head', conflictFiles: [] };
+      },
+    } as WorkspaceManager;
+    ({ platform } = makePlatform(workspace));
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord, PLAN);
+    const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', exec, { kind: 'test', summary: 'passed', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M1', exec, {
+      outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: 'none',
+    });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: 'verified' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+    await platform.recordWorkspace('M1', {
+      projectRoot: '/fake/project', branch: 'mission/M1', targetBranch: 'main', baseRevision: 'old-head',
+    });
+    const before = await platform.getMissionView('M1');
+    const lastReview = before.workItems[0]?.lastReview;
+    await platform.parkMission('M1', { reason: 'waiting', reviewer: 'L3' });
+    await assert.rejects(
+      platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3', answer: 'answer' }),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'NO_OPEN_ESCALATION',
+    );
+    assert.deepEqual(calls, ['checkpoint']);
+    assert.equal((await platform.getMissionView('M1')).parked, true);
+    await platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3' });
+    const after = await platform.getMissionView('M1');
+    assert.deepEqual(calls, ['checkpoint', 'sync']);
+    assert.equal(after.missionId, before.missionId);
+    assert.equal(after.status, before.status);
+    assert.equal(after.parked, false);
+    assert.equal(after.workspaceRef?.baseRevision, 'new-head');
+    assert.equal(after.workItems[0]?.id, workItemId);
+    assert.equal(after.workItems[0]?.status, 'accepted');
+    assert.deepEqual(after.workItems[0]?.lastReview, lastReview);
+    assert.deepEqual(after.workItems[0]?.attempts, before.workItems[0]?.attempts);
+  });
+
+  test('拒绝空 reason 或 reviewer', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'PARK1', contract: CONTRACT });
+    await assert.rejects(platform.parkMission('PARK1', { reason: ' ', reviewer: 'L3' }), PlatformRuleError);
+    await assert.rejects(platform.parkMission('PARK1', { reason: 'wait', reviewer: ' ' }), PlatformRuleError);
+    assert.equal((await platform.getMissionView('PARK1')).parked, false);
+  });
+
+  test('挂起释放同项目名额，下一张票可以开跑', async () => {
+    const cleanChecks: string[] = [];
+    const workspace = {
+      worktreePath: () => '/fake/mission-worktree',
+      assertMissionWorktreeClean: async (missionId: string) => { cleanChecks.push(missionId); },
+    } as WorkspaceManager;
+    const { platform } = makePlatform(workspace);
+    const prepare = async (missionId: string) => {
+      await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+      const coord = await platform.startCoordinatorAttempt(missionId);
+      await platform.updatePlan(missionId, coord.attemptId, PLAN);
+      const item = await platform.createWorkItem(missionId, coord.attemptId, { title: 'W', order: ORDER });
+      await platform.dispatchWorkItems(missionId, coord.attemptId, [item.workItemId]);
+    };
+
+    await prepare('PARK-FIRST');
+    await platform.recordWorkspace('PARK-FIRST', {
+      projectRoot: '/fake/project', branch: 'mission/PARK-FIRST', targetBranch: 'main', baseRevision: 'base',
+    });
+    assert.equal((await platform.getMissionView('PARK-FIRST')).isMutating, true);
+    await platform.parkMission('PARK-FIRST', { reason: '等待用户答复', reviewer: 'L3' });
+    const parked = await platform.getMissionView('PARK-FIRST');
+    assert.equal(parked.parked, true);
+    assert.equal(parked.parkReason, '等待用户答复');
+    assert.equal(parked.isMutating, false);
+    assert.deepEqual(cleanChecks, ['PARK-FIRST']);
+
+    await prepare('PARK-SECOND');
+    const second = await platform.getMissionView('PARK-SECOND');
+    assert.equal(second.status, 'executing');
+    assert.equal(second.isMutating, true);
+  });
+});
 
 describe('平台规则：能用工具层挡住的，不指望模型记得住', () => {
   test('没有 Plan 就不许创建工作项', async () => {

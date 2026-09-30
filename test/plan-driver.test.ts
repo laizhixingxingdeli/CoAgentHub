@@ -69,6 +69,8 @@ type HarnessView = {
   executionMode?: string;
   haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
   waitDetail?: string;
+  parked?: boolean;
+  parkReason?: string;
   workspaceRef?: { targetBranch?: string };
   independentReviews?: readonly {
     readonly reviewedCommit: string;
@@ -80,8 +82,9 @@ type HarnessView = {
 
 function harness(options?: {
   features?: string[];
+  dependsOn?: Record<string, string[]>;
   runs?: Record<string, Ran | Error | (Ran | Error)[]>;
-  finalize?: Record<string, Finalize | Error>;
+  finalize?: Record<string, Finalize | Error | (Finalize | Error)[]>;
   haFinalize?: Record<string, Finalize | Error>;
   onHaFinalize?: (missionId: string) => void;
   passTakesMs?: number[];
@@ -128,6 +131,7 @@ function harness(options?: {
         why: '因为',
         allowedScope: [`src/${id}.ts`],
         acceptance: ['绿'],
+        ...(options?.dependsOn?.[id] ? { dependsOn: options.dependsOn[id] } : {}),
       })),
     },
     { reviewer: 'claude' },
@@ -239,10 +243,15 @@ function harness(options?: {
       },
       finalizeMissionByMachine: async (missionId, input) => {
         calls.push(`finalize ${missionId} → ${input.integrationBranch} [${input.verification[0].argv.join(' ')}]`);
-        const result = options?.finalize?.[missionId] ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
-        if (result instanceof Error) throw result;
-        status.set(missionId, result.status);
-        return result;
+        const configured = options?.finalize?.[missionId];
+        const result = Array.isArray(configured)
+          ? configured[runIndex.get(`finalize:${missionId}`) ?? 0]
+          : configured;
+        if (Array.isArray(configured)) runIndex.set(`finalize:${missionId}`, (runIndex.get(`finalize:${missionId}`) ?? 0) + 1);
+        const finalResult = result ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
+        if (finalResult instanceof Error) throw finalResult;
+        status.set(missionId, finalResult.status);
+        return finalResult;
       },
       abandonMissionForPlan: async (missionId, input) => {
         calls.push(`abandon ${missionId} ${input.escalationId}`);
@@ -1413,6 +1422,61 @@ describe('失败了开升级单等检视者', () => {
     // 先断它确实放弃了：没放弃时 indexOf 是 -1，只比先后会两边都绿。
     assert.ok(h.calls.includes('abandon R1-F1 E-1'));
     assert.ok(h.calls.indexOf('abandon R1-F1 E-1') < h.calls.indexOf('create R1-F2'));
+  });
+
+  test('活动升级发现 Mission park：投影后运行独立后票、不派发依赖票', async () => {
+    const views: Record<string, HarnessView> = {};
+    let parked = false;
+    const h = harness({
+      features: ['F1', 'F2', 'F3'],
+      dependsOn: { F3: ['F1'] },
+      finalize: { 'R1-F1': RED },
+      views,
+      onSleep: async () => {
+        if (!parked) {
+          parked = true;
+          views['R1-F1'] = { parked: true, parkReason: '等用户答复' };
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    const run = h.store.read()!;
+    assert.equal(stop.reason, 'finished');
+    assert.equal(run.escalations[0].resolution?.kind, 'parked');
+    assert.equal(run.unresolvedCount, 0);
+    assert.ok(!h.calls.includes('abandon R1-F1 E-1'));
+    assert.ok(h.calls.includes('create R1-F2'));
+    assert.ok(!h.calls.includes('create R1-F3'));
+    assert.equal(run.feature('F3')?.status, 'suspended');
+  });
+
+  test('活动 PlanRun 恢复已解挂 Mission 时复用原 id', async () => {
+    const views: Record<string, HarnessView> = {};
+    let parked = false;
+    const h = harness({
+      features: ['F1', 'F2'],
+      finalize: { 'R1-F1': [RED, { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-2' }] },
+      views,
+      onSleep: async () => {
+        if (!parked) {
+          parked = true;
+          views['R1-F1'] = { parked: true, parkReason: '等用户答复' };
+        }
+      },
+      onMissionReturn: async ({ store }) => {
+        if (store.read()?.feature('F2')?.status === 'running') {
+          views['R1-F1'] = { parked: false };
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.ok(h.calls.includes('run R1-F1'));
+    assert.equal(h.calls.filter((call) => call === 'run R1-F1').length, 2);
+    assert.ok(!h.calls.some((call) => call.startsWith('create-classified R1-F1')));
+    assert.equal(h.store.read()!.feature('F1')?.missionIds.length, 1);
   });
 
   test('没人定 → 截止判过期、记未解决、功能挂起、名额放掉、接着跑', async () => {

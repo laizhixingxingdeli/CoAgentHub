@@ -228,6 +228,31 @@ describe('升级握手', () => {
   });
 });
 
+describe('Mission 挂起投影', () => {
+  test('parked 投影绑定 Mission 与升级单，过截止仍不计未解决且可往返读取', () => {
+    const { run, escalation } = withEscalation();
+    const parked = run.parkMission('M-F1', '需求有歧义，等用户回答', at(12));
+    assert.equal(parked.id, escalation.id);
+    assert.deepEqual(run.parkedMissions, [{
+      escalationId: escalation.id, missionId: 'M-F1', reviewer: 'claude',
+      reason: '需求有歧义，等用户回答', parkedAt: at(12),
+    }]);
+    assert.equal(run.feature('F1')?.status, 'suspended');
+    assert.equal(run.feature('F1')?.needsDecision, '需求有歧义，等用户回答');
+    const restored = PlanRun.restore(JSON.parse(JSON.stringify(run.toSnapshot())));
+    assert.deepEqual(restored.parkedMissions, run.parkedMissions);
+    assert.throws(() => restored.expire(escalation.id, at(90)), rule('ESCALATION_ALREADY_RESOLVED'));
+    assert.equal(restored.unresolvedCount, 0);
+    const missionIds = restored.feature('F1')?.missionIds;
+    assert.equal(restored.resumeParkedMission('M-F1'), 'F1');
+    assert.deepEqual(restored.parkedMissions, run.parkedMissions);
+    assert.equal(restored.unresolvedCount, 0);
+    assert.equal(restored.feature('F1')?.status, 'running');
+    assert.deepEqual(restored.feature('F1')?.missionIds, missionIds);
+    assert.equal(restored.stopped, undefined);
+  });
+});
+
 describe('超时与未解决', () => {
   test('截止前不能判过期：检视者还在它的窗口里', () => {
     const { run, escalation } = withEscalation();

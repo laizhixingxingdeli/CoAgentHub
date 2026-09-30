@@ -93,6 +93,17 @@ const SKIP = {
 };
 
 describe('升级握手跨进程', () => {
+  test('活动 run 的 Mission parked 投影持久化且不因升级截止计数', async () => {
+    const { store } = await storeWithEscalation();
+    await store.update((run) => run.parkMission('M-F1', '等待用户澄清', at(12)));
+    const restored = store.read();
+    assert.equal(restored?.feature('F1')?.status, 'suspended');
+    assert.deepEqual(restored?.parkedMissions, [{
+      escalationId: 'E-1', missionId: 'M-F1', reviewer: 'claude', reason: '等待用户澄清', parkedAt: at(12),
+    }]);
+    assert.equal(restored?.unresolvedCount, 0);
+    assert.equal(restored?.stopped, undefined);
+  });
   test('另一个进程读到升级单、写回决定，本进程读得到', async () => {
     const { path, store } = await storeWithEscalation();
 

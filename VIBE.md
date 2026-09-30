@@ -135,6 +135,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   `Platform.finalizeMissionByMachine` 是**机器放行**的唯一入口；`Platform.abandonMissionForPlan` 是**方案运行放弃失败 Mission** 的唯一入口；`Platfor
 - **mission-checkpoints** — Mission 工作项检查点与候选失败回滚
   成功 `structured_submit` 的 executor 完成 `finishAttempt` 后，在 Mission worktree 的 Mission 分支建立 `mission(<missionId>): <workIte
+- **mission-parking** — Mission 挂起与续跑
+  检视者决定等待用户时使用 Mission 级命令 `node src/l3.ts park <missionId> --reason "…" --as <检视者>`；用户答复后使用 `node src/l3.ts resume <missi
 - **mission-round-limit** — Mission 单次运行轮次上限
   `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
 - **plan-run-web-observability** — 方案运行只读观测面（HTTP 与 Web）

@@ -129,6 +129,8 @@ export class Mission {
   #waitDetail: string | undefined;
   #updatedAt: string | undefined;
   #paused = false;
+  #parked = false;
+  #parkReason: string | undefined;
   #executionMode: MissionExecutionMode;
   #runKind: RunKind;
   #complexityAssessment: Readonly<ComplexityAssessment> | undefined;
@@ -200,7 +202,7 @@ export class Mission {
    * 此刻退回了 planning、或正在等 L3 检视。
    */
   get isMutating(): boolean {
-    return this.#hasMutated && !this.#isTerminal();
+    return this.#hasMutated && !this.#isTerminal() && !this.#parked;
   }
 
   /** 这条 Mission 是否动过代码（进过 executing）。 */
@@ -302,6 +304,35 @@ export class Mission {
     return this.#paused;
   }
 
+  get isParked(): boolean {
+    return this.#parked;
+  }
+
+  get parkReason(): string | undefined {
+    return this.#parkReason;
+  }
+
+  /** 暂存已提交成果；调用方须先确保成果处于安全检查点。 */
+  park(reason: string): void {
+    if (this.#isTerminal()) {
+      throw new IllegalTransitionError('Mission', this.#status, 'park');
+    }
+    this.#parked = true;
+    this.#parkReason = reason;
+  }
+
+  /** 重新领取名额后恢复调度；拒绝时保持 parked 原状。 */
+  unpark(): void {
+    if (this.#parked && this.#project.hasOtherMutatingMission(this.#id)) {
+      throw new InvariantViolationError(
+        'CONCURRENT_MUTATING_MISSION',
+        `Project ${this.#projectId} already has a mission in executing state`,
+      );
+    }
+    this.#parked = false;
+    this.#parkReason = undefined;
+  }
+
   pause(): void {
     if (this.#isTerminal()) {
       throw new IllegalTransitionError('Mission', this.#status, 'pause');
@@ -310,6 +341,7 @@ export class Mission {
   }
 
   resume(): void {
+    if (this.#parked) this.unpark();
     this.#paused = false;
   }
 
@@ -753,6 +785,8 @@ export class Mission {
       waitDetail: this.#waitDetail,
       updatedAt: this.#updatedAt,
       paused: this.#paused,
+      parked: this.#parked,
+      parkReason: this.#parkReason,
       executionMode: this.#executionMode,
       runKind: this.#runKind,
       complexityAssessment: this.#complexityAssessment,
@@ -809,6 +843,10 @@ export class Mission {
     mission.#waitDetail = snapshot.waitDetail;
     mission.#updatedAt = snapshot.updatedAt;
     mission.#paused = snapshot.paused ?? false;
+    mission.#parked = snapshot.parked ?? false;
+    mission.#parkReason = mission.#parked && typeof snapshot.parkReason === 'string'
+      ? snapshot.parkReason
+      : undefined;
     mission.#workItems = (snapshot.workItems ?? []).map((item: WorkItemSnapshot) =>
       WorkItem.restore(item),
     );

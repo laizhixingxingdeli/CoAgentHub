@@ -110,6 +110,7 @@ async function driveToReview(
     projectRoot: repo,
     branch: prepared.branch,
     baseRevision: prepared.baseRevision,
+    targetBranch: prepared.targetBranch,
   });
   const coord = await platform.startCoordinatorAttempt(missionId);
   await platform.updatePlan(missionId, coord.attemptId, PLAN);
@@ -540,5 +541,27 @@ describe('l3 show：HA 子态与阻塞原因', () => {
     // 夹具的历史 Attempt 没记 profileId：独立性先卡在「无法证明」，阻塞原因是它而不是缺候选。
     assert.match(fault.out, /history_missing_profile/);
     assert.match(fault.out, /缺 profileId/);
+  });
+
+  test('Mission park 与签名续跑走独立入口；缺签名的 answer 不会走旧恢复', async () => {
+    const { statePath, missionId } = await fixtureAwaitingReview('M-park');
+    const parked = l3(statePath, 'park', missionId, '--reason', '等用户答复', '--as', 'reviewer');
+    assert.equal(parked.status, 0, parked.out);
+    let built = await buildPersistentPlatform(statePath, { reconcile: false });
+    const parkedView = await built.platform.getMissionView(missionId);
+    assert.equal(parkedView.parked, true);
+    assert.equal(parkedView.parkReason, '等用户答复');
+    assert.equal(parkedView.status, 'awaiting_review');
+
+    const resumed = l3(statePath, 'resume', missionId, '--reason', '不再等待', '--as', 'reviewer');
+    assert.equal(resumed.status, 0, resumed.out);
+    built = await buildPersistentPlatform(statePath, { reconcile: false });
+    const resumedView = await built.platform.getMissionView(missionId);
+    assert.equal(resumedView.parked, false);
+    assert.equal(resumedView.status, 'awaiting_review');
+
+    const missing = l3(statePath, 'resume', missionId, '--answer', '不可漏签');
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.out, /只能与带检视者签名/);
   });
 });
