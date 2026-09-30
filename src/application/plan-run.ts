@@ -109,7 +109,14 @@ export type PlanEscalationResolution =
       readonly decidedBy: string;
       readonly decidedAt: string;
     }
-  | { readonly kind: 'expired'; readonly expiredAt: string };
+  | { readonly kind: 'expired'; readonly expiredAt: string }
+  | {
+      readonly kind: 'parked';
+      readonly missionId: string;
+      readonly reviewer: string;
+      readonly reason: string;
+      readonly parkedAt: string;
+    };
 
 export interface PlanEscalation {
   readonly id: string;
@@ -313,6 +320,10 @@ function readResolution(value: unknown): PlanEscalationResolution | undefined | 
   const raw = value as Record<string, unknown>;
   if (raw.kind === 'expired') {
     return isInstant(raw.expiredAt) ? Object.freeze({ kind: 'expired', expiredAt: raw.expiredAt }) : false;
+  }
+  if (raw.kind === 'parked') {
+    if (!isText(raw.missionId) || !isText(raw.reviewer) || !isText(raw.reason) || !isInstant(raw.parkedAt)) return false;
+    return Object.freeze({ kind: 'parked', missionId: raw.missionId, reviewer: raw.reviewer, reason: raw.reason, parkedAt: raw.parkedAt });
   }
   if (raw.kind !== 'decided') return false;
   if (!isText(raw.decidedBy) || !isInstant(raw.decidedAt)) return false;
@@ -765,6 +776,16 @@ export class PlanRun {
     return this.#features.find((f) => f.featureId === featureId);
   }
 
+  /** 当前运行里由平台确认挂起的 Mission 投影；Mission 本身仍是挂起权威。 */
+  get parkedMissions(): readonly { escalationId: string; missionId: string; reviewer: string; reason: string; parkedAt: string }[] {
+    return this.#escalations.flatMap((e) => {
+      const resolution = e.resolution;
+      return resolution?.kind === 'parked'
+        ? [{ escalationId: e.id, missionId: resolution.missionId, reviewer: resolution.reviewer, reason: resolution.reason, parkedAt: resolution.parkedAt }]
+        : [];
+    });
+  }
+
   /** 截止前没等到决定的升级单数。停止条件之一。 */
   get unresolvedCount(): number {
     return this.#escalations.filter((e) => e.resolution?.kind === 'expired').length;
@@ -1163,6 +1184,23 @@ export class PlanRun {
       }
     }
     return raw as string[];
+  }
+
+  /** 后续 driver 在 Platform 确认 Mission 已挂起后调用；只记录活动 run 的展示投影。 */
+  parkMission(missionId: string, reason: string, at: string): PlanEscalation {
+    this.#assertRunning();
+    if (!isText(missionId) || !isText(reason) || !isInstant(at)) {
+      throw new PlatformRuleError('PLAN_MISSION_PARK_INVALID', '挂起投影需要合法的 Mission、理由和时间。');
+    }
+    const index = this.#escalations.findIndex((e) => e.missionId === missionId && e.resolution === undefined);
+    if (index < 0) throw new PlatformRuleError('PLAN_MISSION_PARK_NOT_FOUND', `没有 Mission ${missionId} 对应的待决升级单。`);
+    const escalation = this.#escalations[index];
+    const parked = Object.freeze({ ...escalation, resolution: Object.freeze({
+      kind: 'parked' as const, missionId, reviewer: this.#reviewer, reason, parkedAt: at,
+    }) });
+    this.#escalations[index] = parked;
+    this.#setFeature(escalation.featureId, { status: 'suspended', needsDecision: reason });
+    return parked;
   }
 
   /**
