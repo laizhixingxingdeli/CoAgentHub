@@ -2194,8 +2194,28 @@ describe('startServer 方案记录目录与托管 live', () => {
         () => { built.hostedRunSnapshots(); },
       );
       handler();
-      assert.equal(built.server.listening, false);
+      assert.equal(built.server.listening, true, '首次信号排空期间 HTTP listener 应保持开启');
       assert.equal(closeDone, false, '首次 close 应等待真实 PlanRun 请求排空');
+      assert.throws(() => acquireLock(statePath), LockBusyError);
+      let rejectTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          assert.rejects(
+            loopbackRunRequest(target, { path: '/api/control/run-plan', body }, () => {}),
+            (error: unknown) =>
+              error instanceof LoopbackHttpError &&
+              error.status === 503 &&
+              error.code === 'SERVICE_DRAINING',
+          ),
+          new Promise<never>((_, reject) => {
+            rejectTimer = setTimeout(() => reject(new Error('新 hosted start 未在有界时间内被拒绝')), 1_000);
+          }),
+        ]);
+      } finally {
+        if (rejectTimer) clearTimeout(rejectTimer);
+      }
+      assert.equal(built.server.listening, true);
+      assert.equal(closeDone, false);
       assert.throws(() => acquireLock(statePath), LockBusyError);
       handler();
       const closeDeadline = Date.now() + 4_000;
@@ -2206,8 +2226,8 @@ describe('startServer 方案记录目录与托管 live', () => {
       assert.equal(stopped?.reason, 'service_shutdown');
       assert.ok(stopped?.detail, 'service_shutdown detail 必须明确');
       assert.equal(built.server.listening, false);
-      const reacquired = acquireLock(statePath);
-      reacquired.release();
+      const releaseReacquired = acquireLock(statePath);
+      releaseReacquired();
     } finally {
       gated.release();
       if (running) await running;
