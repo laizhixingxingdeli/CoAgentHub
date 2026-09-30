@@ -260,23 +260,51 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 describe('调度器：整条 Mission 自己走完', () => {
-  test('未合并路径先唤醒协调者，不运行旧派发执行者', async () => {
+  test('冲突期间只运行新解决单，冲突解除后恢复旧派单', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-conflict-'));
     const coordinator = new ScriptedRuntime({
       'coordinator:-:0': COORDINATOR_HAPPY['coordinator:-:0'],
-      'coordinator:-:1': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+      'coordinator:-:1': {
+        steps: [
+          { tool: 'coagent_get_mission', body: {} },
+          { tool: 'coagent_create_work_item', body: { title: '解决冲突', ...ORDER } },
+          { tool: 'coagent_dispatch_work_item', body: (previous) => ({ workItemIds: [previous.workItemId] }) },
+        ],
+      },
+      'coordinator:-:2': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
     });
-    const executor = new ScriptedRuntime(EXECUTOR_HAPPY);
+    const executorStarts: string[] = [];
+    const executor = new ScriptedRuntime({
+      'executor:W-1': { ...EXECUTOR_HAPPY['executor:W-1'], steps: [
+        { tool: 'coagent_get_work_order', body: {} },
+        { tool: 'coagent_submit_evidence', body: { kind: 'test', summary: 'ok', command: 'node --test', exitCode: 0 } },
+        { tool: 'coagent_submit_execution_result', body: (previous) => ({ outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [previous.evidenceId], notes: '无' }) },
+      ] },
+      'executor:W-2': { ...EXECUTOR_HAPPY['executor:W-1'], steps: [
+        { tool: 'coagent_get_work_order', body: {} },
+        { tool: 'coagent_submit_evidence', body: { kind: 'test', summary: 'ok', command: 'node --test', exitCode: 0 } },
+        { tool: 'coagent_submit_execution_result', body: (previous) => ({ outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [previous.evidenceId], notes: '无' }) },
+      ] },
+    });
+    const originalStart = executor.start.bind(executor);
+    executor.start = async (spec) => {
+      executorStarts.push(spec.workItemId!);
+      if (spec.workItemId === 'W-2') conflictCall = 3;
+      return originalStart(spec);
+    };
+    let conflictCall = 0;
     const workspace = Object.assign(new InPlaceWorkspaceManager(), {
-      getMissionConflictFiles: async () => ['src/foo.ts'],
+      getMissionConflictFiles: async () => {
+        const call = conflictCall++;
+        return call > 0 && conflictCall < 4 ? ['src/foo.ts'] : [];
+      },
     });
     try {
       current = await harness({ coordinator, executor }, undefined, undefined, workspace);
       await current.platform.createMission({ projectId: 'P', missionId: 'M-conflict', contract: CONTRACT });
-      await current.makeOrchestrator().runMission('M-conflict', { projectRoot, maxRounds: 2 });
+      await current.makeOrchestrator().runMission('M-conflict', { projectRoot, maxRounds: 5 });
+      assert.deepEqual(executorStarts, ['W-2', 'W-1']);
       assert.match(coordinator.instructions[1], /src\/foo\.ts/);
-      assert.match(coordinator.instructions[1], /不要丢弃任一方/);
-      assert.equal(executor.specs.length, 0);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

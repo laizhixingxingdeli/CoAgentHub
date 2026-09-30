@@ -555,6 +555,10 @@ export class Orchestrator {
         options.projectRoot,
       );
       const activeConflicts = conflictFiles?.length ? conflictFiles : undefined;
+      const oldDispatchedIds = await this.#platform.recordConflictDispatchBarrier(
+        missionId,
+        conflictFiles ?? [],
+      );
 
       // 有已派发但还没交回结果的工作项，就先把它们跑完。
       //
@@ -562,8 +566,12 @@ export class Orchestrator {
       // 或者 L2 自己）判定当前这批工单需要重新审视；这时候还去跑它们，
       // 就是明知要重做还先花一遍钱。让协调者先说话。
       const pending =
-        !activeConflicts && view.status === 'executing'
-          ? view.workItems.filter((item) => item.status === 'dispatched')
+        view.status === 'executing'
+          ? view.workItems.filter(
+              (item) =>
+                item.status === 'dispatched' &&
+                (!activeConflicts || !oldDispatchedIds.includes(item.id)),
+            )
           : [];
       if (pending.length > 0) {
         for (const item of pending) {
