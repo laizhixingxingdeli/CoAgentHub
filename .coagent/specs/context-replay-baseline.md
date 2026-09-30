@@ -4,4 +4,4 @@
 
 每个来源独立按 sourceLabel、missionId、role 分组，不跨文件去重。JSON stdout 和可选报告只含 sourceLabel、missionId、role、attemptsTotal、usageReportedCount、usageUnknownCount、input、output、cacheRead、cacheWrite。只有 usage.quality 为 reported 且四个分项都是非负整数时才纳入用量分项；否则只增加 unknown。四项是**已报告用量的分项合计**，cacheRead 仅表示缓存读取 token 数，并非 prompt 重放或可删除上下文。
 
-`docs/reports/context-replay-baseline.md` 记载实测来源与纳入数；缺真实快照时明确没有历史统计，prompt 重放量、可删除上下文量、逐跳趋势和跨源覆盖率均标记「未知／本票未测」。以 `node --test test/context-replay-report.test.ts` 复验合成案例。
+没有用真实快照跑过之前，不存在历史统计：prompt 重放量、可删除上下文量、逐跳趋势和跨源覆盖率一律按「未知」对待，不能拿合成夹具的结果推断实际用量。以 `node --test test/context-replay-report.test.ts` 复验合成案例。

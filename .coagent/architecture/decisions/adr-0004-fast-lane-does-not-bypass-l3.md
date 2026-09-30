@@ -23,6 +23,15 @@ Lightweight 缩短 **L2 规划与协调者自验**，不缩短 **机器验收权
 
 入口：`Platform.finalizeMissionByMachine`（见 Living Spec `machine-final-review`），只由进程内的方案驱动调用，不接 HTTP / agent tools。检视者代签入口是 `Platform.finalizeMissionByReviewer`，只给 `l3` 终审三命令进程内调用，同样不接 HTTP / agent tools。
 
+## 修订（2026-09-30）：快车道加协调者验收；验收没全部达成不自动合
+
+用户定（ADR-0007）：
+
+1. **快车道机器验证通过后，再加一跳协调者验收**：协调者看改动和验证报告决定过不过。协调者打回，就在这一跳里转 Standard 由它接手；这次打回计入「同一条验收标准连续没通过」。validator 仍是必要条件，不再是充分条件。
+2. **机器 L3 只在交卷结论里每条验收标准都达成时放行**。有未达成或无法验证的，留在 `awaiting_review` 交检视者决定：先合已完成的部分另开票、退回协调者，或在会改变需求时问用户。
+
+实现见统一计划 AC4、AC2；实现之前行为不变，第 2 条由值守检视者在合并后读结论补救。
+
 ## 为什么
 
 1. **落地权单点。** 与项目不变量一致：未经 L3 不得 completed。Fast Lane 若可自完成，Standard/Lightweight 会分裂成两套「完成」定义，审计与回滚无从对齐。机器 L3 仍是 L3——它走同一道 `awaiting_review → completed` 闸，只是凭的是确定性证据、落的是集成分支。
