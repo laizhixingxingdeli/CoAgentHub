@@ -888,7 +888,7 @@ describe('构建器把 POST 评估器交到 Platform', () => {
       const deps = source.indexOf('buildDecisionDeps(process.env)');
       assert.ok(deps > 0, `${cli} 没按 env 组装决策依赖`);
       for (const builder of ['buildPgPlatform({', 'buildPersistentPlatform(statePath, {']) {
-        const at = source.indexOf(builder);
+        const at = source.indexOf(builder, deps);
         assert.ok(at > deps, `${cli}：${builder} 要在组装决策依赖之后`);
         assert.match(source.slice(at, at + 160), /\.\.\.decision,/, `${cli}：${builder} 没带上决策依赖`);
       }
