@@ -38,6 +38,7 @@ const MAIN_STATE_WRITES = new Set([
   'cancel',
   'pause',
   'resume',
+  'park',
   'retire',
   'rerun',
   'ack',
@@ -155,6 +156,12 @@ function assertWriteArgs(command: string, target: string | undefined): void {
   }
   if (command === 'cancel' || command === 'pause' || command === 'resume') {
     if (!target) throw new Error('需要 missionId');
+    if (command === 'resume' && (arg('--reason') !== undefined || arg('--as') !== undefined) && (!arg('--reason')?.trim() || !arg('--as')?.trim())) throw new Error('带检视者签名的 resume 必须提供非空 --reason 与 --as。');
+    return;
+  }
+  if (command === 'park') {
+    if (!target) throw new Error('需要 missionId');
+    if (!arg('--reason')?.trim() || !arg('--as')?.trim()) throw new Error('park 必须提供非空 --reason 与 --as。');
     return;
   }
   if (command === 'retire') {
@@ -246,6 +253,14 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
     return;
   }
 
+  if (command === 'park') {
+    await post(`/api/missions/${encodeURIComponent(target)}/park`, { reason: arg('--reason'), reviewer: arg('--as') });
+    return;
+  }
+  if (command === 'resume' && arg('--reason') !== undefined) {
+    await post(`/api/missions/${encodeURIComponent(target)}/parked-resume`, { reason: arg('--reason'), reviewer: arg('--as'), ...(arg('--answer') !== undefined ? { answer: arg('--answer') } : {}) });
+    return;
+  }
   if (command === 'pause') {
     await post(`/api/missions/${encodeURIComponent(target)}/pause`, {});
     console.log(`Mission ${target} 已暂停。阶段保持原样，resume 之后重跑 run-mission 即可。`);
@@ -601,6 +616,13 @@ async function main() {
     return;
   }
 
+  if (command === 'park') {
+    if (!target) throw new Error('需要 missionId');
+    await platform.parkMission(target, { reason: arg('--reason')!, reviewer: arg('--as')! });
+    await persist();
+    return;
+  }
+
   if (command === 'cancel' || command === 'pause' || command === 'resume') {
     if (!target) throw new Error('需要 missionId');
     if (command === 'cancel') {
@@ -612,6 +634,9 @@ async function main() {
       await platform.pauseMission(target);
       await persist();
       console.log(`Mission ${target} 已暂停。阶段保持原样，resume 之后重跑 run-mission 即可。`);
+    } else if (arg('--reason') !== undefined) {
+      await platform.resumeParkedMission(target, { reason: arg('--reason')!, reviewer: arg('--as')!, ...(arg('--answer') !== undefined ? { answer: arg('--answer') } : {}) });
+      await persist();
     } else {
       await platform.resumeMission(target);
       await persist();

@@ -1233,7 +1233,19 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.reviseContract(reviseMatch[1], body as never));
     }
 
-    const controlMatch = /^\/api\/missions\/([^/]+)\/(cancel|pause|resume)$/.exec(path);
+    const parkedControlMatch = /^\/api\/missions\/([^/]+)\/(park|parked-resume)$/.exec(path);
+    if (method === 'POST' && parkedControlMatch) {
+      const [, id, verb] = parkedControlMatch;
+      await requireControl(req, verb === 'park' ? POLICY_ACTION.missionPause : POLICY_ACTION.missionResume);
+      const body = await readJson(req);
+      if (verb === 'park') return send(res, 200, await platform.parkMission(id, { reason: String(body.reason ?? ''), reviewer: String(body.reviewer ?? '') }));
+      return send(res, 200, await platform.resumeParkedMission(id, {
+        reason: String(body.reason ?? ''), reviewer: String(body.reviewer ?? ''),
+        ...(typeof body.answer === 'string' ? { answer: body.answer } : {}),
+      }));
+    }
+
+    const controlMatch = /^\/api\/missions\/([^/]+)\/(cancel|pause|resume)$/ .exec(path);
     if (method === 'POST' && controlMatch) {
       const [, id, verb] = controlMatch;
       const controlAction =
