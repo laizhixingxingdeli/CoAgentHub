@@ -23,7 +23,8 @@ import {
   type HostedHeldState,
 } from './mission-runner.ts';
 import { renderPlanHandoff } from './plan-handoff.ts';
-import { preflightPlanRepo, slotHolders } from './plan-preflight.ts';
+import { preflightPlanMissionSlots, preflightPlanRepo, slotHolders } from './plan-preflight.ts';
+// slotHolders formatting remains owned by shared preflight for rejected missions.
 import { drivePlan, runWithDeadline, type PlanDriverDeps } from './plan-driver.ts';
 import { PlanRun, type PlanRunStop } from './plan-run.ts';
 import { FilePlanRunStore } from './plan-run-store.ts';
@@ -477,14 +478,22 @@ export async function runHostedPlan(
     );
     return 2;
   }
-  const holders = slotHolders(await ctx.built.platform.listMissions(), parsed.plan.projectId);
-  if (holders.length > 0) {
+  const slotPreflight = preflightPlanMissionSlots({
+    selection: parsed.selection,
+    plan: parsed.plan,
+    runDir: parsed.runDir,
+    missions: await ctx.built.platform.listMissions(),
+  });
+  if (slotPreflight.problems.length > 0) {
     emit(
       'stderr',
-      `开跑前检查没过，一个功能都没跑：\n${holders.map((h) => `  ✗ ${h}`).join('\n')}`,
+      `开跑前检查没过，一个功能都没跑：\n${slotPreflight.problems.map((h) => `  ✗ ${h}`).join('\n')}`,
     );
     return 2;
   }
+  const resumeMissions = Object.fromEntries(
+    slotPreflight.resume.map(({ featureId, missionId }) => [featureId, missionId]),
+  );
 
   const { platform, agentPool, persist, candidateCircuits, queuedHops } = ctx.built;
   const tokens = hostedIssuer(ctx.built);
@@ -591,6 +600,7 @@ export async function runHostedPlan(
     platform,
     runMission: (missionId, options) => runner.run(missionId, hostedPlanRunOptions(options, parsed.maxRounds)),
     ...(runQuery ? { runQuery } : {}),
+    ...(Object.keys(resumeMissions).length > 0 ? { resumeMissions } : {}),
     ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
     persist: async () => {
       await persist();
