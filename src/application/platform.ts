@@ -2015,6 +2015,42 @@ export class Platform {
     });
   }
 
+  async resumeParkedMission(
+    missionId: string,
+    input: { reason: string; reviewer: string; answer?: string },
+  ): Promise<{ parked: boolean; conflictFiles: string[]; targetHead: string }> {
+    const reason = input?.reason?.trim();
+    const reviewer = input?.reviewer?.trim();
+    if (!reason || !reviewer) throw new PlatformRuleError('INVALID_PARK_REQUEST', '续跑需要非空 reason 与 reviewer。');
+    const { mission, project } = await this.#locate(missionId);
+    if (!mission.isParked) throw new PlatformRuleError('MISSION_NOT_PARKED', `Mission ${missionId} 未挂起。`);
+    const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
+    if (holder) throw new PlatformRuleError('PROJECT_BUSY', `Mission ${holder.id} 占用项目改动名额。`);
+    const ref = mission.workspaceRef;
+    const workspace = this.#workspace;
+    const cwd = ref?.projectRoot && workspace?.worktreePath?.(mission.id, ref.projectRoot);
+    if (!workspace?.syncMissionWithTarget || !workspace.worktreePath || !ref?.projectRoot || !ref.branch ||
+        ref.branch === '(in-place)' || !cwd || cwd === ref.projectRoot || !ref.targetBranch || ref.targetBranch === '(in-place)') {
+      throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', '续跑需要可信 Mission worktree 与目标分支。');
+    }
+    const synced = await workspace.syncMissionWithTarget({ missionId, projectRoot: ref.projectRoot, targetBranch: ref.targetBranch });
+    await this.#tx(async () => {
+      const current = await this.#locate(missionId);
+      current.mission.recordWorkspace({ ...current.mission.workspaceRef!, baseRevision: synced.targetHead });
+      if (synced.conflictFiles.length) {
+        current.mission.unpark();
+        await this.#event(current.mission, 'mission.resume_sync_conflict', {
+          reason, reviewer, conflictFiles: synced.conflictFiles, baseRevision: synced.targetHead,
+        });
+      } else {
+        current.mission.unpark();
+        await this.#event(current.mission, 'mission.resumed_from_park', { reason, reviewer, baseRevision: synced.targetHead });
+      }
+      if (input.answer?.trim()) await this.#answerEscalation(missionId, input.answer.trim());
+    });
+    return { parked: false, conflictFiles: synced.conflictFiles, targetHead: synced.targetHead };
+  }
+
   async resumeMission(missionId: string): Promise<{ paused: boolean }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#resumeMission(missionId));
