@@ -15,7 +15,7 @@
 - Lightweight/Standard 正常交卷经机器 L3，集成验证绿且状态匹配才标 merged。合并失败、验证红且成功回滚、其余可升级失败开普通四动作升级单。回滚失败、集成目标被推进、checkout 离开目标及持久 HA unsafe 停 `unsafe`，不误报为验证红。合入后状态/记录不明也 unsafe；功能与 Mission 绑定不变式错误停 `crashed` 并抛出，绝不猜着续跑。
 - **协调者提问**：仅 runMission 返回 `awaiting_l3` 时，驱动为正在 running 的功能和该 missionId 开 `answerable: true` 升级单，question 存原问题 trim 后的 1–4000 字；超长截断并在上限内注明。原问题空白拒开，记录不变。其他失败（轮次上限、合并后验证红、HA 等）均开不可答复单。可答复单仍允许旧四动作或过期：沿用 settle 的失败 Mission 放弃/名额等原语义。若结论是 answer，驱动先检查墙钟，再通过**同一平台方法** `answerEscalation(missionId, answer)` 交给同一 Mission（运行时 adapter 用 persistAfter），不自行写 Mission 答复逻辑，不调用 abandonMissionForPlan，不新建 Mission、不增 rerun 计数；同 missionId 再次 runMission，并重新按 land() 结果合入、提问或升级。再次提问开递增的新可答复单，也计入 maxEscalations；到上限沿用原处理。墙钟已到不执行答复后续跑。
 - HAOFF1 当前关闭 HA 路；恢复时 pending_release 只有有效独立 pass 且带报告才立 HA 记录，绑定 PlanRun/feature/Mission/提交/检视 attempt/报告/检视者/目标/验证摘要/截止。缺 pass/报告走普通故障升级。等待期间不跑下一功能。HA 审批到期为 expired，截止前已签 approve 可在审批截止之后消费，但方案墙钟先行。消费前核对 feature running、最后 Mission 与审批 Mission 同一、Mission 非终态且 awaiting_review/high_assurance/pending_release、目标一致，重取独立 pass 核其提交/attempt/报告。只经 finalizeMissionByHaAuthority 显式传方案集成验证，复读平台 completed、finalReview.mergedInto 和目标一致才 merged。send_back/expired/非 unsafe 失效走旧故障路径；HA 记录不计升级单上限，实际升级单才计。
-- 等升级/HA 决定每轮先查停止与墙钟，轮询记录缺省 15 秒；升级单截止到点判过期。墙钟到点不执行待处理决定、不补失败升级；在途 Mission 下一跳开头停（至多晚一跳），running 功能挂起。旧 `skip`/`rescope`/`rerun_isolated` 继续前放弃非终态失败 Mission；stop、墙钟、上限或未解决阈值停时保留 Mission。只有接受 rerun_isolated 计重跑。异常记 crashed 并抛出，Ctrl+C/SIGTERM 记 crashed、落盘放锁，在途 Mission 留人接手。
+- 等升级/HA 决定每轮先查停止与墙钟，轮询记录缺省 15 秒；升级单截止到点判过期。墙钟到点不执行待处理决定、不补失败升级；在途 Mission 下一跳开头停（至多晚一跳），running 功能挂起。旧 `skip`/`rescope`/`rerun_isolated` 继续前放弃非终态失败 Mission；stop、墙钟、上限或未解决阈值停时保留 Mission。只有接受 rerun_isolated 计重跑。异常记 crashed 并抛出，独立运行的 run-plan 遇 Ctrl+C/SIGTERM 记 crashed、落盘放锁，在途 Mission 留人接手；常驻服务托管的方案运行在服务收到第二次 SIGINT 时停 `service_shutdown`：暂停在途 Mission 并落盘、running 功能挂起、驱动不再建单或合入（见 `hosted-run-routing`）。
 - 内部入口 `runPlanOnPlatform(plan, selection, deps)` 使用调用方已有平台跑筛选方案并建 PlanRun，不建立第二平台/主锁/listen。常驻 startServer 不自动跑方案。旧 CLI 负责筛选、双重预检、file/PG 平台和锁/周期修复、回环 API 与 runner、信号及 finally 清理；同一主状态平台实例，runner.run 提供每个 Mission 的 outcome。
 
 ## 交接与决定
@@ -29,7 +29,7 @@
 - 运行须指定检视者、非空不重复功能、三项正整数停止条件；可选 maxEscalations 缺省 5、maxRerunsPerFeature 缺省 1，出现须正整数（0/小数/负值/字符串/null 不合法）。parsePlanSpec/start/restore 同尺校验并补缺省；旧记录缺两项按缺省恢复，不重审旧决定/停止。方案字段错 PLAN_SPEC_INVALID，记录错 PLAN_RUN_CORRUPT。
 - 同时仅一个功能 running；只 pending 可启动，隔离重跑累积 Mission id；⏸/⊘ 的每条路径都须 needsDecision。升级仅对 running，至多一张开放，deadline=openedAt+escalationTimeoutMs；等待单时不能合入或挂起。maxEscalations 数已开全部（已决/过期亦算），满时下一次故障不开单而挂起并记失败、Mission、人工问题，以 escalation_limit 停止，失败 Mission 留人。与只数过期的 unresolvedEscalations 阈值独立。
 - REVIEWER_ACTIONS 仍仅四个旧动作，没有「通过」「合并」或 answer（answer 是受限分支）。本次 reviewer 才能决定，截止含本身以后拒绝、已决拒绝、停后拒绝。skip → ⊘；rescope → 当前 ⊘ 并删除指定的未轮到功能，名单不得空/重/非 pending，仅此动作可带名单；stop → reviewer_stop + ⏸；rerun_isolated → pending 并待另一 Mission。超每功能重跑额拒绝 RERUN_LIMIT_REACHED，仍可在截止前选另三动作；规则拒绝不落盘。
-- 截止含当刻可判过期，之前 ESCALATION_NOT_DUE；过期记未解决并将功能挂起保留人工问题，累计到 unresolvedEscalations 阈值停。决定和过期由同一文件短锁串行，后者报 ESCALATION_ALREADY_RESOLVED。checkStop 到墙钟含当刻停 wall_clock 并挂起 running；halt unsafe/crashed 挂起且记原因；全部结束 finish 记 finished（不保证全部 merged）。
+- 截止含当刻可判过期，之前 ESCALATION_NOT_DUE；过期记未解决并将功能挂起保留人工问题，累计到 unresolvedEscalations 阈值停。决定和过期由同一文件短锁串行，后者报 ESCALATION_ALREADY_RESOLVED。checkStop 到墙钟含当刻停 wall_clock 并挂起 running；halt unsafe/crashed/service_shutdown 挂起且记原因；全部结束 finish 记 finished（不保证全部 merged）。
 
 ## 非目标与权威源
 
