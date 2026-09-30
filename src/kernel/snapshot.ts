@@ -79,6 +79,10 @@ export interface MissionSnapshot {
   /** 最后一次状态变化的时间。 */
   updatedAt?: string;
   paused?: boolean;
+  /** 老快照可能没有；restore 时缺省为 false。 */
+  parked?: boolean;
+  /** 挂起原因；仅 parked 时有意义。 */
+  parkReason?: string;
   /** 老快照可能没有；restore 时缺省/非法 -> standard。 */
   executionMode?: MissionExecutionMode;
   /** 老快照可能没有；restore 时缺省/非法 -> mutation。 */

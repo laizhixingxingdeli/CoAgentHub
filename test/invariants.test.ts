@@ -290,6 +290,37 @@ describe('不变量 C：同一 Project 同一时刻只有一个 executing Missio
     assert.equal(second.status, 'executing');
   });
 
+  test('park 保留历史、释放名额并在恢复时保留；冲突续跑不改变挂起状态', () => {
+    const project = Project.create({ id: 'p-park' });
+    const first = project.createMission({ id: 'm-park' });
+    const second = project.createMission({ id: 'm-next' });
+    first.startExecuting();
+    const item = first.createWorkItem({ id: 'w-accepted', title: 'accepted' });
+    item.dispatch();
+    item.submit({ result: true });
+    item.review('accept');
+
+    first.park('等待用户答复');
+    assert.equal(first.status, 'executing');
+    assert.equal(first.hasMutated, true);
+    assert.equal(first.workItems[0]?.status, 'accepted');
+    assert.equal(first.isMutating, false);
+    assert.equal(first.parkReason, '等待用户答复');
+    const restored = Project.restore(project.toSnapshot()).missions[0]!;
+    assert.equal(restored.isParked, true);
+    assert.equal(restored.parkReason, '等待用户答复');
+    assert.equal(restored.workItems[0]?.status, 'accepted');
+
+    second.startExecuting();
+    assert.throws(() => first.resume(), invariant('CONCURRENT_MUTATING_MISSION'));
+    assert.equal(first.isParked, true);
+    assert.equal(first.isPaused, false);
+    second.block();
+    first.resume();
+    assert.equal(first.isParked, false);
+    assert.equal(first.isMutating, true);
+  });
+
   test('放弃也放名额', () => {
     const project = Project.create({ id: 'p-abandon' });
     const first = project.createMission({ id: 'm-1' });
