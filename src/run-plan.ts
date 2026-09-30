@@ -27,7 +27,7 @@ import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
-import { preflightPlanRepo, slotHolders } from './application/plan-preflight.ts';
+import { preflightPlanMissionSlots, preflightPlanRepo } from './application/plan-preflight.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
 import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
@@ -497,9 +497,9 @@ async function main() {
       return;
     }
     // 上一晚停下时原样留给人的 Mission 还占着名额的话，今晚一个都派发不了。
-    const holders = slotHolders(await platform.listMissions(), plan.projectId);
-    if (holders.length > 0) {
-      console.error(`开跑前检查没过，一个功能都没跑：\n${holders.map((h) => `  ✗ ${h}`).join('\n')}`);
+    const slots = preflightPlanMissionSlots({ selection, plan, runDir, missions: await platform.listMissions() });
+    if (slots.problems.length > 0) {
+      console.error(`开跑前检查没过，一个功能都没跑：\n${slots.problems.map((h) => `  ✗ ${h}`).join('\n')}`);
       process.exitCode = 2;
       return;
     }
@@ -621,6 +621,7 @@ async function main() {
       runId,
       startedAt: started.toISOString(),
       checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
+      resumeMissions: Object.fromEntries(slots.resume.map(({ featureId, missionId }) => [featureId, missionId])),
     });
 
     const run = store.read();
