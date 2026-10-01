@@ -57,6 +57,10 @@ function tempState(): string {
   return join(dir, 'state.json');
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function lockDirOf(statePath: string): string {
   const id = stateIdFor(statePath);
   return join(dirname(id), `.lock-${basename(id)}`);
@@ -226,6 +230,105 @@ describe('单写者锁', () => {
     const before = process.listenerCount('exit');
     for (let i = 0; i < 20; i += 1) acquireLock(statePath, `第 ${i} 次`)();
     assert.equal(process.listenerCount('exit'), before);
+  });
+});
+
+describe('主锁心跳', () => {
+  test('新锁带 heartbeatAt：短间隔前移，释放后定时器不再动锁', async () => {
+    const statePath = tempState();
+    const release = acquireLock(statePath, '心跳', undefined, { heartbeatIntervalMs: 10 });
+    let stoppedAt = '';
+    try {
+      const born = readHolderFile(statePath);
+      assert.equal(typeof born.heartbeatAt, 'string');
+      assert.ok(
+        Number.isFinite(Date.parse(born.heartbeatAt as string)),
+        'heartbeatAt 必须是可解析的时间',
+      );
+      assert.equal(born.pid, process.pid);
+      assert.equal(born.what, '心跳');
+
+      await delay(80);
+      const beating = readHolderFile(statePath);
+      assert.ok(
+        Date.parse(beating.heartbeatAt as string) > Date.parse(born.heartbeatAt as string),
+        `持锁期间心跳应当前移：${born.heartbeatAt} → ${beating.heartbeatAt}`,
+      );
+      // 心跳只改时间：持有者身份与用途不能被刷掉。
+      assert.equal(beating.pid, process.pid);
+      assert.equal(beating.what, '心跳');
+      stoppedAt = beating.heartbeatAt as string;
+    } finally {
+      release();
+    }
+    assert.ok(!existsSync(lockDirOf(statePath)), '释放仍要删掉自己的锁');
+
+    // 放一把「同进程」的假锁回去：若 release 没停掉定时器，旧回调会把它当成
+    // 自己的锁接着刷——这正是「释放后还在动锁」要防的样子。
+    const lockPath = lockDirOf(statePath);
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify(
+        {
+          pid: process.pid,
+          since: new Date().toISOString(),
+          what: '后来的持有者',
+          heartbeatAt: stoppedAt,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    await delay(80);
+    const kept = readHolderFile(statePath);
+    assert.equal(kept.what, '后来的持有者');
+    assert.equal(kept.heartbeatAt, stoppedAt, '释放后不得再刷新任何锁的心跳');
+    rmSync(lockPath, { recursive: true, force: true });
+  });
+
+  test('发布端口与心跳交错：不丢 port / instanceId，也不把心跳倒回去', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const instanceId = 'inst-hb-pub';
+    const apiVersion = 'v-hb-pub';
+    const release = acquireLock(statePath, '常驻心跳', { instanceId, apiVersion }, {
+      heartbeatIntervalMs: 10,
+    });
+    try {
+      const { port } = await listenHealth({
+        instanceId,
+        stateId: stateIdFor(statePath),
+        api: apiVersion,
+      });
+      await delay(40);
+      const beforePublish = readHolderFile(statePath);
+      publishLockPort(statePath, instanceId, port);
+      const afterPublish = readHolderFile(statePath);
+      assert.equal(afterPublish.port, port);
+      assert.equal(afterPublish.instanceId, instanceId);
+      assert.equal(afterPublish.apiVersion, apiVersion);
+      assert.equal(afterPublish.pid, process.pid);
+      assert.ok(
+        Date.parse(afterPublish.heartbeatAt as string) >=
+          Date.parse(beforePublish.heartbeatAt as string),
+        '发布端口不得把 heartbeatAt 倒退回旧值',
+      );
+
+      // 再让心跳跑几轮：端口与身份必须还在（心跳以整份元数据为基刷新）。
+      await delay(40);
+      const beating = readHolderFile(statePath);
+      assert.equal(beating.port, port);
+      assert.equal(beating.instanceId, instanceId);
+      assert.equal(beating.apiVersion, apiVersion);
+      assert.ok(
+        Date.parse(beating.heartbeatAt as string) >= Date.parse(afterPublish.heartbeatAt as string),
+      );
+    } finally {
+      release();
+    }
+    assert.ok(!existsSync(lockDirOf(statePath)), '释放后不留锁');
   });
 });
 

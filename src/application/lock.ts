@@ -25,6 +25,11 @@ export interface LockInfo {
   pid: number;
   since: string;
   what: string;
+  /**
+   * 最近一次心跳。持锁者活着时应当持续前移；停在一个旧时间上，才谈得上
+   * 「这个持有者可能已经卡死」。接管要看的正是这个字段。
+   */
+  heartbeatAt?: string;
   stateId?: string;
   instanceId?: string;
   apiVersion?: string;
@@ -38,6 +43,14 @@ export type LocalWriterProbe =
 
 /** 回环探测超时。太长会卡住 CLI；太短会把慢启动误判成 occupied。 */
 const HEALTH_PROBE_TIMEOUT_MS = 800;
+
+/**
+ * 主锁心跳周期。
+ *
+ * 取得够短，接管方才能在合理时间内看出「持有者还在动」；取得够长，不至于
+ * 让每次心跳都去写一次盘。测试可注入更短的周期。
+ */
+const LOCK_HEARTBEAT_INTERVAL_MS = 30_000;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
@@ -100,6 +113,35 @@ function lockPathFor(statePath: string): string {
   return join(dirname(id), `.lock-${basename(id)}`);
 }
 
+export type LockAcquireOptions = {
+  /**
+   * 测试注入：心跳周期（毫秒）。<= 0 表示不启动心跳定时器（仍然算持锁，
+   * 只是元数据不随时间前移）。
+   */
+  heartbeatIntervalMs?: number;
+};
+
+/**
+ * 用 temp + rename 原子换掉持有者元数据。
+ *
+ * 直接覆写 holder.json 时，读到半截 JSON 的探测方会把它判成「元数据损坏」，
+ * 于是报 occupied 并要人手工删锁——一次心跳就能凭空造出一个假故障。
+ */
+function writeHolderAtomic(lockPath: string, info: LockInfo): void {
+  const tmpPath = join(lockPath, `holder.json.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(info, null, 2), 'utf8');
+    renameSync(tmpPath, join(lockPath, 'holder.json'));
+  } catch (error) {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      /* 清临时文件失败不改变上层错误 */
+    }
+    throw error;
+  }
+}
+
 /**
  * 拿到锁就返回一个释放函数；拿不到就抛 LockBusyError。
  *
@@ -108,11 +150,13 @@ function lockPathFor(statePath: string): string {
  * 看一眼再手动删。
  *
  * 第三参是常驻写者身份。普通 CLI 写者继续 `acquireLock(path, what)` 即可。
+ * 第四参只给测试用（注入心跳周期）。
  */
 export function acquireLock(
   statePath: string,
   what: string,
   identity?: { instanceId: string; apiVersion: string },
+  options?: LockAcquireOptions,
 ): () => void {
   const lockPath = lockPathFor(statePath);
   try {
@@ -122,10 +166,14 @@ export function acquireLock(
     throw new LockBusyError(lockPath, readHolder(lockPath));
   }
 
+  const now = new Date().toISOString();
   const info: LockInfo = {
     pid: process.pid,
-    since: new Date().toISOString(),
+    since: now,
     what,
+    // 拿锁那一刻就算一次心跳：否则「刚拿到的锁」在接管方眼里是一把从没
+    // 动过、出生即陈旧的锁。
+    heartbeatAt: now,
     stateId: stateIdFor(statePath),
   };
   if (identity) {
@@ -138,10 +186,49 @@ export function acquireLock(
     // 写不进持有者信息不影响互斥，只是卡死时少一条线索。
   }
 
+  /**
+   * 刷新自己的心跳。
+   *
+   * 只更新元数据、绝不删锁：写心跳失败可能是磁盘、权限、锁已经被别人接管，
+   * 任何一个都不是「可以顺手清掉锁」的理由。
+   */
+  const refreshHeartbeat = (): void => {
+    // 锁目录没了、或者里面的持有者已经不是「我们」，就什么都不做。
+    // 锁被释放后又被别人重建时，照着自己的旧快照写回去等于伪造持有者。
+    if (!stillHeldByUs(lockPath, identity?.instanceId)) return;
+    const current = readHolder(lockPath);
+    // 目录在但元数据读不出来：说不清这是谁的锁，宁可不动手。
+    if (!current) return;
+    try {
+      writeHolderAtomic(lockPath, { ...current, heartbeatAt: new Date().toISOString() });
+    } catch {
+      // 一次心跳写不进去不影响互斥语义，下一拍再试。
+    }
+  };
+
+  const heartbeatIntervalMs = options?.heartbeatIntervalMs ?? LOCK_HEARTBEAT_INTERVAL_MS;
+  const heartbeat =
+    heartbeatIntervalMs > 0
+      ? setInterval(() => {
+          try {
+            refreshHeartbeat();
+          } catch {
+            // 定时器回调里抛出的异常会变成 unhandled 异常直接结束进程，
+            // 那就把「一次写心跳失败」升级成「进程带着锁死掉」了。
+          }
+        }, heartbeatIntervalMs)
+      : undefined;
+  // unref：心跳不该成为进程退不出去的理由（CLI 干完活要能自然退出）。
+  heartbeat?.unref();
+
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
+    // 先停心跳再删锁。顺序反过来的话，残留的定时器会在一把已经清掉的锁上
+    // 继续写：要么在目录被重建后往里塞我们这份旧元数据，要么把一个刚拿到
+    // 锁的新持有者刷成「pid 是我们」。
+    if (heartbeat !== undefined) clearInterval(heartbeat);
     // 放锁时把下面那个 exit 兜底一起摘掉。不摘的话，常驻进程每拿一次锁就在
     // process 上多挂一个监听——方案运行记录一晚上要拿几十次，过了 10 个 Node
     // 就开始报泄漏告警，而且这些闭包到进程退出才释放。
@@ -184,6 +271,11 @@ export function publishLockPort(statePath: string, instanceId: string, port: num
     const still = readHolder(lockPath);
     if (!still || still.pid !== process.pid || still.instanceId !== instanceId) {
       throw new Error(`发布锁端口失败：当前进程不是锁持有者（${lockPath}）。`);
+    }
+    // 两次读之间心跳可能已经把 heartbeatAt 前移了。以重读到的那份为基再写
+    // 一次：否则 rename 会把心跳倒退回旧值，接管方就会以为持有者已经停摆。
+    if (still.heartbeatAt !== next.heartbeatAt) {
+      writeFileSync(tmpPath, JSON.stringify({ ...still, port }, null, 2), 'utf8');
     }
     renameSync(tmpPath, holderPath);
   } catch (error) {
@@ -302,6 +394,9 @@ function parseHolder(raw: string): LockInfo | undefined {
   if (typeof rec.pid !== 'number' || !Number.isInteger(rec.pid)) return undefined;
   if (typeof rec.since !== 'string' || typeof rec.what !== 'string') return undefined;
   const info: LockInfo = { pid: rec.pid, since: rec.since, what: rec.what };
+  // 旧版本写的锁没有这个字段：缺了就当「没心跳」，由接管逻辑去判断，
+  // 不能因此把整把锁判成元数据损坏。
+  if (typeof rec.heartbeatAt === 'string') info.heartbeatAt = rec.heartbeatAt;
   if (typeof rec.stateId === 'string') info.stateId = rec.stateId;
   if (typeof rec.instanceId === 'string') info.instanceId = rec.instanceId;
   if (typeof rec.apiVersion === 'string') info.apiVersion = rec.apiVersion;
