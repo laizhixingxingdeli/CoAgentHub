@@ -319,6 +319,121 @@ describe('HTTP 面', () => {
     assert.equal(echoed.includes(execToken), false);
     assert.equal(echoed.includes(coordToken), false);
   });
+
+  test('协调者可原子修订 created / blocked 的工单，修订号递增且事件记录 changedFields', async () => {
+    await call('/api/missions', {
+      projectId: 'P-revise',
+      missionId: 'M-revise',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-revise/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+
+    // created：整份替换，修订号 r1 -> r2。
+    const firstRevise = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '改 bar', allowedScope: ['src/bar.ts'] },
+      coordToken,
+    );
+    assert.equal(firstRevise.status, 200);
+    assert.equal((firstRevise.json as { revision: string }).revision, 'r2');
+    assert.deepEqual(
+      [...(firstRevise.json as { changedFields: string[] }).changedFields].sort(),
+      ['allowedScope', 'objective'],
+    );
+
+    const events = (await call('/api/missions/M-revise/activity')).json as unknown as ActivityRow[];
+    const revised = events.filter((row) => row.kind === 'work_item.order_revised');
+    assert.equal(revised.length, 1);
+    assert.equal(revised[0]?.workItemId, workItemId);
+    assert.equal((revised[0]?.data as { revision: string }).revision, 'r2');
+    assert.deepEqual((revised[0]?.data as { changedFields: string[] }).changedFields, [
+      'allowedScope',
+      'objective',
+    ]);
+
+    // blocked：执行者报卡住之后仍可修订，修订号 r2 -> r3。
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(`/api/missions/M-revise/work-items/${workItemId}/executor-attempts`, {});
+    const execToken = (exec.json as { token: string }).token;
+    const blocked = await call(
+      '/api/agent/coagent_report_blocked',
+      { reason: '工单前提不成立', whatWasTried: [], needsFromUpstream: '补上下文' },
+      execToken,
+    );
+    assert.equal(blocked.status, 200);
+
+    const secondRevise = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '改 baz', allowedScope: ['src/bar.ts'] },
+      coordToken,
+    );
+    assert.equal(secondRevise.status, 200);
+    assert.equal((secondRevise.json as { revision: string }).revision, 'r3');
+    assert.deepEqual((secondRevise.json as { changedFields: string[] }).changedFields, ['objective']);
+  });
+
+  test('运行中的工单拒绝修订并指出下一步，原工单不变；非协调者不能借路由修订', async () => {
+    await call('/api/missions', {
+      projectId: 'P-revise-guard',
+      missionId: 'M-revise-guard',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-revise-guard/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call(
+      '/api/agent/coagent_create_work_item',
+      { title: 'W', ...ORDER },
+      coordToken,
+    );
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(
+      `/api/missions/M-revise-guard/work-items/${workItemId}/executor-attempts`,
+      {},
+    );
+    const execToken = (exec.json as { token: string }).token;
+
+    const rejected = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '不该生效' },
+      coordToken,
+    );
+    assert.equal(rejected.status, 409);
+    assert.equal((rejected.json as { error: string }).error, 'WORK_ITEM_NOT_REVISABLE');
+    // 错误里要有下一步，而不是一句 invalid state。
+    assert.match((rejected.json as { message: string }).message, /执行/);
+
+    // 原工单没被动过：修订号仍是 r1，objective 未变，也没有修订事件。
+    const order = await call('/api/agent/coagent_get_work_order', {}, execToken);
+    assert.equal(order.status, 200);
+    const view = order.json as unknown as { order: { objective: string; orderRevision: string } };
+    assert.equal(view.order.objective, ORDER.objective);
+    assert.equal(view.order.orderRevision, 'r1');
+    const events = (await call('/api/missions/M-revise-guard/activity')).json as unknown as ActivityRow[];
+    assert.equal(events.filter((row) => row.kind === 'work_item.order_revised').length, 0);
+
+    // 执行者拿着自己的 token 调修订路由：角色闸直接挡在入口。
+    const stolen = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '越权' },
+      execToken,
+    );
+    assert.equal(stolen.status, 409);
+    assert.equal((stolen.json as { error: string }).error, 'WRONG_ROLE');
+  });
 });
 
 const QUEUE_NOW = '2025-01-01T00:00:00Z';

@@ -50,6 +50,7 @@ import type {
   ValidationCheckResult,
   WaitReason,
   WorkItem,
+  WorkItemStatus,
   WorkOrder,
   WorkspaceRef,
 } from '../kernel/index.ts';
@@ -2848,6 +2849,64 @@ export class Platform {
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
     await this.#event(mission, 'work_item.created', { title: input.title }, workItemId, attemptId);
     return { workItemId };
+  }
+
+  /**
+   * 修订一张还没定稿的工单。
+   *
+   * 工单冻结后原本只能作废重建（实测 PLAT3 作废 9 个，其中 7 个曾卡住），
+   * 但唤醒说明又要求「把工单改对再重新派发」——两者对不上。这里补上入口：
+   * 只要工单**没在跑**（created / rejected / blocked），协调者可以整份替换。
+   *
+   * 身份只来自 Run Token 的 claim，body 里自述的角色一律不采信（#requireAttempt）。
+   * 修订号在 kernel 里递增（r1 -> r2 …），平台只负责发事件、对比字段差异。
+   */
+  async reviseWorkOrder(
+    missionId: string,
+    attemptId: string,
+    workItemId: string,
+    order: WorkOrder,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ workItemId: string; revision: string; changedFields: readonly string[] }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () =>
+      this.#reviseWorkOrder(missionId, attemptId, workItemId, order),
+    );
+  }
+
+  async #reviseWorkOrder(
+    missionId: string,
+    attemptId: string,
+    workItemId: string,
+    order: WorkOrder,
+  ): Promise<{ workItemId: string; revision: string; changedFields: readonly string[] }> {
+    const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
+    const item = mission.workItem(workItemId);
+    if (!item) {
+      throw new PlatformRuleError('UNKNOWN_WORK_ITEM', `工作项 ${workItemId} 不存在`);
+    }
+    // 运行中 / 已有结果的工单不能就地改：执行者手上那份是冻结的，改了它就会
+    // 出现「按旧工单交的结果对不上新验收标准」。kernel 也挡这些状态（抛
+    // ILLEGAL_TRANSITION），这里先挡一次是为了给协调者一句能照做的下一步。
+    const hint = REVISE_BLOCKED_HINT[item.status];
+    if (hint) {
+      throw new PlatformRuleError('WORK_ITEM_NOT_REVISABLE', `工作项 ${workItemId} ${hint}`);
+    }
+    // 差异取调用方提交的整份工单 vs 修订前的整份工单；orderRevision 是
+    // kernel 机械递增的，不算「协调者改了哪个字段」，单独由 revision 事件字段给出。
+    const changedFields = orderChangedFields(item.order, order);
+    item.reviseOrder(order);
+    const revision = item.order?.orderRevision ?? 'r1';
+    // 只记修订号与字段名，不把工单全文写进事件：事件流是给人看的，
+    // 全文会在每条时间线上重复一遍工单。
+    await this.#event(
+      mission,
+      'work_item.order_revised',
+      { revision, changedFields },
+      workItemId,
+      attemptId,
+    );
+    return { workItemId, revision, changedFields };
   }
 
   /**
@@ -5985,6 +6044,42 @@ function collectPromotionEvidenceIds(mission: Mission): string[] {
  *   2) activity `validation.reported` 事件 data.reportId
  *      （Lightweight 失败只落 report+事件、不写 ReviewRecord 时仍须计入）
  */
+/**
+ * 工单处于「正在跑 / 已出结果」时不能修订。每条给协调者下一步能照做的事：
+ * 等结果、先验收、或走作废重建。created / rejected / blocked 不在表里，可修订。
+ */
+const REVISE_BLOCKED_HINT: Partial<Record<WorkItemStatus, string>> = {
+  dispatched: '正在执行中，改不了：等执行者交卷（或报告卡住）后再修订，或先作废重建。',
+  submitted: '已有执行结果待验收，先 review_execution_result 收掉这次结果，再决定是否修订。',
+  accepted: '已经验收通过，不能修订；契约若变应由 L3 打回，再重建工单。',
+  retired: '已经作废，不能修订；需要的话请新建一张工单。',
+};
+
+/**
+ * 两份工单的顶层字段差异（字段名，排序）。
+ *
+ * orderRevision 由 kernel 机械递增，不代表协调者改了什么，所以从两侧剔掉；
+ * 修订号单独由事件的 revision 字段给出。用 JSON 值比较能连数组 / 对象的
+ * 内容差异一起认出来，而不是只看引用是否变了。
+ */
+function orderChangedFields(
+  previous: Readonly<WorkOrder> | undefined,
+  next: WorkOrder,
+): string[] {
+  const prev = { ...((previous ?? {}) as Record<string, unknown>) };
+  const curr = { ...(next as unknown as Record<string, unknown>) };
+  delete prev.orderRevision;
+  delete curr.orderRevision;
+  const fields = new Set([...Object.keys(prev), ...Object.keys(curr)]);
+  const changed: string[] = [];
+  for (const field of fields) {
+    const before = JSON.stringify(prev[field] ?? null);
+    const after = JSON.stringify(curr[field] ?? null);
+    if (before !== after) changed.push(field);
+  }
+  return changed.sort();
+}
+
 /**
  * 协调者评审的逐条结果（方案 §11）：工单有验收标准时必须一条对一条、照抄原文。
  *
