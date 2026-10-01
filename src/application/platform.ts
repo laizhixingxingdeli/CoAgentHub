@@ -90,7 +90,7 @@ import type { ArtifactStore } from './artifact-store.ts';
 import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
-import { redactSecrets } from './redact.ts';
+import { redactSecrets, redactSecretsDeep } from './redact.ts';
 import { collectAttemptLiveTail, mergeAttemptOutput, type LiveOutput } from './live.ts';
 import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from './policy-engine.ts';
 import {
@@ -6604,17 +6604,26 @@ export interface AgentWorkItemView {
 
 /**
  * 把一次 attempt 的证据投影成脱敏 + 截尾的摘要。output 一律先 redactSecrets 再截尾——
- * 顺序反了会把截出来的尾巴里的 token 明文露出去。maxTail 控制尾巴长度，用于超限时逐步收紧。
+ * 顺序反了会把截出来的尾巴里的 token 明文露出去。maxTail 控制尾巴长度；summary 过长时按
+ * summaryCap 截断、dropCommand 时直接丢弃 command，均为超限时逐步收紧所用。
  */
-function agentEvidenceSummary(attempts: readonly Readonly<{ id: string; evidence: readonly Readonly<EvidenceRecord>[] }>[], maxTail: number): AgentWorkItemEvidenceSummary[] {
+function agentEvidenceSummary(
+  attempts: readonly Readonly<{ id: string; evidence: readonly Readonly<EvidenceRecord>[] }>[],
+  maxTail: number,
+  opts: { summaryCap?: number; dropCommand?: boolean } = {},
+): AgentWorkItemEvidenceSummary[] {
   const out: AgentWorkItemEvidenceSummary[] = [];
   for (const attempt of attempts) {
     for (const e of attempt.evidence) {
+      const summary =
+        opts.summaryCap !== undefined
+          ? capString(redactSecrets(e.summary), opts.summaryCap)
+          : redactSecrets(e.summary);
       out.push({
         attemptId: attempt.id,
         kind: e.kind,
-        summary: redactSecrets(e.summary),
-        command: e.command !== undefined ? redactSecrets(e.command) : undefined,
+        summary,
+        command: opts.dropCommand ? undefined : e.command !== undefined ? redactSecrets(e.command) : undefined,
         exitCode: e.exitCode,
         outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-maxTail),
       });
@@ -6623,9 +6632,38 @@ function agentEvidenceSummary(attempts: readonly Readonly<{ id: string; evidence
   return out;
 }
 
+/** 超长字符串按 n 字符截断并注明被裁掉多少，避免静默丢失"这里有内容"的信息。 */
+function capString(s: string, n: number): string {
+  return s.length <= n ? s : `${s.slice(0, n)}…[truncated ${s.length - n} chars]`;
+}
+
+/** 工单里会膨胀的长文本字段按 n 字符上限收紧；contextRefs 是取上下文用的结构，保留。 */
+function capOrderText(order: WorkOrder, n: number): WorkOrder {
+  return {
+    ...order,
+    objective: capString(order.objective, n),
+    requiredBehaviour: capString(order.requiredBehaviour, n),
+    constraints: order.constraints.map((s) => capString(s, n)),
+    acceptance: order.acceptance.map((s) => capString(s, n)),
+    verification: order.verification.map((s) => capString(s, n)),
+    doNot: order.doNot.map((s) => capString(s, n)),
+  };
+}
+
+/** 执行结果里 summary / notes 会膨胀，按 n 字符上限收紧；文件清单保留为有用结构。 */
+function capResultText(result: ExecutionResultBody, n: number): ExecutionResultBody {
+  return {
+    ...result,
+    summary: capString(result.summary, n),
+    notes: capString(result.notes, n),
+  };
+}
+
 /**
- * 构造单项视图并按 20 KB 上限收紧：先按 1000 字符尾巴试，超限就减半重试，
- * 仍超则保留最小尾巴并标 truncated。所有外显文本均已 redactSecrets。
+ * 构造单项视图并按 20 KB 上限收紧：所有外显文本先深层脱敏（redactSecretsDeep），
+ * 之后按 UTF-8 实测大小逐级收紧——先裁证据 output 尾巴，再裁证据 summary/command，
+ * 再裁工单 / 执行结果 / 评审的长文本，始终保留 id/status/orderRevision 与有用结构；
+ * 仍超大时返回仅含索引字段的紧凑 truncated 摘要。每条 return 前都复核 <=20KB。
  */
 function buildAgentWorkItemView(
   item: WorkItem,
@@ -6633,43 +6671,87 @@ function buildAgentWorkItemView(
   order: WorkOrder | undefined,
   executionResult: ExecutionResultBody | undefined,
 ): AgentWorkItemView {
+  // 外显文本先统一深层脱敏：order / executionResult / reviews / title 都可能含凭据。
+  const redactedTitle = redactSecrets(item.title);
+  const redactedOrder = order !== undefined ? redactSecretsDeep(order) : undefined;
+  const redactedResult = executionResult !== undefined ? redactSecretsDeep(executionResult) : undefined;
   const reviews = item.reviews.map((r) => ({
     verdict: r.verdict,
-    reasons: r.reasons,
-    requiredChanges: r.requiredChanges,
+    reasons: r.reasons.map((t) => redactSecrets(t)),
+    requiredChanges: r.requiredChanges.map((t) => redactSecrets(t)),
   }));
-  let maxTail = 1000;
-  let evidenceSummary = agentEvidenceSummary(item.attempts, maxTail);
-  let truncated = false;
-  while (maxTail > 0) {
-    const candidate: AgentWorkItemView = {
+
+  const byteSize = (v: AgentWorkItemView): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+
+  // 一条候选视图：证据尾巴 maxTail，summary/command/order/result/reviews 的字符上限可选。
+  const build = (
+    maxTail: number,
+    t: { summaryCap?: number; dropCommand: boolean; orderCap?: number; resultCap?: number; reviewCap?: number },
+  ): AgentWorkItemView => {
+    const evidenceSummary = agentEvidenceSummary(item.attempts, maxTail, {
+      summaryCap: t.summaryCap,
+      dropCommand: t.dropCommand,
+    });
+    const cappedOrder =
+      t.orderCap !== undefined && redactedOrder !== undefined ? capOrderText(redactedOrder, t.orderCap) : redactedOrder;
+    const cappedResult =
+      t.resultCap !== undefined && redactedResult !== undefined
+        ? capResultText(redactedResult, t.resultCap)
+        : redactedResult;
+    const cappedReviews =
+      t.reviewCap !== undefined
+        ? reviews.map((r) => {
+            const cap = t.reviewCap as number;
+            return {
+              verdict: r.verdict,
+              reasons: r.reasons.map((s) => capString(s, cap)),
+              requiredChanges: r.requiredChanges.map((s) => capString(s, cap)),
+            };
+          })
+        : reviews;
+    return {
       workItemId: item.id,
-      title: item.title,
+      title: redactedTitle,
       status: item.status,
       orderRevision,
-      order,
-      executionResult,
-      reviews,
+      order: cappedOrder,
+      executionResult: cappedResult,
+      reviews: cappedReviews,
       evidenceSummary,
       truncated: false,
     };
-    if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= MAX_AGENT_WORK_ITEM_BYTES) {
-      return candidate;
+  };
+
+  // 完整（1000 字符尾巴、不裁其它字段）若已在上限内，直接返回、未截断。
+  const base = build(1000, { dropCommand: false });
+  if (byteSize(base) <= MAX_AGENT_WORK_ITEM_BYTES) return base;
+
+  // 逐级收紧：证据尾巴优先，再依次裁 summary/command、工单、执行结果、评审。每级都复核大小。
+  const levels: { summaryCap?: number; dropCommand: boolean; orderCap?: number; resultCap?: number; reviewCap?: number }[] = [
+    { dropCommand: false },
+    { dropCommand: true, summaryCap: 400 },
+    { dropCommand: true, summaryCap: 300, orderCap: 300 },
+    { dropCommand: true, summaryCap: 200, orderCap: 200, resultCap: 200 },
+    { dropCommand: true, summaryCap: 120, orderCap: 120, resultCap: 120, reviewCap: 120 },
+  ];
+  for (const lvl of levels) {
+    for (const mt of [1000, 500, 250, 100, 0]) {
+      const candidate = build(mt, lvl);
+      if (byteSize(candidate) <= MAX_AGENT_WORK_ITEM_BYTES) return { ...candidate, truncated: true };
     }
-    maxTail = Math.floor(maxTail / 2);
-    evidenceSummary = agentEvidenceSummary(item.attempts, maxTail);
   }
-  truncated = true;
+
+  // 仍超大：只保留索引字段的紧凑摘要，明确标 truncated（必然远小于上限）。
   return {
     workItemId: item.id,
-    title: item.title,
+    title: redactedTitle,
     status: item.status,
     orderRevision,
-    order,
-    executionResult,
-    reviews,
-    evidenceSummary,
-    truncated,
+    order: undefined,
+    executionResult: undefined,
+    reviews: [],
+    evidenceSummary: [],
+    truncated: true,
   };
 }
 
