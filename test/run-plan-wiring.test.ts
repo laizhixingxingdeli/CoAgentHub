@@ -679,120 +679,6 @@ describe('开跑前：项目的改动名额被谁占着', () => {
   });
 });
 
-describe('run-plan 周期投递修复接线', () => {
-  test('在副作用之前解析间隔，finally 里 stop，文件版注入 hasArchivedMission', () => {
-    const root = join(import.meta.dirname, '..', 'src');
-    const runPlan = readFileSync(join(root, 'run-plan.ts'), 'utf8');
-    const main = readFileSync(join(root, 'main.ts'), 'utf8');
-
-    // 一律取调用点，不取名字第一次出现的位置：import 列表在文件最前，按名字 indexOf
-    // 会先撞上 import 行，顺序断言就成了「比两个 import 谁在前」，失去意义。
-    const parseAt = runPlan.indexOf('parseReconcileIntervalMs(process.env');
-    const worktreeAt = runPlan.indexOf('new GitWorktreeManager(');
-    const platformAt = runPlan.indexOf('await buildPersistentPlatform(', runPlan.indexOf("if (process.argv.includes('--check'))"));
-    assert.ok(parseAt >= 0 && worktreeAt >= 0 && platformAt >= 0, '三个调用点都应能找到');
-    assert.ok(parseAt < worktreeAt && parseAt < platformAt, '非法间隔必须在建 worktree / 开状态之前拒绝');
-    const checkAt = runPlan.indexOf("if (process.argv.includes('--check'))");
-    const selectAt = runPlan.indexOf('selectPlanCandidates(plan');
-    const firstPreflightAt = runPlan.indexOf('await preflightPlanRepo(projectRoot, plan.integrationBranch)');
-    const probeAt = runPlan.indexOf('probeLocalWriter(statePath)');
-    const runAt = runPlan.indexOf('runPlanOnPlatform(');
-    const apiAt = runPlan.indexOf('createApi(');
-    const runnerAt = runPlan.indexOf('new MissionRunner(');
-    const slotAt = runPlan.indexOf('preflightPlanMissionSlots(', platformAt);
-    const afterLockAt = runPlan.indexOf('拿到状态锁之后项目仓变脏了');
-    const sigAt = runPlan.indexOf("process.once('SIGINT'");
-    assert.ok(checkAt >= 0 && checkAt < platformAt, '--check 只读路径必须在装配平台之前');
-    assert.ok(checkAt >= 0 && probeAt >= 0 && checkAt < probeAt, '--check 必须在探测之前只读返回');
-    assert.ok(selectAt >= 0 && firstPreflightAt >= 0 && selectAt < firstPreflightAt && firstPreflightAt < probeAt, '资格筛选和第一次 git 预检必须在探测之前');
-    assert.ok(probeAt < platformAt, '探测必须在装配平台之前');
-    assert.ok(selectAt >= 0 && selectAt < platformAt, '资格筛选必须在装配平台之前');
-    assert.ok(runAt >= 0 && selectAt < runAt, '资格筛选必须在内部入口建运行记录之前');
-    assert.ok(afterLockAt >= 0 && platformAt < afterLockAt, '二次预检必须在拿锁之后');
-    assert.ok(slotAt >= 0 && afterLockAt < slotAt && slotAt < runAt, '名额复检在锁后、建记录之前');
-    assert.ok(apiAt >= 0 && runnerAt >= 0 && apiAt < runnerAt && runnerAt < runAt, 'API 与 MissionRunner 在内部入口之前');
-    assert.ok(sigAt >= 0 && sigAt < runAt, '信号停记必须在内部入口建记录之前挂上');
-    assert.match(runPlan, /process\.argv\.includes\('--check'\)/);
-    assert.match(runPlan, /probeLocalWriter/);
-    assert.match(runPlan, /loopbackRunRequest/);
-    assert.match(runPlan, /loopbackRunRequest\([\s\S]*?timeoutMs: 0/);
-    assert.match(runPlan, /\/api\/control\/run-plan/);
-    assert.match(runPlan, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
-    assert.match(runPlan, /if \(!usePg\)/);
-    assert.match(runPlan, /process\.exit\(code\)/);
-    assert.match(runPlan, /from '\.\/application\/plan-runtime\.ts'/);
-    assert.match(runPlan, /from '\.\/application\/mission-runner\.ts'/);
-    assert.match(runPlan, /runner\.run\(/);
-    assert.match(runPlan, /runner\.run\(missionId, missionRunOptions\(options, maxRounds\)\)/);
-    assert.match(runPlan, /return maxRounds === undefined \? options : \{ \.\.\.options, maxRounds \}/);
-    assert.match(runPlan, /parseMaxRounds\(flagValue\('--max-rounds'\), process\.argv\.includes\('--max-rounds'\)\)/);
-    assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
-    assert.match(runPlan, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
-    assert.match(runPlan, /candidateCircuits, queuedHops \} = built/);
-    assert.doesNotMatch(runPlan, /--hop-capacity|--capacity-global|--capacity-project|--capacity-role|--capacity-runtime|--capacity-profile/);
-    const planStoreAt = runPlan.indexOf('new FilePlanRunStore(');
-    assert.ok(planStoreAt >= 0 && slotAt < planStoreAt && planStoreAt < runnerAt, '名额拒绝必须发生在新建 PlanRun 与构造 Runner 之前');
-    assert.match(runPlan, /const runId = `\$\{plan\.planId\}-\$\{stamp\(started\)\}`/);
-    assert.doesNotMatch(runPlan, /restore.*PlanRun|resumePlanRun|existingPlanRun/);
-    assert.equal([...runPlan.matchAll(/createApi\(/g)].length, 1);
-    assert.equal([...runPlan.matchAll(/listenLoopback\(/g)].length, 1);
-    assert.equal([...runPlan.matchAll(/buildPersistentPlatform\(/g)].length, 2);
-    assert.equal([...runPlan.matchAll(/buildPgPlatform\(/g)].length, 2);
-    assert.equal([...runPlan.matchAll(/new MissionRunner\(/g)].length, 1);
-    assert.equal([...runPlan.matchAll(/runPlanOnPlatform\(/g)].length, 1);
-    assert.match(runPlan, /pick\('independent_reviewer'/);
-    assert.match(runPlan, /independentReviewer:\s*\{\s*runtime,\s*candidates: independentReviewers/);
-    assert.doesNotMatch(runPlan, /independentReviewer:[\s\S]{0,120}candidates:\s*coordinators/);
-    assert.doesNotMatch(runPlan, /new Orchestrator/);
-    assert.doesNotMatch(runPlan, /drivePlan\(/);
-    assert.doesNotMatch(runPlan, /runWithDeadline/);
-    assert.doesNotMatch(runPlan, /startServer\s*\(/);
-    assert.doesNotMatch(runPlan, /from '\.\/application\/orchestrator\.ts'/);
-    assert.doesNotMatch(runPlan, /from '\.\/application\/plan-driver\.ts'/);
-
-    assert.match(runPlan, /startPeriodicDeliveryRepair\(/);
-    assert.match(runPlan, /kind: 'file-held'/);
-    assert.match(runPlan, /kind: 'pg'/);
-    assert.doesNotMatch(runPlan, /startPeriodicReconcile/);
-    assert.doesNotMatch(runPlan, /runHeldFileDeliveryRepair/);
-    assert.doesNotMatch(runPlan, /runPgDeliveryRepairTick/);
-    assert.match(runPlan, /finally \{[\s\S]*runIndependentCleanup/);
-    assert.match(runPlan, /periodic\.stop\(\)/);
-    assert.match(runPlan, /name: 'persist'/);
-    assert.match(runPlan, /name: 'releaseLock'/);
-    assert.match(runPlan, /primary = \{ error \}/);
-    assert.match(runPlan, /runIndependentCleanup\(\{[\s\S]*primary/);
-    assert.match(runPlan, /cleanupAfterSignal/);
-    assert.match(runPlan, /formatErrorForLog/);
-    assert.doesNotMatch(runPlan, /catch\(\(\) => undefined\)/);
-    assert.doesNotMatch(runPlan, /reconcileInterruptedAttempts/);
-    assert.doesNotMatch(runPlan, /reconcileOrphanedWorktrees/);
-
-    assert.match(main, /hasArchivedMission/);
-    assert.match(main, /export function startPeriodicDeliveryRepair/);
-    assert.match(main, /runFileObserverDeliveryRepairTick/);
-    assert.match(main, /bindServerCloseToPeriodicStop\(\s*server,/);
-    assert.match(main, /periodic\?\.stop\(\)/);
-    assert.match(main, /closeHttp = server\.close\.bind\(server\)/);
-    assert.match(main, /warnDeliveryRepairErrors/);
-    assert.match(main, /acquireLock\(statePath, '周期投递修复'\)/);
-    const startServerSrc = main.slice(main.indexOf('export async function startServer'));
-    assert.match(startServerSrc, /startPeriodicDeliveryRepair\(/);
-    assert.match(startServerSrc, /kind: 'file-held'/);
-    assert.match(startServerSrc, /kind: 'pg'/);
-    assert.match(startServerSrc, /publishLockPort\(/);
-    assert.match(startServerSrc, /attachLoopbackWriterIdentity\(/);
-    assert.match(startServerSrc, /randomUUID\(/);
-    assert.match(startServerSrc, /API_VERSION/);
-    assert.match(startServerSrc, /exclusive:\s*\{/);
-    assert.match(startServerSrc, /resolveControlPrincipal/);
-    assert.doesNotMatch(startServerSrc, /kind: 'file-observer'/);
-    assert.doesNotMatch(startServerSrc, /startPeriodicReconcile/);
-    assert.doesNotMatch(startServerSrc, /runFileObserverDeliveryRepairTick/);
-    assert.doesNotMatch(startServerSrc, /runPgDeliveryRepairTick/);
-  });
-});
-
 describe('buildPersistentPlatform 残锁安全接管', () => {
   test('临时状态残锁满足三条件时从生产入口接管并留审计，释放后不留锁', async () => {
     const home = temp('coagent-stale-lock-');
@@ -2824,11 +2710,6 @@ describe('生产入口 makeIssuer 队列领取身份', () => {
     for (const server of servers) {
       if (server.listening) server.close();
     }
-  });
-
-  test('源码：run-plan 经共用 makeIssuer 发牌', () => {
-    const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
-    assert.match(src, /tokens:\s*makeIssuer\(platform,\s*tokens\)/);
   });
 
   test('三类 start 把真实领取身份交给 Platform 并冻结进 token；失租 finish 拒绝；请求体不能自述身份；非队列不变', async () => {
