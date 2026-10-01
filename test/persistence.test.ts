@@ -85,6 +85,11 @@ describe('文件持久化', () => {
         title: '修 foo',
         order: ORDER,
       });
+      // W-334：Standard 第一次派发前必须先落一条当前契约修订的核对结论。
+      await platform.submitContractCheck('M1', coord.attemptId, {
+        verdict: 'ok',
+        summary: '测试契约已核对',
+      });
       await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
 
       const exec = await platform.startExecutorAttempt('M1', workItemId);
@@ -498,6 +503,11 @@ async function awaitingReview(platform: {
   startCoordinatorAttempt: (missionId: string) => Promise<{ attemptId: string }>;
   updatePlan: (missionId: string, attemptId: string, plan: typeof PLAN) => Promise<unknown>;
   createWorkItem: (missionId: string, attemptId: string, input: { title: string; order: WorkOrder }) => Promise<{ workItemId: string }>;
+  submitContractCheck: (
+    missionId: string,
+    attemptId: string,
+    input: { verdict: 'ok' | 'issues'; summary: string },
+  ) => Promise<unknown>;
   dispatchWorkItems: (missionId: string, attemptId: string, ids: string[]) => Promise<unknown>;
   startExecutorAttempt: (missionId: string, workItemId: string) => Promise<{ attemptId: string }>;
   submitEvidence: (missionId: string, attemptId: string, evidence: object) => Promise<unknown>;
@@ -513,6 +523,11 @@ async function awaitingReview(platform: {
   const { workItemId } = await platform.createWorkItem(missionId, coord.attemptId, {
     title: 'W',
     order: ORDER,
+  });
+  // W-334：Standard 第一次派发前必须先落一条当前契约修订的核对结论。
+  await platform.submitContractCheck(missionId, coord.attemptId, {
+    verdict: 'ok',
+    summary: '测试契约已核对',
   });
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
