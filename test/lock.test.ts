@@ -738,6 +738,70 @@ describe('残锁安全接管', () => {
     assert.equal(audit[0].newPid, process.pid);
     assert.equal(audit[0].newInstanceId, 'inst-new');
     assert.equal(audit[0].at, new Date(PROBE_NOW).toISOString());
+
+    // 并发窗口（仍在同一条用例内）：另一个候选在「重读校验通过」与「移走旧锁」
+    // 之间完成了接管——原路径上已经换成它自己那把新的、活着的锁。
+    // 注入探针把这一瞬间造出来（真实进程里这个窗口窄到复现不了），
+    // 检验我们的恢复策略不会覆盖/删掉别人的锁，也不会把隔离目录当垃圾清掉。
+    plantStaleLock(statePath, {
+      pid: 2147483645,
+      heartbeatAt: STALE_HEARTBEAT,
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-dead-2',
+      apiVersion: 'v-dead-2',
+      port: 45680,
+    });
+    const competing: LockInfo = {
+      pid: 2147483644,
+      since: new Date(PROBE_NOW).toISOString(),
+      what: '另一个候选刚拿到的新锁',
+      heartbeatAt: new Date(PROBE_NOW).toISOString(),
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-competitor',
+      apiVersion: 'v-competitor',
+      port: 45681,
+    };
+
+    let stranded: string | undefined;
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => false,
+          portListening: async () => false,
+          onBeforeQuarantine: () => {
+            // 模拟对方：把残锁移走（对方自己的隔离目录不关我们的事），
+            // 在原路径上 mkdir 出它自己的锁并写下持有者。
+            rmSync(lockPath, { recursive: true, force: true });
+            mkdirSync(lockPath);
+            writeFileSync(join(lockPath, 'holder.json'), JSON.stringify(competing, null, 2), 'utf8');
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        const line = /隔离目录：(.+)/.exec(error.message);
+        assert.ok(line, `错误信息要给出隔离目录路径：${error.message}`);
+        stranded = line[1].trim();
+        // 报告要说清楚：没覆盖原路径，并给出带存在性前置条件的恢复/删除命令。
+        assert.match(error.message, /当前是空的/);
+        assert.match(error.message, /test ! -e/);
+        return true;
+      },
+    );
+
+    // 别人的锁被完整留在隔离目录里等人工核实：没被删、没被搬回、没被覆盖。
+    assert.ok(stranded !== undefined, '错误信息必须指明隔离目录');
+    const strandedHolder = JSON.parse(readFileSync(join(stranded, 'holder.json'), 'utf8')) as LockInfo;
+    assert.equal(strandedHolder.instanceId, 'inst-competitor');
+    assert.equal(strandedHolder.pid, 2147483644);
+    assert.ok(!existsSync(lockPath), '不重建原路径，也不往上面写自己的锁');
+    assert.equal(readLockAudit(statePath).length, 1, '没接管成功就不该多一条审计');
+    assert.deepEqual(
+      takeoverTemps(statePath).filter((name) => name.includes('takeover')),
+      [],
+      'guard 是自己的目录，必须清掉',
+    );
+    rmSync(stranded, { recursive: true, force: true });
   });
 
   test('活 pid / 无心跳 / 端口状态未知都不接管，旧锁原样不动', async () => {

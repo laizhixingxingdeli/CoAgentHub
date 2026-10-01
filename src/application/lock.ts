@@ -17,7 +17,7 @@
  * 猜错就会变成两个写者同时落盘。
  */
 
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -521,6 +521,14 @@ export type RecoverableLockOptions = {
   pidAlive?: (pid: number) => boolean;
   /** 测试注入：端口监听探测。只有返回 false 才算「确定无人监听」；抛错一律算未知。 */
   portListening?: (port: number) => Promise<boolean>;
+  /**
+   * 测试注入：在「重读校验通过」与「把旧锁移进隔离目录」之间调用。
+   *
+   * 只有测试用它来模拟另一个候选刚好在这一瞬间完成接管的并发窗口——那个窗口
+   * 窄到没法在真实进程里稳定复现，而它正是「接管方会不会误吞别人新锁」的分界。
+   * 生产调用不传：这不是强制接管的开关，接了也不会让接管更容易发生。
+   */
+  onBeforeQuarantine?: () => void;
 };
 
 export interface LockTakeoverAuditRecord {
@@ -618,7 +626,8 @@ export async function acquireRecoverableLock(
     ]);
   }
 
-  let quarantinePath: string | undefined;
+  /** 只登记「已证实是本次要清理的残锁」的隔离目录；别人持有者的锁绝不登记。 */
+  let ownQuarantine: string | undefined;
   try {
     const assessed = await assessStaleLock(lockPath, probes);
     if (!assessed.recoverable) {
@@ -637,6 +646,7 @@ export async function acquireRecoverableLock(
 
     // 先移走旧锁目录，再用 mkdir 在原路径上竞争：这一步决定谁是新持有者。
     // 隔离名同样唯一，所以输的一方绝不会删到赢家的锁目录。
+    options?.onBeforeQuarantine?.();
     const quarantine = uniqueSiblingPath(lockPath, 'stale');
     try {
       renameSync(lockPath, quarantine);
@@ -645,32 +655,26 @@ export async function acquireRecoverableLock(
         `把旧锁移进隔离目录失败（${(error as Error).message}），放弃接管。`,
       ]);
     }
-    // 从这一刻起隔离目录归本次接管清理。
-    quarantinePath = quarantine;
 
     // 移完之后先看一眼移走的确实是刚才那把残锁。
     //
     // 上面那次重读与 rename 之间还有一个很窄的窗口：另一个候选可能刚完成接管，
     // 把一把**新的、活着的**锁放在原路径上。不查这一步，我们会把别人刚拿到的
     // 锁卷进隔离目录，接着在原路径上 mkdir 成功——两个进程同时以为自己持有锁，
-    // 正是这把锁要防的事。查出来不对就原样放回去，绝不当垃圾清掉。
+    // 正是这把锁要防的事。
     const moved = readHolder(quarantine);
     if (!sameHolderIdentity(moved, assessed.holder)) {
-      // 不管放不放得回去，都不能在 finally 里清掉它：里面可能是别人活着的锁。
-      quarantinePath = undefined;
-      let restored = false;
-      try {
-        renameSync(quarantine, lockPath);
-        restored = true;
-      } catch {
-        restored = false;
-      }
-      throw new LockBusyError(lockPath, moved ?? assessed.holder, [
-        restored
-          ? '隔离目录里不是刚才证实的那把残锁（另一个候选已经接管），已原样放回，放弃接管。'
-          : `隔离目录里不是刚才证实的那把残锁，且放不回去；锁暂存于 ${quarantine}，请人工核实后再恢复。`,
-      ]);
+      // 隔离目录里是别人的锁，不是我们证实过的那把残锁：到这里就停手。
+      //
+      // **不 rename 回去**：原路径上可能已经有新的持有者，而 POSIX 的 rename
+      // 把目录移到一个已存在的空目录上是静默替换——那就等于我们亲手删掉了
+      // 别人的锁，比不动手糟得多。**也不 rm**：里面的持有者可能正活着。
+      // 这个隔离目录名是本次调用独有的，谁都不会来动它，就留在这里交给人工，
+      // 恢复/删除命令写进错误信息（见 quarantineMismatchReasons）。
+      throw new LockBusyError(lockPath, moved ?? assessed.holder, quarantineMismatchReasons(lockPath, quarantine, moved));
     }
+    // 到这里隔离目录里装的是已证实死亡的残锁，归本次接管清理。
+    ownQuarantine = quarantine;
 
     const release = acquireAfterQuarantine(
       statePath,
@@ -690,11 +694,44 @@ export async function acquireRecoverableLock(
     }
     return release;
   } finally {
-    // 隔离目录里装的是已经证实死掉的旧锁，guard 是自己刚建的临时目录：
-    // 两条路径都以唯一名字创建，清掉不会碰到任何人的锁。
+    // 只清自己建的两个目录：二者的名字里都带本次调用的唯一串，撞不上别人的目录。
+    // 隔离目录只有在查出里面确实装着已证实死亡的残锁时才登记进 ownQuarantine；
+    // 装着别人持有者的那把（隔离对象不符的分支）不登记，也就不在这里被删。
     rmSync(guardPath, { recursive: true, force: true });
-    if (quarantinePath !== undefined) rmSync(quarantinePath, { recursive: true, force: true });
+    if (ownQuarantine !== undefined) rmSync(ownQuarantine, { recursive: true, force: true });
   }
+}
+
+/**
+ * 「隔离目录里的锁不是我们证实过的那把残锁」时的逐条报告。
+ *
+ * 这是整条接管路径上唯一会把别人的锁目录挪到别处的分支，所以必须把话说全：
+ * 我们停在哪、那个目录现在在哪、原路径是什么状态、人工怎么判断和恢复。
+ * 说不清楚，人就只看到状态目录里少了一把锁，却不知道该去哪里找它。
+ */
+function quarantineMismatchReasons(
+  lockPath: string,
+  quarantine: string,
+  moved: LockInfo | undefined,
+): string[] {
+  return [
+    '隔离目录里不是刚才证实的那把残锁（另一个候选已经接管，或者锁已经换人），放弃接管。',
+    '没有覆盖、也没有删除原锁路径上的任何东西；隔离目录保持原样，不由本次接管清理。',
+    existsSync(lockPath)
+      ? `原锁路径 ${lockPath} 当前已存在，可能是新持有者的锁：我们绝不触碰。`
+      : `原锁路径 ${lockPath} 当前是空的：另一个持有者的锁目录被移到了隔离目录，请优先核实并恢复它，否则它会以为自己在持锁而无人可见。`,
+    `隔离目录：${quarantine}`,
+    `其中的持有者：${
+      moved === undefined
+        ? '元数据缺失或损坏'
+        : `pid=${moved.pid}，instanceId=${moved.instanceId ?? '（无）'}，since=${moved.since}，what=${moved.what}`
+    }`,
+    `请先核实其中持有者确实已退出：kill -0 ${moved?.pid ?? '<pid>'} && echo alive || echo not-alive`,
+    `确认它已退出、且 ${lockPath} 当前没有持有者时的恢复命令（POSIX）：test ! -e ${shellQuote(lockPath)} && mv ${shellQuote(quarantine)} ${shellQuote(lockPath)}`,
+    `确认它已退出且不需要恢复时的删除命令（POSIX）：rm -rf -- ${shellQuote(quarantine)}`,
+    `恢复（Windows PowerShell）：if (-not (Test-Path -LiteralPath ${powershellQuote(lockPath)})) { Move-Item -LiteralPath ${powershellQuote(quarantine)} -Destination ${powershellQuote(lockPath)} }`,
+    `删除（Windows PowerShell）：Remove-Item -LiteralPath ${powershellQuote(quarantine)} -Recurse -Force`,
+  ];
 }
 
 /**
