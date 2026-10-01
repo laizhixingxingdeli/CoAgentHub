@@ -31,7 +31,7 @@ Orchestrator Fast Lane 只调 Platform trusted 方法（不暴露 HTTP/tools）�
 4. `submitLightweightMissionForReview` → `awaiting_review`（**不 complete**）。
 5. 仍须 **L3 `finalizeMission`** 才能 completed / merge（见 ADR-0004）。
 
-校验失败保持 submitted / stall；**不**回退 Coordinator。trusted 方法名不得出现在 `api/` 或 tool 面（`source-constraints` 钉死）。
+校验没过，或改动超出轻量规模被扣下：`promoteLightweightAfterValidation` 以那份 ValidationReport 为凭据升级 Standard，交协调者接手；升级也失败才 stalled，并把两件事都说出来。执行者 blocked 时不回退协调者，走下面的 L3 升级。trusted 方法名不得出现在 `api/` 或 tool 面（`source-constraints` 钉死）。
 
 执行者 `coagent_report_blocked` 时，若 `needsFromUpstream.trim()` 非空，Platform 在记 blocked 的同一事务建立一条 Mission 升级并投递：`attemptId` 取 blocked attempt、`question` 为原 `needsFromUpstream`、`why` 为 `reason`、`optionsConsidered` 为 `whatWasTried`；工作项保持 blocked。Orchestrator 首轮及未答复重跑均返回 `awaiting_l3` 和原问题，不重复升级。空串或全空白需求仍按原文返回 stalled。Standard 的 blocked 继续交协调者处理。
 

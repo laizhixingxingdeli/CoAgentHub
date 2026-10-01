@@ -10,6 +10,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import type { WorkspaceManager } from '../src/application/workspace.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -30,12 +31,12 @@ const ORDER: WorkOrder = {
   contextRefs: [],
 };
 
-function makePlatform() {
+function makePlatform(workspace?: WorkspaceManager) {
   const clock = new FixedClock();
   const activity = new InMemoryActivityLog(clock);
   const projects = new InMemoryProjectRepository();
   const ids = new SequentialIds();
-  const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids });
+  const platform = new Platform({ projects, deliveries: new InMemoryDeliveryRepository(clock, ids), activity, clock, ids, workspace });
   return { platform, activity, projects };
 }
 
@@ -75,6 +76,8 @@ async function upToSubmitted() {
     risks: [],
   });
   const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+  // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+  await platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M1', coord, [workItemId]);
   const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
   // S11.1：completed 必须有证据撑着，平台会拦下没证据的提交。
@@ -93,6 +96,123 @@ async function upToSubmitted() {
   });
   return { platform, activity, coord, exec, workItemId };
 }
+
+describe('Mission park', () => {
+  test('conflict dispatch barrier freezes old dispatched work items until cleared', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'BARRIER', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('BARRIER');
+    await platform.updatePlan('BARRIER', coord, PLAN);
+    const oldItem = await platform.createWorkItem('BARRIER', coord, { title: 'old', order: ORDER });
+    await platform.submitContractCheck('BARRIER', coord, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('BARRIER', coord, [oldItem.workItemId]);
+
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', ['src/foo.ts']), [oldItem.workItemId]);
+    const newItem = await platform.createWorkItem('BARRIER', coord, { title: 'resolution', order: ORDER });
+    await platform.dispatchWorkItems('BARRIER', coord, [newItem.workItemId]);
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', ['src/foo.ts']), [oldItem.workItemId]);
+    assert.deepEqual(await platform.recordConflictDispatchBarrier('BARRIER', []), []);
+    const view = await platform.getMissionView('BARRIER');
+    assert.equal(view.workItems.find((item) => item.id === oldItem.workItemId)?.status, 'dispatched');
+    assert.equal(view.workItems.find((item) => item.id === newItem.workItemId)?.status, 'dispatched');
+  });
+
+  test('resume 同一 Mission 前先同步目标 HEAD 并保留已验收成果', async () => {
+    const calls: string[] = [];
+    let platform: Platform;
+    const workspace = {
+      worktreePath: () => '/fake/mission-worktree',
+      checkpoint: async (_cwd: string, _missionId: string, _reason: string, _paths: string[]) => { calls.push('checkpoint'); },
+      syncMissionWithTarget: async () => {
+        calls.push('sync');
+        assert.equal((await platform.getMissionView('M1')).parked, true);
+        return { targetHead: 'new-head', conflictFiles: [] };
+      },
+    } as WorkspaceManager;
+    ({ platform } = makePlatform(workspace));
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord, PLAN);
+    const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', exec, { kind: 'test', summary: 'passed', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M1', exec, {
+      outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: 'none',
+    });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: 'verified' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+    await platform.recordWorkspace('M1', {
+      projectRoot: '/fake/project', branch: 'mission/M1', targetBranch: 'main', baseRevision: 'old-head',
+    });
+    const before = await platform.getMissionView('M1');
+    const lastReview = before.workItems[0]?.lastReview;
+    await platform.parkMission('M1', { reason: 'waiting', reviewer: 'L3' });
+    await assert.rejects(
+      platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3', answer: 'answer' }),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'NO_OPEN_ESCALATION',
+    );
+    assert.deepEqual(calls, ['checkpoint']);
+    assert.equal((await platform.getMissionView('M1')).parked, true);
+    await platform.resumeParkedMission('M1', { reason: 'answered', reviewer: 'L3' });
+    const after = await platform.getMissionView('M1');
+    assert.deepEqual(calls, ['checkpoint', 'sync']);
+    assert.equal(after.missionId, before.missionId);
+    assert.equal(after.status, before.status);
+    assert.equal(after.parked, false);
+    assert.equal(after.workspaceRef?.baseRevision, 'new-head');
+    assert.equal(after.workItems[0]?.id, workItemId);
+    assert.equal(after.workItems[0]?.status, 'accepted');
+    assert.deepEqual(after.workItems[0]?.lastReview, lastReview);
+    assert.deepEqual(after.workItems[0]?.attempts, before.workItems[0]?.attempts);
+  });
+
+  test('拒绝空 reason 或 reviewer', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'PARK1', contract: CONTRACT });
+    await assert.rejects(platform.parkMission('PARK1', { reason: ' ', reviewer: 'L3' }), PlatformRuleError);
+    await assert.rejects(platform.parkMission('PARK1', { reason: 'wait', reviewer: ' ' }), PlatformRuleError);
+    assert.equal((await platform.getMissionView('PARK1')).parked, false);
+  });
+
+  test('挂起释放同项目名额，下一张票可以开跑', async () => {
+    const cleanChecks: string[] = [];
+    const workspace = {
+      worktreePath: () => '/fake/mission-worktree',
+      assertMissionWorktreeClean: async (missionId: string) => { cleanChecks.push(missionId); },
+    } as WorkspaceManager;
+    const { platform } = makePlatform(workspace);
+    const prepare = async (missionId: string) => {
+      await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+      const coord = await platform.startCoordinatorAttempt(missionId);
+      await platform.updatePlan(missionId, coord.attemptId, PLAN);
+      const item = await platform.createWorkItem(missionId, coord.attemptId, { title: 'W', order: ORDER });
+      await platform.submitContractCheck(missionId, coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+      await platform.dispatchWorkItems(missionId, coord.attemptId, [item.workItemId]);
+    };
+
+    await prepare('PARK-FIRST');
+    await platform.recordWorkspace('PARK-FIRST', {
+      projectRoot: '/fake/project', branch: 'mission/PARK-FIRST', targetBranch: 'main', baseRevision: 'base',
+    });
+    assert.equal((await platform.getMissionView('PARK-FIRST')).isMutating, true);
+    await platform.parkMission('PARK-FIRST', { reason: '等待用户答复', reviewer: 'L3' });
+    const parked = await platform.getMissionView('PARK-FIRST');
+    assert.equal(parked.parked, true);
+    assert.equal(parked.parkReason, '等待用户答复');
+    assert.equal(parked.isMutating, false);
+    assert.deepEqual(cleanChecks, ['PARK-FIRST']);
+
+    await prepare('PARK-SECOND');
+    const second = await platform.getMissionView('PARK-SECOND');
+    assert.equal(second.status, 'executing');
+    assert.equal(second.isMutating, true);
+  });
+});
 
 describe('平台规则：能用工具层挡住的，不指望模型记得住', () => {
   test('没有 Plan 就不许创建工作项', async () => {
@@ -176,6 +296,7 @@ describe('平台规则：能用工具层挡住的，不指望模型记得住', (
       risks: [],
     });
     const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord, [workItemId]);
     await assert.rejects(
       () =>
@@ -298,6 +419,76 @@ describe('打回重做', () => {
     const view = await platform.getMissionView('M1');
     assert.equal(view.workItems[0].attempts, 2);
   });
+
+  test('L3 send_back 后重派：工单视图与开跑简报都带 L3 理由与最近 reject 要求，冻结工单不变', async () => {
+    const { platform, coord, exec, workItemId } = await upToSubmitted();
+    await platform.finishAttempt('M1', exec, { endedBy: 'structured_submit' });
+    const requiredChanges = ['把 verification 里的命令实际执行并交退出码'];
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
+      reasons: ['测试没真跑'],
+      requiredChanges,
+    });
+
+    // 重派、重做、验收通过，最后交卷给 L3。
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const second = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', second.attemptId, {
+      kind: 'test',
+      summary: '绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await platform.submitExecutionResult('M1', second.attemptId, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M1', second.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '逐条核过' })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    await platform.submitMissionResult('M1', coord, {
+      outcome: 'delivered',
+      summary: '做完了',
+      acceptanceEvidence: ['证据'],
+      memoryDelta: [],
+      openRisks: [],
+    });
+
+    // L3 打回整个 Mission。此时工单最后一条评审是 accept、requiredChanges 为空，
+    // 单看它执行者读到的「上次要改什么」是空——本投影要救的正是这个场景。
+    const l3Reasons = ['Contract 已更新到 r2，需要按新契约重新核对'];
+    await platform.finalizeMissionByReviewer('M1', {
+      verdict: 'send_back',
+      reasons: l3Reasons,
+      reviewerId: 'reviewer-1',
+      confirmedBy: 'user-1',
+    });
+
+    // 重派已验收的工作项，并开新的执行者尝试。
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const third = await platform.startExecutorAttempt('M1', workItemId);
+
+    const orderView = await platform.getWorkOrder('M1', workItemId);
+    assert.deepEqual(orderView.l3SendBackReasons, l3Reasons);
+    assert.deepEqual(orderView.previousRequiredChanges, requiredChanges);
+    // 打回理由与要求是事后补的，不能写进冻结 order。
+    assert.equal(orderView.order.orderRevision, 'r1');
+
+    const brief = await platform.getStartupBrief('M1', third.attemptId);
+    assert.deepEqual(brief.workItem?.l3SendBackReasons, l3Reasons);
+    assert.deepEqual(brief.workItem?.previousRequiredChanges, requiredChanges);
+    assert.equal(brief.workItem?.order?.orderRevision, 'r1');
+  });
 });
 
 describe('用量聚合', () => {
@@ -367,6 +558,7 @@ describe('VAL-003：executionResult 绑定提交它的 executor attempt', () => 
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M-val3', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M-val3', coord.attemptId, [workItemId]);
     const exec = await platform.startExecutorAttempt('M-val3', workItemId);
     await platform.submitEvidence('M-val3', exec.attemptId, {
@@ -400,6 +592,7 @@ describe('VAL-003：executionResult 绑定提交它的 executor attempt', () => 
       title: 'WB',
       order: ORDER,
     });
+    await platform.submitContractCheck('M-val3b', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M-val3b', coord.attemptId, [a.workItemId, b.workItemId]);
 
     const execA = await platform.startExecutorAttempt('M-val3b', a.workItemId);
@@ -450,6 +643,7 @@ describe('S11.1：「已完成」必须有证据', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M9', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M9', coord.attemptId, [workItemId]);
     const exec = await platform.startExecutorAttempt('M9', workItemId);
 
@@ -486,6 +680,7 @@ describe('S11.1：「已完成」必须有证据', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M10', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M10', coord.attemptId, [workItemId]);
     const exec = await platform.startExecutorAttempt('M10', workItemId);
     await platform.submitEvidence('M10', exec.attemptId, {
@@ -513,6 +708,7 @@ describe('S11.1：「已完成」必须有证据', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M11', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M11', coord.attemptId, [workItemId]);
     const exec = await platform.startExecutorAttempt('M11', workItemId);
     await platform.submitExecutionResult('M11', exec.attemptId, {
@@ -569,6 +765,7 @@ describe('契约中途变更（S14.6）', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
     assert.equal((await platform.getMissionView('M1')).status, 'executing');
 
@@ -600,6 +797,7 @@ describe('退回规划之后重新派发', () => {
       title: 'W1',
       order: ORDER,
     });
+    await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord.attemptId, [first.workItemId]);
     assert.equal((await platform.getMissionView('M1')).status, 'executing');
 
@@ -614,6 +812,8 @@ describe('退回规划之后重新派发', () => {
       title: 'W2',
       order: ORDER,
     });
+    // 契约已改到 r2，r1 的核对结论解不了闸，按当前修订重新核对。
+    await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord.attemptId, [second.workItemId]);
 
     const after = await platform.getMissionView('M1');
@@ -638,6 +838,7 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
       title: '按旧契约拆的',
       order: ORDER,
     });
+    await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord.attemptId, [old.workItemId]);
 
     const result = await platform.retireWorkItem('M1', old.workItemId, '契约改了，已被新工单取代');
@@ -708,5 +909,392 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
     const view = await platform.getMissionView('M1');
     assert.equal(view.status, 'awaiting_review');
     assert.equal(view.result?.outcome, 'delivered');
+  });
+});
+
+describe('调查发现追加（S09.2）', () => {
+  test('连续补充保留既有规划信息，完整更新仍整体替换', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'F1', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('F1');
+    const initial = {
+      rootCause: '根因', findings: '原始发现', rejectedHypotheses: ['假设A'],
+      decisions: ['决策'], direction: '方向', risks: ['风险'],
+    };
+    await platform.updatePlan('F1', coord.attemptId, initial);
+    await platform.updateFindings('F1', coord.attemptId, '第一次发现', ['假设A', '假设B']);
+    await platform.updateFindings('F1', coord.attemptId, '第二次发现');
+
+    const view = await platform.getMissionView('F1');
+    assert.equal(view.plan?.findings, '原始发现\n\n—— 第 2 次补充\n第一次发现\n\n—— 第 3 次补充\n第二次发现');
+    assert.equal(view.plan?.rootCause, '根因');
+    assert.deepEqual(view.plan?.rejectedHypotheses, ['假设A', '假设B']);
+    assert.deepEqual(view.plan?.decisions, ['决策']);
+    assert.equal(view.plan?.direction, '方向');
+    assert.deepEqual(view.plan?.risks, ['风险']);
+
+    await platform.updatePlan('F1', coord.attemptId, { ...initial, findings: '整体替换' });
+    assert.equal((await platform.getMissionView('F1')).plan?.findings, '整体替换');
+  });
+});
+
+describe('Mission 视图：提交证据可见但已验收输出不泄露', () => {
+  // 自带 setup：提交带 >1000 字输出的证据后再交执行结果，避免 upToSubmitted 已交过一次结果。
+  async function submittedWithEvidence(evidence: {
+    kind: 'test' | 'command' | 'diff' | 'typecheck' | 'build' | 'observation';
+    summary: string;
+    command?: string;
+    exitCode?: number;
+    output?: string;
+  }) {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord, PLAN);
+    const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', exec, evidence);
+    await platform.submitExecutionResult('M1', exec, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    return { platform, coord, exec, workItemId };
+  }
+
+  test('submitted 视图带脱敏截尾证据，accepted 仅给条数与结论', async () => {
+    // 形状凭据：redactSecrets 按形状命中 `api_key=…` 这类赋值，替换为 [REDACTED]。
+    // 长输出在前，凭据行放尾部，确保落在截尾的最后 1000 字里（先脱敏再截尾）。
+    const secretLine = '环境变量 api_key=sk-supersecret0123456789abcdefghij 已注入';
+    const longOutput = 'x'.repeat(1200) + '\n' + secretLine;
+    const { platform, coord, workItemId } = await submittedWithEvidence({
+      kind: 'command',
+      summary: '跑了 build，token api_key=sk-supersecret0123456789abcdefghij 在用',
+      command: 'npm run build --token api_key=sk-supersecret0123456789abcdefghij',
+      exitCode: 0,
+      output: longOutput,
+    });
+
+    const submitted = await platform.getMissionView('M1');
+    const submittedItem = submitted.workItems[0];
+    assert.equal(submittedItem?.status, 'submitted');
+    assert.ok(submittedItem?.submittedEvidence, 'submitted 视图带 submittedEvidence');
+    assert.equal(submittedItem?.submittedEvidence?.length, 1);
+    const ev = submittedItem!.submittedEvidence![0];
+    assert.equal(ev.exitCode, 0);
+
+    // 命令与摘要均脱敏：api_key=… 的值被 [REDACTED] 替换。
+    assert.ok(!ev.command.includes('sk-supersecret0123456789abcdefghij'), '命令中的 token 被脱敏');
+    assert.ok(!ev.summary.includes('sk-supersecret0123456789abcdefghij'), '摘要中的 token 被脱敏');
+    assert.ok(ev.command.includes('[REDACTED]'));
+    assert.ok(ev.summary.includes('[REDACTED]'));
+
+    // 输出先脱敏再截尾：原始 1200+ 字截到最后 1000 字，且 token 已被 [REDACTED] 替换。
+    assert.ok(!ev.outputTail.includes('sk-supersecret0123456789abcdefghij'), '输出尾部 token 被脱敏');
+    assert.ok(ev.outputTail.includes('[REDACTED]'), '输出尾部含脱敏标记');
+    assert.equal(ev.outputTail.length, 1000, '输出截到最后的 1000 字');
+    assert.equal(submittedItem?.reviewSummary, undefined, 'submitted 不含 reviewSummary');
+
+    // 验收后：只给条数和结论，不返回证据输出。
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    const accepted = await platform.getMissionView('M1');
+    const acceptedItem = accepted.workItems[0];
+    assert.equal(acceptedItem?.status, 'accepted');
+    assert.equal(acceptedItem?.submittedEvidence, undefined, 'accepted 不含证据输出');
+    assert.ok(acceptedItem?.reviewSummary, 'accepted 带 reviewSummary');
+    assert.equal(acceptedItem?.reviewSummary?.evidenceCount, 1, '条数 = 1');
+    assert.equal(acceptedItem?.reviewSummary?.verdict, 'accept', '结论 = accept');
+  });
+
+  test('rejected 视图同样仅给条数与结论，不泄露证据输出', async () => {
+    const { platform, coord, workItemId } = await submittedWithEvidence({
+      kind: 'test',
+      summary: 'x',
+      command: 'node --test',
+      exitCode: 0,
+      output: 'y'.repeat(1500),
+    });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
+      reasons: ['不行'],
+      requiredChanges: ['改'],
+    });
+    const rejected = await platform.getMissionView('M1');
+    const item = rejected.workItems[0];
+    assert.equal(item?.status, 'rejected');
+    assert.equal(item?.submittedEvidence, undefined);
+    assert.ok(item?.reviewSummary);
+    assert.equal(item?.reviewSummary?.evidenceCount, 1);
+    assert.equal(item?.reviewSummary?.verdict, 'reject');
+  });
+});
+
+describe('W-292：blocked/partial 工单未修订禁止原样重派', () => {
+  test('blocked 后同修订号重派被拒且状态不变，修订后可 dispatch', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M292', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M292');
+    await platform.updatePlan('M292', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M292', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M292', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M292', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M292', workItemId);
+    await platform.reportBlocked('M292', exec.attemptId, {
+      reason: '前提不成立',
+      whatWasTried: ['试过 X'],
+      needsFromUpstream: '',
+    });
+    // 工单仍是 r1，原样重派必须被拒，且被拒不能留下半套流转（状态仍是 blocked）。
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M292', coord.attemptId, [workItemId]),
+      (e: unknown) => (e as PlatformRuleError).code === 'WORK_ORDER_REVISION_REQUIRED',
+    );
+    assert.equal((await platform.getMissionView('M292')).workItems[0].status, 'blocked');
+
+    // 修订后修订号递增（r2），可正常重派。
+    const { revision } = await platform.reviseWorkOrder('M292', coord.attemptId, workItemId, {
+      ...ORDER,
+      objective: '把前提改对再派',
+    });
+    assert.equal(revision, 'r2');
+    await platform.dispatchWorkItems('M292', coord.attemptId, [workItemId]);
+    assert.equal((await platform.getMissionView('M292')).workItems[0].status, 'dispatched');
+  });
+
+  test('partial 被 reject 后同修订号重派被拒，修订后可 dispatch；普通 rejected/accepted 不误拦', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M293', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M293');
+    await platform.updatePlan('M293', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M293', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M293', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M293', workItemId);
+    await platform.submitEvidence('M293', exec.attemptId, {
+      kind: 'test',
+      summary: 'x',
+      command: 'node --test',
+      exitCode: 1,
+    });
+    await platform.submitExecutionResult('M293', exec.attemptId, {
+      outcome: 'partial',
+      summary: '只做了一半',
+      changedFiles: [],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M293', exec.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M293', coord.attemptId, {
+      workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'fail' as const })),
+      reasons: ['没做完'],
+      requiredChanges: ['做完'],
+    });
+    assert.equal((await platform.getMissionView('M293')).workItems[0].status, 'rejected');
+
+    // 同修订号（r1）重派被拒。
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M293', coord.attemptId, [workItemId]),
+      (e: unknown) => (e as PlatformRuleError).code === 'WORK_ORDER_REVISION_REQUIRED',
+    );
+
+    // 修订后恢复派发。
+    const { revision } = await platform.reviseWorkOrder('M293', coord.attemptId, workItemId, {
+      ...ORDER,
+      objective: '做完',
+    });
+    assert.equal(revision, 'r2');
+    await platform.dispatchWorkItems('M293', coord.attemptId, [workItemId]);
+    assert.equal((await platform.getMissionView('M293')).workItems[0].status, 'dispatched');
+
+    // 不误拦 1：普通「completed 提交后被 reject」不是 blocked/partial，可重派。
+    const normal = await platform.createWorkItem('M293', coord.attemptId, { title: '正常', order: ORDER });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [normal.workItemId]);
+    const ne = await platform.startExecutorAttempt('M293', normal.workItemId);
+    await platform.submitEvidence('M293', ne.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M293', ne.attemptId, {
+      outcome: 'completed',
+      summary: '做完了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M293', ne.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M293', coord.attemptId, {
+      workItemId: normal.workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'fail' as const })),
+      reasons: ['差一点'],
+      requiredChanges: ['补一处'],
+    });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [normal.workItemId]);
+    assert.equal(
+      (await platform.getMissionView('M293')).workItems.find((i) => i.id === normal.workItemId)?.status,
+      'dispatched',
+    );
+
+    // 不误拦 2：accepted（L3 send_back 重开）重派不受门禁影响。
+    const acc = await platform.createWorkItem('M293', coord.attemptId, { title: '已验收', order: ORDER });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [acc.workItemId]);
+    const ae = await platform.startExecutorAttempt('M293', acc.workItemId);
+    await platform.submitEvidence('M293', ae.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M293', ae.attemptId, {
+      outcome: 'completed',
+      summary: '做完了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.reviewExecutionResult('M293', coord.attemptId, {
+      workItemId: acc.workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    // 模拟 L3 send_back 后该 accepted 工作项被重开重派：门禁不应触发。
+    await platform.dispatchWorkItems('M293', coord.attemptId, [acc.workItemId]);
+    assert.equal(
+      (await platform.getMissionView('M293')).workItems.find((i) => i.id === acc.workItemId)?.status,
+      'dispatched',
+    );
+  });
+});
+
+describe('W-317 协调者简报：工作项索引 + 上一跳增量（生产接线）', () => {
+  test('首次 coordinator 有索引、增量为空、plan 不变；后续 coordinator 取到提交证据增量；executor 不携带两来源', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W317a', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('W317a');
+    await platform.updatePlan('W317a', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('W317a', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('W317a', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('W317a', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('W317a', workItemId);
+    await platform.submitEvidence('W317a', exec.attemptId, {
+      kind: 'test', summary: '绿', command: 'node --test', exitCode: 0,
+    });
+    await platform.submitExecutionResult('W317a', exec.attemptId, {
+      outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无',
+    });
+    await platform.finishAttempt('W317a', exec.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317a', coord.attemptId, {
+      workItemId, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+
+    const coordBrief = await platform.getStartupBrief('W317a', coord.attemptId);
+    assert.deepEqual(coordBrief.plan, PLAN, 'coordinator 简报不能改动 plan');
+    assert.ok(Array.isArray(coordBrief.workItemsIndex), 'coordinator 应带工作项索引');
+    assert.equal(coordBrief.workItemsIndex!.length, 1);
+    assert.deepEqual(coordBrief.workItemsIndex![0], {
+      id: workItemId, title: 'W', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept',
+    });
+    assert.deepEqual(coordBrief.sinceLastHop, [], '首次 coordinator 无上一跳，增量为空');
+
+    // 收尾第一跳，开第二次 coordinator，并在两跳之间产生新活动。
+    await platform.finishAttempt('W317a', coord.attemptId, { endedBy: 'structured_submit' });
+    const coord2 = await platform.startCoordinatorAttempt('W317a');
+    const { workItemId: w2 } = await platform.createWorkItem('W317a', coord2.attemptId, { title: 'W2', order: ORDER });
+    await platform.dispatchWorkItems('W317a', coord2.attemptId, [w2]);
+    const exec2 = await platform.startExecutorAttempt('W317a', w2);
+    await platform.submitEvidence('W317a', exec2.attemptId, { kind: 'test', summary: '第二跳证据', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('W317a', exec2.attemptId, { outcome: 'completed', summary: '又改好了', changedFiles: ['src/bar.ts'], evidenceIds: [], notes: '无' });
+    await platform.finishAttempt('W317a', exec2.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317a', coord2.attemptId, {
+      workItemId: w2, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+
+    const coord2Brief = await platform.getStartupBrief('W317a', coord2.attemptId);
+    assert.deepEqual(coord2Brief.plan, PLAN, '第二跳 plan 仍不变');
+    assert.equal(coord2Brief.workItemsIndex!.length, 2, '第二跳索引含两项工作项');
+    const w2Index = coord2Brief.workItemsIndex!.find((e) => e.id === w2);
+    assert.deepEqual(w2Index, { id: w2, title: 'W2', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept' });
+    assert.ok(coord2Brief.sinceLastHop!.length >= 1, '第二跳应有上一跳增量');
+    const summaries = coord2Brief.sinceLastHop!.map((e) => e.summary);
+    assert.ok(
+      summaries.some((s) => s.includes('提交[') && s.includes('改动1个文件')),
+      `应有证据提交摘要，实际：${JSON.stringify(summaries)}`,
+    );
+
+    // 执行者简报不应携带两来源（投影与 Bundle 都没有）。
+    await platform.dispatchWorkItems('W317a', coord2.attemptId, [workItemId]);
+    const exec3 = await platform.startExecutorAttempt('W317a', workItemId);
+    const execBrief = await platform.getStartupBrief('W317a', exec3.attemptId);
+    assert.equal(execBrief.workItemsIndex, undefined);
+    assert.equal(execBrief.sinceLastHop, undefined);
+    assert.equal(
+      execBrief.contextBundle.entries.find((e) => e.source === 'work_items_index'),
+      undefined,
+      'executor 的 Bundle 不得含工作项索引来源',
+    );
+    assert.equal(
+      execBrief.contextBundle.entries.find((e) => e.source === 'since_last_hop'),
+      undefined,
+      'executor 的 Bundle 不得含上一跳增量来源',
+    );
+  });
+
+  test('后续 coordinator 增量含证据提交与 blocked 报告摘要，plan 不变', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W317b', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('W317b');
+    await platform.updatePlan('W317b', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('W317b', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('W317b', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('W317b', coord.attemptId, [workItemId]);
+    const exec1 = await platform.startExecutorAttempt('W317b', workItemId);
+    await platform.submitEvidence('W317b', exec1.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('W317b', exec1.attemptId, { outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无' });
+    await platform.finishAttempt('W317b', exec1.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317b', coord.attemptId, { workItemId, verdict: 'accept', acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })), reasons: ['ok'], requiredChanges: [] });
+    await platform.finishAttempt('W317b', coord.attemptId, { endedBy: 'structured_submit' });
+
+    // 第二跳：先有一个完成的提交（产生带证据的执行结果事件），再有一个 blocked 报告。
+    const coord2 = await platform.startCoordinatorAttempt('W317b');
+    await platform.dispatchWorkItems('W317b', coord2.attemptId, [workItemId]);
+    const exec2 = await platform.startExecutorAttempt('W317b', workItemId);
+    await platform.submitEvidence('W317b', exec2.attemptId, { kind: 'test', summary: '第二跳证据', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('W317b', exec2.attemptId, { outcome: 'completed', summary: '又改好了', changedFiles: ['src/bar.ts'], evidenceIds: [], notes: '无' });
+    await platform.finishAttempt('W317b', exec2.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317b', coord2.attemptId, { workItemId, verdict: 'accept', acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })), reasons: ['ok'], requiredChanges: [] });
+    await platform.dispatchWorkItems('W317b', coord2.attemptId, [workItemId]);
+    const exec3 = await platform.startExecutorAttempt('W317b', workItemId);
+    await platform.reportBlocked('W317b', exec3.attemptId, { reason: '依赖没装', whatWasTried: ['试过 npm i'], needsFromUpstream: '' });
+
+    const brief = await platform.getStartupBrief('W317b', coord2.attemptId);
+    assert.deepEqual(brief.plan, PLAN, 'plan 保持完整');
+    const summaries = brief.sinceLastHop!.map((e) => e.summary);
+    assert.ok(
+      summaries.some((s) => s.includes('提交[') && s.includes('改动1个文件')),
+      `应有证据提交摘要，实际：${JSON.stringify(summaries)}`,
+    );
+    assert.ok(
+      summaries.some((s) => s.includes('卡住报告')),
+      `应有 blocked 报告摘要，实际：${JSON.stringify(summaries)}`,
+    );
+    assert.equal(brief.workItemsIndex!.length, 1);
+    const idx = brief.workItemsIndex![0];
+    assert.equal(idx.id, workItemId);
+    assert.equal(idx.title, 'W');
+    assert.equal(idx.status, 'blocked');
+    assert.equal(idx.attempts, 3);
+    assert.equal(idx.lastReviewVerdict, 'accept');
   });
 });

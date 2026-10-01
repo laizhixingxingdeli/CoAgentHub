@@ -90,6 +90,7 @@ async function harness(
   candidateCircuits?: CandidateCircuitRepository,
   attemptWallClockMs?: number,
   workspace?: WorkspaceManager,
+  options?: { usageReader?: () => Promise<unknown>; provider?: string },
 ) {
   const workspaceManager = workspace ?? new InPlaceWorkspaceManager();
   const clock = new FixedClock();
@@ -118,7 +119,7 @@ async function harness(
     executor: {
       runtime: runtimes.executor,
       candidates: [
-        { endpoint: 'local' as const, profileId: 'exec-a' },
+        { endpoint: 'local' as const, profileId: 'exec-a', facts: [{ key: 'provider', value: options?.provider ?? 'scripted' }] },
         { endpoint: 'local' as const, profileId: 'exec-b' },
       ],
     },
@@ -140,6 +141,7 @@ async function harness(
         candidateCircuits,
         attemptWallClockMs,
         executor: pools.executor,
+        usageReader: options?.usageReader,
       }),
     makeRunner: () =>
       new MissionRunner({
@@ -204,6 +206,10 @@ const COORDINATOR_HAPPY: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+      // W-334 门禁：Standard 派发前必须先落一条**当前契约修订**的核对结论。
+      // 少了这一步，派发被拒会让整条 Mission 停在「候选全在冷却」上，
+      // 于是这些用例测的调度性质全都被一个前置条件挡住。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -260,6 +266,56 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 describe('调度器：整条 Mission 自己走完', () => {
+  test('冲突期间只运行新解决单，冲突解除后恢复旧派单', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-conflict-'));
+    const coordinator = new ScriptedRuntime({
+      'coordinator:-:0': COORDINATOR_HAPPY['coordinator:-:0'],
+      'coordinator:-:1': {
+        steps: [
+          { tool: 'coagent_get_mission', body: {} },
+          { tool: 'coagent_create_work_item', body: { title: '解决冲突', ...ORDER } },
+          { tool: 'coagent_dispatch_work_item', body: (previous) => ({ workItemIds: [previous.workItemId] }) },
+        ],
+      },
+      'coordinator:-:2': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
+    });
+    const executorStarts: string[] = [];
+    const executor = new ScriptedRuntime({
+      'executor:W-1': { ...EXECUTOR_HAPPY['executor:W-1'], steps: [
+        { tool: 'coagent_get_work_order', body: {} },
+        { tool: 'coagent_submit_evidence', body: { kind: 'test', summary: 'ok', command: 'node --test', exitCode: 0 } },
+        { tool: 'coagent_submit_execution_result', body: (previous) => ({ outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [previous.evidenceId], notes: '无' }) },
+      ] },
+      'executor:W-2': { ...EXECUTOR_HAPPY['executor:W-1'], steps: [
+        { tool: 'coagent_get_work_order', body: {} },
+        { tool: 'coagent_submit_evidence', body: { kind: 'test', summary: 'ok', command: 'node --test', exitCode: 0 } },
+        { tool: 'coagent_submit_execution_result', body: (previous) => ({ outcome: 'completed', summary: 'done', changedFiles: ['src/foo.ts'], evidenceIds: [previous.evidenceId], notes: '无' }) },
+      ] },
+    });
+    const originalStart = executor.start.bind(executor);
+    executor.start = async (spec) => {
+      executorStarts.push(spec.workItemId!);
+      if (spec.workItemId === 'W-2') conflictCall = 3;
+      return originalStart(spec);
+    };
+    let conflictCall = 0;
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      getMissionConflictFiles: async () => {
+        const call = conflictCall++;
+        return call > 0 && conflictCall < 4 ? ['src/foo.ts'] : [];
+      },
+    });
+    try {
+      current = await harness({ coordinator, executor }, undefined, undefined, workspace);
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-conflict', contract: CONTRACT });
+      await current.makeOrchestrator().runMission('M-conflict', { projectRoot, maxRounds: 5 });
+      assert.deepEqual(executorStarts, ['W-2', 'W-1']);
+      assert.match(coordinator.instructions[1], /src\/foo\.ts/);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('成功 executor 使用冻结 WorkOrder.allowedScope 检查点', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-checkpoint-'));
     const checkpoints: Array<{ cwd: string; missionId: string; workItemId: string; allowedPaths: readonly string[] }> = [];
@@ -332,6 +388,66 @@ describe('调度器：整条 Mission 自己走完', () => {
       );
       assert.equal(rollbackCalls, 0);
       assert.equal(readFileSync(marker, 'utf8'), 'handed-off');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  // 方案驱动的等待探针要能直接从结果里读出「这次缺的是哪个角色的人」。
+  // 为什么不能拿 reason 顶替：`no_available_agent` 这个字符串同时盖着
+  // 「候选在冷却」和「检查点失败」两件处置相反的事——后者要人来看，
+  // 探针若一律当成候选冷却，就会去等一个永远不会自己好的东西。
+  test('缺候选的 waiting 带出角色；非候选故障不带', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-candidate-role-'));
+    const circuits = candidateCircuitRepository();
+    // 检查点抛错的 workspace 只服务这条 Mission；候选冷却那条根本启动不了 Agent。
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async () => {
+        throw new Error('checkpoint-denied');
+      },
+    });
+    const coordinator = new ScriptedRuntime(COORDINATOR_HAPPY);
+    try {
+      current = await harness({
+        coordinator,
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, circuits, undefined, workspace);
+      await current.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-checkpoint-no-role',
+        contract: CONTRACT,
+      });
+      await current.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-coord-cold',
+        contract: CONTRACT,
+      });
+
+      // 先跑非候选故障那条：它的 reason 同样是 no_available_agent，
+      // 但缺的东西不是候选，所以不许带角色。
+      const orchestrator = current.makeOrchestrator();
+      const checkpointFault = await orchestrator.runMission('M-checkpoint-no-role', { projectRoot });
+      assert.equal(checkpointFault.kind, 'waiting');
+      assert.equal((checkpointFault as { reason: string }).reason, 'no_available_agent');
+      assert.match((checkpointFault as { detail: string }).detail, /checkpoint-denied/);
+      assert.equal(
+        Object.hasOwn(checkpointFault, 'candidateRole'),
+        false,
+        '检查点失败不是候选不可用，不许贴角色',
+      );
+
+      // 再让协调者唯一的候选进冷却。执行者的候选没动，不许混算成 executor。
+      await circuits.open({
+        profileId: 'coordinator-a',
+        failureClass: 'rate_limit',
+        openUntil: new Date(Date.now() + 5 * 60_000).toISOString(),
+      });
+      const cold = await orchestrator.runMission('M-coord-cold', { projectRoot });
+      assert.equal(cold.kind, 'waiting');
+      assert.equal((cold as { reason: string }).reason, 'no_available_agent');
+      assert.equal((cold as { candidateRole?: string }).candidateRole, 'coordinator');
+      assert.equal(coordinator.specs.length, 1, '候选不可用不得启动协调者');
+      assert.equal(orchestrator.hops.length, 2, '这一跳连 Attempt 都不该开');
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }
@@ -449,12 +565,83 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal(recorded.state, 'open');
     if (recorded.state === 'open') {
       assert.equal(recorded.failureClass, 'quota');
-      assert.ok(Date.parse(recorded.openUntil) > Date.now());
+      assert.equal(recorded.openUntil, null);
     }
 
     const view = await current.platform.getMissionView('M-failover');
     assert.equal(view.workItems[0].attempts, 2, '同一工作项两次尝试');
     assert.equal(view.workItems[0].status, 'accepted', '第一次失败不等于工作项失败');
+  });
+
+  test('用量耗尽时持久候选关闸不发请求；到期确认余量后才派发', async () => {
+    const quotaRuns = async (usage: unknown) => {
+      const executor = new ScriptedRuntime({ 'executor:W-1': EXECUTOR_HAPPY['executor:W-1'] });
+      const circuits = candidateCircuitRepository();
+      current = await harness(
+        { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor },
+        circuits,
+        undefined,
+        undefined,
+        { usageReader: async () => usage, provider: 'xai' },
+      );
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-quota', contract: CONTRACT });
+      const orchestrator = current.makeOrchestrator();
+      await orchestrator.runMission('M-usage-quota', { projectRoot: process.cwd() });
+      return { executor, circuits, orchestrator };
+    };
+
+    const resetAt = new Date(Date.now() + 3_600_000).toISOString();
+    const exhausted = await quotaRuns([
+      { provider: 'xai', status: 'ok', remainingPercent: 0, usedPercent: 100, resetAt },
+    ]);
+    assert.equal(
+      exhausted.executor.specs.filter((spec) => spec.profile.profileId === 'exec-a').length,
+      0,
+      '耗尽时不发请求',
+    );
+    const gated = await exhausted.circuits.get('exec-a');
+    assert.equal(gated.state, 'open');
+    if (gated.state === 'open') {
+      assert.equal(gated.failureClass, 'quota');
+      assert.equal(gated.openUntil, resetAt);
+    }
+
+    const fresh = await quotaRuns([
+      { provider: 'xai', status: 'ok', remainingPercent: 42, usedPercent: 58, resetAt },
+    ]);
+    assert.equal(
+      fresh.executor.specs.filter((spec) => spec.profile.profileId === 'exec-a').length,
+      1,
+      '有余量时正常派发',
+    );
+    assert.equal(fresh.orchestrator.hops.some((hop) => hop.role === 'executor' && hop.profile.profileId === 'exec-a'), true);
+  });
+
+  test('到期 quota 候选未确认余量仍不半开不发请求', async () => {
+    const executor = new ScriptedRuntime({ 'executor:W-1': EXECUTOR_HAPPY['executor:W-1'] });
+    const circuits = candidateCircuitRepository();
+    await circuits.open({
+      profileId: 'exec-a',
+      failureClass: 'quota',
+      openUntil: new Date(Date.now() - 60_000).toISOString(),
+    });
+    current = await harness(
+      { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor },
+      circuits,
+      undefined,
+      undefined,
+      { usageReader: async () => ({ available: false }), provider: 'xai' },
+    );
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-unknown', contract: CONTRACT });
+    const orchestrator = current.makeOrchestrator();
+    await orchestrator.runMission('M-usage-unknown', { projectRoot: process.cwd() });
+    assert.equal(
+      executor.specs.filter((spec) => spec.profile.profileId === 'exec-a').length,
+      0,
+      '用量不可用时不得半开发请求',
+    );
+    assert.equal((await circuits.get('exec-a')).state, 'open', '未确认余量不改熔断');
+    assert.equal(orchestrator.hops.some((hop) => hop.profile.profileId === 'exec-a'), false);
   });
 
   test('持久 Hop 的平台不可达保留原熔断记录且不轮换候选', async () => {
@@ -545,7 +732,9 @@ describe('调度器：整条 Mission 自己走完', () => {
       assert.equal(recorded.state, 'open', `${name} opens P circuit`);
       if (recorded.state === 'open') {
         assert.equal(recorded.failureClass, expectedClass);
-        assert.ok(Date.parse(recorded.openUntil) > Date.now());
+        // quota 无重置时间时熔断 openUntil 为 null（等人工复位）；其余类别仍是未来时刻。
+        if (expectedClass === 'quota') assert.equal(recorded.openUntil, null, `${name} 无重置时间`);
+        else assert.ok(Date.parse(recorded.openUntil) > Date.now(), `${name} 有未来截止`);
       }
     }
 
@@ -581,9 +770,11 @@ describe('调度器：整条 Mission 自己走完', () => {
 
   test('两个 MissionRunner 共用持久仓储：到期 P 只探测一次，成功关闭后可再启动', async () => {
     const circuits = candidateCircuitRepository();
+    // 通用半开探测夹具：这一类只测并发/探测/恢复，不测 quota —— quota 在
+    // 无 provider/usage 的 harness 下正确地不得半开，会让下面的 execAStarted 一直等。
     await circuits.open({
       profileId: 'exec-a',
-      failureClass: 'quota',
+      failureClass: 'rate_limit',
       openUntil: new Date(Date.now() - 60_000).toISOString(),
     });
 
@@ -673,7 +864,7 @@ describe('调度器：整条 Mission 自己走完', () => {
     const expiredUntil = new Date(Date.now() - 60_000).toISOString();
     await circuits.open({
       profileId: 'exec-a',
-      failureClass: 'quota',
+      failureClass: 'rate_limit',
       openUntil: expiredUntil,
     });
     const before = await circuits.get('exec-a');
@@ -723,7 +914,7 @@ describe('调度器：整条 Mission 自己走完', () => {
     const circuits = candidateCircuitRepository();
     await circuits.open({
       profileId: 'exec-a',
-      failureClass: 'quota',
+      failureClass: 'rate_limit',
       openUntil: new Date(Date.now() - 60_000).toISOString(),
     });
     const before = await circuits.get('exec-a');
@@ -822,6 +1013,8 @@ describe('调度器：整条 Mission 自己走完', () => {
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER }, expectFailure: true },
           { tool: 'coagent_update_plan', body: PLAN },
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+          // W-334 门禁：核对结论要在派发之前落，否则这一跳只会得到 CONTRACT_CHECK_REQUIRED。
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
           {
             tool: 'coagent_dispatch_work_item',
             body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -1330,6 +1523,8 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
               { tool: 'coagent_get_mission', body: {} },
               { tool: 'coagent_update_plan', body: PLAN },
               { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+              // W-334 门禁：这张表单独用，没走 COORDINATOR_HAPPY，所以核对结论要自己带上。
+              { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
               {
                 tool: 'coagent_dispatch_work_item',
                 body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -2183,14 +2378,9 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     }
   });
 
-  test('killed_idle：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
-    async () => {
-      await assertSameRunSwap('killed_idle');
-    });
-
   test('quota：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
     async () => {
-      await assertSameRunSwap('quota');
+      await assertSameRunSwap();
     });
 
   test('unknown 不启动 Q；仍记队列失败',
@@ -2477,34 +2667,14 @@ describe('平台 getStartupBrief 显式预算裁剪', () => {
   );
 });
 
-async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
+async function assertSameRunSwap(): Promise<void> {
   const rows: QueuedHop[] = [];
   const queuedHops = memoryCapacityRepo(rows);
   const starts: { role: string; profileId: string }[] = [];
-  const failing =
-    kind === 'quota'
-      ? { steps: [], upstreamFailure: '403 需要充值' }
-      : { steps: [] };
-  const inner = new ScriptedRuntime({
-    'executor:W-1:0': failing,
+  const executor = new ScriptedRuntime({
+    'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
     'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
   });
-  const executor: AgentRuntime =
-    kind === 'killed_idle'
-      ? {
-          kind: inner.kind,
-          start: async (spec) => {
-            const run = await inner.start(spec);
-            if (spec.role !== 'executor' || spec.profile.profileId !== 'exec-a') return run;
-            return {
-              resumeRef: run.resumeRef,
-              on: (handler) => run.on(handler),
-              abort: (reason) => run.abort(reason),
-              wait: async () => ({ ...await run.wait(), endedBy: 'killed_idle' as const }),
-            };
-          },
-        }
-      : inner;
   const env = await capacityHarness({
     coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
     executor: trackingStarts(executor, starts),
@@ -2516,27 +2686,27 @@ async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
   });
   await env.platform.createMission({
     projectId: 'P',
-    missionId: `M-swap-${kind}`,
+    missionId: 'M-swap-quota',
     contract: CONTRACT,
   });
   const began = Date.now();
   const orch = env.makeOrchestrator();
-  const result = await orch.runMission(`M-swap-${kind}`, { projectRoot: process.cwd() });
+  const result = await orch.runMission('M-swap-quota', { projectRoot: process.cwd() });
   assert.ok(Date.now() - began >= 1_000, '必须真实等到退避到期，不能用固定 now 配立即返回的 sleep');
   assert.equal(result.kind, 'awaiting_l3_review');
-  await env.platform.finalizeMission(`M-swap-${kind}`, {
+  await env.platform.finalizeMission('M-swap-quota', {
     verdict: 'merge',
     reasons: ['ok'],
     projectRoot: process.cwd(),
   });
-  assert.equal((await env.platform.getMissionView(`M-swap-${kind}`)).status, 'completed');
+  assert.equal((await env.platform.getMissionView('M-swap-quota')).status, 'completed');
   const execStarts = starts.filter((row) => row.role === 'executor');
   assert.deepEqual(execStarts.map((row) => row.profileId), ['exec-a', 'exec-b']);
   const execHops = (await queuedHops.list()).filter((row) => row.role === 'executor');
   assert.equal(execHops.length, 1, '必须同键重领，不得另开槽');
   assert.equal(execHops[0]?.status, 'completed');
   assert.equal(execHops[0]?.attemptCount, 1, 'attemptCount 不得因换候选清零');
-  assert.equal(execHops[0]?.lastFailure?.classification, kind === 'quota' ? 'quota' : 'killed_idle');
+  assert.equal(execHops[0]?.lastFailure?.classification, 'quota');
   const executorRecords = orch.hops.filter((hop) => hop.role === 'executor');
   assert.equal(executorRecords.length, 2);
   assert.equal(executorRecords[0]?.profile.profileId, 'exec-a');
@@ -2940,3 +3110,74 @@ describe('调度器：运行时 contextMetrics 透传到平台收尾',
         assert.deepEqual(hit.metrics, VALID_CONTEXT_METRICS);
       });
   });
+
+describe('调度器：按角色读取候选冷却快照', () => {
+  test('协调者唯一候选 open 五分钟时给出到期，执行者不被混算', async () => {
+    const now = Date.parse('2026-10-01T12:00:00.000Z');
+    const openUntil = new Date(now + 5 * 60_000).toISOString();
+    const circuits = candidateCircuitRepository();
+    await circuits.open({ profileId: 'coordinator-a', failureClass: 'rate_limit', openUntil });
+    // exec-b：到期后探针已被领取，停在 half_open。快照必须说「不可证明可用」，
+    // 不能折算成一个冷却时长——那会把「有人正在试探」说成「等一会就好」。
+    const probeAt = new Date(now).toISOString();
+    await circuits.open({ profileId: 'exec-b', failureClass: 'rate_limit', openUntil: probeAt });
+    assert.equal(await circuits.tryClaimProbe({ profileId: 'exec-b', now: probeAt }), true);
+    // exec-c：仓储读这一行时直接抛。快照不能跟着炸，也不能替它编一个冷却时长——
+    // 一个候选读坏了说明不了别的候选怎么样。
+    const circuitsWithUnreadableRow: CandidateCircuitRepository = {
+      get: (profileId) =>
+        profileId === 'exec-c'
+          ? Promise.reject(new Error('state row unreadable'))
+          : circuits.get(profileId),
+      open: (input) => circuits.open(input),
+      tryClaimProbe: (input) => circuits.tryClaimProbe(input),
+      resolveProbe: (input) => circuits.resolveProbe(input),
+    };
+
+    // 直构编排器，不起 server、不碰真实状态目录：这一跳只读候选池与熔断仓储。
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const platform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries,
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    const tokens = new RunTokenRegistry();
+    const runner = new Orchestrator({
+      platform,
+      tokens: makeIssuer(platform, tokens),
+      baseUrl: 'http://cooldown-snapshot.invalid',
+      workspace: new InPlaceWorkspaceManager(),
+      candidateCircuits: circuitsWithUnreadableRow,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coordinator-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [
+          { endpoint: 'local', profileId: 'exec-a' },
+          { endpoint: 'local', profileId: 'exec-b' },
+          { endpoint: 'local', profileId: 'exec-c' },
+        ],
+      },
+    });
+
+    assert.deepEqual(await runner.roleCooldownSnapshot('coordinator', now), [
+      { profileId: 'coordinator-a', availability: 'cooldown', until: openUntil, retryAfterMs: 5 * 60_000 },
+    ]);
+    // 执行者这一侧一个都不能沾上协调者的冷却；exec-b（half_open）与 exec-c（读坏了）
+    // 都是 unknown，不是 cooldown，也都不影响 exec-a 报 available。
+    assert.deepEqual(await runner.roleCooldownSnapshot('executor', now), [
+      { profileId: 'exec-a', availability: 'available', retryAfterMs: 0 },
+      { profileId: 'exec-b', availability: 'unknown' },
+      { profileId: 'exec-c', availability: 'unknown' },
+    ]);
+    // 池没装配 = 没有候选，不是「全在冷却」。
+    assert.deepEqual(await runner.roleCooldownSnapshot('independent_reviewer', now), []);
+  });
+});

@@ -136,6 +136,7 @@ describe('L2 打回 L1：重发的工单带上「这次要避开什么」', () =
         steps: [
           { tool: 'coagent_update_plan', body: PLAN },
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
           { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1'] } },
         ],
       },
@@ -215,6 +216,7 @@ describe('L3 打回 L2：重跑时协调者知道自己为什么被打回', () =
         steps: [
           { tool: 'coagent_update_plan', body: PLAN },
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
           { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1'] } },
         ],
       },
@@ -389,6 +391,7 @@ describe('落地之后回收工作区', () => {
         steps: [
           { tool: 'coagent_update_plan', body: PLAN },
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
           { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1'] } },
         ],
       },

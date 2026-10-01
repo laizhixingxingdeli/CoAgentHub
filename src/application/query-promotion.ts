@@ -123,7 +123,7 @@ export class QueryPromotionService {
     }
 
     // 3) workOrder runtime guard 先于任何 Project side effect（ensure / create）
-    const workOrder = requireWorkOrder(input);
+    const workOrder = normalizeOrderRevision(requireWorkOrder(input));
 
     const source = summarizeSource(record);
     const project = await this.#projects.ensure(record.projectId);
@@ -333,6 +333,23 @@ function requireWorkOrder(input: PromoteQueryRunInput): WorkOrder {
     );
   }
   return workOrder as WorkOrder;
+}
+
+/**
+ * 把「缺修订号」的显式入参规范化为 r1 后再比较 / 落库。
+ *
+ * kernel 冻结工单时本来就把缺省 orderRevision 补成 r1（work-item.ts
+ * freezeWorkOrder），所以已冻结的工单**总是**带 r1。不规范化的话，同一张
+ * 无修订号的工单第二次晋升就会深比较失败（undefined vs 'r1'），被误判成
+ * PROMOTION_CONFLICT——legacy 调用方从此再也 promote 不了同一张工单。
+ *
+ * 返回浅拷贝：调用者传入的对象（以及它复用的 fixture）不得被改写。
+ */
+function normalizeOrderRevision(order: WorkOrder): WorkOrder {
+  if (order.orderRevision !== undefined && order.orderRevision !== null) {
+    return order;
+  }
+  return { ...order, orderRevision: 'r1' };
 }
 
 function structuralEqual(a: unknown, b: unknown): boolean {

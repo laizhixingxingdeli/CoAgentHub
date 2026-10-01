@@ -384,6 +384,12 @@ describe('落地时把知识跟代码一起合进去', () => {
       title: 'W',
       order: ORDER,
     });
+    // 派发门禁：Standard 首次派发前必须落一条契约核对结论。这条测试要验的是
+    // memory 跟代码同一次 merge，不是门禁本身，所以照实核对、不绕门禁。
+    await platform.submitContractCheck('M1', coord.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
+    });
     await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
     writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
 

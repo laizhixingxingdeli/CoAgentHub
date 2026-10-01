@@ -418,6 +418,20 @@ const EVENT_TABLE = {
     };
   },
 
+  'work_item.order_revised': (event) => {
+    const data = (event && event.data) || {};
+    const revision = text(data.revision);
+    const fields = list(data.changedFields);
+    // 事件只记修订号与字段名（full order 在工单时间线重复无意义），缺了就直说。
+    const revisionText = revision ? `（${revision}）` : '（没写修订号）';
+    const changedText = fields.length === 0 ? '（没写改了哪些字段）' : fields.join('、');
+    return {
+      badge: 'L2',
+      action: '修订工单',
+      detail: `工作项 ${or(event && event.workItemId, '（没有工作项 ID）')}${revisionText} · 改了：${changedText}`,
+    };
+  },
+
   'work_item.retired': (event) => ({
     badge: 'L2',
     action: '作废工作项',
@@ -482,6 +496,20 @@ const EVENT_TABLE = {
     };
   },
 
+  // 协调者开工前的契约核对：ok / issues 决定要不要升级给 L3，所以结论必须显眼。
+  'contract_check.submitted': (event) => {
+    const data = (event && event.data) || {};
+    const verdict = text(data.verdict);
+    // verdict 只有 ok / issues；认不出来就把原值端出来，那是唯一还能 grep 的线索。
+    const verdictText = verdict === 'ok' ? '核对通过' : verdict === 'issues' ? '发现问题' : verdict || '（没有写核对结论）';
+    const revision = data.contractRevision === undefined || data.contractRevision === null ? '' : revisionLabel('contract', data.contractRevision);
+    return {
+      badge: 'L2',
+      action: '契约核对',
+      detail: [verdictText, revision, text(data.summary)].filter(Boolean).join(' · '),
+    };
+  },
+
   'final_review.merged': (event) => ({
     badge: 'L3',
     action: '放行并落地',
@@ -495,6 +523,50 @@ const EVENT_TABLE = {
       action: '暂停',
       // enum 有翻译就用翻译，没有就把原因原样端出来，别丢线索。
       detail: reason ? WAIT_REASON[reason] || reason : '（没有写原因）',
+    };
+  },
+
+  'mission.conflict_dispatch_barrier': (event) => {
+    const data = (event && event.data) || {};
+    const files = list(data.conflictFiles);
+    return {
+      badge: 'L2',
+      action: '冲突期间暂停派发',
+      detail: files.length ? `冲突文件：${files.join('、')}` : '检测到冲突，已暂停派发工作项',
+    };
+  },
+
+  'mission.conflict_dispatch_cleared': () => ({
+    badge: 'L2',
+    action: '解除冲突派发限制',
+    detail: '冲突已清除，可以继续派发工作项',
+  }),
+
+  'mission.parked': (event) => ({
+    badge: 'L2',
+    action: '挂起 Mission',
+    detail: or(event && event.data && event.data.reason, '等待用户答复，暂时挂起'),
+  }),
+
+  'mission.resume_sync_conflict': (event) => {
+    const data = (event && event.data) || {};
+    const files = list(data.conflictFiles);
+    const reason = text(data.reason);
+    return {
+      badge: 'L2',
+      action: '续跑同步遇到冲突',
+      detail: [reason, files.length ? `冲突文件：${files.join('、')}` : '', data.baseRevision ? `集成基线：${data.baseRevision}` : '']
+        .filter(Boolean).join(' · ') || '与集成分支同步时发生冲突，需协调处理',
+    };
+  },
+
+  'mission.resumed_from_park': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L2',
+      action: '从挂起状态续跑',
+      detail: [text(data.reason), data.baseRevision ? `集成基线：${data.baseRevision}` : '']
+        .filter(Boolean).join(' · ') || '已同步集成分支并恢复 Mission',
     };
   },
 
@@ -555,6 +627,30 @@ const EVENT_TABLE = {
       badge: 'L3 → L1',
       action: '重新派发工作项',
       detail: ids.length === 0 ? '（没有写派了哪些工作项）' : ids.map((id) => titleOf(ctx, id)).join('、'),
+    };
+  },
+
+  /*
+   * 机器自动接续（platform 把 partial / 验证失败退回执行者，每条最多两次）。
+   * 这条要回答的是「谁退的、为什么、第几次」，所以依据与次数都得出现，缺了直说。
+   * summary 在落盘前已由 platform 侧脱敏截尾，这里原样展示；再截一次会把
+   * 「为什么退回去」的尾巴切掉，而界面要回答的正是这个。
+   */
+  'work_item.auto_redispatched': (event, ctx) => {
+    const data = (event && event.data) || {};
+    const rawReason = text(data.reason);
+    const reason = rawReason === 'validation_failed'
+      ? '验证没过'
+      : rawReason === 'partial'
+        ? '只交了半成品'
+        : '（没有写退回依据）';
+    const count = data.count === undefined || data.count === null ? '（没有写续派次数）' : `续派第 ${num(data.count)} 次`;
+    const workItem = titleOf(ctx, event && event.workItemId) || '（不知道是哪个工作项）';
+    const summary = text(data.summary);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '自动退回执行者',
+      detail: [`${reason} · ${workItem} · ${count}`, summary].filter(Boolean).join('：'),
     };
   },
 
@@ -638,6 +734,20 @@ const EVENT_TABLE = {
     action: '从暂停恢复',
     detail: '调度器可以再碰它了',
   }),
+
+  /*
+   * 执行前记下的 diff 比较基线（platform 在派发时写，data.head 是那个版本号）。
+   * 这是「之后验什么」的参照点，不是验证结论：动作只能写成记基线，
+   * 写成「验证通过」/「工作项已接受」会让时间线把还没发生的事说成发生了。
+   */
+  'work_item.validation_baseline_recorded': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '记下验证基线',
+      detail: `执行前基线 ${or(data.head, '（没有基线版本）')}`,
+    };
+  },
 
   'validation.reported': (event) => {
     const data = (event && event.data) || {};

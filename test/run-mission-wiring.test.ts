@@ -88,6 +88,9 @@ const COORDINATOR_HAPPY: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+      // Standard 派发前必须先交当前契约修订的核对结论，否则门禁拒派；
+      // 缺这一步协调者跳会失败，整条 run 停在 no_available_agent，后面测的就不是原场景。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),

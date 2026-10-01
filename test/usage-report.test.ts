@@ -102,6 +102,7 @@ async function seed(platform: Platform) {
     order: ORDER,
   });
   // 派发必须在收尾之前：attempt 一旦 succeeded 就不能再拿它提交东西了。
+  await platform.submitContractCheck('M1', c1.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M1', c1.attemptId, [workItemId]);
   await platform.finishAttempt('M1', c1.attemptId, {
     endedBy: 'structured_submit',
@@ -267,6 +268,7 @@ describe('Envelope 公共语义（S10.3）', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
 
     const events = await platform.getActivity('M1');

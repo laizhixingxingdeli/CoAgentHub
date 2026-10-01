@@ -65,6 +65,18 @@ const WORK_ORDER: WorkOrder = Object.freeze({
   contextRefs: Object.freeze(['src/foo.ts']),
 });
 
+/**
+ * WORK_ORDER 的「冻结后」形态：kernel 冻结时给缺省修订号补 r1。
+ *
+ * 深等断言比这个，而不是把 WORK_ORDER 本身改成带 r1——后者会让入参看起来
+ * 已经带修订号，就验证不到「legacy 无修订号入参仍幂等」和「caller 对象不被
+ * 改写」这两条了。
+ */
+const WORK_ORDER_R1: WorkOrder = Object.freeze({
+  ...WORK_ORDER,
+  orderRevision: 'r1',
+});
+
 const WORK_ORDER_OTHER: WorkOrder = Object.freeze({
   objective: '另一张工单',
   allowedScope: Object.freeze(['src/bar.ts']),
@@ -172,7 +184,7 @@ describe('QueryPromotionService', () => {
     const wi = result.mission.workItems[0]!;
     assert.match(wi.id, /^W-/);
     assert.equal(wi.title, WORK_ORDER.objective);
-    assert.deepEqual(wi.order, WORK_ORDER);
+    assert.deepEqual(wi.order, WORK_ORDER_R1);
     assert.ok(Object.isFrozen(wi.order));
     assert.ok(Object.isFrozen(wi.order!.allowedScope));
 
@@ -495,7 +507,7 @@ describe('QueryPromotionService', () => {
     const still = await projects.get(record.projectId);
     assert.equal(still?.missions.length, 1);
     assert.equal(still?.missions[0]?.workItems.length, 1);
-    assert.deepEqual(still?.missions[0]?.workItems[0]?.order, WORK_ORDER);
+    assert.deepEqual(still?.missions[0]?.workItems[0]?.order, WORK_ORDER_R1);
     assert.equal((await activity.list(first.mission.id)).length, beforeEvents);
 
     assert.equal((await projects.get('P-dirty'))?.missions.length, 1);
@@ -527,7 +539,7 @@ describe('QueryPromotionService', () => {
     const wi = result.mission.workItems[0]!;
     assert.match(wi.id, /^W-/);
     assert.equal(wi.title, WORK_ORDER.objective);
-    assert.deepEqual(wi.order, WORK_ORDER);
+    assert.deepEqual(wi.order, WORK_ORDER_R1);
     assert.ok(Object.isFrozen(wi.order));
 
     const events = await activity.list(result.mission.id);
@@ -668,13 +680,13 @@ describe('QueryPromotionService', () => {
     assert.equal(missionSnap.runKind, 'mutation');
     assert.equal(missionSnap.workItems.length, 1);
     assert.equal(missionSnap.workItems[0]?.title, WORK_ORDER.objective);
-    assert.deepEqual(missionSnap.workItems[0]?.order, WORK_ORDER);
+    assert.deepEqual(missionSnap.workItems[0]?.order, WORK_ORDER_R1);
 
     const restored = Project.restore(snap);
     const restoredMission = restored.missions.find((m) => m.id === mission.id);
     assert.equal(restoredMission?.origin?.queryRunId, record.id);
     assert.equal(restoredMission?.workItems.length, 1);
-    assert.deepEqual(restoredMission?.workItems[0]?.order, WORK_ORDER);
+    assert.deepEqual(restoredMission?.workItems[0]?.order, WORK_ORDER_R1);
   });
 
   test('promoteQueryRun 便捷函数同样要求 workOrder 并行为一致', async () => {
@@ -687,7 +699,7 @@ describe('QueryPromotionService', () => {
     assert.equal(result.mission.origin?.queryRunId, 'Q-fn');
     assert.equal(result.mission.workItems.length, 1);
     assert.equal(result.mission.workItems[0]?.title, WORK_ORDER.objective);
-    assert.deepEqual(result.mission.workItems[0]?.order, WORK_ORDER);
+    assert.deepEqual(result.mission.workItems[0]?.order, WORK_ORDER_R1);
 
     await assert.rejects(
       () =>

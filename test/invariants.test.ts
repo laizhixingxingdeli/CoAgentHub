@@ -8,6 +8,7 @@ import {
   Project,
   WorkItem,
 } from '../src/kernel/index.ts';
+import type { WorkOrder } from '../src/kernel/index.ts';
 
 /** 同一 Project 下的兄弟 Mission 对，不变量 C 的用例场景。 */
 function missionPair(): { project: Project; first: Mission; second: Mission; third: Mission } {
@@ -159,6 +160,37 @@ describe('不变量 A：执行者路径不能验收', () => {
     const args: Record<string, unknown[]> = {
       startAttempt: [],
       toSnapshot: [],
+      // reviseOrder 要一份满足 WorkOrder 格式的完整工单才谈得上"能不能改状态"。
+      // 在 dispatched 上它必须被状态机拒绝（见下方 rejectedOnDispatched）。
+      reviseOrder: [
+        {
+          objective: '守卫遍历用的一份合法工单',
+          allowedScope: ['test/invariants.test.ts'],
+          requiredBehaviour: '提供一个可被 reviseOrder 接受的工单载荷',
+          constraints: [],
+          acceptance: [],
+          verification: [],
+          doNot: [],
+          contextRefs: [],
+        } satisfies WorkOrder,
+      ],
+    };
+
+    // 在 dispatched 上被状态机**直接拒绝**的公开方法：调用抛 IllegalTransitionError，
+    // 连状态都没碰到，因此也算"改不了状态"。但必须逐个显式声明——
+    // 否则以后新增一个方法，只要开头就抛个 IllegalTransitionError，
+    // 就能悄悄混过下面"逐个调用证明改不了状态"这条守卫。
+    const rejectedOnDispatched: Record<string, (err: unknown) => boolean> = {
+      // reviseOrder 只在 created / rejected / blocked 生效（见 kernel 的注释）。
+      // 在 dispatched 上拒绝，正是"它不是验收后门"的证据：它碰不到 status。
+      reviseOrder: (err) => {
+        assert.ok(err instanceof IllegalTransitionError, `got ${String(err)}`);
+        assert.equal(err.code, 'ILLEGAL_TRANSITION');
+        assert.equal(err.entity, 'WorkItem');
+        assert.equal(err.from, 'dispatched');
+        assert.equal(err.to, 'reviseOrder');
+        return true;
+      },
     };
 
     for (const name of publicMethodNames(WorkItem)) {
@@ -166,10 +198,17 @@ describe('不变量 A：执行者路径不能验收', () => {
       assert.ok(name in args, `新公开方法 ${name} 没被这条守卫覆盖：补一组入参再跑`);
       const item = dispatchedWorkItem();
       const before = item.status;
-      (item as unknown as Record<string, (...a: unknown[]) => unknown>)[name](
-        ...(args[name] as unknown[]),
-      );
+      const invoke = () =>
+        (item as unknown as Record<string, (...a: unknown[]) => unknown>)[name](
+          ...(args[name] as unknown[]),
+        );
+      if (name in rejectedOnDispatched) {
+        assert.throws(invoke, rejectedOnDispatched[name]);
+      } else {
+        invoke();
+      }
       assert.equal(item.status, before, `${name} 不得改变 WorkItem 状态`);
+      assert.notEqual(item.status, 'accepted', `${name} 不得把 WorkItem 写成 accepted`);
     }
 
     // recordBlocked 只能把状态推到 blocked，推不到 accepted。
@@ -288,6 +327,37 @@ describe('不变量 C：同一 Project 同一时刻只有一个 executing Missio
     assert.equal(first.isMutating, false, 'L3 放行、改动落地之后才放名额');
     second.startExecuting();
     assert.equal(second.status, 'executing');
+  });
+
+  test('park 保留历史、释放名额并在恢复时保留；冲突续跑不改变挂起状态', () => {
+    const project = Project.create({ id: 'p-park' });
+    const first = project.createMission({ id: 'm-park' });
+    const second = project.createMission({ id: 'm-next' });
+    first.startExecuting();
+    const item = first.createWorkItem({ id: 'w-accepted', title: 'accepted' });
+    item.dispatch();
+    item.submit({ result: true });
+    item.review('accept');
+
+    first.park('等待用户答复');
+    assert.equal(first.status, 'executing');
+    assert.equal(first.hasMutated, true);
+    assert.equal(first.workItems[0]?.status, 'accepted');
+    assert.equal(first.isMutating, false);
+    assert.equal(first.parkReason, '等待用户答复');
+    const restored = Project.restore(project.toSnapshot()).missions[0]!;
+    assert.equal(restored.isParked, true);
+    assert.equal(restored.parkReason, '等待用户答复');
+    assert.equal(restored.workItems[0]?.status, 'accepted');
+
+    second.startExecuting();
+    assert.throws(() => first.resume(), invariant('CONCURRENT_MUTATING_MISSION'));
+    assert.equal(first.isParked, true);
+    assert.equal(first.isPaused, false);
+    second.block();
+    first.resume();
+    assert.equal(first.isParked, false);
+    assert.equal(first.isMutating, true);
   });
 
   test('放弃也放名额', () => {

@@ -67,6 +67,7 @@ const COORDINATOR_HAPPY: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),

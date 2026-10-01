@@ -14,6 +14,8 @@
 import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { listPlanRuns, type PlanRunListOk } from './plan-run-store.ts';
+import type { PlanCandidateSelection, PlanSpec } from './plan-spec.ts';
 
 const run = promisify(execFile);
 
@@ -53,16 +55,64 @@ export async function preflightPlanRepo(projectRoot: string, integrationBranch: 
  * 不先处理它就开下一晚，每个功能的协调者都会先调查规划一遍、派发时撞上
  * PROJECT_BUSY，然后开单、等过期、再换下一个——一整晚白烧。
  */
+export interface PlanResumeTarget {
+  readonly featureId: string;
+  readonly missionId: string;
+}
+
+export function preflightPlanMissionSlots(input: {
+  readonly selection: PlanCandidateSelection;
+  readonly plan: Pick<PlanSpec, 'planId' | 'projectId'>;
+  readonly runDir: string;
+  readonly missions: readonly { missionId: string; projectId: string; status: string; isMutating: boolean; paused: boolean }[];
+}): { readonly problems: string[]; readonly resume: readonly PlanResumeTarget[] } {
+  const problems: string[] = [];
+  const resume: PlanResumeTarget[] = [];
+  const holders = input.missions.filter((mission) => mission.projectId === input.plan.projectId && mission.isMutating);
+  // 空名额不依赖历史；损坏记录不应阻止与其无关的新方案运行。
+  const history = holders.length > 0 ? listPlanRuns([input.runDir]) : [];
+  const historyErrors = history.some((item) => 'error' in item);
+  const candidateCounts = new Map<string, number>();
+  for (const feature of input.selection.candidates) {
+    candidateCounts.set(feature.id, (candidateCounts.get(feature.id) ?? 0) + 1);
+  }
+  const validRuns = history
+    .filter((item): item is PlanRunListOk => !('error' in item) && item.planId === input.plan.planId &&
+      item.projectId === input.plan.projectId && item.stopped?.reason === 'reviewer_stop')
+    .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  // 同一 Mission 被叫停两次后第三次仍要能续跑：每个 holder 只认 startedAt 最新的那条
+  // 叫停记录作为有效认领，早先的同 Mission 记录是「曾经」占过，不该算成第二个冲突认领。
+  // 一份最新记录里同 Mission 的 feature 多于一个，才是真的分不清，仍按冲突阻断。
+  const claims = holders.map((holder) => {
+    const run = validRuns.find((item) => item.features.some((feature) => feature.missionIds.includes(holder.missionId)));
+    const matched = run?.features.filter((feature) => feature.missionIds.includes(holder.missionId)) ?? [];
+    return { holder, feature: matched.length === 1 ? matched[0] : undefined };
+  });
+  const featureHolderCounts = new Map<string, number>();
+  for (const claim of claims) {
+    if (claim.feature === undefined) continue;
+    featureHolderCounts.set(claim.feature.featureId, (featureHolderCounts.get(claim.feature.featureId) ?? 0) + 1);
+  }
+  for (const { holder, feature } of claims) {
+    const unique = !historyErrors && feature !== undefined &&
+      feature.missionIds.length === 1 && feature.missionIds[0] === holder.missionId &&
+      featureHolderCounts.get(feature.featureId) === 1 &&
+      candidateCounts.get(feature.featureId) === 1 &&
+      holders.filter((other) => other.missionId === holder.missionId).length === 1;
+    if (unique && holder.paused && holder.status === 'executing') {
+      resume.push({ featureId: feature.featureId, missionId: holder.missionId });
+    } else {
+      problems.push(...slotHolders([holder], input.plan.projectId));
+    }
+  }
+  return { problems, resume };
+}
+
 export function slotHolders(
   missions: readonly { missionId: string; projectId: string; status: string; isMutating: boolean }[],
   projectId: string,
 ): string[] {
-  return missions
-    .filter((mission) => mission.projectId === projectId && mission.isMutating)
-    .map(
-      (mission) =>
-        `Mission ${mission.missionId}（${mission.status}）正占着项目 ${projectId} 的改动名额：` +
-        `先处理它（node src/l3.ts show ${mission.missionId}，再 merge 或 abandon），` +
-        '否则今晚每个功能都派发不了。',
-    );
+  return missions.filter((mission) => mission.projectId === projectId && mission.isMutating).map((mission) =>
+    `Mission ${mission.missionId}（${mission.status}）正占着项目 ${projectId} 的改动名额：` +
+    `先处理它（node src/l3.ts show ${mission.missionId}，再 merge 或 abandon），否则今晚每个功能都派发不了。`);
 }

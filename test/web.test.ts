@@ -496,6 +496,46 @@ describe('资源池页：首屏不阻塞模型', { concurrency: false }, () => {
     assert.equal(evil.includes('<b>'), false);
     assert.match(evil, /&lt;img/);
     assert.match(evil, /近七日：尝试 0 · 成功 0 · 费用未上报/);
+    assert.equal(evil.includes('data-health-usage'), false, '没有用量字段时整行不出现');
+  });
+
+  test('健康格：定时重置显示套餐与剩余百分比', async () => {
+    const { healthCellHtml } = await loaded;
+    const html = healthCellHtml({
+      circuit: { state: 'open', failureClass: 'quota' },
+      window7d: { attempts: 3, successes: 1, reportedCost: 0.5 },
+      runtime: { running: false, reason: 'no_active_lease' },
+      usage: { provider: 'xai', plan: 'SuperGrok', remainingPercent: 0, resetAt: '2026-10-05T16:10:00.000Z' },
+      quotaReason: '额度已用完，2026-10-05T16:10:00.000Z 重置后再派活。',
+    });
+    assert.match(html, /data-health-usage/);
+    assert.match(html, /SuperGrok 剩 0%/);
+    // 用量行里的重置时间要缩短到分钟；额度原因里带 ISO 原串是后端原样文案，不算退化。
+    const usageLine = /data-health-usage>([^<]*)</.exec(html);
+    assert.ok(usageLine, '要有用量行');
+    assert.match(usageLine[1], /^SuperGrok 剩 0% · \d{1,2}\/\d{1,2} \d{2}:\d{2} 重置$/);
+    assert.equal(usageLine[1].includes('2026-10-05T16:10'), false, 'ISO 原串不该占满整行');
+    assert.match(html, /data-health-quota-reason/);
+    assert.match(html, /重置后再派活/);
+    assert.match(html, /近七日：尝试 3 · 成功 1/, '既有健康行不能因为加了用量行而退化');
+  });
+
+  test('健康格：没有重置时间时给复位命令，命令只显示且转义', async () => {
+    const { healthCellHtml } = await loaded;
+    const html = healthCellHtml({
+      circuit: { state: 'open', failureClass: 'quota' },
+      window7d: { attempts: 2, successes: 0, reportedCost: null },
+      runtime: { running: false, reason: 'no_active_lease' },
+      quotaReason: '额度已用完，适配层没有给出重置时间 —— 不会自动恢复，要等充值后人工复位。',
+      resetCommand: "coagentctl pool reset 'grok' && echo <script>",
+    });
+    assert.match(html, /要等充值后人工复位/);
+    assert.match(html, /data-health-quota-reset/);
+    assert.match(html, /<code>/);
+    assert.equal(html.includes('<script>'), false, '复位命令是外来文案，必须转义');
+    assert.match(html, /&lt;script&gt;/);
+    assert.equal(html.includes('data-health-usage'), false, '没有用量就不显示用量行');
+    assert.match(html, /chip failed/, '既有熔断 chip 不受影响');
   });
 
   test('首屏只拉 pools 与 usage，不发也不等 models', async () => {

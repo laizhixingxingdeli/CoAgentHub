@@ -267,6 +267,12 @@ export interface WorkOrder {
    * 可选结构化机器验收命令。缺省 = 旧行为；有则只认 commands，不解析 verification。
    */
   readonly validation?: WorkOrderValidationSpec;
+  /**
+   * 工单修订号，格式 `r<n>`（如 `r1`、`r2`）。
+   * 缺省（旧工单 / 老快照无该字段）视作 `r1`；`WorkItem.reviseOrder` 替换工单时
+   * 在既有号上 +1。它随 `order` 一起进入快照，故快照恢复后修订号一致。
+   */
+  readonly orderRevision?: string;
 }
 
 export type ExecutionOutcome = 'completed' | 'partial';

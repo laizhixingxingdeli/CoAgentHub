@@ -134,6 +134,9 @@ async function prepareMission(
   await platform.createMission({ projectId, missionId, contract: CONTRACT });
   const { attemptId } = await platform.startCoordinatorAttempt(missionId);
   await platform.updatePlan(missionId, attemptId, PLAN);
+  // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论，否则派发在
+  // 走到 shadow 之前就被拒，这组测的接线根本没机会跑。
+  await platform.submitContractCheck(missionId, attemptId, { verdict: 'ok', summary: '测试契约已核对' });
   return { attemptId };
 }
 
@@ -379,6 +382,7 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
     const a1 = await platform.startCoordinatorAttempt('M1');
     await platform.updatePlan('M1', a1.attemptId, PLAN);
     const w1 = await createItem(platform, 'M1', a1.attemptId);
+    await platform.submitContractCheck('M1', a1.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', a1.attemptId, [w1]);
     const callsAfterM1 = sink.calls;
     assert.equal(callsAfterM1, 1);
@@ -387,6 +391,8 @@ describe('Platform.dispatchWorkItems PRE_DISPATCH shadow', () => {
     const a2 = await platform.startCoordinatorAttempt('M2');
     await platform.updatePlan('M2', a2.attemptId, PLAN);
     const w2 = await createItem(platform, 'M2', a2.attemptId);
+    // M2 也要先过核对门禁，否则被拒的是门禁而不是这组要测的 PROJECT_BUSY。
+    await platform.submitContractCheck('M2', a2.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
 
     await assert.rejects(
       () => platform.dispatchWorkItems('M2', a2.attemptId, [w2]),

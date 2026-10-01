@@ -11,7 +11,7 @@ export interface OpenCandidateCircuit {
   readonly profileId: string;
   readonly state: 'open';
   readonly failureClass: string;
-  readonly openUntil: string;
+  readonly openUntil: string | null;
 }
 
 export interface HalfOpenCandidateCircuit {
@@ -27,7 +27,7 @@ export type CandidateCircuit = ClosedCandidateCircuit | OpenCandidateCircuit | H
 export interface OpenCandidateCircuitInput {
   readonly profileId: string;
   readonly failureClass: string;
-  readonly openUntil: string;
+  readonly openUntil: string | null;
 }
 
 export interface ClaimCandidateProbeInput {
@@ -41,11 +41,61 @@ export interface ResolveCandidateProbeInput {
   /** Required on failure; ignored on success. */
   readonly failureClass?: string;
   /** Required on failure; ignored on success. */
-  readonly openUntil?: string;
+  readonly openUntil?: string | null;
 }
 
 function nonEmpty(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${field} must be non-empty`);
+}
+
+export interface QuotaResetInput {
+  readonly message?: string;
+  readonly headers?: Readonly<Record<string, string | undefined>>;
+  readonly now: string;
+}
+
+/** Returns only an explicitly supplied, valid future reset; absent information stays manual. */
+export function resolveQuotaResetTime(input: QuotaResetInput): string | null {
+  const now = Date.parse(input.now);
+  if (!Number.isFinite(now)) return null;
+  const future = (value: number): string | null => Number.isFinite(value) && value > now ? new Date(value).toISOString() : null;
+  const headers = input.headers ?? {};
+  const retry = Object.entries(headers).find(([key]) => key.toLowerCase() === 'retry-after')?.[1];
+  if (retry !== undefined) {
+    const seconds = Number(retry);
+    const result = Number.isFinite(seconds) && /^\d+(?:\.\d+)?$/.test(retry.trim())
+      ? future(now + seconds * 1000)
+      : future(Date.parse(retry));
+    if (result) return result;
+  }
+  const reset = Object.entries(headers).find(([key]) => key.toLowerCase() === 'x-ratelimit-reset')?.[1];
+  if (reset !== undefined) {
+    const value = Number(reset);
+    const result = /^\d+(?:\.\d+)?$/.test(reset.trim())
+      ? future(value > 1e12 ? value : value * 1000)
+      : future(Date.parse(reset));
+    if (result) return result;
+  }
+  const message = input.message ?? '';
+  const relative = /try again in\s+(\d+(?:\.\d+)?)\s*(seconds?|secs?|秒|minutes?|mins?|分钟|分|hours?|hrs?|小时|时)/i.exec(message);
+  if (relative) {
+    const unit = relative[2].toLowerCase();
+    const factor = /秒|sec/.test(unit) ? 1000 : /分|min/.test(unit) ? 60000 : 3600000;
+    const result = future(now + Number(relative[1]) * factor);
+    if (result) return result;
+  }
+  const candidates = [
+    /\(\s*quota resets at\s+([^\)]+)\)/i,
+    /(?:resets at|重置于)\s*([^\s,;\)]+)/i,
+  ];
+  for (const pattern of candidates) {
+    const match = pattern.exec(message);
+    if (match) {
+      const result = future(Date.parse(match[1]));
+      if (result) return result;
+    }
+  }
+  return null;
 }
 
 export function validateCandidateCircuitTimestamp(value: unknown, field: string): asserts value is string {
@@ -57,7 +107,11 @@ export function validateCandidateCircuitTimestamp(value: unknown, field: string)
 export function validateOpenCandidateCircuit(input: OpenCandidateCircuitInput): void {
   nonEmpty(input.profileId, 'profileId');
   nonEmpty(input.failureClass, 'failureClass');
-  validateCandidateCircuitTimestamp(input.openUntil, 'openUntil');
+  if (input.openUntil === null) {
+    if (input.failureClass !== 'quota') throw new Error('openUntil may be null only for quota');
+  } else {
+    validateCandidateCircuitTimestamp(input.openUntil, 'openUntil');
+  }
 }
 
 export function closedCandidateCircuit(profileId: string): ClosedCandidateCircuit {
@@ -81,13 +135,17 @@ export function validateResolveCandidateProbe(input: ResolveCandidateProbeInput)
   if (typeof input.succeeded !== 'boolean') throw new Error('succeeded must be boolean');
   if (!input.succeeded) {
     nonEmpty(input.failureClass, 'failureClass');
-    validateCandidateCircuitTimestamp(input.openUntil, 'openUntil');
+    if (input.openUntil === null) {
+      if (input.failureClass !== 'quota') throw new Error('openUntil may be null only for quota');
+    } else {
+      validateCandidateCircuitTimestamp(input.openUntil, 'openUntil');
+    }
   }
 }
 
 export function claimCandidateProbe(record: OpenCandidateCircuit | HalfOpenCandidateCircuit, now: string): CandidateCircuit | undefined {
   validateCandidateCircuitTimestamp(now, 'now');
-  if (record.state !== 'open' || Date.parse(now) < Date.parse(record.openUntil)) return undefined;
+  if (record.state !== 'open' || record.openUntil === null || Date.parse(now) < Date.parse(record.openUntil)) return undefined;
   return { profileId: record.profileId, state: 'half_open', failureClass: record.failureClass, openUntil: record.openUntil, probeClaimed: true };
 }
 

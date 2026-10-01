@@ -15,6 +15,7 @@ import { API_VERSION, createApi } from './api/server.ts';
 import { loadPoolOrSeed } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import {
   HOSTED_AGENT_ENV_UNPROVEN_MESSAGE,
@@ -255,6 +256,11 @@ async function main() {
       throw new Error(occupiedMessage(probe.reason));
     }
   }
+
+  // 本进程的用量查询要问本次 --adapter 所在仓库：只有走到这里才是独立本地写者，
+  // 转发给常驻服务时仍由服务按 body 记目录，不能让 CLI 子进程盖掉服务已缓存的目录。
+  // COAGENT_ADAPTER_DIR 优先级更高，由 adapterDir() 自己判。
+  rememberAdapterDir(resolve(adapter, '../..'));
 
   // Platform validator 与 Orchestrator 必须共享同一个 WorkspaceManager 实例。
   const missionWorkspace = inPlace

@@ -550,6 +550,11 @@ describe('真读模型喂真渲染函数', () => {
         contextRefs: [],
       },
     });
+    // 冻结契约核对前置（W-334）：Standard 第一次派发前必须先落一条当前修订的核对结论。
+    await platform.submitContractCheck('M-1', coord.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
+    });
     await platform.dispatchWorkItems('M-1', coord.attemptId, [workItemId]);
     await platform.recordWorkspace('M-1', {
       projectRoot: '/repo/a',

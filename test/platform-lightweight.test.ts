@@ -1281,6 +1281,7 @@ describe('Standard 回归：Lightweight 不放宽', () => {
       title: 'W',
       order: ORDER_BASE,
     });
+    await h.platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
     await h.platform.dispatchWorkItems('M1', coord, [workItemId]);
     const { attemptId: exec } = await h.platform.startExecutorAttempt('M1', workItemId);
     await h.platform.submitEvidence('M1', exec, {
@@ -1339,6 +1340,7 @@ describe('Standard 回归：Lightweight 不放宽', () => {
       title: 'W',
       order: ORDER_BASE,
     });
+    await h.platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
     await h.platform.dispatchWorkItems('M1', coord, [workItemId]);
     assert.equal(sink.calls, 1);
   });

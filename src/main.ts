@@ -25,6 +25,7 @@ import {
   SystemClock,
 } from './application/in-memory.ts';
 import { Platform } from './application/platform.ts';
+import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
 import { InMemoryAgentPoolRepository, loadPoolOrSeed } from './application/agent-pool.ts';
@@ -59,7 +60,7 @@ import {
   PERIODIC_RECONCILE_LOCK_KEY2,
   tryPgAdvisoryLock,
 } from './application/pg-store.ts';
-import { acquireLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
+import { acquireLock, acquireRecoverableLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
 import { attachLoopbackWriterIdentity, listenLoopback } from './application/loopback-listen.ts';
 import {
   parseReconcileIntervalMs,
@@ -258,7 +259,7 @@ export async function buildPersistentPlatform(
       ? { instanceId: options.exclusive.instanceId, apiVersion: options.exclusive.apiVersion }
       : undefined;
   const releaseLock = options.exclusive
-    ? acquireLock(statePath, options.exclusive.what, exclusiveIdentity)
+    ? await acquireRecoverableLock(statePath, options.exclusive.what, exclusiveIdentity)
     : () => {};
   try {
   const clock = new SystemClock();
@@ -939,6 +940,11 @@ function hostedHeldState(usePg: boolean, statePath: string): HostedHeldState {
   };
 }
 
+function rememberHostedAdapter(body: Record<string, unknown>): void {
+  if (typeof body.adapter !== 'string' || body.adapter.trim() === '') return;
+  rememberAdapterDir(resolve(body.adapter, '../..'));
+}
+
 export async function startServer(
   port = 3101,
   statePath = '.coagent-state.json',
@@ -1022,6 +1028,7 @@ export async function startServer(
       planRunDirs: () => [...knownPlanRunDirs],
       planLive,
       runMission: async (body, emit) => {
+        rememberHostedAdapter(body);
         const token = randomUUID();
         try {
           return await runHostedMission(
@@ -1046,6 +1053,7 @@ export async function startServer(
         }
       },
       runPlan: async (body, emit) => {
+        rememberHostedAdapter(body);
         const token = randomUUID();
         try {
           return await runHostedPlan(

@@ -173,6 +173,15 @@ CREATE TABLE IF NOT EXISTS candidate_circuits (
   probe_claimed boolean NOT NULL DEFAULT false
 );
 
+CREATE TABLE IF NOT EXISTS candidate_circuit_reset_events (
+  event_id bigserial PRIMARY KEY,
+  profile_id text NOT NULL,
+  actor text NOT NULL,
+  at timestamptz NOT NULL,
+  reason text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS candidate_circuit_reset_profile_idx ON candidate_circuit_reset_events (profile_id, event_id);
+
 CREATE TABLE IF NOT EXISTS validation_reports (
   report_id  text PRIMARY KEY,
   report     jsonb       NOT NULL,
@@ -1108,7 +1117,7 @@ export class PgCandidateCircuitRepository implements CandidateCircuitRepository 
     }>('SELECT state, failure_class, open_until, probe_claimed FROM candidate_circuits WHERE profile_id = $1', [profileId]);
     const row = rows[0];
     if (!row || row.state === 'closed') return closedCandidateCircuit(profileId);
-    const openUntil = row.open_until instanceof Date ? row.open_until.toISOString() : new Date(row.open_until!).toISOString();
+    const openUntil = row.open_until === null ? null : row.open_until instanceof Date ? row.open_until.toISOString() : new Date(row.open_until).toISOString();
     if (row.state === 'half_open' && row.probe_claimed) {
       return { profileId, state: 'half_open', failureClass: row.failure_class!, openUntil, probeClaimed: true };
     }
@@ -1135,6 +1144,31 @@ export class PgCandidateCircuitRepository implements CandidateCircuitRepository 
        RETURNING profile_id`, [input.profileId, input.now],
     );
     return rows.length === 1;
+  }
+
+  async reset(input: { profileId: string; actor: string; at: string; reason: string }): Promise<CandidateCircuit> {
+    for (const key of ['profileId', 'actor', 'at', 'reason'] as const) if (!input[key]?.trim()) throw new Error(`${key} must be non-empty`);
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<{ state: string }>(
+        `UPDATE candidate_circuits SET state = 'closed', failure_class = NULL, open_until = NULL, probe_claimed = false
+         WHERE profile_id = $1 AND state IN ('open', 'half_open') RETURNING state`, [input.profileId]);
+      if (rows.length !== 1) {
+        const exists = await client.query('SELECT 1 FROM candidate_circuits WHERE profile_id = $1', [input.profileId]);
+        throw new Error(exists.rows.length ? 'candidate circuit is closed' : 'candidate circuit does not exist');
+      }
+      await client.query('INSERT INTO candidate_circuit_reset_events (profile_id, actor, at, reason) VALUES ($1, $2, $3::timestamptz, $4)', [input.profileId, input.actor, input.at, input.reason]);
+      await client.query('COMMIT');
+      return closedCandidateCircuit(input.profileId);
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+  }
+
+  async listResetEvents(profileId?: string): Promise<Array<{ profileId: string; actor: string; at: string; reason: string }>> {
+    const { rows } = profileId === undefined
+      ? await this.#pool.query<{ profile_id: string; actor: string; at: Date | string; reason: string }>('SELECT profile_id, actor, at, reason FROM candidate_circuit_reset_events ORDER BY event_id')
+      : await this.#pool.query<{ profile_id: string; actor: string; at: Date | string; reason: string }>('SELECT profile_id, actor, at, reason FROM candidate_circuit_reset_events WHERE profile_id = $1 ORDER BY event_id', [profileId]);
+    return rows.map((row) => ({ profileId: row.profile_id, actor: row.actor, at: row.at instanceof Date ? row.at.toISOString() : new Date(row.at).toISOString(), reason: row.reason }));
   }
 
   async resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit> {

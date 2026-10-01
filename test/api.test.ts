@@ -120,12 +120,6 @@ async function call(
 }
 
 describe('HTTP 面', () => {
-  test('健康检查', async () => {
-    const { status, json } = await call('/api/health');
-    assert.equal(status, 200);
-    assert.equal((json as { ok: boolean }).ok, true);
-  });
-
   test('没有 run token 的工具调用一律 401', async () => {
     const { status, json } = await call('/api/agent/coagent_get_mission', {});
     assert.equal(status, 401);
@@ -174,6 +168,13 @@ describe('HTTP 面', () => {
     );
     assert.equal(wi.status, 200);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call(
+      '/api/agent/coagent_submit_contract_check',
+      { verdict: 'ok', summary: '测试契约已核对' },
+      coordToken,
+    );
 
     const dispatched = await call(
       '/api/agent/coagent_dispatch_work_item',
@@ -271,6 +272,8 @@ describe('HTTP 面', () => {
     );
     const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
     const exec = await call(`/api/missions/M-guard/work-items/${workItemId}/executor-attempts`, {});
     const execToken = (exec.json as { token: string }).token;
@@ -295,6 +298,8 @@ describe('HTTP 面', () => {
     );
     const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
     const exec = await call(`/api/missions/M-spoof/work-items/${workItemId}/executor-attempts`, {});
     const execToken = (exec.json as { token: string }).token;
@@ -318,6 +323,408 @@ describe('HTTP 面', () => {
     const echoed = JSON.stringify(stolen.json);
     assert.equal(echoed.includes(execToken), false);
     assert.equal(echoed.includes(coordToken), false);
+  });
+
+  test('协调者可原子修订 created / blocked 的工单，修订号递增且事件记录 changedFields', async () => {
+    await call('/api/missions', {
+      projectId: 'P-revise',
+      missionId: 'M-revise',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-revise/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+
+    // created：整份替换，修订号 r1 -> r2。
+    const firstRevise = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '改 bar', allowedScope: ['src/bar.ts'] },
+      coordToken,
+    );
+    assert.equal(firstRevise.status, 200);
+    assert.equal((firstRevise.json as { revision: string }).revision, 'r2');
+    assert.deepEqual(
+      [...(firstRevise.json as { changedFields: string[] }).changedFields].sort(),
+      ['allowedScope', 'objective'],
+    );
+
+    const events = (await call('/api/missions/M-revise/activity')).json as unknown as ActivityRow[];
+    const revised = events.filter((row) => row.kind === 'work_item.order_revised');
+    assert.equal(revised.length, 1);
+    assert.equal(revised[0]?.workItemId, workItemId);
+    assert.equal((revised[0]?.data as { revision: string }).revision, 'r2');
+    assert.deepEqual((revised[0]?.data as { changedFields: string[] }).changedFields, [
+      'allowedScope',
+      'objective',
+    ]);
+
+    // blocked：执行者报卡住之后仍可修订，修订号 r2 -> r3。
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(`/api/missions/M-revise/work-items/${workItemId}/executor-attempts`, {});
+    const execToken = (exec.json as { token: string }).token;
+    const blocked = await call(
+      '/api/agent/coagent_report_blocked',
+      { reason: '工单前提不成立', whatWasTried: [], needsFromUpstream: '补上下文' },
+      execToken,
+    );
+    assert.equal(blocked.status, 200);
+
+    const secondRevise = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '改 baz', allowedScope: ['src/bar.ts'] },
+      coordToken,
+    );
+    assert.equal(secondRevise.status, 200);
+    assert.equal((secondRevise.json as { revision: string }).revision, 'r3');
+    assert.deepEqual((secondRevise.json as { changedFields: string[] }).changedFields, ['objective']);
+  });
+
+  test('运行中的工单拒绝修订并指出下一步，原工单不变；非协调者不能借路由修订', async () => {
+    await call('/api/missions', {
+      projectId: 'P-revise-guard',
+      missionId: 'M-revise-guard',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-revise-guard/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call(
+      '/api/agent/coagent_create_work_item',
+      { title: 'W', ...ORDER },
+      coordToken,
+    );
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(
+      `/api/missions/M-revise-guard/work-items/${workItemId}/executor-attempts`,
+      {},
+    );
+    const execToken = (exec.json as { token: string }).token;
+
+    const rejected = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '不该生效' },
+      coordToken,
+    );
+    assert.equal(rejected.status, 409);
+    assert.equal((rejected.json as { error: string }).error, 'WORK_ITEM_NOT_REVISABLE');
+    // 错误里要有下一步，而不是一句 invalid state。
+    assert.match((rejected.json as { message: string }).message, /执行/);
+
+    // 原工单没被动过：修订号仍是 r1，objective 未变，也没有修订事件。
+    const order = await call('/api/agent/coagent_get_work_order', {}, execToken);
+    assert.equal(order.status, 200);
+    const view = order.json as unknown as { order: { objective: string; orderRevision: string } };
+    assert.equal(view.order.objective, ORDER.objective);
+    assert.equal(view.order.orderRevision, 'r1');
+    const events = (await call('/api/missions/M-revise-guard/activity')).json as unknown as ActivityRow[];
+    assert.equal(events.filter((row) => row.kind === 'work_item.order_revised').length, 0);
+
+    // 执行者拿着自己的 token 调修订路由：角色闸直接挡在入口。
+    const stolen = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '越权' },
+      execToken,
+    );
+    assert.equal(stolen.status, 409);
+    assert.equal((stolen.json as { error: string }).error, 'WRONG_ROLE');
+  });
+  test('协调者经 HTTP 工具建/修超标工单：软警告审计同步、直接调用无警告字段', async () => {
+    // --- HTTP 路径：超标工单照常成功，响应与事件同步含软警告 ---
+    await call('/api/missions', {
+      projectId: 'P-warn',
+      missionId: 'M-warn',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-warn/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+
+    // 触发三类软警告：allowedScope 超 2 项（含一目录冒充文件）、verification 超 2 条、contextRefs 为空。
+    const violatingOrder = {
+      objective: '改多个文件',
+      allowedScope: ['src/a.ts', 'src/b.ts', 'src/c/dir'],
+      requiredBehaviour: '做点事',
+      constraints: [],
+      acceptance: ['a() === 1', 'b() === 1'],
+      verification: ['v1', 'v2', 'v3'],
+      doNot: [],
+      contextRefs: [],
+    };
+
+    const created = await call(
+      '/api/agent/coagent_create_work_item',
+      { title: 'W-warn', ...violatingOrder },
+      coordToken,
+    );
+    assert.ok(created.status >= 200 && created.status < 300);
+    const workItemId = (created.json as { workItemId: string }).workItemId;
+    assert.ok(workItemId);
+    const createWarnings = (created.json as { warnings?: { rule: string; suggestion: string }[] })
+      .warnings;
+    assert.ok(Array.isArray(createWarnings) && createWarnings.length >= 1);
+    // 标出违规项，且每条都有可照做的下一步建议。
+    for (const w of createWarnings!) {
+      assert.ok(['allowedScope', 'verification', 'contextRefs'].includes(w.rule));
+      assert.ok(typeof w.suggestion === 'string' && w.suggestion.length > 0);
+    }
+
+    // 原事件 work_item.created 同步含 warnings。
+    const events = (await call('/api/missions/M-warn/activity')).json as unknown as ActivityRow[];
+    const createdEvt = events.find((row) => row.kind === 'work_item.created');
+    assert.ok(createdEvt);
+    assert.deepEqual(
+      (createdEvt?.data as { warnings?: unknown[] }).warnings,
+      createWarnings,
+    );
+
+    // 经协调者工具修订成另一份超标工单：成功、revision/changedFields、warnings 与事件同步。
+    const revisedOrder = {
+      ...violatingOrder,
+      objective: '改更多文件',
+      allowedScope: ['src/x.ts', 'src/y.ts', 'src/z/another'],
+    };
+    const revised = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...revisedOrder },
+      coordToken,
+    );
+    assert.equal(revised.status, 200);
+    assert.equal((revised.json as { revision: string }).revision, 'r2');
+    assert.ok(Array.isArray((revised.json as { changedFields: string[] }).changedFields));
+    assert.ok((revised.json as { changedFields: string[] }).changedFields.length >= 1);
+    const revWarnings = (revised.json as { warnings?: { rule: string }[] }).warnings;
+    assert.ok(Array.isArray(revWarnings) && revWarnings.length >= 1);
+
+    const events2 = (await call('/api/missions/M-warn/activity')).json as unknown as ActivityRow[];
+    const revisedEvt = events2.find((row) => row.kind === 'work_item.order_revised');
+    assert.ok(revisedEvt);
+    assert.deepEqual((revisedEvt?.data as { warnings?: unknown[] }).warnings, revWarnings);
+    assert.equal((revisedEvt?.data as { revision: string }).revision, 'r2');
+
+    // --- 直接调用路径：独立内存 Platform，不传 viaCoordinatorTool -> 无 warnings 字段、不硬拒 ---
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const directPlatform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    await directPlatform.createMission({
+      projectId: 'P-warn-direct',
+      missionId: 'M-warn-direct',
+      contract: CONTRACT,
+    });
+    const directAttempt = await directPlatform.startCoordinatorAttempt('M-warn-direct');
+    await directPlatform.updatePlan('M-warn-direct', directAttempt.attemptId, {
+      findings: 'f',
+      rejectedHypotheses: [],
+      decisions: [],
+      direction: 'd',
+      risks: [],
+    });
+    // 同样的超标工单，但直接调用（不带 viaCoordinatorTool）：应照常建出、不返回 warnings。
+    const directRes = await directPlatform.createWorkItem('M-warn-direct', directAttempt.attemptId, {
+      title: 'W-direct',
+      order: violatingOrder,
+    });
+    assert.ok(directRes.workItemId);
+    assert.equal(
+      (directRes as Record<string, unknown>).warnings,
+      undefined,
+      '直接调用不应带软警告字段',
+    );
+  });
+
+  test('W-319 T1: 60 项 Mission 精简视图 <=30KB 仅索引，网页 GET 仍给完整 60 工单', async () => {
+    await call('/api/missions', { projectId: 'P-60', missionId: 'M-60', contract: CONTRACT });
+    const coord = await call('/api/missions/M-60/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const shortOrder = {
+      objective: 'o',
+      allowedScope: ['x.ts'],
+      requiredBehaviour: 'b',
+      constraints: [],
+      acceptance: ['a'],
+      verification: ['v'],
+      doNot: [],
+      contextRefs: [],
+    };
+    for (let i = 0; i < 60; i++) {
+      const wi = await call(
+        '/api/agent/coagent_create_work_item',
+        { title: `W-${i}`, ...shortOrder },
+        coordToken,
+      );
+      assert.equal(wi.status, 200, `第 ${i} 个工单应建成功`);
+    }
+
+    const agentView = await call('/api/agent/coagent_get_mission', {}, coordToken);
+    assert.equal(agentView.status, 200);
+    const av = agentView.json as unknown as Record<string, unknown>;
+    const serialized = JSON.stringify(av);
+    assert.ok(
+      Buffer.byteLength(serialized, 'utf8') <= 30 * 1024,
+      `精简视图应 <=30KB，实际 ${Buffer.byteLength(serialized, 'utf8')}`,
+    );
+    const index = av.workItemIndex as unknown[];
+    assert.equal(index.length, 60, '精简视图应恰含 60 条索引');
+    for (const entry of index) {
+      const e = entry as Record<string, unknown>;
+      assert.equal('order' in e, false, '索引不得含工单正文');
+      assert.equal('executionResult' in e, false, '索引不得含执行结果');
+      assert.equal('reviews' in e, false, '索引不得含评审');
+    }
+    assert.equal('order' in av, false);
+    assert.equal('executionResult' in av, false);
+    assert.equal('reviews' in av, false);
+
+    const full = await call('/api/missions/M-60');
+    assert.equal(full.status, 200);
+    const fv = full.json as unknown as { workItems: unknown[] };
+    assert.equal(fv.workItems.length, 60, '网页 GET 应仍返回完整 60 工单');
+  });
+
+  test('W-319 T2: 协调者取详情含最新正文/证据/评审与旧摘要，executor 403，空 id 400，超长标截断', async () => {
+    await call('/api/missions', { projectId: 'P-det', missionId: 'M-det', contract: CONTRACT });
+    const coord = await call('/api/missions/M-det/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const detOrder = {
+      objective: '细项',
+      allowedScope: ['x.ts'],
+      requiredBehaviour: 'b',
+      constraints: [],
+      acceptance: ['a'],
+      verification: ['v'],
+      doNot: [],
+      contextRefs: [],
+    };
+    const wi = await call('/api/agent/coagent_create_work_item', { title: 'W-det', ...detOrder }, coordToken);
+    assert.equal(wi.status, 200);
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+
+    const exec1 = await call(`/api/missions/M-det/work-items/${workItemId}/executor-attempts`, {});
+    const exec1Id = (exec1.json as { attemptId: string }).attemptId;
+    const exec1Token = (exec1.json as { token: string }).token;
+    const ev1 = await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: '证据一', command: 'node --test', exitCode: 0 }, exec1Token);
+    assert.equal(ev1.status, 200);
+    const sub1 = await call(
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: '旧提交全文', changedFiles: ['x.ts'], evidenceIds: [(ev1.json as { evidenceId: string }).evidenceId], notes: 'n1' },
+      exec1Token,
+    );
+    assert.equal(sub1.status, 200);
+    await call(`/api/missions/M-det/attempts/${exec1Id}/finish`, { endedBy: 'structured_submit' });
+
+    const reviewed = await call(
+      '/api/agent/coagent_review_execution_result',
+      {
+        workItemId,
+        verdict: 'accept',
+        acceptanceResults: detOrder.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '逐条核过' })),
+        reasons: ['跑过'],
+        requiredChanges: [],
+      },
+      coordToken,
+    );
+    assert.equal(reviewed.status, 200);
+
+    // 重派（accepted 可派发）后第二次提交，制造「旧正文未保存」摘要。
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec2 = await call(`/api/missions/M-det/work-items/${workItemId}/executor-attempts`, {});
+    const exec2Token = (exec2.json as { token: string }).token;
+    const ev2 = await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: '证据二', command: 'node --test', exitCode: 0 }, exec2Token);
+    assert.equal(ev2.status, 200);
+    const sub2 = await call(
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: '最新提交全文', changedFiles: ['x.ts'], evidenceIds: [(ev2.json as { evidenceId: string }).evidenceId], notes: 'n2' },
+      exec2Token,
+    );
+    assert.equal(sub2.status, 200);
+
+    const detail = await call('/api/agent/coagent_get_work_item', { workItemId }, coordToken);
+    assert.equal(detail.status, 200);
+    const d = detail.json as unknown as Record<string, unknown>;
+    const result = d.executionResult as { summary?: string } | undefined;
+    assert.equal(result?.summary, '最新提交全文', '应给最新提交全文');
+    const evSum = d.evidenceSummary as { summary?: string }[];
+    assert.ok(evSum.some((e) => e.summary === '证据一'));
+    assert.ok(evSum.some((e) => e.summary === '证据二'));
+    const reviews = d.reviews as { verdict?: string }[];
+    assert.ok(reviews.length >= 1);
+    assert.equal(reviews[reviews.length - 1]?.verdict, 'accept');
+    const subs = d.submissionSummaries as { isLatest?: boolean; note?: string }[];
+    assert.equal(subs.length, 2);
+    const oldOne = subs.find((s) => s.isLatest !== true);
+    assert.equal(oldOne?.note, '旧正文未保存');
+    const latest = subs.find((s) => s.isLatest === true);
+    assert.equal(latest?.note, undefined);
+
+    const execFetch = await call('/api/agent/coagent_get_work_item', { workItemId }, exec2Token);
+    assert.equal(execFetch.status, 403);
+
+    const empty = await call('/api/agent/coagent_get_work_item', {}, coordToken);
+    assert.equal(empty.status, 400);
+
+    // 合法超长数据触发截断。
+    await call('/api/missions', { projectId: 'P-big', missionId: 'M-big', contract: CONTRACT });
+    const coordB = await call('/api/missions/M-big/coordinator-attempts', {});
+    const coordBToken = (coordB.json as { token: string }).token;
+    await call('/api/agent/coagent_update_plan', { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] }, coordBToken);
+    const bigWi = await call('/api/agent/coagent_create_work_item', { title: 'W-big', ...detOrder }, coordBToken);
+    const bigId = (bigWi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordBToken);
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [bigId] }, coordBToken);
+    const execB = await call(`/api/missions/M-big/work-items/${bigId}/executor-attempts`, {});
+    const execBToken = (execB.json as { token: string }).token;
+    await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: 'e', command: 'c', exitCode: 0 }, execBToken);
+    const huge = 'x'.repeat(100 * 1024);
+    const subB = await call(
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: huge, changedFiles: ['x.ts'], evidenceIds: [], notes: 'n' },
+      execBToken,
+    );
+    assert.equal(subB.status, 200);
+    const bigDetail = await call('/api/agent/coagent_get_work_item', { workItemId: bigId }, coordBToken);
+    assert.equal(bigDetail.status, 200);
+    const bd = bigDetail.json as unknown as Record<string, unknown>;
+    assert.equal(bd.truncated, true, '超长详情应标截断');
+    const bigBytes = Buffer.byteLength(JSON.stringify(bd), 'utf8');
+    assert.ok(bigBytes <= 20 * 1024, `截断后 JSON 应 <=20KB，实际 ${bigBytes}`);
   });
 });
 
@@ -472,6 +879,8 @@ describe('HTTP 队列 Attempt 身份', () => {
         { title: 'W', order: ORDER, workItemId: 'W1' },
         live,
       );
+      // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+      await platform.submitContractCheck('M', queued.attemptId, { verdict: 'ok', summary: '测试契约已核对' }, live);
       await platform.dispatchWorkItems('M', queued.attemptId, [workItemId], live);
       const exec = await platform.startExecutorAttempt('M', workItemId, undefined, live);
       assert.equal(await platform.attemptRequiresQueueClaim('M', exec.attemptId), true);
@@ -548,7 +957,7 @@ describe('HTTP 队列 Attempt 身份', () => {
         fresh.token,
       );
       assert.equal(ok.status, 200);
-      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'current-gen');
+      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'live\n\n—— 第 2 次补充\ncurrent-gen');
       assert.equal(tokens.resolve(fresh.token)?.attemptId, attemptId);
     } finally {
       await closeServer(server);
@@ -920,6 +1329,14 @@ describe('HTTP 简报与按需引用权限',
           const workItemId = (wi.json as { workItemId?: string }).workItemId;
           assert.equal(typeof workItemId, 'string');
 
+          // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+          await postJson(
+            base,
+            '/api/agent/coagent_submit_contract_check',
+            { verdict: 'ok', summary: '测试契约已核对' },
+            coordToken,
+          );
+
           const dispatched = await postJson(
             base,
             '/api/agent/coagent_dispatch_work_item',
@@ -961,7 +1378,7 @@ describe('HTTP 简报与按需引用权限',
             contractRevision?: number;
             plan?: { direction?: string; findings?: string };
             planRevision?: number;
-            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown } };
+            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown }; l3SendBackReasons?: string[] };
             finalReview?: { verdict?: string; reasons?: string[] };
             contextBundle?: { role?: string; entries?: BundleEntry[] };
           };
@@ -982,7 +1399,7 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(coordBrief.contextBundle?.role, 'coordinator');
           assert.deepEqual(
             coordBrief.contextBundle?.entries?.map((e) => e.source),
-            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review', 'work_items_index', 'since_last_hop'],
           );
           const coordContract = coordBrief.contextBundle?.entries?.find((e) => e.source === 'contract');
           const coordPlan = coordBrief.contextBundle?.entries?.find((e) => e.source === 'plan');
@@ -998,6 +1415,9 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(execBrief.workItem?.id, workItemId);
           assert.equal(execBrief.workItem?.title, 'W1');
           assert.deepEqual(execBrief.workItem?.order?.contextRefs, BRIEF_REFS);
+          assert.deepEqual(execBrief.workItem?.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
           assert.equal(execBrief.contract, undefined);
           assert.equal(execBrief.plan, undefined);
           assert.equal(execBrief.finalReview, undefined);
@@ -1025,13 +1445,13 @@ describe('HTTP 简报与按需引用权限',
             order?: { contextRefs?: unknown; objective?: string };
             missionIntent?: string;
             guardrails?: unknown;
-            previousRequiredChanges?: unknown;
+            l3SendBackReasons?: unknown;
           };
           assert.deepEqual(Object.keys(order.json).sort(), [
             'guardrails',
+            'l3SendBackReasons',
             'missionIntent',
             'order',
-            'previousRequiredChanges',
             'status',
             'title',
             'workItemId',
@@ -1042,7 +1462,11 @@ describe('HTTP 简报与按需引用权限',
           assert.deepEqual(orderJson.order?.contextRefs, BRIEF_REFS);
           assert.equal(orderJson.missionIntent, BRIEF_CONTRACT_R2.intent);
           assert.deepEqual(orderJson.guardrails, BRIEF_CONTRACT_R2.guardrails);
-          assert.deepEqual(orderJson.previousRequiredChanges, []);
+          // 此 fixture 是 contract r2 触发的 send_back，从未 reject：只带 L3 理由，
+          // 不带空的 previousRequiredChanges（空数组会被读成「上次要求是空」）。
+          assert.deepEqual(orderJson.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
           assert.equal(JSON.stringify(orderJson.order).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
 
           const coordOrder = await postJson(base, '/api/agent/coagent_get_work_order', {}, coordToken);
@@ -1323,7 +1747,7 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
         assert.equal(none.contextBundle?.budgetReport, undefined);
         assert.deepEqual(
           none.contextBundle?.entries?.map((e) => e.source),
-          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review', 'work_items_index', 'since_last_hop'],
         );
         assert.equal(none.contract?.intent, BRIEF_CONTRACT_R2.intent);
         assert.equal(none.plan?.direction, BRIEF_PLAN.direction);
@@ -1356,6 +1780,8 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
           'environment_notes',
           'contract',
           'final_review',
+          'work_items_index',
+          'since_last_hop',
         ]);
         assert.deepEqual(cut.contextBundle?.budgetReport?.omittedSources, ['plan']);
         assert.equal(cut.contextBundle?.budgetReport?.estimatedBefore, N);
@@ -1379,6 +1805,13 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
         );
         assert.equal(wi.status, 200);
         const workItemId = (wi.json as { workItemId?: string }).workItemId;
+        // 契约已在 startCoordWithPlan 里改到 r2，核对要按当前修订提交。
+        await postJson(
+          base,
+          '/api/agent/coagent_submit_contract_check',
+          { verdict: 'ok', summary: '测试契约已核对' },
+          coordToken,
+        );
         const dispatched = await postJson(
           base,
           '/api/agent/coagent_dispatch_work_item',
@@ -1712,6 +2145,8 @@ async function seedAwaitingReview(base: string, missionId: string, projectId = '
   const wi = await postJson(base, '/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
   assert.equal(wi.status, 200, JSON.stringify(wi.json));
   const workItemId = (wi.json as { workItemId?: string }).workItemId as string;
+  // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+  await postJson(base, '/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
   const dispatched = await postJson(base, '/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
   assert.equal(dispatched.status, 200, JSON.stringify(dispatched.json));
   const exec = await request(base, `/api/missions/${missionId}/work-items/${workItemId}/executor-attempts`, {});
@@ -1824,6 +2259,35 @@ describe('L3 写路由与落盘后应答', () => {
       assert.equal(haCalls.length, 1);
       assert.equal((haCalls[0] as unknown[])[0], 'M-ha');
       assert.equal(reviewerCalls.length, 1, 'HA merge 不得再走普通 reviewer 入口');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('park 与 parked-resume 使用独立 Platform 入口并传递检视信息', async () => {
+    const { server, base, platform } = await openApi();
+    try {
+      const parkedCalls: unknown[][] = [];
+      const resumedCalls: unknown[][] = [];
+      (platform as unknown as Record<string, unknown>).parkMission = async (...args: unknown[]) => {
+        parkedCalls.push(args);
+        return { parked: true };
+      };
+      (platform as unknown as Record<string, unknown>).resumeParkedMission = async (...args: unknown[]) => {
+        resumedCalls.push(args);
+        return { parked: false };
+      };
+      const created = await request(base, '/api/missions', {
+        projectId: 'P-park', missionId: 'M-park-api', contract: CONTRACT,
+      });
+      assert.equal(created.status, 201);
+      const parked = await request(base, '/api/missions/M-park-api/park', { reason: '等用户', reviewer: 'reviewer' });
+      assert.equal(parked.status, 200, JSON.stringify(parked.json));
+      assert.equal(parkedCalls.length, 1);
+      assert.deepEqual(parkedCalls[0], ['M-park-api', { reason: '等用户', reviewer: 'reviewer' }]);
+      const resumed = await request(base, '/api/missions/M-park-api/parked-resume', { reason: '答复到达', reviewer: 'reviewer', answer: '选 A' });
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.json));
+      assert.deepEqual(resumedCalls[0], ['M-park-api', { reason: '答复到达', reviewer: 'reviewer', answer: '选 A' }]);
     } finally {
       await closeServer(server);
     }
@@ -1997,6 +2461,7 @@ describe('L3 写路由与落盘后应答', () => {
     try {
       const health = await request(base, '/api/health');
       assert.equal(health.status, 200);
+      assert.equal(health.json.ok, true);
       assert.equal(health.headers.get('x-coagent-api'), API_VERSION);
       assert.equal(health.headers.get('x-coagent-instance'), identity.instanceId);
       assert.equal(health.headers.get('x-coagent-state-id'), identity.stateId);
@@ -2630,6 +3095,8 @@ describe('轻量报卡升级、答复重派与执行者问答视图', () => {
       title: 'W',
       order: ORDER,
     });
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await std.platform.submitContractCheck('M-std', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await std.platform.dispatchWorkItems('M-std', coord.attemptId, [workItemId]);
     const exec = await std.platform.startExecutorAttempt('M-std', workItemId);
     await std.platform.reportBlocked('M-std', exec.attemptId, {
@@ -2690,6 +3157,8 @@ describe('轻量报卡升级、答复重派与执行者问答视图', () => {
       title: 'W2',
       order: ORDER,
     });
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await std.platform.submitContractCheck('M-std', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await std.platform.dispatchWorkItems('M-std', coord.attemptId, [
       first.workItemId,
       second.workItemId,

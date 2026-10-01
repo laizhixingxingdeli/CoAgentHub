@@ -100,6 +100,9 @@ export interface CandidateCircuitRepository {
   tryClaimProbe(input: ClaimCandidateProbeInput): Promise<boolean>;
   /** Only a claimed half_open probe may resolve; invalid/repeated resolution rejects without mutation. */
   resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit>;
+  /** Atomically closes an open/half_open circuit and appends its operator audit record. */
+  reset(input: { profileId: string; actor: string; at: string; reason: string }): Promise<CandidateCircuit>;
+  listResetEvents(profileId?: string): Promise<Array<{ profileId: string; actor: string; at: string; reason: string }>>;
 }
 
 export interface Clock {

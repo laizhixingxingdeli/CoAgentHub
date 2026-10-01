@@ -146,8 +146,18 @@ export interface WorkspaceManager {
   head(cwd: string): Promise<string>;
   /** Commit only the explicitly authorized work-item paths; unsupported by in-place mode. */
   checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
+  /** Read-only assertion that an isolated Mission worktree has no tracked, staged, or untracked changes. */
+  assertMissionWorktreeClean?(missionId: string, projectRoot: string): Promise<void>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
   targetHead(projectRoot: string): Promise<string>;
+  /** 只读查询原 Mission worktree 中未解决的合并路径。 */
+  getMissionConflictFiles?(missionId: string, projectRoot: string): Promise<string[]>;
+  /** 将指定目标分支当前 HEAD 合入原 Mission worktree；冲突时保留冲突状态。 */
+  syncMissionWithTarget?(input: {
+    missionId: string;
+    projectRoot: string;
+    targetBranch: string;
+  }): Promise<{ targetHead: string; conflictFiles: string[] }>;
   /** 回到某个版本，并清掉未跟踪文件。仅在 Mission worktree 内使用。 */
   rollback(cwd: string, revision: string): Promise<void>;
   /**
@@ -309,20 +319,21 @@ export class GitWorktreeManager implements WorkspaceManager {
 
     if (existsSync(cwd)) {
       // 续跑同一个 Mission：沿用已有 worktree，不要重开一份。
-      //
-      // 基线必须是**分叉点**，不是 worktree 当前的 HEAD。执行者一旦提交过，
-      // HEAD 就走到 Mission 自己的提交上；拿它跟目标分支比永远不相等，
-      // 于是每次续跑都被报成"基线过期"——而真正的分叉点可能好好的。
+      // 调用方提供的集成基线必须先确认有效；否则旧调用继续使用分叉点。
       const target = await this.#currentBranch(repo);
-      const forkPoint = await run('git', ['merge-base', 'HEAD', target ?? 'HEAD'], { cwd })
-        .then((r) => r.stdout.trim())
-        .catch(() => undefined);
-      return {
-        cwd,
-        branch,
-        baseRevision: forkPoint ?? (await this.head(cwd)),
-        targetBranch: target,
-      };
+      const baseRevision = pinnedBase
+        ? await run('git', ['rev-parse', '--verify', `${pinnedBase}^{commit}`], { cwd: repo })
+            .then((r) => r.stdout.trim())
+            .catch(() => {
+              throw new Error(
+                `指定的分叉基线 ${pinnedBase} 在 ${repo} 里不存在。` +
+                  '重跑要求两次运行从同一个版本起步，起点找不到就没法比。',
+              );
+            })
+        : await run('git', ['merge-base', 'HEAD', target ?? 'HEAD'], { cwd })
+            .then((r) => r.stdout.trim())
+            .catch(() => this.head(cwd));
+      return { cwd, branch, baseRevision, targetBranch: target };
     }
 
     // 指定了就用指定的；没指定才用目标分支当前的 HEAD。
@@ -400,6 +411,15 @@ export class GitWorktreeManager implements WorkspaceManager {
     return (await run('git', ['rev-parse', 'HEAD'], { cwd: resolve(projectRoot) })).stdout.trim();
   }
 
+  async assertMissionWorktreeClean(missionId: string, projectRoot: string): Promise<void> {
+    const cwd = join(this.#rootFor(projectRoot), missionId);
+    if (!existsSync(cwd)) throw new Error('Mission worktree 不存在');
+    const branch = (await run('git', ['symbolic-ref', '-q', 'HEAD'], { cwd }).then((r) => r.stdout.trim()).catch(() => ''));
+    if (branch !== `refs/heads/mission/${missionId}`) throw new Error('Mission worktree 分支不符');
+    const status = (await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })).stdout;
+    if (status.length > 0) throw new Error('Mission worktree 不干净');
+  }
+
   async checkpoint(
     cwd: string,
     missionId: string,
@@ -440,6 +460,54 @@ export class GitWorktreeManager implements WorkspaceManager {
     if (stagedOutside.length) throw new Error(`Git index 包含未授权路径：${stagedOutside.join(', ')}`);
     if (staged.length === 0) return;
     await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `mission(${missionId}): ${workItemId} 检查点`], { cwd });
+  }
+
+  async getMissionConflictFiles(missionId: string, projectRoot: string): Promise<string[]> {
+    const cwd = join(this.#rootFor(projectRoot), missionId);
+    if (!existsSync(cwd)) throw new Error('Mission worktree 不存在');
+    const expectedBranch = `refs/heads/mission/${missionId}`;
+    const actualBranch = (await run('git', ['symbolic-ref', '-q', 'HEAD'], { cwd })).stdout.trim();
+    if (actualBranch !== expectedBranch) throw new Error('Mission worktree 分支不符');
+    return (await run('git', ['diff', '--name-only', '--diff-filter=U', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean);
+  }
+
+  async syncMissionWithTarget(input: {
+    missionId: string;
+    projectRoot: string;
+    targetBranch: string;
+  }): Promise<{ targetHead: string; conflictFiles: string[] }> {
+    const repo = resolve(input.projectRoot);
+    const cwd = join(this.#rootFor(input.projectRoot), input.missionId);
+    if (!existsSync(cwd)) throw new Error('Mission worktree 不存在');
+    if (!input.targetBranch || input.targetBranch.startsWith('-')) throw new Error('目标分支无效');
+    const targetRef = `refs/heads/${input.targetBranch}`;
+    const actualTargetBranch = await this.#currentBranch(repo);
+    if (actualTargetBranch !== input.targetBranch) throw new Error('目标仓库不在预期目标分支');
+    const targetHead = (await run('git', ['rev-parse', '--verify', `${targetRef}^{commit}`], { cwd: repo })).stdout.trim();
+    const missionBranch = `refs/heads/mission/${input.missionId}`;
+    const actualMissionBranch = (await run('git', ['symbolic-ref', '-q', 'HEAD'], { cwd })).stdout.trim();
+    if (actualMissionBranch !== missionBranch) throw new Error('Mission worktree 分支不符');
+    const existingConflicts = await this.getMissionConflictFiles(input.missionId, input.projectRoot);
+    if (existingConflicts.length > 0) {
+      const mergeHead = await run('git', ['rev-parse', '--verify', 'MERGE_HEAD'], { cwd })
+        .then((result) => result.stdout.trim());
+      return { targetHead: mergeHead || targetHead, conflictFiles: existingConflicts };
+    }
+    if ((await run('git', ['status', '--porcelain'], { cwd })).stdout.trim()) throw new Error('Mission worktree 不干净');
+    if ((await run('git', ['status', '--porcelain'], { cwd: repo })).stdout.trim()) throw new Error('目标工作区不干净');
+    const current = (await run('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
+    if (current === targetHead || (await run('git', ['merge-base', '--is-ancestor', targetHead, 'HEAD'], { cwd }).then(() => true).catch(() => false))) {
+      return { targetHead, conflictFiles: [] };
+    }
+    const merge = await run('git', ['merge', '--no-edit', targetHead], { cwd }).then(() => true).catch(() => false);
+    if (merge) return { targetHead, conflictFiles: [] };
+    const conflicts = (await run('git', ['diff', '--name-only', '--diff-filter=U', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean);
+    if (conflicts.length === 0) {
+      throw new Error('目标合并失败但没有未合并路径；保留 Mission worktree 状态以供检查');
+    }
+    return { targetHead, conflictFiles: conflicts };
   }
 
   async rollback(cwd: string, revision: string): Promise<void> {

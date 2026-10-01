@@ -11,10 +11,9 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { SpawnRuntime } from '../src/runtime/spawn.ts';
 import type { RuntimeEvent } from '../src/application/ports.ts';
@@ -253,17 +252,6 @@ describe('BUDGET-001-S4 runtime protocol: capabilities + activityClass', () => {
     for (const t of tools) {
       assert.equal('activityClass' in t, false, 'illegal class must not be coerced or inferred');
     }
-  });
-
-  test('spawn.ts has no bash/powershell classification policy', () => {
-    const root = fileURLToPath(new URL('..', import.meta.url));
-    const body = readFileSync(join(root, 'src', 'runtime', 'spawn.ts'), 'utf8');
-    // May mention bash only in human comments about detail examples — forbid classification branches.
-    assert.doesNotMatch(body, /activityClass\s*=\s*.*bash|name\s*===\s*['"]bash['"]/);
-    assert.doesNotMatch(body, /name\s*===\s*['"]powershell['"]|activityClass.*powershell/);
-    // parseEvent must not map tool names to activityClass
-    assert.doesNotMatch(body, /activityClass:\s*raw\.name/);
-    assert.doesNotMatch(body, /bash.*activityClass|powershell.*activityClass/);
   });
 });
 

@@ -9,7 +9,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,9 +18,15 @@ import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
-import { PlatformRuleError } from '../src/application/platform.ts';
+import { Platform, PlatformRuleError } from '../src/application/platform.ts';
+import type { ClassificationResult } from '../src/application/task-classifier.ts';
+import type { ComplexityAssessment } from '../src/kernel/index.ts';
 import type { MissionRunOutcome } from '../src/application/orchestrator.ts';
 import type { RunQueryResult } from '../src/application/query-run.ts';
+import { FixedClock, InMemoryActivityLog, InMemoryProjectRepository, SequentialIds } from '../src/application/in-memory.ts';
+import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import type { MissionContract, OriginChannel } from '../src/kernel/index.ts';
 
 const T0 = '2026-09-23T22:00:00.000Z';
 const MIN = 60_000;
@@ -69,6 +75,8 @@ type HarnessView = {
   executionMode?: string;
   haReviewHold?: 'pending_dispatch' | 'in_review' | 'pending_release' | 'fault';
   waitDetail?: string;
+  parked?: boolean;
+  parkReason?: string;
   workspaceRef?: { targetBranch?: string };
   independentReviews?: readonly {
     readonly reviewedCommit: string;
@@ -80,8 +88,9 @@ type HarnessView = {
 
 function harness(options?: {
   features?: string[];
+  dependsOn?: Record<string, string[]>;
   runs?: Record<string, Ran | Error | (Ran | Error)[]>;
-  finalize?: Record<string, Finalize | Error>;
+  finalize?: Record<string, Finalize | Error | (Finalize | Error)[]>;
   haFinalize?: Record<string, Finalize | Error>;
   onHaFinalize?: (missionId: string) => void;
   passTakesMs?: number[];
@@ -105,6 +114,15 @@ function harness(options?: {
   wallClockMs?: number;
   maxEscalations?: number;
   maxRerunsPerFeature?: number;
+  resumeMissions?: Record<string, string>;
+  /** 等待资格探针：由测试给出证实的自身退避 / 容量短轮询 / 角色全冷却证明。 */
+  waitEligibility?: PlanDriverDeps['waitEligibility'];
+  /** 让 harness 改用真实内存 Platform 来落建单与路由事件（HAOFF1 回落端到端验证专用）。 */
+  realPlatform?: Platform;
+  /** 仅在注入 realPlatform 时调用：建单后插一笔。 */
+  onCreateMission?: (missionId: string) => Promise<void> | void;
+  /** 仅在注入 realPlatform 时调用：路由事件记录后插一笔。 */
+  onRecordStandardFallbackRoute?: (missionId: string) => Promise<void> | void;
 }) {
   const ids = options?.features ?? ['F1', 'F2'];
   const plan = parsePlanSpec(
@@ -127,6 +145,7 @@ function harness(options?: {
         why: '因为',
         allowedScope: [`src/${id}.ts`],
         acceptance: ['绿'],
+        ...(options?.dependsOn?.[id] ? { dependsOn: options.dependsOn[id] } : {}),
       })),
     },
     { reviewer: 'claude' },
@@ -147,6 +166,8 @@ function harness(options?: {
   let passIndex = 0;
 
   const deps: PlanDriverDeps = {
+    ...(options?.resumeMissions ? { resumeMissions: options.resumeMissions } : {}),
+    ...(options?.waitEligibility ? { waitEligibility: options.waitEligibility } : {}),
     store: {
       read: () => store.read(),
       update: async (mutate) => {
@@ -191,9 +212,19 @@ function harness(options?: {
       return ran.outcome;
     },
     platform: {
+      resumeMission: async (missionId) => {
+        calls.push(`resume ${missionId}`);
+        status.set(missionId, 'investigating');
+        return { paused: false };
+      },
       createMission: async (input) => {
         calls.push(`create ${input.missionId}`);
         status.set(input.missionId, 'investigating');
+        if (options?.realPlatform) {
+          const result = await options.realPlatform.createMission(input);
+          await options.onCreateMission?.(input.missionId);
+          return result;
+        }
         return { missionId: input.missionId };
       },
       createClassifiedMission: async (input) => {
@@ -232,16 +263,33 @@ function harness(options?: {
       },
       finalizeMissionByMachine: async (missionId, input) => {
         calls.push(`finalize ${missionId} → ${input.integrationBranch} [${input.verification[0].argv.join(' ')}]`);
-        const result = options?.finalize?.[missionId] ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
-        if (result instanceof Error) throw result;
-        status.set(missionId, result.status);
-        return result;
+        const configured = options?.finalize?.[missionId];
+        const result = Array.isArray(configured)
+          ? configured[runIndex.get(`finalize:${missionId}`) ?? 0]
+          : configured;
+        if (Array.isArray(configured)) runIndex.set(`finalize:${missionId}`, (runIndex.get(`finalize:${missionId}`) ?? 0) + 1);
+        const finalResult = result ?? { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-1' };
+        if (finalResult instanceof Error) throw finalResult;
+        status.set(missionId, finalResult.status);
+        return finalResult;
       },
       abandonMissionForPlan: async (missionId, input) => {
         calls.push(`abandon ${missionId} ${input.escalationId}`);
         status.set(missionId, 'blocked');
         return { status: 'blocked' };
       },
+      ...(options?.realPlatform
+        ? {
+            recordStandardFallbackRoute: async (
+              missionId: string,
+              input: { classification: ClassificationResult; fallbackReason: string; assessment?: ComplexityAssessment },
+            ) => {
+              const result = await options.realPlatform!.recordStandardFallbackRoute(missionId, input);
+              await options.onRecordStandardFallbackRoute?.(missionId);
+              return result;
+            },
+          }
+        : {}),
       answerEscalation: async (missionId, answer) => {
         calls.push(`answer ${missionId} ${answer}`);
         return { question: 'recorded', answer };
@@ -296,6 +344,26 @@ const haAssessment = {
 const haRoute = { ok: true as const, proposal: { facts: HA_FACTS, assessment: haAssessment } };
 
 describe('一路顺利', () => {
+  test('恢复已认证的 Mission 不分类建单，恢复后继续运行及落地；普通票保持原路径', async () => {
+    const h = harness({ features: ['F1', 'F2'], resumeMissions: { F1: 'M-original' } });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(h.calls, [
+      'resume M-original',
+      'run M-original',
+      'finalize M-original → auto/plan-x [node --test]',
+      'create R1-F2',
+      'run R1-F2',
+      'finalize R1-F2 → auto/plan-x [node --test]',
+    ]);
+    assert.deepEqual(h.routed, ['F2']);
+    assert.deepEqual(h.store.read()!.feature('F1')?.missionIds, ['M-original']);
+    assert.ok(h.logs.some((line) => line.includes('M-original') && line.includes('恢复自上一次方案运行')));
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+    assert.equal(h.store.read()!.feature('F2')?.status, 'merged');
+  });
+
   test('逐个开跑、机器 L3 合进集成分支、全部合入后停在 finished', async () => {
     const h = harness();
     await h.start();
@@ -1388,6 +1456,61 @@ describe('失败了开升级单等检视者', () => {
     assert.ok(h.calls.indexOf('abandon R1-F1 E-1') < h.calls.indexOf('create R1-F2'));
   });
 
+  test('活动升级发现 Mission park：投影后运行独立后票、不派发依赖票', async () => {
+    const views: Record<string, HarnessView> = {};
+    let parked = false;
+    const h = harness({
+      features: ['F1', 'F2', 'F3'],
+      dependsOn: { F3: ['F1'] },
+      finalize: { 'R1-F1': RED },
+      views,
+      onSleep: async () => {
+        if (!parked) {
+          parked = true;
+          views['R1-F1'] = { parked: true, parkReason: '等用户答复' };
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    const run = h.store.read()!;
+    assert.equal(stop.reason, 'finished');
+    assert.equal(run.escalations[0].resolution?.kind, 'parked');
+    assert.equal(run.unresolvedCount, 0);
+    assert.ok(!h.calls.includes('abandon R1-F1 E-1'));
+    assert.ok(h.calls.includes('create R1-F2'));
+    assert.ok(!h.calls.includes('create R1-F3'));
+    assert.equal(run.feature('F3')?.status, 'suspended');
+  });
+
+  test('活动 PlanRun 恢复已解挂 Mission 时复用原 id', async () => {
+    const views: Record<string, HarnessView> = {};
+    let parked = false;
+    const h = harness({
+      features: ['F1', 'F2'],
+      finalize: { 'R1-F1': [RED, { status: 'completed', mergedInto: 'abc', reportId: 'IVAL-2' }] },
+      views,
+      onSleep: async () => {
+        if (!parked) {
+          parked = true;
+          views['R1-F1'] = { parked: true, parkReason: '等用户答复' };
+        }
+      },
+      onMissionReturn: async ({ store }) => {
+        if (store.read()?.feature('F2')?.status === 'running') {
+          views['R1-F1'] = { parked: false };
+        }
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.ok(h.calls.includes('run R1-F1'));
+    assert.equal(h.calls.filter((call) => call === 'run R1-F1').length, 2);
+    assert.ok(!h.calls.some((call) => call.startsWith('create-classified R1-F1')));
+    assert.equal(h.store.read()!.feature('F1')?.missionIds.length, 1);
+  });
+
   test('没人定 → 截止判过期、记未解决、功能挂起、名额放掉、接着跑', async () => {
     const h = harness({ finalize: { 'R1-F1': RED } });
     await h.start();
@@ -1478,6 +1601,156 @@ describe('失败了开升级单等检视者', () => {
     assert.ok(!h.calls.includes('abandon R1-F3 E-3'), '已经终结的不用再放弃');
     assert.ok(!h.calls.some((c) => c.startsWith('answer')), '旧动作不走 answerEscalation');
     assert.ok(!h.calls.some((c) => c.startsWith('finalize')), '没交卷的不走机器 L3');
+  });
+});
+
+describe('等得到头的 waiting 在运行内续跑，不开升级单', () => {
+  test('本 Mission 自己退避 availableAt：睡到点后同 missionId 续跑合入、零升级单；容量等待中墙钟到点不再调用 runMission', async () => {
+    // 场景一：探针证实是自己的 Hop 在退避 → 睡到 availableAt 再跑同一条。
+    const slept: number[] = [];
+    let cursor = Date.parse(T0);
+    let probeAt = T0;
+    const h = harness({
+      features: ['F1'],
+      pollMs: MIN,
+      runs: {
+        'R1-F1': [
+          {
+            outcome: {
+              kind: 'waiting',
+              reason: 'project_busy',
+              detail: '队列 Hop H1 失败后退避中，availableAt=2026-09-23T22:32:00.000Z，count=1/3，不能启动 Agent',
+            },
+            status: 'executing',
+          },
+          { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' },
+        ],
+      },
+      onMissionReturn: async ({ now }) => {
+        probeAt = now;
+        cursor = Date.parse(now);
+      },
+      onSleep: async ({ now }) => {
+        slept.push(Date.parse(now) - cursor);
+        cursor = Date.parse(now);
+      },
+      waitEligibility: async ({ missionId, reason }) => {
+        assert.equal(missionId, 'R1-F1');
+        assert.equal(reason, 'project_busy');
+        return { kind: 'own_backoff', availableAt: new Date(Date.parse(probeAt) + 2 * MIN).toISOString() };
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(h.calls.filter((call) => call.startsWith('run ')), ['run R1-F1', 'run R1-F1']);
+    assert.deepEqual(slept, [MIN, MIN], '睡到 availableAt 为止，不提前也不空转');
+    assert.equal(h.store.read()!.escalations.length, 0, '等得到头就不开升级单');
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+    assert.ok(h.logs.some((line) => line.includes('续跑 R1-F1，不开升级单')));
+
+    // 场景二：本 Mission 自己占着名额（容量只能短轮询，不猜到期），等到头之前墙钟到点
+    // → checkStop 就停手，不再调用 runMission。
+    const wallSlept: number[] = [];
+    let wallCursor = Date.parse(T0);
+    let wallProbeAt = T0;
+    const w = harness({
+      features: ['F1'],
+      pollMs: 5 * MIN,
+      wallClockMs: 40 * MIN,
+      runs: {
+        'R1-F1': [
+          {
+            outcome: {
+              kind: 'waiting',
+              reason: 'project_busy',
+              detail: '同一 Project 有别的 Mission 正占着改动名额。',
+            },
+            status: 'executing',
+          },
+        ],
+      },
+      onMissionReturn: async ({ now }) => {
+        wallProbeAt = now;
+        wallCursor = Date.parse(now);
+      },
+      onSleep: async ({ now }) => {
+        wallSlept.push(Date.parse(now) - wallCursor);
+        wallCursor = Date.parse(now);
+      },
+      waitEligibility: async () => ({
+        kind: 'capacity',
+        nextPollAt: new Date(Date.parse(wallProbeAt) + 60 * MIN).toISOString(),
+      }),
+    });
+    await w.start();
+    const wallStop = await drivePlan(w.plan, w.deps);
+    assert.equal(wallStop.reason, 'wall_clock');
+    assert.deepEqual(w.calls.filter((call) => call.startsWith('run ')), ['run R1-F1'], '墙钟到点不再调用 runMission');
+    assert.deepEqual(wallSlept, [5 * MIN, 5 * MIN]);
+    assert.equal(w.store.read()!.feature('F1')?.status, 'suspended');
+  });
+
+  test('角色全冷却最早 5 分钟到期：等到点续跑同 missionId、零升级单；探针没证明则保留原升级', async () => {
+    const cooldownSlept: number[] = [];
+    let cooldownCursor = Date.parse(T0);
+    let cooldownProbeAt = T0;
+    const h = harness({
+      features: ['F1'],
+      pollMs: MIN,
+      runs: {
+        'R1-F1': [
+          { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '协调者候选池全在冷却', candidateRole: 'coordinator' }, status: 'executing' },
+          { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' },
+        ],
+      },
+      onMissionReturn: async ({ now }) => {
+        cooldownProbeAt = now;
+        cooldownCursor = Date.parse(now);
+      },
+      onSleep: async ({ now }) => {
+        cooldownSlept.push(Date.parse(now) - cooldownCursor);
+        cooldownCursor = Date.parse(now);
+      },
+      waitEligibility: async ({ missionId, reason, candidateRole }) => {
+        assert.equal(missionId, 'R1-F1');
+        assert.equal(reason, 'no_available_agent');
+        assert.equal(candidateRole, 'coordinator');
+        return { kind: 'role_cooldown', earliestUntil: new Date(Date.parse(cooldownProbeAt) + 5 * MIN).toISOString() };
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(h.calls.filter((call) => call.startsWith('run ')), ['run R1-F1', 'run R1-F1']);
+    assert.deepEqual(cooldownSlept, [MIN, MIN, MIN, MIN, MIN], '短冷却睡到最早到期，不真实睡五分钟');
+    assert.equal(h.store.read()!.escalations.length, 0, '短冷却等得到头，不开升级单');
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+
+    // 探针被问到但说不知道 → 不拿 reason 字样当证明，照旧开升级单。
+    let probed = 0;
+    const n = harness({
+      features: ['F1'],
+      runs: {
+        'R1-F1': [
+          { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '候选池没有可用的了' }, status: 'executing' },
+        ],
+      },
+      waitEligibility: async (input) => {
+        assert.equal(input.candidateRole, undefined, '无标记的 waiting 不伪造角色');
+        probed += 1;
+        return undefined;
+      },
+      onSleep: reviewerDecides('skip'),
+    });
+    await n.start();
+    const noProofStop = await drivePlan(n.plan, n.deps);
+    assert.equal(noProofStop.reason, 'finished');
+    assert.equal(probed, 1, '探针被问过，但它没给出证明');
+    assert.deepEqual(n.calls.filter((call) => call.startsWith('run ')), ['run R1-F1']);
+    const run = n.store.read()!;
+    assert.equal(run.escalations.length, 1);
+    assert.match(run.escalations[0].failure, /Mission 停在 no_available_agent：候选池没有可用的了/);
   });
 });
 
@@ -2216,22 +2489,8 @@ describe('注入式方案运行入口', () => {
       assert.ok(h.calls.includes('create R1-Alpha'));
       assert.ok(!h.calls.some((c) => c.startsWith('create-classified')));
       assert.match(h.logs.join('\n'), /分类员不可用/);
-      const src = readFileSync(join(import.meta.dirname, '..', 'src', 'application', 'plan-runtime.ts'), 'utf8');
-      assert.match(src, /export async function runPlanOnPlatform/);
-      assert.match(src, /drivePlan\(/);
-      assert.match(src, /runWithDeadline/);
-      assert.match(src, /buildRoutingPrompt/);
-      assert.match(src, /parseRoutingProposal/);
-      assert.doesNotMatch(src, /new Orchestrator/);
-      assert.doesNotMatch(src, /createApi\s*\(/);
-      assert.doesNotMatch(src, /listenLoopback/);
-      assert.doesNotMatch(src, /acquireLock/);
-      assert.doesNotMatch(src, /buildPersistentPlatform/);
-      assert.doesNotMatch(src, /buildPgPlatform/);
-      assert.match(
-        src,
-        /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
-      );
+      // 实现语句（runPlanOnPlatform 用了哪些函数、没另建平台/锁/API）是重构自由的，不在这里钉源码文本；
+      // answerEscalation 的接线由 test/run-plan-wiring.test.ts「runtime adapter 用 persistAfter 包住 platform.answerEscalation」覆盖。
     });
 
   test('到点调用暂停并持久化，run 后仍持久化',
@@ -2258,4 +2517,57 @@ describe('注入式方案运行入口', () => {
       assert.ok(h.events.lastIndexOf('persist') > runEnd, 'run 后仍持久化');
       assert.equal(h.runnerIds[0], 'R1-Beta');
     });
+});
+
+describe('HAOFF1 分类回落：路由事件与协调者简报保留', () => {
+  test('HA 分类结论经 HAOFF1 回落普通 Standard Mission，路由事件与简报保留 fallbackReason/事实且不带工单', async () => {
+    // 真实内存 Platform：与现做分类其余场景一样，把 HA 事实交给分类器，仅因 HAOFF1 关闭而回落 Standard。
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const realPlatform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+
+    const haRoute = { ok: true as const, proposal: { facts: HA_FACTS, assessment: haAssessment } };
+    const h = harness({
+      features: ['F1'],
+      routes: { F1: haRoute },
+      realPlatform,
+      // 钩子仅作观测：真实平台的 createMission / recordStandardFallbackRoute 已由 harness 依次调用。
+      onCreateMission: () => {},
+      onRecordStandardFallbackRoute: () => {},
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+
+    // 回落创建的是普通 Standard Mission，不带工单（workItems 长度 0）。
+    const view = await realPlatform.getMissionView('R1-F1');
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.workItems.length, 0);
+
+    // mission.routed 事件保留原推荐/事实/理由与 fallbackReason。
+    const events = await realPlatform.getActivity('R1-F1');
+    const routed = events.filter((event) => event.kind === 'mission.routed');
+    assert.equal(routed.length, 1);
+    const data = routed[0]!.data as Record<string, unknown>;
+    assert.deepEqual(data.recommended, { runKind: 'mutation', executionMode: 'high_assurance' });
+    assert.deepEqual(data.facts, HA_FACTS);
+    assert.deepEqual(data.unknowns, []);
+    assert.ok(Array.isArray(data.reasons) && (data.reasons as unknown[]).length > 0);
+    assert.match(data.fallbackReason as string, /HA 路暂时关闭/);
+
+    // 协调者开跑简报带 classification（含 fallbackReason 与事实）。
+    const attempt = await realPlatform.startCoordinatorAttempt('R1-F1');
+    const brief = await realPlatform.getStartupBrief('R1-F1', attempt.attemptId);
+    assert.ok(typeof brief.classification === 'string' && brief.classification.length > 0);
+    assert.match(brief.classification!, /分类阶段已查明/);
+    assert.match(brief.classification!, /fallbackReason/);
+    assert.match(brief.classification!, /credentialsPermissionsSecurity|schemaPublicApiPersistenceCompat/);
+  });
 });

@@ -142,6 +142,11 @@ const SCRIPT: Step[] = [
   { name: 'updatePlan', run: async (p, c) => void (await p.updatePlan('M1', c.a1!, PLAN)) },
   { name: 'createWorkItem w1', run: async (p, c) => void (c.w1 = (await p.createWorkItem('M1', c.a1!, { title: 'w1', order: ORDER })).workItemId) },
   { name: 'createWorkItem w2', run: async (p, c) => void (c.w2 = (await p.createWorkItem('M1', c.a1!, { title: 'w2', order: ORDER })).workItemId) },
+  // Standard 派发前必须先落一条当前契约修订的核对结论（W-334 门禁）。
+  {
+    name: 'submitContractCheck a1',
+    run: async (p, c) => void (await p.submitContractCheck('M1', c.a1!, { verdict: 'ok', summary: '测试契约已核对' })),
+  },
   { name: 'dispatchWorkItems', run: async (p, c) => void (await p.dispatchWorkItems('M1', c.a1!, [c.w1!, c.w2!])) },
   { name: 'finishAttempt a1', run: async (p, c) => void (await p.finishAttempt('M1', c.a1!, { endedBy: 'structured_submit' })) },
   { name: 'recordWorkspace M1', run: async (p) => void (await p.recordWorkspace('M1', { projectRoot: '/proj', branch: 'mission/M1', baseRevision: 'base' })) },

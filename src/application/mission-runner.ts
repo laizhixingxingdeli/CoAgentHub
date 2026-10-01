@@ -122,6 +122,20 @@ export class MissionRunner {
       workspace: orchestrator.workspace,
     };
   }
+
+  /**
+   * 某角色的候选冷却快照桥：hosted 入口据此在运行内等待，而不是开升级单。
+   * 委托给与 run() 同组 deps 构造的 Orchestrator，只读地读出该角色候选池
+   * 当前的冷却状态；不新建池/仓储，不改 run() 逐 Mission 新建编排器的行为。
+   * 无仓储时 Orchestrator 本地冷却不跨逐 Mission run() 存活，桥只反映当前
+   * 进程、当前 deps 下的快照，绝不凭空宣称可读上一次 run() 的本地 Map。
+   */
+  roleCooldownSnapshot(
+    role: Parameters<Orchestrator['roleCooldownSnapshot']>[0],
+    now?: number,
+  ): ReturnType<Orchestrator['roleCooldownSnapshot']> {
+    return new Orchestrator(this.#deps).roleCooldownSnapshot(role, now ?? Date.now());
+  }
 }
 
 /** hosted run 进度。channel 必须可区分，调用方不能靠猜 stdout/stderr。 */

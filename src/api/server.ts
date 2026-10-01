@@ -32,7 +32,7 @@ import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
-import { listRuntimeModels, type RuntimeCatalog } from '../application/runtime-catalog.ts';
+import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage, type UsageRow } from '../application/runtime-catalog.ts';
 import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
 import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -178,6 +178,7 @@ export interface ApiDeps {
    * 必须用假函数数调用次数。不注入不得改默认路径，否则页面拿到的就不是适配层真相。
    */
   listRuntimeModels?: () => Promise<RuntimeCatalog>;
+  getRuntimeUsage?: () => Promise<RuntimeUsage>;
   /**
    * 模型清单缓存用的时钟（epoch ms）。缺省 Date.now。
    *
@@ -219,6 +220,51 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   } catch {
     throw new HttpError(400, 'BAD_JSON', '请求体不是合法 JSON');
   }
+}
+
+/**
+ * URL 里的 profileId。名字带 / 等字符时是百分号编码进来的，原样用会和池里的名字
+ * 对不上；编码坏了（比如孤零零一个 %）必须当时报错，不能拿半截名字去查。
+ */
+function decodeProfileId(raw: string): string {
+  let profileId: string;
+  try {
+    profileId = decodeURIComponent(raw);
+  } catch {
+    throw new HttpError(400, 'INVALID_PROFILE_ID', 'profileId 不是合法的百分号编码');
+  }
+  if (!profileId.trim()) throw new HttpError(400, 'INVALID_PROFILE_ID', 'profileId 不能为空');
+  return profileId;
+}
+
+/**
+ * 复位审计里的 actor 必须来自受控主体，不是请求体。没有 resolver 时无从得知身份 ——
+ * 记固定的 'operator'，也不放行让调用方自己填名字。
+ */
+function controlActor(
+  resolve: ControlPrincipalResolver | undefined,
+  req: IncomingMessage,
+): Promise<string> {
+  if (!resolve) return Promise.resolve('operator');
+  return Promise.resolve(resolve(req)).then((resolved) => {
+    if (resolved && !('status' in resolved) && resolved.id.trim()) return resolved.id;
+    return 'operator';
+  });
+}
+
+/**
+ * 仓储只说「不存在 / 已 closed」，HTTP 要把它翻成明确的 4xx 与固定文案。
+ * 原样透出仓储消息会把内部路径与实现细节带进应答。
+ */
+function circuitResetHttpError(error: unknown, profileId: string): HttpError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/does not exist/.test(message)) {
+    return new HttpError(404, 'CIRCUIT_NOT_FOUND', `还没有熔断记录，无需复位：${profileId}`);
+  }
+  if (/closed/.test(message)) {
+    return new HttpError(409, 'CIRCUIT_NOT_OPEN', `熔断已经是 closed，无需复位：${profileId}`);
+  }
+  return new HttpError(500, 'CIRCUIT_RESET_FAILED', '复位失败');
 }
 
 /**
@@ -402,6 +448,46 @@ function circuitHealth(circuit: CandidateCircuit): Exclude<AgentPoolCandidateHea
   };
 }
 
+/**
+ * 人工复位的命令模板。
+ *
+ * 界面只显示不执行：复位是有人确认过「已经充值」之后的动作，API 替人做等于
+ * 把「额度耗尽」这条熔断当成一个可以自动重试的普通失败 —— 那正是它要挡的事
+ * （每一跳都先探测它再失败换候选，PLAT3 一张票里就撞了 11 次）。
+ */
+const CANDIDATE_RESET_COMMAND = 'node src/l3.ts candidate reset <profileId> --reason "…"';
+
+function resetCommandFor(profileId: string): string {
+  return CANDIDATE_RESET_COMMAND.replace('<profileId>', profileId);
+}
+
+/**
+ * 熔断原因是 quota 时给人看的那句话。
+ *
+ * 两种必须分开说：一个是「等到某个时刻就好」，一个是「没人充值就永远不好」。
+ * 合成一句话的后果是运维一直等一个不会到来的自动恢复。
+ */
+function quotaExtras(circuit: CandidateCircuit): Pick<AgentPoolCandidateHealth, 'quotaReason' | 'resetCommand'> {
+  if (circuit.state !== 'open' || circuit.failureClass !== 'quota') return {};
+  if (circuit.openUntil === null) {
+    return {
+      quotaReason: '额度已用完，适配层没有给出重置时间 —— 不会自动恢复，要等充值后人工复位。',
+      resetCommand: resetCommandFor(circuit.profileId),
+    };
+  }
+  return {
+    quotaReason: `额度已用完，${circuit.openUntil} 重置后再派活。`,
+    resetCommand: resetCommandFor(circuit.profileId),
+  };
+}
+
+/** 候选 facts 里的 provider 对上哪条用量行。没有 provider fact 就无从对应 —— 不猜。 */
+function usageRowFor(candidate: AgentPoolCandidate, rows: readonly UsageRow[]): UsageRow | undefined {
+  const provider = candidate.facts.find((fact) => fact.key === 'provider')?.value;
+  if (!provider) return undefined;
+  return rows.find((row) => row.provider === provider && row.status === 'ok');
+}
+
 function runtimeHealth(lease: QueuedHop | undefined): AgentPoolCandidateHealth['runtime'] {
   if (!lease) return { running: false, reason: 'no_active_lease' };
   if (typeof lease.runtimeKind !== 'string' || lease.runtimeKind.length === 0) {
@@ -541,6 +627,7 @@ async function buildPoolsHealth(
   queuedHops: QueuedHopRepository | undefined,
   candidateCircuits: CandidateCircuitRepository | undefined,
   nowMsValue: number,
+  usageRows: readonly UsageRow[],
 ) {
   const hops = queuedHops ? await queuedHops.list() : [];
   const nowIso = new Date(nowMsValue).toISOString();
@@ -561,11 +648,16 @@ async function buildPoolsHealth(
       };
     }
     const circuit = await candidateCircuits.get(candidate.profileId);
+    const usage = usageRowFor(candidate, usageRows);
     return {
       circuit: circuitHealth(circuit),
       lastFailure: resolveCandidateLastFailure(circuit, hints),
       window7d,
       runtime,
+      // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，
+      // 平台摘几个出来重命名等于又抄一份会过期的表。
+      ...(usage ? { usage } : {}),
+      ...quotaExtras(circuit),
     };
   };
   const attach = async (rows: readonly AgentPoolCandidate[]) => {
@@ -590,6 +682,42 @@ export function createApi(deps: ApiDeps): Server {
   const nowMs = deps.now ?? Date.now;
   /** 成功清单按实例缓存。失败不进这里——否则一次适配层故障会锁死 10 分钟旧错误。 */
   let cachedRuntimeCatalog: { readonly at: number; readonly catalog: RuntimeCatalog } | undefined;
+  let cachedRuntimeUsage: { readonly at: number; readonly usage: RuntimeUsage } | undefined;
+
+  /**
+   * 这一次请求要用的适配层用量。
+   *
+   * 与 GET /api/runtime/usage **共用同一份缓存**：两个页面都在问适配层同一个
+   * 问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只
+   * 降级不进缓存 —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。
+   *
+   * 成功（UsageRow[]）和适配器自己给出的 unavailable 都原样交出去，由调用方
+   * 决定怎么显示；只有**抛异常**才往上传，让端点把它翻成 unavailable。
+   */
+  const readUsage = async (): Promise<RuntimeUsage> => {
+    const hit = cachedRuntimeUsage;
+    if (hit && nowMs() - hit.at < RUNTIME_MODELS_CACHE_MS) return hit.usage;
+    const usage = await (deps.getRuntimeUsage ?? getRuntimeUsage)();
+    if (Array.isArray(usage) || usage.available === true) {
+      cachedRuntimeUsage = { at: nowMs(), usage };
+    }
+    return usage;
+  };
+
+  /**
+   * 资源池那一列要用的用量行。
+   *
+   * 拿不到（适配层不在 / 返回不可用 / 抛异常）就是空数组：资源池照原样返回，
+   * 用量那几个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
+   */
+  const readUsageRows = async (): Promise<readonly UsageRow[]> => {
+    try {
+      const usage = await readUsage();
+      return Array.isArray(usage) ? usage : [];
+    } catch {
+      return [];
+    }
+  };
 
   const requireRun = (req: IncomingMessage): RunContext => {
     const header = req.headers['x-coagent-run'];
@@ -671,11 +799,38 @@ export function createApi(deps: ApiDeps): Server {
     (run: RunContext, body: Record<string, never>) => Promise<unknown>
   > = {
     async coagent_get_mission(run) {
-      return platform.getMissionView(run.missionId);
+      return platform.getAgentMissionView(run.missionId);
+    },
+
+    async coagent_get_work_item(run, body) {
+      const { workItemId } = body as unknown as { workItemId: unknown };
+      if (typeof workItemId !== 'string' || workItemId.length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
+      }
+      // 只有协调者能取精简详情。enforceAgentPolicy 对非 coordinator 的 ACTION_DENIED
+      // 保留「让 Platform 抛 WRONG_ROLE」的旧工具兼容回退（不在此改动），executor
+      // 会落到放行，故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
+      if (run.role !== 'coordinator') {
+        throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取工作项详情。');
+      }
+      return platform.getAgentWorkItem(run.missionId, workItemId);
     },
 
     async coagent_get_contract(run) {
       return platform.getContract(run.missionId);
+    },
+
+    async coagent_submit_contract_check(run, body) {
+      // 请求体形状由契约固定（{verdict, summary, issues?}），这是 L3 侧读事件时
+      // 依赖的字段名：改一个名字，核对结论就会在压缩后被读成空。
+      // 领域校验（verdict 取值、summary / issues 非空）全在 Platform，
+      // 这里只透传，重复校验只会让两处规则各自漂移。
+      return platform.submitContractCheck(
+        run.missionId,
+        run.attemptId,
+        body as unknown as { verdict: 'ok' | 'issues'; summary: string; issues?: string[] },
+        run.claim,
+      );
     },
 
     async coagent_update_findings(run, body) {
@@ -706,6 +861,8 @@ export function createApi(deps: ApiDeps): Server {
           order: order as never,
         },
         run.claim,
+        // 经协调者 HTTP 工具创建：开启工单标准软警告审计，但不改变行为。
+        { viaCoordinatorTool: true },
       );
     },
 
@@ -723,6 +880,23 @@ export function createApi(deps: ApiDeps): Server {
     async coagent_dispatch_work_item(run, body) {
       const { workItemIds } = body as unknown as { workItemIds: string[] };
       return platform.dispatchWorkItems(run.missionId, run.attemptId, workItemIds ?? [], run.claim);
+    },
+
+    async coagent_revise_work_order(run, body) {
+      // 只有协调者能修订工单：S14.6 说 cancel-replace 是 L2 的判断。
+      // 角色闸在入口 PolicyEngine（与 retire 同理由 WRONG_ROLE 文案一致）。
+      // 身份只来自 Run Token 的 claim，body 里自述的工作项 / 角色一律不采信。
+      // 这里只做透传，规则（PLAN 校验、WRONG_ROLE）都在 Platform.reviseWorkOrder。
+      const { workItemId, ...order } = body as unknown as { workItemId: string };
+      return platform.reviseWorkOrder(
+        run.missionId,
+        run.attemptId,
+        workItemId,
+        order as never,
+        run.claim,
+        // 经协调者 HTTP 工具修订：开启工单标准软警告审计，但不改变行为。
+        { viaCoordinatorTool: true },
+      );
     },
 
     async coagent_review_execution_result(run, body) {
@@ -1038,18 +1212,78 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, catalog);
     }
 
+    if (method === 'GET' && path === '/api/runtime/usage') {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      // 用量页要的是「有没有额度」，不是「适配层好不好」。适配器抛错时这里只能
+      // 降级成 unavailable 并说明原因：500 会让整页空白，人也分不清是平台挂了还是
+      // 没额度。note 只用固定文案 —— 错误原文里可能带命令、路径、凭据片段。
+      try {
+        const usage = await readUsage();
+        return send(res, 200, usage);
+      } catch {
+        return send(res, 200, { available: false, note: '读取用量失败' });
+      }
+    }
+
     if (method === 'GET' && path === '/api/projects') {
       await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.listProjects());
     }
 
-    /* ---- 候选池（资源池页的原料）。只有列与追加两个动作 ---- */
+    /* ---- 候选池（资源池页的原料）。列、追加，以及额度熔断的人工复位 ---- */
 
     // 没有 DELETE / PATCH / PUT，也没有播种：GET 只读且受 control-read 门禁；
-    // 「打开界面看一眼」不会改写候选池配置。
+    // 「打开界面看一眼」不会改写候选池配置。复位是唯一的写例外，走下面的 POST。
+
+    // 人工复位额度熔断。quota 熔断「没人充值就永远不会自己好」，只能靠人复位，
+    // 所以这条写路径必须存在；每一次复位都留下 actor/at/reason 的审计记录 ——
+    // 谁在什么时候为什么解的，事后要有据可查。
+    const resetMatch = /^\/api\/pools\/([^/]+)\/circuit\/reset$/.exec(path);
+    if (method === 'POST' && resetMatch) {
+      await requireControl(req, POLICY_ACTION.poolAdd);
+      const profileId = decodeProfileId(resetMatch[1]);
+      const body = await readJson(req);
+      const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+      // 没写理由的复位是审计里一条空白：事后分不清是充值了还是手滑。
+      if (!reason) throw new HttpError(400, 'RESET_REASON_REQUIRED', 'reason 必须是非空字符串');
+      const circuits = deps.candidateCircuits;
+      // 缺仓储要明说「不可用」：静默 200 会让运维以为复位成功了。
+      if (!circuits) {
+        throw new HttpError(503, 'CIRCUIT_UNAVAILABLE', '本服务没有候选熔断仓储，无法复位');
+      }
+      const pool = await agentPool.list();
+      const known = [
+        ...pool.coordinator,
+        ...pool.executor,
+        ...pool.independent_reviewer,
+      ].some((row) => row.profileId === profileId);
+      if (!known) throw new HttpError(404, 'CANDIDATE_NOT_FOUND', `候选池里没有：${profileId}`);
+      // actor 只取受控主体：调用方自称是谁不作数，审计要由凭据说话。
+      const actor = await controlActor(resolveControlPrincipal, req);
+      const at = new Date(nowMs()).toISOString();
+      const circuit = await circuits.reset({ profileId, actor, at, reason }).catch((error: unknown) => {
+        throw circuitResetHttpError(error, profileId);
+      });
+      return send(res, 200, { profileId, circuit: circuitHealth(circuit) });
+    }
+
+    // 复位审计只读。查历史不该要求写权限，所以走 poolList 而不是 poolAdd。
+    const resetEventsMatch = /^\/api\/pools\/([^/]+)\/circuit\/reset-events$/.exec(path);
+    if (method === 'GET' && resetEventsMatch) {
+      await requireControl(req, POLICY_ACTION.poolList);
+      const profileId = decodeProfileId(resetEventsMatch[1]);
+      const circuits = deps.candidateCircuits;
+      if (!circuits) {
+        throw new HttpError(503, 'CIRCUIT_UNAVAILABLE', '本服务没有候选熔断仓储，读不到复位记录');
+      }
+      return send(res, 200, { profileId, events: await circuits.listResetEvents(profileId) });
+    }
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
       const snapshot = await agentPool.list();
+      // 用量是附加信息：它读不到（失败 / 适配层不在 / 抛异常）时资源池仍要原样
+      // 返回。先取再拼，取失败就当没有 —— 一个页面的可选列不该让整个池 500。
+      const usageRows = await readUsageRows();
       return send(
         res,
         200,
@@ -1060,6 +1294,7 @@ export function createApi(deps: ApiDeps): Server {
             deps.queuedHops,
             deps.candidateCircuits,
             nowMs(),
+            usageRows,
           ),
         ),
       );
@@ -1210,6 +1445,25 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.getMissionView(missionMatch[1]));
     }
 
+    // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks
+    // 可能很长，列表页不该为了显示一行状态把它整个拉过来。
+    // 取报告与取 Mission 同级只读，共用 missionRead；报告的不可变性与归属判断都在
+    // Platform.getValidationReport 里，这里只透传，不直连任何存储适配器。
+    // 归属不符与不存在同样回 404：报告是 append-only 机器证据，若告诉调用方
+    // 「这份报告属于别的 Mission」，等于给了跨 Mission 探测报告 id 的接口。
+    const validationReportMatch = /^\/api\/missions\/([^/]+)\/validation-reports\/([^/]+)$/.exec(path);
+    if (method === 'GET' && validationReportMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const report = await platform.getValidationReport(
+        validationReportMatch[1],
+        validationReportMatch[2],
+      );
+      if (!report) {
+        throw new HttpError(404, 'VALIDATION_REPORT_NOT_FOUND', '没有这份验证报告');
+      }
+      return send(res, 200, report);
+    }
+
     /* ---- L3 面：最终检视 ---- */
 
     const diffMatch = /^\/api\/missions\/([^/]+)\/diff$/.exec(path);
@@ -1233,7 +1487,19 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.reviseContract(reviseMatch[1], body as never));
     }
 
-    const controlMatch = /^\/api\/missions\/([^/]+)\/(cancel|pause|resume)$/.exec(path);
+    const parkedControlMatch = /^\/api\/missions\/([^/]+)\/(park|parked-resume)$/.exec(path);
+    if (method === 'POST' && parkedControlMatch) {
+      const [, id, verb] = parkedControlMatch;
+      await requireControl(req, verb === 'park' ? POLICY_ACTION.missionPause : POLICY_ACTION.missionResume);
+      const body = await readJson(req);
+      if (verb === 'park') return send(res, 200, await platform.parkMission(id, { reason: String(body.reason ?? ''), reviewer: String(body.reviewer ?? '') }));
+      return send(res, 200, await platform.resumeParkedMission(id, {
+        reason: String(body.reason ?? ''), reviewer: String(body.reviewer ?? ''),
+        ...(typeof body.answer === 'string' ? { answer: body.answer } : {}),
+      }));
+    }
+
+    const controlMatch = /^\/api\/missions\/([^/]+)\/(cancel|pause|resume)$/ .exec(path);
     if (method === 'POST' && controlMatch) {
       const [, id, verb] = controlMatch;
       const controlAction =

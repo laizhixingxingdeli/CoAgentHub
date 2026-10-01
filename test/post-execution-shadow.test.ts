@@ -379,6 +379,7 @@ async function upToSubmitted(
   const { attemptId: coordinator } = await platform.startCoordinatorAttempt('M');
   await platform.updatePlan('M', coordinator, PLAN);
   const { workItemId } = await platform.createWorkItem('M', coordinator, { title: 'w', order: ORDER });
+  await platform.submitContractCheck('M', coordinator, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M', coordinator, [workItemId]);
   await platform.finishAttempt('M', coordinator, { endedBy: 'structured_submit' });
   const { attemptId: executor } = await platform.startExecutorAttempt('M', workItemId);
@@ -462,6 +463,7 @@ describe('Platform.runPostExecutionShadow', () => {
     const { attemptId: coordinator } = await platform.startCoordinatorAttempt('M');
     await platform.updatePlan('M', coordinator, PLAN);
     const { workItemId } = await platform.createWorkItem('M', coordinator, { title: 'w', order: ORDER });
+    await platform.submitContractCheck('M', coordinator, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M', coordinator, [workItemId]);
     await platform.finishAttempt('M', coordinator, { endedBy: 'structured_submit' });
     // 第一次：跑挂了，只留下一条失败的测试证据。
@@ -599,6 +601,7 @@ const COORDINATOR_STANDARD: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       { tool: 'coagent_dispatch_work_item', body: (previous) => ({ workItemIds: [previous.workItemId] }) },
     ],
   },
@@ -888,7 +891,7 @@ describe('构建器把 POST 评估器交到 Platform', () => {
       const deps = source.indexOf('buildDecisionDeps(process.env)');
       assert.ok(deps > 0, `${cli} 没按 env 组装决策依赖`);
       for (const builder of ['buildPgPlatform({', 'buildPersistentPlatform(statePath, {']) {
-        const at = source.indexOf(builder);
+        const at = source.indexOf(builder, deps);
         assert.ok(at > deps, `${cli}：${builder} 要在组装决策依赖之后`);
         assert.match(source.slice(at, at + 160), /\.\.\.decision,/, `${cli}：${builder} 没带上决策依赖`);
       }

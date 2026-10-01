@@ -23,8 +23,10 @@ import {
   type HostedHeldState,
 } from './mission-runner.ts';
 import { renderPlanHandoff } from './plan-handoff.ts';
-import { preflightPlanRepo, slotHolders } from './plan-preflight.ts';
+import { preflightPlanMissionSlots, preflightPlanRepo, slotHolders } from './plan-preflight.ts';
+// slotHolders formatting remains owned by shared preflight for rejected missions.
 import { drivePlan, runWithDeadline, type PlanDriverDeps } from './plan-driver.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 import { PlanRun, type PlanRunStop } from './plan-run.ts';
 import { FilePlanRunStore } from './plan-run-store.ts';
 import { buildRoutingPrompt, parseRoutingProposal } from './plan-routing.ts';
@@ -43,6 +45,10 @@ import type {
   IdGenerator,
   QueuedHopRepository,
 } from './ports.ts';
+import {
+  type RoleCooldownCandidate,
+  type RolePoolName,
+} from './orchestrator.ts';
 import { QueryRunner, type QueryRunRepository, type RunQueryInput, type RunQueryResult } from './query-run.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
@@ -67,6 +73,8 @@ export interface PlanRuntimeDeps {
   readonly platform: PlanDriverDeps['platform'];
   /** 每条 Mission：`runner.run(missionId, { projectRoot })`，outcome 交给 drivePlan。 */
   readonly runMission: MissionRunner['run'];
+  /** 外层已认证的恢复映射，由驱动用于续跑已有 Mission。 */
+  readonly resumeMissions?: Readonly<Record<string, string>>;
   readonly runQuery?: (input: RunQueryInput) => Promise<RunQueryResult>;
   /** 分类员用的 profile；缺省走 query 自己的默认。 */
   readonly queryProfile?: ExecutionProfile;
@@ -80,6 +88,11 @@ export interface PlanRuntimeDeps {
   readonly startedAt?: string;
   readonly checkRepo?: () => Promise<readonly string[]>;
   readonly pollMs?: number;
+  /**
+   * 见 plan-driver 的 WaitEligibility：判一条 waiting 是不是本 Mission 在运行内等得到头。
+   * 缺省不等待，照旧开升级单——没有结构性证明就等，等于把整晚押在一条猜出来的原因上。
+   */
+  readonly waitEligibility?: PlanDriverDeps['waitEligibility'];
 }
 
 async function persistAfter<T>(persist: () => Promise<void>, work: Promise<T>): Promise<T> {
@@ -88,10 +101,136 @@ async function persistAfter<T>(persist: () => Promise<void>, work: Promise<T>): 
   return result;
 }
 
+export interface QueuedHopWaitEligibilityDeps {
+  /** 读持久队列行。读不到（抛错）时探针返回 undefined，不猜。 */
+  readonly list: () => Promise<readonly QueuedHop[]>;
+  /** 当前时刻；capacity 的短轮询与 availableAt / leaseUntil 的比较都按它算。 */
+  readonly now: () => string;
+  /** 自己占着名额时多久复核一次。缺省 5 秒——占位只能短轮询，猜不出完工时刻。 */
+  readonly capacityPollMs?: number;
+}
+
 /**
- * 建与 run-plan 相同字段的 PlanRun，再按筛选结果的源顺序驱动。
- * 分类失败 / 没装 query 的回落语义保持原样，好让 CLI 只换装配不换规则。
+ * 生产用等待资格探针：只从持久 Hop 记录里认**本 Mission 自己**的退避 / 占位。
+ *
+ * 驱动的 WaitEligibility 刻意不接受「project_busy 就是自己占名额」这种从字样推出来的
+ * 结论——同一个 reason 既可能是自己另一个在途工作项占着名额（该等），也可能是别的
+ * Mission 在改代码（等不到头）。所以这里按 missionId 过滤队列行：
+ *   - 本 Mission 有 retry_wait 且 availableAt 还没到 → own_backoff，睡到最早那刻重试；
+ *   - 否则本 Mission 有 claimed 且租约还没到期 → capacity，短轮询复核；
+ *   - 其余一律 undefined，交回驱动走原升级处置。
+ *
+ * detail 文案一个字都不看——它只分得出「发生了什么」，分不出归属。读库出错也返回
+ * undefined：读不到就猜，等于没证据地空等一整晚。
  */
+export function createQueuedHopWaitEligibility(
+  deps: QueuedHopWaitEligibilityDeps,
+): NonNullable<PlanDriverDeps['waitEligibility']> {
+  return async ({ missionId, reason }) => {
+    // 只有「名额被占」值得探一次；其余 reason 探队列也证明不了本 Mission 等得到头。
+    if (reason !== 'project_busy') return undefined;
+    let rows: readonly QueuedHop[];
+    try {
+      rows = await deps.list();
+    } catch {
+      return undefined;
+    }
+    const nowMs = Date.parse(deps.now());
+    if (!Number.isFinite(nowMs)) return undefined;
+    const mine = rows.filter((row) => row.missionId === missionId);
+
+    // 自己的退避优先：最早到期的那个有效 availableAt 就是重试时刻。
+    const backoffs = mine
+      .filter((row) => row.status === 'retry_wait')
+      .map((row) => Date.parse(row.availableAt))
+      .filter((at) => Number.isFinite(at) && at > nowMs);
+    if (backoffs.length > 0) {
+      return { kind: 'own_backoff', availableAt: new Date(Math.min(...backoffs)).toISOString() };
+    }
+
+    // 自己另一个在途工作项占着名额：租约还没到期，只能短轮询复核。
+    const holdsLease = mine.some((row) => {
+      if (row.status !== 'claimed') return false;
+      const until = Date.parse(row.leaseUntil ?? '');
+      return Number.isFinite(until) && until > nowMs;
+    });
+    if (holdsLease) {
+      const pollMs = deps.capacityPollMs ?? 5_000;
+      return { kind: 'capacity', nextPollAt: new Date(nowMs + pollMs).toISOString() };
+    }
+
+    return undefined;
+  };
+}
+
+/**
+ * 共享资格工厂：把「本 Mission 在运行内等得到头」的两种证明并到一个探针里。
+ *
+ * 为什么合并：hosted 入口要在 runner 构造后同时启用「自己的退避/占位」和
+ * 「指定角色候选全冷却」两类等待，而不是各装各的探针导致逻辑分叉。这里把
+ * project_busy 委托给 createQueuedHopWaitEligibility（那条已验收的队列探针），
+ * 把 no_available_agent 接上 runner.roleCooldownSnapshot 的权威快照。
+ *
+ * 冷却资格的三条不许违反的口径（与 orchestrator.roleCooldownSnapshot 同源）：
+ *   - 只有 reason==='no_available_agent' 且本次 waiting 确由该角色候选拿不出人
+ *     （candidateRole 明确存在）才去查那个角色的冷却快照；绝不按 reason/detail
+ *     字样猜角色。
+ *   - 快照非空、每位 availability==='cooldown' 且 until 都是有效未来时间，才取
+ *     最早 until 且距当前不超过 15 分钟——否则（空池、有 unknown、有 available、
+ *     超长冷却、读异常）一律 undefined。读异常 fail closed，绝不解析 detail。
+ *   - unknown 不是 cooldown：探针在跑或到期值非法时只能说「不可证明可用」，
+ *     不能编一个冷却时长出来。
+ */
+export interface PlanWaitEligibilityDeps {
+  /** 可选：持久 Hop 队列，project_busy 委托给它认本 Mission 的退避/占位。无则 undefined。 */
+  readonly queuedHops?: { readonly list: () => Promise<readonly QueuedHop[]> };
+  /** 必需：MissionRunner 的角色冷却快照桥，只读读出某角色候选池的权威冷却状态。 */
+  readonly roleCooldownSnapshot: (
+    role: RolePoolName,
+    now?: number,
+  ) => Promise<readonly RoleCooldownCandidate[]>;
+  /** 当前时刻（数值毫秒），冷却到期的比较与 15 分钟上限都按它算。 */
+  readonly now: () => number;
+}
+
+/** 冷却资格的上限：超出这一刻钟的冷却不是「马上就好」，不拿运行去等。 */
+const MAX_ROLE_COOLDOWN_WAIT_MS = 15 * 60_000;
+
+export function createPlanWaitEligibility(
+  deps: PlanWaitEligibilityDeps,
+): NonNullable<PlanDriverDeps['waitEligibility']> {
+  const queued = deps.queuedHops
+    ? createQueuedHopWaitEligibility({ list: () => deps.queuedHops!.list(), now: () => new Date(deps.now()).toISOString() })
+    : undefined;
+  return async ({ missionId, reason, detail, candidateRole }) => {
+    // project_busy 交给队列探针：只认本 Mission 自己的退避/占位。
+    if (reason === 'project_busy') {
+      return queued ? queued({ missionId, reason, detail }) : undefined;
+    }
+    // 只有「指定角色候选全冷却」才值得探：缺角色或别的 reason 查快照也证明不了。
+    if (reason !== 'no_available_agent' || candidateRole === undefined) return undefined;
+    const now = deps.now();
+    let snapshot: readonly RoleCooldownCandidate[];
+    try {
+      snapshot = await deps.roleCooldownSnapshot(candidateRole, now);
+    } catch {
+      // 读异常 fail closed：读不到就猜等于空等一整晚，交回驱动走原升级处置。
+      return undefined;
+    }
+    if (snapshot.length === 0) return undefined;
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const candidate of snapshot) {
+      if (candidate.availability !== 'cooldown') return undefined;
+      const until = Date.parse(candidate.until ?? '');
+      // 到期值非法或不是有效未来时间：不可证明，不编冷却时长。
+      if (!Number.isFinite(until) || until <= now) return undefined;
+      earliest = Math.min(earliest, until);
+    }
+    // 距当前超过 15 分钟的不是「马上就好」，不拿运行去等。
+    if (earliest - now > MAX_ROLE_COOLDOWN_WAIT_MS) return undefined;
+    return { kind: 'role_cooldown', earliestUntil: new Date(earliest).toISOString() };
+  };
+}
 export async function runPlanOnPlatform(
   plan: PlanSpec,
   selection: PlanCandidateSelection,
@@ -118,13 +257,19 @@ export async function runPlanOnPlatform(
   return drivePlan(plan, {
     store: deps.store,
     projectRoot: deps.projectRoot,
+    ...(deps.resumeMissions ? { resumeMissions: deps.resumeMissions } : {}),
     now: deps.now,
     sleep: deps.sleep,
     log: deps.log,
     ...(deps.checkRepo ? { checkRepo: deps.checkRepo } : {}),
     ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
+    ...(deps.waitEligibility ? { waitEligibility: deps.waitEligibility } : {}),
     platform: {
+      resumeMission: (missionId) =>
+        persistAfter(deps.persist, deps.platform.resumeMission!(missionId)),
       createMission: (input) => persistAfter(deps.persist, deps.platform.createMission(input)),
+      recordStandardFallbackRoute: (missionId, input) =>
+        persistAfter(deps.persist, deps.platform.recordStandardFallbackRoute(missionId, input)),
       createClassifiedMission: (input) =>
         persistAfter(deps.persist, deps.platform.createClassifiedMission(input)),
       getMissionView: (missionId) => deps.platform.getMissionView(missionId),
@@ -472,14 +617,22 @@ export async function runHostedPlan(
     );
     return 2;
   }
-  const holders = slotHolders(await ctx.built.platform.listMissions(), parsed.plan.projectId);
-  if (holders.length > 0) {
+  const slotPreflight = preflightPlanMissionSlots({
+    selection: parsed.selection,
+    plan: parsed.plan,
+    runDir: parsed.runDir,
+    missions: await ctx.built.platform.listMissions(),
+  });
+  if (slotPreflight.problems.length > 0) {
     emit(
       'stderr',
-      `开跑前检查没过，一个功能都没跑：\n${holders.map((h) => `  ✗ ${h}`).join('\n')}`,
+      `开跑前检查没过，一个功能都没跑：\n${slotPreflight.problems.map((h) => `  ✗ ${h}`).join('\n')}`,
     );
     return 2;
   }
+  const resumeMissions = Object.fromEntries(
+    slotPreflight.resume.map(({ featureId, missionId }) => [featureId, missionId]),
+  );
 
   const { platform, agentPool, persist, candidateCircuits, queuedHops } = ctx.built;
   const tokens = hostedIssuer(ctx.built);
@@ -580,12 +733,24 @@ export async function runHostedPlan(
 
   ctx.onStarted?.({ runId, runPath: store.path, reviewer: parsed.plan.reviewer });
 
+  // 共享资格工厂：project_busy 委托队列探针认本 Mission 的退避/占位，
+  // no_available_agent 接上 runner 的同池角色快照认全部候选短冷却。
+  // 即使没装队列也启用冷却判断——指定角色候选全在 15 分钟内冷却时就在运行内等待续跑，
+  // 不把未知或非候选失败误当冷却、也不开升级单。
+  const waitEligibility = createPlanWaitEligibility({
+    ...(queuedHops ? { queuedHops } : {}),
+    roleCooldownSnapshot: (role, now) => runner.roleCooldownSnapshot(role, now),
+    now: () => Date.now(),
+  });
+
   const stop = await runPlanOnPlatform(parsed.plan, parsed.selection, {
     store,
     projectRoot: parsed.cwd,
     platform,
+    ...(waitEligibility ? { waitEligibility } : {}),
     runMission: (missionId, options) => runner.run(missionId, hostedPlanRunOptions(options, parsed.maxRounds)),
     ...(runQuery ? { runQuery } : {}),
+    ...(Object.keys(resumeMissions).length > 0 ? { resumeMissions } : {}),
     ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
     persist: async () => {
       await persist();

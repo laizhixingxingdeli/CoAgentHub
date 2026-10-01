@@ -10,4 +10,6 @@
 
 `GET /api/runtime/models` 先走原有控制面读鉴权；同一 HTTP 服务实例缓存 `available:true` 的清单 10 分钟，有效期内请求不重复调用适配层，过期重读。失败结果不缓存，不同服务实例不共享缓存；响应结构不变。
 
+`GET /api/runtime/usage` 经现有读鉴权调用适配器目录内 `npx tsx src/cli.ts usage`，读取 stdout 的 PI-Q1 顶层 JSON 数组并原样转出；目录依次取 `COAGENT_ADAPTER_DIR`、最近一次运行的 `--adapter` 所在目录、同级缺省目录。有效结果在服务内缓存 10 分钟；失败或不支持返回 `{ available: false, note }`，不阻断其他功能。平台不保存或解释适配器凭据。`GET /api/pools` 的候选 health 关联同 provider 的用量行，携带套餐、remainingPercent、resetAt；额度熔断显示重置时间或待充值人工复位原因和命令，资源池页作相同展示，其他失败类不受影响。
+
 源：`src/main.ts`、`src/application/live.ts`、`src/application/platform.ts`、`src/application/agent-pool.ts`、`src/application/candidate-circuit.ts`、`src/application/durable-scheduler.ts`、`src/api/server.ts`、`src/application/runtime-catalog.ts`。验证：`test/start-server.test.ts`、`test/live-output.test.ts`、`test/redact.test.ts`、`test/api.test.ts`、`test/agent-pool.test.ts`、`test/candidate-circuit.test.ts`、`test/runtime-catalog.test.ts`。

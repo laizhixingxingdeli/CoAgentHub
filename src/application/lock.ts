@@ -17,14 +17,20 @@
  * 猜错就会变成两个写者同时落盘。
  */
 
-import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
 import { basename, dirname, join, resolve } from 'node:path';
 
 export interface LockInfo {
   pid: number;
   since: string;
   what: string;
+  /**
+   * 最近一次心跳。持锁者活着时应当持续前移；停在一个旧时间上，才谈得上
+   * 「这个持有者可能已经卡死」。接管要看的正是这个字段。
+   */
+  heartbeatAt?: string;
   stateId?: string;
   instanceId?: string;
   apiVersion?: string;
@@ -39,6 +45,14 @@ export type LocalWriterProbe =
 /** 回环探测超时。太长会卡住 CLI；太短会把慢启动误判成 occupied。 */
 const HEALTH_PROBE_TIMEOUT_MS = 800;
 
+/**
+ * 主锁心跳周期。
+ *
+ * 取得够短，接管方才能在合理时间内看出「持有者还在动」；取得够长，不至于
+ * 让每次心跳都去写一次盘。测试可注入更短的周期。
+ */
+const LOCK_HEARTBEAT_INTERVAL_MS = 30_000;
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -47,7 +61,7 @@ function powershellQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function lockBusyMessage(path: string, holder: LockInfo | undefined): string {
+function lockBusyMessage(path: string, holder: LockInfo | undefined, reasons?: readonly string[]): string {
   const lines = ['平台正被另一个进程占用；不会自动抢占或删除锁。', `锁目录：${path}`];
   if (holder) {
     lines.push(
@@ -55,8 +69,20 @@ function lockBusyMessage(path: string, holder: LockInfo | undefined): string {
       `核实进程仍活着（POSIX）：kill -0 ${holder.pid} && echo alive || echo not-alive`,
       `核实进程仍活着（Windows PowerShell）：Get-Process -Id ${holder.pid} -ErrorAction SilentlyContinue`,
     );
+    if (holder.port !== undefined) {
+      // 接管只看端口"是否仍在监听"，而这件事在命令行上不容易随口核实：
+      // 给两条现成命令，省得人凭印象说"应该没人了吧"。
+      lines.push(
+        `核实端口无人监听（POSIX）：lsof -nP -iTCP:${holder.port} -sTCP:LISTEN || ss -ltnp | grep ':${holder.port}'`,
+        `核实端口无人监听（Windows PowerShell）：Get-NetTCPConnection -LocalPort ${holder.port} -State Listen -ErrorAction SilentlyContinue`,
+      );
+    }
   } else {
     lines.push('持有者元数据缺失或损坏，无法确定 PID；请先人工检查锁目录内容及系统中可能运行的平台写者。不要仅凭元数据缺失判断进程已死。');
+  }
+  if (reasons !== undefined && reasons.length > 0) {
+    lines.push('拒绝自动接管的原因：');
+    for (const reason of reasons) lines.push(`- ${reason}`);
   }
   lines.push(
     `仅在确认持有者进程已死亡、且无其他写者运行后，手动清理（POSIX）：rm -rf -- ${shellQuote(path)}`,
@@ -67,11 +93,17 @@ function lockBusyMessage(path: string, holder: LockInfo | undefined): string {
 
 export class LockBusyError extends Error {
   readonly holder: LockInfo | undefined;
+  /**
+   * 拒绝自动接管的逐条原因。同步入口（acquireLock）拿不到锁时通常是空的；
+   * 异步接管入口要把"为什么不接管"说清楚，否则用的人只能猜。
+   */
+  readonly reasons: readonly string[];
 
-  constructor(path: string, holder: LockInfo | undefined) {
-    super(lockBusyMessage(path, holder));
+  constructor(path: string, holder: LockInfo | undefined, reasons?: ReadonlyArray<string>) {
+    super(lockBusyMessage(path, holder, reasons));
     this.name = 'LockBusyError';
     this.holder = holder;
+    this.reasons = reasons ?? [];
   }
 }
 
@@ -100,6 +132,35 @@ function lockPathFor(statePath: string): string {
   return join(dirname(id), `.lock-${basename(id)}`);
 }
 
+export type LockAcquireOptions = {
+  /**
+   * 测试注入：心跳周期（毫秒）。<= 0 表示不启动心跳定时器（仍然算持锁，
+   * 只是元数据不随时间前移）。
+   */
+  heartbeatIntervalMs?: number;
+};
+
+/**
+ * 用 temp + rename 原子换掉持有者元数据。
+ *
+ * 直接覆写 holder.json 时，读到半截 JSON 的探测方会把它判成「元数据损坏」，
+ * 于是报 occupied 并要人手工删锁——一次心跳就能凭空造出一个假故障。
+ */
+function writeHolderAtomic(lockPath: string, info: LockInfo): void {
+  const tmpPath = join(lockPath, `holder.json.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(info, null, 2), 'utf8');
+    renameSync(tmpPath, join(lockPath, 'holder.json'));
+  } catch (error) {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      /* 清临时文件失败不改变上层错误 */
+    }
+    throw error;
+  }
+}
+
 /**
  * 拿到锁就返回一个释放函数；拿不到就抛 LockBusyError。
  *
@@ -108,13 +169,130 @@ function lockPathFor(statePath: string): string {
  * 看一眼再手动删。
  *
  * 第三参是常驻写者身份。普通 CLI 写者继续 `acquireLock(path, what)` 即可。
+ * 第四参只给测试用（注入心跳周期）。
  */
 export function acquireLock(
   statePath: string,
   what: string,
   identity?: { instanceId: string; apiVersion: string },
+  options?: LockAcquireOptions,
 ): () => void {
   const lockPath = lockPathFor(statePath);
+  // 先独占这条锁的接管门，再碰锁路径本身。少了这一步，普通写者能在接管方
+  // 「已经把旧锁 rename 走、还没在原路径 mkdir 回来」的那个空窗里 mkdir 成功，
+  // 于是接管方和它同时以为自己是唯一持有者——正是这把锁要防的双写。
+  const gate = acquireTakeoverGate(lockPath);
+  try {
+    return acquireLockHoldingGate(statePath, lockPath, what, identity, options);
+  } finally {
+    releaseTakeoverGate(gate);
+  }
+}
+
+/**
+ * 接管互斥门：与锁路径一一对应、**名字固定**。
+ *
+ * 为什么不能像旧版那样每次取一个唯一名字：唯一名字的目录谁也挡不住谁，两个
+ * 候选各建各的，然后同时走到「把原路径上的锁 rename 走」——后动手的那个会把
+ * 先动手那个刚拿到的新锁搬进自己的隔离目录，原路径空出来，第三个写者 mkdir
+ * 就成功了。三个人、两把锁都以为自己在独占写。
+ *
+ * 名字由锁路径算出（不是随机串），所以两个候选与普通 acquireLock 抢的是同一个
+ * 目录：mkdir 的原子性在这里就是互斥本身，建不出来就说明有人正在这条锁上动手，
+ * fail closed。
+ *
+ * 只护住「mkdir 原路径 / rename 旧锁 / 写持有者」这几步：门被长期持有等于这条锁
+ * 永远拿不到，所以成功拿到锁之后立刻放开。
+ */
+function takeoverGatePathFor(lockPath: string): string {
+  return `${lockPath}.takeover-gate`;
+}
+
+interface TakeoverGate {
+  path: string;
+  /** 本次持有的标记，用来保证放门时只删自己的门。 */
+  token: string;
+}
+
+interface TakeoverGateMarker {
+  pid: number;
+  token: string;
+  since: string;
+}
+
+function readGateMarker(gatePath: string): TakeoverGateMarker | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(gatePath, 'gate.json'), 'utf8')) as Partial<TakeoverGateMarker>;
+    if (typeof value.pid !== 'number' || typeof value.token !== 'string') return undefined;
+    return {
+      pid: value.pid,
+      token: value.token,
+      since: typeof value.since === 'string' ? value.since : '（未记录）',
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 原子独占接管门。冲突一律 fail closed：不抢占、不删除、不越过。
+ */
+function acquireTakeoverGate(lockPath: string): TakeoverGate {
+  const path = takeoverGatePathFor(lockPath);
+  const token = uniqueSiblingPath(lockPath, 'gate-token');
+  try {
+    mkdirSync(path, { recursive: false });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const marker = readGateMarker(path);
+    throw new LockBusyError(lockPath, readHolder(lockPath), [
+      `这条锁的接管互斥门已被其他写者持有：${path}`,
+      marker === undefined
+        ? '门内没有标记，可能是异常退出留下的，也可能是对方还没写完标记。'
+        : `门内登记：pid=${marker.pid}，since=${marker.since}`,
+      '门不会自动清理，也不会被别的进程删除：先核实门内进程已退出、且没有其他写者在这个状态目录上工作，再人工删除这个目录。',
+    ]);
+  }
+  try {
+    // 写下自己的标记：人排障时能一眼看出门是谁留下的。写不进去不影响互斥，
+    // 只是少一条线索。
+    writeFileSync(
+      join(path, 'gate.json'),
+      JSON.stringify({ pid: process.pid, token, since: new Date().toISOString() }, null, 2),
+      'utf8',
+    );
+  } catch {
+    /* 标记写失败不改变互斥语义 */
+  }
+  return { path, token };
+}
+
+/**
+ * 放掉自己的门。
+ *
+ * 只删本次调用建的那一个：门里如果有别人的标记，说明这个目录已经被别人重建过
+ * （我们那扇门不在了），再删就是把别人正用来互斥的门拆掉，等于放第二个写者进去。
+ */
+function releaseTakeoverGate(gate: TakeoverGate): void {
+  const marker = readGateMarker(gate.path);
+  if (marker !== undefined && marker.token !== gate.token) return;
+  rmSync(gate.path, { recursive: true, force: true });
+}
+
+/**
+ * 已经持有这条锁的门时的取锁实现。
+ *
+ * 拆出来是为了让接管路径复用同一段代码而不重入抢门：`acquireAfterQuarantine`
+ * 调用它时门已经在本次调用手里，再 mkdir 一次只会撞上自己的门（fail closed），
+ * 接管就永远做不成。调用方必须保证门由自己持有、并在随后释放。
+ */
+function acquireLockHoldingGate(
+  statePath: string,
+  lockPath: string,
+  what: string,
+  identity: { instanceId: string; apiVersion: string } | undefined,
+  options?: LockAcquireOptions,
+): () => void {
   try {
     mkdirSync(lockPath, { recursive: false });
   } catch (error) {
@@ -122,10 +300,14 @@ export function acquireLock(
     throw new LockBusyError(lockPath, readHolder(lockPath));
   }
 
+  const now = new Date().toISOString();
   const info: LockInfo = {
     pid: process.pid,
-    since: new Date().toISOString(),
+    since: now,
     what,
+    // 拿锁那一刻就算一次心跳：否则「刚拿到的锁」在接管方眼里是一把从没
+    // 动过、出生即陈旧的锁。
+    heartbeatAt: now,
     stateId: stateIdFor(statePath),
   };
   if (identity) {
@@ -138,10 +320,49 @@ export function acquireLock(
     // 写不进持有者信息不影响互斥，只是卡死时少一条线索。
   }
 
+  /**
+   * 刷新自己的心跳。
+   *
+   * 只更新元数据、绝不删锁：写心跳失败可能是磁盘、权限、锁已经被别人接管，
+   * 任何一个都不是「可以顺手清掉锁」的理由。
+   */
+  const refreshHeartbeat = (): void => {
+    // 锁目录没了、或者里面的持有者已经不是「我们」，就什么都不做。
+    // 锁被释放后又被别人重建时，照着自己的旧快照写回去等于伪造持有者。
+    if (!stillHeldByUs(lockPath, identity?.instanceId)) return;
+    const current = readHolder(lockPath);
+    // 目录在但元数据读不出来：说不清这是谁的锁，宁可不动手。
+    if (!current) return;
+    try {
+      writeHolderAtomic(lockPath, { ...current, heartbeatAt: new Date().toISOString() });
+    } catch {
+      // 一次心跳写不进去不影响互斥语义，下一拍再试。
+    }
+  };
+
+  const heartbeatIntervalMs = options?.heartbeatIntervalMs ?? LOCK_HEARTBEAT_INTERVAL_MS;
+  const heartbeat =
+    heartbeatIntervalMs > 0
+      ? setInterval(() => {
+          try {
+            refreshHeartbeat();
+          } catch {
+            // 定时器回调里抛出的异常会变成 unhandled 异常直接结束进程，
+            // 那就把「一次写心跳失败」升级成「进程带着锁死掉」了。
+          }
+        }, heartbeatIntervalMs)
+      : undefined;
+  // unref：心跳不该成为进程退不出去的理由（CLI 干完活要能自然退出）。
+  heartbeat?.unref();
+
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
+    // 先停心跳再删锁。顺序反过来的话，残留的定时器会在一把已经清掉的锁上
+    // 继续写：要么在目录被重建后往里塞我们这份旧元数据，要么把一个刚拿到
+    // 锁的新持有者刷成「pid 是我们」。
+    if (heartbeat !== undefined) clearInterval(heartbeat);
     // 放锁时把下面那个 exit 兜底一起摘掉。不摘的话，常驻进程每拿一次锁就在
     // process 上多挂一个监听——方案运行记录一晚上要拿几十次，过了 10 个 Node
     // 就开始报泄漏告警，而且这些闭包到进程退出才释放。
@@ -184,6 +405,11 @@ export function publishLockPort(statePath: string, instanceId: string, port: num
     const still = readHolder(lockPath);
     if (!still || still.pid !== process.pid || still.instanceId !== instanceId) {
       throw new Error(`发布锁端口失败：当前进程不是锁持有者（${lockPath}）。`);
+    }
+    // 两次读之间心跳可能已经把 heartbeatAt 前移了。以重读到的那份为基再写
+    // 一次：否则 rename 会把心跳倒退回旧值，接管方就会以为持有者已经停摆。
+    if (still.heartbeatAt !== next.heartbeatAt) {
+      writeFileSync(tmpPath, JSON.stringify({ ...still, port }, null, 2), 'utf8');
     }
     renameSync(tmpPath, holderPath);
   } catch (error) {
@@ -302,6 +528,9 @@ function parseHolder(raw: string): LockInfo | undefined {
   if (typeof rec.pid !== 'number' || !Number.isInteger(rec.pid)) return undefined;
   if (typeof rec.since !== 'string' || typeof rec.what !== 'string') return undefined;
   const info: LockInfo = { pid: rec.pid, since: rec.since, what: rec.what };
+  // 旧版本写的锁没有这个字段：缺了就当「没心跳」，由接管逻辑去判断，
+  // 不能因此把整把锁判成元数据损坏。
+  if (typeof rec.heartbeatAt === 'string') info.heartbeatAt = rec.heartbeatAt;
   if (typeof rec.stateId === 'string') info.stateId = rec.stateId;
   if (typeof rec.instanceId === 'string') info.instanceId = rec.instanceId;
   if (typeof rec.apiVersion === 'string') info.apiVersion = rec.apiVersion;
@@ -383,5 +612,387 @@ function getLoopbackHealth(port: number): Promise<LoopbackHealth> {
     });
     req.on('error', (error) => done(error));
     req.end();
+  });
+}
+
+/**
+ * 残锁接管的停摆阈值（毫秒）。
+ *
+ * 心跳 30 秒一跳（W-297），阈值取它的四倍：一次心跳写失败、进程被短暂挂起、
+ * 机器刚从休眠醒来，都不该让接管方把仍在推进的写者判成「已停摆」。判错的
+ * 方向只有一个——两个写者同时落盘。
+ */
+const STALE_LOCK_HEARTBEAT_MS = 120_000;
+
+/** 回环端口探测超时。够短以免拖住启动，够长以免把正在慢启动的服务误判成无人监听。 */
+const PORT_PROBE_TIMEOUT_MS = 500;
+
+export type RecoverableLockOptions = {
+  /** 透传给 acquireLock：心跳周期（毫秒）。 */
+  heartbeatIntervalMs?: number;
+  /** 测试注入：当前时间（毫秒）。默认 Date.now。 */
+  now?: () => number;
+  /** 测试注入：进程存活探测。默认 process.kill(pid, 0)，EPERM 算存活。 */
+  pidAlive?: (pid: number) => boolean;
+  /** 测试注入：端口监听探测。只有返回 false 才算「确定无人监听」；抛错一律算未知。 */
+  portListening?: (port: number) => Promise<boolean>;
+  /**
+   * 测试注入：在「重读校验通过」与「把旧锁移进隔离目录」之间调用。
+   *
+   * 只有测试用它来模拟另一个候选刚好在这一瞬间完成接管的并发窗口——那个窗口
+   * 窄到没法在真实进程里稳定复现，而它正是「接管方会不会误吞别人新锁」的分界。
+   * 生产调用不传：这不是强制接管的开关，接了也不会让接管更容易发生。
+   */
+  onBeforeQuarantine?: () => void;
+};
+
+export interface LockTakeoverAuditRecord {
+  /** 接管完成的时刻（ISO 8601）。 */
+  at: string;
+  oldPid: number;
+  oldInstanceId?: string;
+  oldHeartbeatAt?: string;
+  newPid: number;
+  newInstanceId?: string;
+}
+
+/**
+ * 接管审计文件的位置：状态文件旁边，按状态身份稳定。
+ *
+ * 放状态旁边而不是系统临时目录，是因为它回答的是「这份状态被谁接管过」，
+ * 得跟着这份状态一起被备份、迁移和查看。
+ */
+export function lockAuditPathFor(statePath: string): string {
+  const id = stateIdFor(statePath);
+  return join(dirname(id), `.lock-audit-${basename(id)}.jsonl`);
+}
+
+/** 读回接管审计。没接管过返回空数组；文件在但内容坏了就抛，不假装「没有记录」。 */
+export function readLockAudit(statePath: string): LockTakeoverAuditRecord[] {
+  let raw: string;
+  try {
+    raw = readFileSync(lockAuditPathFor(statePath), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  return raw
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as LockTakeoverAuditRecord);
+}
+
+type StaleLockProbes = {
+  now: () => number;
+  pidAlive: (pid: number) => boolean;
+  portListening: (port: number) => Promise<boolean>;
+};
+
+type StaleLockAssessment =
+  | { recoverable: true; holder: LockInfo }
+  | { recoverable: false; holder: LockInfo | undefined; reasons: string[] };
+
+/**
+ * 安全接管入口：无锁时与 acquireLock 完全一致；锁被占着时，只接管
+ * 「已死亡 + 已停摆 + 端口无人监听」**三个条件同时成立**的残锁。
+ *
+ * 为什么不能像同步入口那样一律报忙：常驻服务被 SIGKILL 之后锁留在本机，
+ * 每次重启都要人核实一遍再手工删锁（#25）。但为什么不能一律接管：进程
+ * 卡住和进程已死从外面看一模一样，只有把三个条件都证实了才敢动手。
+ *
+ * 任何一步「说不清」都不接管：拿不到解析不了的心跳、EPERM（进程其实是活的，
+ * 只是没权限发信号）、端口探测报的不是明确 ECONNREFUSED 都算拒绝理由，
+ * 逐条写在 LockBusyError 里，连同人工核实与清理命令一起交给人。
+ *
+ * 与同步入口共享同一套互斥手段（mkdir + holder.json），所以接管期间
+ * 照样严守单写者：候选先 mkdir 出这条锁共享的接管门（抢不到就放弃，不越过），
+ * 再重读旧 holder 重做条件判断，然后才把旧锁目录 rename 到同目录唯一隔离名，
+ * 最后用 mkdir 对原锁路径做原子竞争；门一直持到自己的新锁落定为止。
+ * 别人先拿到锁，我们就什么都不碰。
+ */
+export async function acquireRecoverableLock(
+  statePath: string,
+  what: string,
+  identity?: { instanceId: string; apiVersion: string },
+  options?: RecoverableLockOptions,
+): Promise<() => void> {
+  try {
+    // 无锁的情况不该多走一步：接管路径只在真被占着时才启用。
+    return acquireLock(statePath, what, identity, { heartbeatIntervalMs: options?.heartbeatIntervalMs });
+  } catch (error) {
+    if (!(error instanceof LockBusyError)) throw error;
+  }
+
+  const lockPath = lockPathFor(statePath);
+  const probes: StaleLockProbes = {
+    now: options?.now ?? Date.now,
+    pidAlive: options?.pidAlive ?? pidAlive,
+    portListening: options?.portListening ?? probePortListening,
+  };
+
+  // 接管门是这条锁共享的（名字由锁路径算出），它本身就是互斥手段：两个候选
+  // 以及普通 acquireLock 抢的是同一个目录，抢不到就 fail closed。
+  //
+  // 从拿到门起一直持到自己的新锁落定：接管的关键区横跨几个 await（条件探测、
+  // 重读校验），只护住 rename + mkdir 那两步的话，原路径空着的那一小段时间
+  // 仍会被普通写者钻进来 mkdir 成功。
+  let gate: TakeoverGate;
+  try {
+    gate = acquireTakeoverGate(lockPath);
+  } catch (error) {
+    if (error instanceof LockBusyError) throw error;
+    throw new LockBusyError(lockPath, readHolder(lockPath), [
+      `接管互斥门建不起来（${(error as Error).message}），放弃接管。`,
+    ]);
+  }
+
+  /** 只登记「已证实是本次要清理的残锁」的隔离目录；别人持有者的锁绝不登记。 */
+  let ownQuarantine: string | undefined;
+  try {
+    const assessed = await assessStaleLock(lockPath, probes);
+    if (!assessed.recoverable) {
+      throw new LockBusyError(lockPath, assessed.holder, assessed.reasons);
+    }
+
+    // guard 只是自己的标记，挡不住别的候选。动手之前重读旧 holder、
+    // 重新做一遍条件判断：这之间旧锁可能已经换人，或者已经被人接管。
+    const recheck = await assessStaleLock(lockPath, probes);
+    if (!recheck.recoverable || !sameHolderIdentity(recheck.holder, assessed.holder)) {
+      throw new LockBusyError(lockPath, recheck.holder ?? assessed.holder, [
+        '接管 guard 期间锁的状态变了：不再满足接管条件，放弃接管（不覆盖、不删除当前持有者的锁）。',
+        ...(recheck.recoverable ? [] : recheck.reasons),
+      ]);
+    }
+
+    // 先移走旧锁目录，再用 mkdir 在原路径上竞争：这一步决定谁是新持有者。
+    // 隔离名同样唯一，所以输的一方绝不会删到赢家的锁目录。
+    options?.onBeforeQuarantine?.();
+    const quarantine = uniqueSiblingPath(lockPath, 'stale');
+    try {
+      renameSync(lockPath, quarantine);
+    } catch (error) {
+      throw new LockBusyError(lockPath, readHolder(lockPath), [
+        `把旧锁移进隔离目录失败（${(error as Error).message}），放弃接管。`,
+      ]);
+    }
+
+    // 移完之后先看一眼移走的确实是刚才那把残锁。
+    //
+    // 上面那次重读与 rename 之间还有一个很窄的窗口：另一个候选可能刚完成接管，
+    // 把一把**新的、活着的**锁放在原路径上。不查这一步，我们会把别人刚拿到的
+    // 锁卷进隔离目录，接着在原路径上 mkdir 成功——两个进程同时以为自己持有锁，
+    // 正是这把锁要防的事。
+    const moved = readHolder(quarantine);
+    if (!sameHolderIdentity(moved, assessed.holder)) {
+      // 隔离目录里是别人的锁，不是我们证实过的那把残锁：到这里就停手。
+      //
+      // **不 rename 回去**：原路径上可能已经有新的持有者，而 POSIX 的 rename
+      // 把目录移到一个已存在的空目录上是静默替换——那就等于我们亲手删掉了
+      // 别人的锁，比不动手糟得多。**也不 rm**：里面的持有者可能正活着。
+      // 这个隔离目录名是本次调用独有的，谁都不会来动它，就留在这里交给人工，
+      // 恢复/删除命令写进错误信息（见 quarantineMismatchReasons）。
+      throw new LockBusyError(lockPath, moved ?? assessed.holder, quarantineMismatchReasons(lockPath, quarantine, moved));
+    }
+    // 到这里隔离目录里装的是已证实死亡的残锁，归本次接管清理。
+    ownQuarantine = quarantine;
+
+    const release = acquireAfterQuarantine(
+      statePath,
+      lockPath,
+      what,
+      identity,
+      options?.heartbeatIntervalMs,
+    );
+
+    // 先确实持有，再留痕。审计是「这次接管发生过」的唯一记录：写不进去就
+    // 放掉自己的新锁报错，绝不允许「接管成功但没人知道」。
+    try {
+      appendTakeoverAudit(statePath, assessed.holder, identity, probes.now());
+    } catch (error) {
+      release();
+      throw new Error(`接管残锁后写审计失败，已释放本次取得的锁：${(error as Error).message}`);
+    }
+    return release;
+  } finally {
+    // 门只放自己的（releaseTakeoverGate 会校验标记），绝不删别人的门；
+    // 隔离目录只有在查出里面确实装着已证实死亡的残锁时才登记进 ownQuarantine，
+    // 装着别人持有者的那把（隔离对象不符的分支）不登记，也就不在这里被删。
+    releaseTakeoverGate(gate);
+    if (ownQuarantine !== undefined) rmSync(ownQuarantine, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 「隔离目录里的锁不是我们证实过的那把残锁」时的逐条报告。
+ *
+ * 这是整条接管路径上唯一会把别人的锁目录挪到别处的分支，所以必须把话说全：
+ * 我们停在哪、那个目录现在在哪、原路径是什么状态、人工怎么判断和恢复。
+ * 说不清楚，人就只看到状态目录里少了一把锁，却不知道该去哪里找它。
+ */
+function quarantineMismatchReasons(
+  lockPath: string,
+  quarantine: string,
+  moved: LockInfo | undefined,
+): string[] {
+  return [
+    '隔离目录里不是刚才证实的那把残锁（另一个候选已经接管，或者锁已经换人），放弃接管。',
+    '没有覆盖、也没有删除原锁路径上的任何东西；隔离目录保持原样，不由本次接管清理。',
+    existsSync(lockPath)
+      ? `原锁路径 ${lockPath} 当前已存在，可能是新持有者的锁：我们绝不触碰。`
+      : `原锁路径 ${lockPath} 当前是空的：另一个持有者的锁目录被移到了隔离目录，请优先核实并恢复它，否则它会以为自己在持锁而无人可见。`,
+    `隔离目录：${quarantine}`,
+    `其中的持有者：${
+      moved === undefined
+        ? '元数据缺失或损坏'
+        : `pid=${moved.pid}，instanceId=${moved.instanceId ?? '（无）'}，since=${moved.since}，what=${moved.what}`
+    }`,
+    `请先核实其中持有者确实已退出：kill -0 ${moved?.pid ?? '<pid>'} && echo alive || echo not-alive`,
+    `确认它已退出、且 ${lockPath} 当前没有持有者时的恢复命令（POSIX）：test ! -e ${shellQuote(lockPath)} && mv ${shellQuote(quarantine)} ${shellQuote(lockPath)}`,
+    `确认它已退出且不需要恢复时的删除命令（POSIX）：rm -rf -- ${shellQuote(quarantine)}`,
+    `恢复（Windows PowerShell）：if (-not (Test-Path -LiteralPath ${powershellQuote(lockPath)})) { Move-Item -LiteralPath ${powershellQuote(quarantine)} -Destination ${powershellQuote(lockPath)} }`,
+    `删除（Windows PowerShell）：Remove-Item -LiteralPath ${powershellQuote(quarantine)} -Recurse -Force`,
+  ];
+}
+
+/**
+ * 同目录下的唯一名字。
+ *
+ * 必须同目录：rename / mkdir 的原子性只在同一个文件系统上成立。名字里带
+ * pid 与随机串，两个候选不会撞到同一个隔离名，也就不会互相删对方的目录。
+ */
+function uniqueSiblingPath(lockPath: string, tag: string): string {
+  const nonce = `${process.pid.toString(36)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${lockPath}.${tag}-${nonce}`;
+}
+
+function sameHolderIdentity(left: LockInfo | undefined, right: LockInfo | undefined): boolean {
+  if (left === undefined || right === undefined) return false;
+  return (
+    left.pid === right.pid &&
+    left.since === right.since &&
+    left.heartbeatAt === right.heartbeatAt &&
+    left.instanceId === right.instanceId
+  );
+}
+
+/**
+ * 依次证实四个条件，得出「这把锁是不是可以安全接管的残锁」。
+ *
+ * 四条都写进 reasons 而不是遇到第一条就返回：人看报告时要一次看懂
+ * 「是进程还活着，还是心跳没停、还是端口还占着」，而不是改一个条件重跑一次。
+ */
+async function assessStaleLock(lockPath: string, probes: StaleLockProbes): Promise<StaleLockAssessment> {
+  const holder = readHolder(lockPath);
+  if (!holder) {
+    return {
+      recoverable: false,
+      holder: undefined,
+      reasons: ['锁目录存在但持有者元数据缺失或损坏，无法证实旧持有者已死亡。'],
+    };
+  }
+
+  const reasons: string[] = [];
+
+  const heartbeatMs = holder.heartbeatAt === undefined ? Number.NaN : Date.parse(holder.heartbeatAt);
+  if (!Number.isFinite(heartbeatMs)) {
+    reasons.push(
+      `旧持有者 pid=${holder.pid} 没有可解析的 heartbeatAt（旧版本锁或字段缺失），说不清它停摆了多久。`,
+    );
+  }
+
+  if (probes.pidAlive(holder.pid)) {
+    reasons.push(
+      `旧持有者进程 pid=${holder.pid} 仍然存活（EPERM 也算存活）；进程卡住和进程已死从外面看一模一样。`,
+    );
+  }
+
+  if (Number.isFinite(heartbeatMs)) {
+    const idleMs = probes.now() - heartbeatMs;
+    if (idleMs <= STALE_LOCK_HEARTBEAT_MS) {
+      reasons.push(
+        `旧持有者 pid=${holder.pid} 的心跳还在阈值内：距今 ${idleMs}ms ≤ ${STALE_LOCK_HEARTBEAT_MS}ms。`,
+      );
+    }
+  }
+
+  if (holder.port === undefined) {
+    // 没登记端口：没有常驻服务，也就没有第二个写者能借那个端口落盘。
+  } else {
+    try {
+      if (await probes.portListening(holder.port)) {
+        reasons.push(`旧持有者登记的端口 ${holder.port} 仍在监听，可能有另一个写者活着。`);
+      }
+    } catch (error) {
+      // 只有明确的「无人监听」才放行；网络错误、超时、权限问题一律算未知。
+      reasons.push(
+        `旧持有者登记的端口 ${holder.port} 状态未知（${(error as Error).message}），不能当作无人监听。`,
+      );
+    }
+  }
+
+  if (reasons.length > 0) return { recoverable: false, holder, reasons };
+  return { recoverable: true, holder };
+}
+
+function acquireAfterQuarantine(
+  statePath: string,
+  lockPath: string,
+  what: string,
+  identity: { instanceId: string; apiVersion: string } | undefined,
+  heartbeatIntervalMs: number | undefined,
+): () => void {
+  try {
+    // 门已经在接管调用手里，这里只能走不抢门的实现：再 mkdir 一次门会撞上
+    // 自己（fail closed），接管就永远做不成。
+    return acquireLockHoldingGate(statePath, lockPath, what, identity, { heartbeatIntervalMs });
+  } catch (error) {
+    throw new LockBusyError(lockPath, readHolder(lockPath), [
+      `隔离旧锁之后锁被其他写者取得（${(error as Error).message}），放弃接管。`,
+    ]);
+  }
+}
+
+function appendTakeoverAudit(
+  statePath: string,
+  oldHolder: LockInfo,
+  identity: { instanceId: string; apiVersion: string } | undefined,
+  nowMs: number,
+): void {
+  const record: LockTakeoverAuditRecord = {
+    at: new Date(nowMs).toISOString(),
+    oldPid: oldHolder.pid,
+    newPid: process.pid,
+  };
+  if (oldHolder.instanceId !== undefined) record.oldInstanceId = oldHolder.instanceId;
+  if (oldHolder.heartbeatAt !== undefined) record.oldHeartbeatAt = oldHolder.heartbeatAt;
+  if (identity !== undefined) record.newInstanceId = identity.instanceId;
+  // append 而不是重写：审计是流水，接管可能一次接一次，历史不能被后一次抹掉。
+  appendFileSync(lockAuditPathFor(statePath), `${JSON.stringify(record)}\n`, 'utf8');
+}
+
+/**
+ * 端口是否有人监听。
+ *
+ * 只有明确的 ECONNREFUSED 才等于「确定无人监听」。「连不上」和「没人听」是
+ * 两回事：超时、EHOSTUNREACH、EPERM 都可能是本机网络栈/防火墙的问题，
+ * 把它们当成空闲就会在别人还活着的时候接管锁。
+ */
+function probePortListening(port: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const socket = connect({ host: '127.0.0.1', family: 4, port });
+    const done = (error?: Error, listening?: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(listening as boolean);
+    };
+    socket.setTimeout(PORT_PROBE_TIMEOUT_MS, () => done(new Error(`连接 127.0.0.1:${port} 超时`)));
+    socket.once('connect', () => done(undefined, true));
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ECONNREFUSED') done(undefined, false);
+      else done(error);
+    });
   });
 }

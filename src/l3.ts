@@ -38,9 +38,11 @@ const MAIN_STATE_WRITES = new Set([
   'cancel',
   'pause',
   'resume',
+  'park',
   'retire',
   'rerun',
   'ack',
+  'candidate',
 ]);
 
 function arg(name: string): string | undefined {
@@ -155,6 +157,23 @@ function assertWriteArgs(command: string, target: string | undefined): void {
   }
   if (command === 'cancel' || command === 'pause' || command === 'resume') {
     if (!target) throw new Error('需要 missionId');
+    if (command === 'resume') {
+      const reason = reviewFlag('--reason');
+      const reviewer = reviewFlag('--as');
+      const answer = reviewFlag('--answer');
+      if (answer.present && answer.value === undefined) throw new Error('--answer 缺参数值。');
+      if (answer.present && !reason.present && !reviewer.present) {
+        throw new Error('--answer 只能与带检视者签名的 Mission resume 一起使用。');
+      }
+      if ((reason.present || reviewer.present) && (!reason.value?.trim() || !reviewer.value?.trim())) {
+        throw new Error('带检视者签名的 resume 必须提供非空 --reason 与 --as。');
+      }
+    }
+    return;
+  }
+  if (command === 'park') {
+    if (!target) throw new Error('需要 missionId');
+    if (!arg('--reason')?.trim() || !arg('--as')?.trim()) throw new Error('park 必须提供非空 --reason 与 --as。');
     return;
   }
   if (command === 'retire') {
@@ -170,6 +189,12 @@ function assertWriteArgs(command: string, target: string | undefined): void {
   if (command === 'ack') {
     if (!target) throw new Error('需要 deliveryId');
   }
+  if (command === 'candidate') {
+    if (target !== 'reset') throw new Error('candidate 只支持 reset <profileId>。');
+    const profileId = process.argv[4];
+    if (!profileId || profileId.startsWith('--')) throw new Error('需要 profileId');
+    if (!arg('--reason')?.trim()) throw new Error('candidate reset 必须提供非空 --reason。');
+  }
 }
 
 async function forwardWriteCommand(holder: LockInfo, command: string, target: string): Promise<void> {
@@ -177,6 +202,18 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
   const post = (path: string, body: unknown) =>
     loopbackControlRequest(identity, { method: 'POST', path, body });
   const get = (path: string) => loopbackControlRequest(identity, { method: 'GET', path });
+
+  if (command === 'candidate' && target === 'reset') {
+    const profileId = process.argv[4]!;
+    // 服务端返回 `{ profileId, circuit }`：state 在 circuit 里，取错层会把 undefined 当成「未 closed」。
+    const result = (await post(`/api/pools/${encodeURIComponent(profileId)}/circuit/reset`, {
+      reason: arg('--reason'),
+    })) as { circuit: { state: string } };
+    const state = result.circuit.state;
+    if (state !== 'closed') throw new Error(`候选 ${profileId} 复位失败：状态 ${state}`);
+    console.log(`候选 ${profileId} 已复位（closed）`);
+    return;
+  }
 
   if (command === 'merge' || command === 'send-back' || command === 'abandon') {
     const reason = arg('--reason');
@@ -246,6 +283,14 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
     return;
   }
 
+  if (command === 'park') {
+    await post(`/api/missions/${encodeURIComponent(target)}/park`, { reason: arg('--reason'), reviewer: arg('--as') });
+    return;
+  }
+  if (command === 'resume' && arg('--reason') !== undefined) {
+    await post(`/api/missions/${encodeURIComponent(target)}/parked-resume`, { reason: arg('--reason'), reviewer: arg('--as'), ...(arg('--answer') !== undefined ? { answer: arg('--answer') } : {}) });
+    return;
+  }
   if (command === 'pause') {
     await post(`/api/missions/${encodeURIComponent(target)}/pause`, {});
     console.log(`Mission ${target} 已暂停。阶段保持原样，resume 之后重跑 run-mission 即可。`);
@@ -601,6 +646,13 @@ async function main() {
     return;
   }
 
+  if (command === 'park') {
+    if (!target) throw new Error('需要 missionId');
+    await platform.parkMission(target, { reason: arg('--reason')!, reviewer: arg('--as')! });
+    await persist();
+    return;
+  }
+
   if (command === 'cancel' || command === 'pause' || command === 'resume') {
     if (!target) throw new Error('需要 missionId');
     if (command === 'cancel') {
@@ -612,6 +664,9 @@ async function main() {
       await platform.pauseMission(target);
       await persist();
       console.log(`Mission ${target} 已暂停。阶段保持原样，resume 之后重跑 run-mission 即可。`);
+    } else if (arg('--reason') !== undefined) {
+      await platform.resumeParkedMission(target, { reason: arg('--reason')!, reviewer: arg('--as')!, ...(arg('--answer') !== undefined ? { answer: arg('--answer') } : {}) });
+      await persist();
     } else {
       await platform.resumeMission(target);
       await persist();
@@ -721,6 +776,29 @@ async function main() {
     return;
   }
 
+  if (command === 'candidate' && target === 'reset') {
+    const profileId = process.argv[4]!;
+    // list() 给的是按 role 分桶的快照，不是扁平数组：漏掉任一角色会把在册候选判成不存在。
+    const pool = await built.agentPool.list();
+    const exists = [
+      ...pool.coordinator,
+      ...pool.executor,
+      ...pool.independent_reviewer,
+    ].some((entry) => entry.profileId === profileId);
+    if (!exists) throw new Error(`不存在候选 profileId：${profileId}`);
+    const circuit = await built.candidateCircuits.get(profileId);
+    if (circuit.state === 'closed') throw new Error(`候选 ${profileId} 的熔断已 closed，不能复位`);
+    await built.candidateCircuits.reset({
+      profileId,
+      actor: 'operator',
+      at: new Date().toISOString(),
+      reason: arg('--reason')!.trim(),
+    });
+    await persist();
+    console.log(`候选 ${profileId} 已复位（closed）`);
+    return;
+  }
+
   if (command === 'ack') {
     if (!target) throw new Error('需要 deliveryId');
     const delivery = await deliveries.acknowledge(target);
@@ -820,6 +898,7 @@ async function main() {
   node src/l3.ts rerun <missionId> [--as <id>] 照当前契约再跑一遍（另起一条，原来那条不动）
   node src/l3.ts runs <missionId>             同一任务的历次运行横着比：lane/token/时延/打回/升级
   node src/l3.ts ack <deliveryId>             确认收到
+  node src/l3.ts candidate reset <profileId> --reason "..."  人工复位候选熔断
   node src/l3.ts plan [--run <记录>]          方案运行交接面：✓ 已合入 / ⏸ 挂起等你 / ⊘ 检视者跳过 / ○ 没轮到
   node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "..." [--drop F7,F8] --as <检视者>
   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."] [--run <记录>]

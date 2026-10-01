@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -594,5 +595,30 @@ describe('file-store archiveMission compaction', () => {
     assert.throws(() => store.archiveMission('P1', '../M-big-1'), /archive mission id 非法/);
     assert.throws(() => store.archiveMission('P1', 'M/arch'), /archive mission id 非法/);
     assert.equal(readFileSync(statePath, 'utf8'), before);
+  });
+
+  test('主状态 rename 前两次 EPERM 后成功：事务提交，可重开读回', async () => {
+    const dir = tempDir();
+    const statePath = join(dir, 'state.json');
+    let calls = 0;
+    const store = new FileStateStore(statePath, {
+      rename: (from, to) => {
+        calls += 1;
+        // 模拟 Windows 杀软/索引器短暂占文件：前两次拒绝，退避后就该放行。
+        if (calls <= 2) throw Object.assign(new Error('locked'), { code: 'EPERM' });
+        renameSync(from, to);
+      },
+    });
+    const projects = new FileProjectRepository(store);
+
+    await store.run(async () => {
+      await projects.save(Project.create({ id: 'P-retry' }));
+    });
+
+    assert.equal(calls, 3);
+    assert.equal(existsSync(statePath), true);
+    const reopened = new FileStateStore(statePath);
+    const again = await new FileProjectRepository(reopened).get('P-retry');
+    assert.equal(again?.id, 'P-retry');
   });
 });

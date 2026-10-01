@@ -535,18 +535,14 @@ describe('static isolation', () => {
     assert.doesNotMatch(plat, /application\/validation/);
   });
 
-  test('engine 无 ExecutionResult / EvidenceRecord pass dependency', () => {
-    const eng = stripComments(
-      readFileSync(join(srcRoot, 'application/validation/engine.ts'), 'utf8'),
-    );
+  // engine.ts 同两条排除由「12. Engine 接口无 executor self-report / Evidence 输入」覆盖，此处只守 reader 自己的隔离边界
+  test('changed-path-reader 无 ExecutionResult / EvidenceRecord pass dependency', () => {
     const reader = stripComments(
       readFileSync(
         join(srcRoot, 'application/validation/workspace-changed-path-reader.ts'),
         'utf8',
       ),
     );
-    assert.doesNotMatch(eng, /ExecutionResult/);
-    assert.doesNotMatch(eng, /EvidenceRecord/);
     assert.doesNotMatch(reader, /EvidenceRecord/);
     assert.doesNotMatch(reader, /ExecutionResult/);
     assert.match(reader, /\.diff\(/);

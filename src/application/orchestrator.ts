@@ -21,7 +21,12 @@ import type {
   QueuedHopRepository,
   RuntimeOutcome,
 } from './ports.ts';
-import type { MissionView, Platform, QueueClaimIdentity } from './platform.ts';
+import type {
+  MissionView,
+  Platform,
+  QueueClaimIdentity,
+  StandardAutoRedispatchHandoff,
+} from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
@@ -30,7 +35,8 @@ import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
-import { classifyCandidateFailure } from './candidate-circuit.ts';
+import { classifyCandidateFailure, resolveQuotaResetTime, type CandidateCircuit } from './candidate-circuit.ts';
+import { getRuntimeUsage } from './runtime-catalog.ts';
 import {
   acquireQueuedHop,
   compareHopFairness,
@@ -73,6 +79,32 @@ export interface RolePool {
 
 /** 候选的可用性。v1 只有这三种，不做 closed/open/half-open。 */
 export type CandidateAvailability = 'available' | 'cooldown';
+
+/** 三类 agent 各自的候选池名字。与 RolePool 一一对应，不含旁路。 */
+export type RolePoolName = 'coordinator' | 'executor' | 'independent_reviewer';
+
+/**
+ * 冷却快照里的可用性。比 CandidateAvailability 多一档 unknown。
+ *
+ * unknown 的语义是**不可证明可用**——持久熔断处在 half_open（探针在跑）、
+ * 到期值读不出来、或者仓储给了读不懂的行。它**不是**冷却：把 unknown 折算成
+ * 一个等待时长，等于把一个「仓储坏了，要人看」的情况伪装成「等一会就好」。
+ */
+export type RoleCooldownAvailability = 'available' | 'cooldown' | 'unknown';
+
+export interface RoleCooldownCandidate {
+  readonly profileId: string;
+  readonly availability: RoleCooldownAvailability;
+  /** 冷却到期（ISO）。只有 availability === 'cooldown' 时出现。 */
+  readonly until?: string;
+  /**
+   * 从调用方给的 now 起还要等多久（毫秒）。available 是 0。
+   *
+   * 已过期的 open 会给出 0：调度器把这种行当可用（见 #availableCandidates）。
+   * 调用方据此决定等不等，而不是拿 availability 字符串当等待时长。
+   */
+  readonly retryAfterMs?: number;
+}
 
 /**
  * 心跳间隔。
@@ -143,6 +175,8 @@ export interface OrchestratorDeps {
    * 缺省 0：立刻 waiting，保持 D7。生产 CLI 传 120000，让首次 1s 退避不必结束运行。
    */
   inRunBackoffWaitMs?: number;
+  usageReader?: () => Promise<{ readonly available: boolean; readonly [key: string]: unknown } | readonly unknown[]>;
+  now?: () => Date;
 }
 
 /** 运行内退避等待上限：非负安全整数，缺省 0。非法值必须在构造时抛，不能拖到第一跳失败。 */
@@ -170,8 +204,20 @@ export type MissionRunOutcome =
   /**
    * 暂时进行不下去，但**不是失败**：候选在冷却、尝试到上限之类。
    * 和 stalled 分开，因为处置不同——这个等一会儿重跑就行。
+   *
+   * `candidateRole` 只在**确由该角色的候选拿不出人**造成 no_available_agent
+   * 时才带。
+   *
+   * 为什么不能拿 reason 自己当判据：`no_available_agent` 这个字符串同时盖着
+   * 几件不同的事故——冻结范围检查点失败也用它。方案驱动（#27 的等待探针）
+   * 若只看 reason 就去等候选冷却，会把「检查点失败、要人来看」写成
+   * 「等一会儿就好」，于是没人来看。
+   *
+   * 为什么带了角色也**不等于**全在冷却：角色只说「这一跳缺的是谁的人」，
+   * 候选可能只是 unknown（探针在跑、仓储读不懂）。到底等不等，得再拿
+   * roleCooldownSnapshot 按这个角色算一遍。
    */
-  | { kind: 'waiting'; reason: WaitReason; detail: string }
+  | { kind: 'waiting'; reason: WaitReason; detail: string; candidateRole?: RolePoolName }
   | { kind: 'stalled'; reason: string };
 
 /**
@@ -201,6 +247,7 @@ function coordinatorInstruction(view: {
   escalationLog: { question: string; answer?: string }[];
   workItems: { id: string; status: string }[];
   promotions?: readonly { triggerRule: string }[];
+  conflictFiles?: readonly string[];
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -210,7 +257,33 @@ function coordinatorInstruction(view: {
     view.escalationLog.length === 0 &&
     !view.finalReview;
   const body = coordinatorBody(view);
-  return opening ? body : [FRESH_SESSION_PREFIX, '', body].join('\n');
+  const freshBody = opening ? body : [FRESH_SESSION_PREFIX, '', body].join('\n');
+  if (!view.conflictFiles?.length) return freshBody;
+  return [
+    '**阻断：Mission Git index 存在未合并路径。请先创建工作项修复冲突，保留双方改动，不要丢弃任一方。**',
+    ...view.conflictFiles.map((file) => `- ${file}`),
+    '',
+    freshBody,
+  ].join('\n');
+}
+
+/**
+ * 机器接续这一跳时对执行者说什么。
+ *
+ * 上一轮为什么被退回、上轮说明是什么，本来会被这一跳从头忘掉——执行者于是可能
+ * 把同一个错再犯一遍。平台把它持久化在事件流里，这里只负责把它说清楚，并且
+ * 重申「冻结工单才是权威」：摘要是人话，不是可以拿来改目标的依据。
+ */
+function executorContinuationInstruction(handoff: StandardAutoRedispatchHandoff): string {
+  const why =
+    handoff.reason === 'partial'
+      ? `你上一轮提交的是半成品（这是第 ${handoff.count} 次接着做）`
+      : `你上一轮交付的冻结命令验证没通过（这是第 ${handoff.count} 次退回重做）`;
+  return [
+    `${why}，平台把同一个工作项退回给你。接着做，不要从头再来。`,
+    '先调用 coagent_get_work_order 重新读一遍冻结工单——它才是权威，下面的说明只是补充。',
+    `上一轮说明：${handoff.summary}`,
+  ].join('\n');
 }
 
 function coordinatorBody(view: {
@@ -334,6 +407,8 @@ export class Orchestrator {
   #workspace: WorkspaceManager;
   #wallClockMs: number;
   #candidateCircuits: CandidateCircuitRepository | undefined;
+  #usageReader: () => Promise<{ readonly available: boolean; readonly [key: string]: unknown } | readonly unknown[]>;
+  #now: () => Date;
   #queuedHops: QueuedHopRepository | undefined;
   #hopScheduler: DurableScheduler | undefined;
   #hopClock: Clock;
@@ -372,6 +447,8 @@ export class Orchestrator {
     this.#workspace = deps.workspace;
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
     this.#candidateCircuits = deps.candidateCircuits;
+    this.#usageReader = deps.usageReader ?? getRuntimeUsage;
+    this.#now = deps.now ?? (() => new Date());
     this.#staleAcknowledged = deps.acceptStaleBase ?? false;
     this.#queuedHops = deps.queuedHops;
     this.#hopClock = deps.hopClock ?? { now: () => new Date() };
@@ -540,6 +617,18 @@ export class Orchestrator {
         return lightweight.outcome;
       }
 
+      // 每轮都读取 Git index 当前事实；事件可能已过期，不能作为冲突是否仍存在的依据。
+      // 查询失败直接向上抛出，避免把未知状态误当作无冲突而启动执行者。
+      const conflictFiles = await this.#workspace.getMissionConflictFiles?.(
+        missionId,
+        options.projectRoot,
+      );
+      const activeConflicts = conflictFiles?.length ? conflictFiles : undefined;
+      const oldDispatchedIds = await this.#platform.recordConflictDispatchBarrier(
+        missionId,
+        conflictFiles ?? [],
+      );
+
       // 有已派发但还没交回结果的工作项，就先把它们跑完。
       //
       // **但只在 executing 阶段跑。** 退回 planning 意味着有人（L3 改了契约、
@@ -547,18 +636,53 @@ export class Orchestrator {
       // 就是明知要重做还先花一遍钱。让协调者先说话。
       const pending =
         view.status === 'executing'
-          ? view.workItems.filter((item) => item.status === 'dispatched')
+          ? view.workItems.filter(
+              (item) =>
+                item.status === 'dispatched' &&
+                (!activeConflicts || !oldDispatchedIds.includes(item.id)),
+            )
           : [];
       if (pending.length > 0) {
         for (const item of pending) {
+          // 只有冻结工单带了 validation.commands 的工作项才需要机器验证，也才需要基线。
+          // 没命令的一律不进这条路：给它们记基线等于凭空多出一批事件，而 W-321
+          // 的验证入口对空命令本来就是 no-op。
+          const needsStandardValidation = (item.order?.validation?.commands?.length ?? 0) > 0;
+          // 这一跳是不是「接着上一轮做」：平台把退回原因和上轮说明持久化在事件里，
+          // 断线重启后照样读得回来。读到了就写进唤醒语，并把 partial 留下的续跑句柄
+          // 原样交给运行时——执行者不必把同一件事从头再做一遍。
+          const handoff = await this.#platform.getStandardAutoRedispatchHandoff(
+            missionId,
+            item.id,
+          );
           const hop = await this.#runHop({
             role: 'executor',
             missionId,
             workItemId: item.id,
             cwd,
             pool: this.#executor,
-            instruction:
-              '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+            instruction: handoff
+              ? executorContinuationInstruction(handoff)
+              : '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+            ...(handoff?.resumeRef !== undefined ? { resumeRef: handoff.resumeRef } : {}),
+            ...(needsStandardValidation
+              ? {
+                  // 基线要在执行者真起来之前落盘：那时候 cwd 的 HEAD 才是这条工单的
+                  // 起点。重启续跑（交卷之后、报告之前进程被杀）就是靠它才能补验；
+                  // 放到交卷之后记，diff 会把自己刚提交的改动算成没改。
+                  onExecutorStart: async () => {
+                    // 读不到可信 HEAD 就不记：宁可没有基线（验证入口 fail-closed），
+                    // 也不要一条谁都发现不了的假基线。
+                    const head = await this.#workspace.head(cwd).catch(() => undefined);
+                    if (!head) return;
+                    await this.#platform.recordStandardValidationBaseline({
+                      missionId,
+                      workItemId: item.id,
+                      head,
+                    });
+                  },
+                }
+              : {}),
           });
           if (hop && 'alreadyCompleted' in hop) continue;
           if (hop && 'retrySameSlot' in hop) {
@@ -569,12 +693,20 @@ export class Orchestrator {
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
             await this.#platform.setWaitReason(missionId, reason, detail);
-            return { kind: 'waiting', reason, detail };
+            return this.#waitingOutcome(reason, detail, hop?.candidateRole);
           }
           if ('persistentUnknown' in hop && hop.persistentUnknown) {
             const detail = '持久候选熔断记录为 unknown；停止本次 runMission，避免后续轮次绕过保守轮换';
             await this.#platform.setWaitReason(missionId, 'no_available_agent', detail);
             return { kind: 'waiting', reason: 'no_available_agent', detail };
+          }
+          // 交卷了：趁协调者还没被叫起来，先把冻结命令跑一遍存成报告。报告只是给
+          // 协调者的证据，不是验收——跑绿了也不 reject/retry，机器不替它评审。
+          //
+          // **partial 不跑。** 冻结命令是给「做完了」的交付当验收材料的；拿半成品
+          // 去跑，等于把「还没做完」判成「做法不对」，然后退回一次本来就要接着做的交付。
+          if (needsStandardValidation && !(await this.#standardSubmitIsPartial(missionId, item.id))) {
+            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
           }
           // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
           // 没交卷（这一跳没 structured submit）时平台自己会跳过。
@@ -583,9 +715,38 @@ export class Orchestrator {
           const gate = await this.#enforceAuthoritativeBudget(missionId);
           if (gate.kind === 'stop') return gate.outcome;
           if (gate.kind === 'continue') break;
+
+          // 机器接续：partial、或验证没过，平台直接把工单退回执行者（最多两次）。
+          // 续派成功就不用叫协调者——下一轮 pending 会把这条工单重新领起来；
+          // 绿报告 / 缺报告 / blocked / 触顶都返回 false，原样交给 L2。
+          await this.#autoRedispatchStandard(missionId, item.id);
         }
         continue;
       }
+
+      // 补验：重启续跑、或上一轮验完没落盘时，工作项已经 submitted 但还没有报告。
+      // 放在协调者 hop 之前——它这一跳读的就是这份报告。W-321 幂等：已有报告
+      // （同一次 submitted attempt）不会重跑命令，只把那份报告原样返回。
+      let redispatchedOnRecovery = false;
+      for (const item of view.workItems) {
+        if (item.status !== 'submitted') continue;
+        // 只在**有命令且不是 partial** 时才补验。**不能因为 commands 为空就提前
+        // continue**：无命令的 partial 若在 pending 自动接续前停机，恢复后这里漏掉
+        // 续派就会错误叫醒 L2。
+        if ((item.order?.validation?.commands?.length ?? 0) > 0) {
+          // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
+          if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
+            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+          }
+        }
+        // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为
+        // 「重启过」就多叫一次协调者。幂等——同一次提交已经续派过、或已经触顶，
+        // 或者平台判定无可续派依据（绿报告 / 缺报告 / blocked / 非 partial），
+        // 这里都是 no-op，原样交给 L2。
+        if (await this.#autoRedispatchStandard(missionId, item.id)) redispatchedOnRecovery = true;
+      }
+      // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
+      if (redispatchedOnRecovery) continue;
 
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
       //
@@ -609,7 +770,7 @@ export class Orchestrator {
         missionId,
         cwd,
         pool: this.#coordinator,
-        instruction: coordinatorInstruction(view),
+        instruction: coordinatorInstruction({ ...view, conflictFiles: activeConflicts }),
       });
       if (hop && 'alreadyCompleted' in hop) continue;
       if (hop && 'retrySameSlot' in hop) continue;
@@ -631,7 +792,7 @@ export class Orchestrator {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason);
         await this.#platform.setWaitReason(missionId, reason, detail);
-        return { kind: 'waiting', reason, detail };
+        return this.#waitingOutcome(reason, detail, hop?.candidateRole);
       }
 
       // GATE-POST after coordinator hop.
@@ -978,7 +1139,10 @@ export class Orchestrator {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
         await this.#platform.setWaitReason(missionId, reason, detail);
-        return { kind: 'outcome', outcome: { kind: 'waiting', reason, detail } };
+        return {
+          kind: 'outcome',
+          outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole),
+        };
       }
       // reportBlocked 把非空提问记成 Mission 升级。不在这里读一次视图的话，
       // 下一轮主循环才会看到 openEscalations——中间那一轮只是空转。
@@ -1099,12 +1263,54 @@ export class Orchestrator {
     const available: ExecutionProfile[] = [];
     for (const profile of pool.candidates) {
       const circuit = await this.#candidateCircuits.get(profile.profileId);
-      if (circuit.state === 'closed') available.push(profile);
-      else if (circuit.state === 'open' && Date.parse(circuit.openUntil) <= now) {
+      if (circuit.state === 'closed') {
+        const resetAt = await this.#usageResetAt(profile, now);
+        if (resetAt) {
+          await this.#candidateCircuits.open({ profileId: profile.profileId, failureClass: 'quota', openUntil: resetAt });
+          continue;
+        }
+        available.push(profile);
+      } else if (circuit.state === 'open' && circuit.openUntil !== null && Date.parse(circuit.openUntil) <= now) {
+        if (circuit.failureClass === 'quota') {
+          const usage = await this.#quotaUsage(profile, now);
+          if (usage.kind !== 'available') continue;
+        }
         available.push(profile);
       }
     }
     return available;
+  }
+
+  async #usageResetAt(profile: ExecutionProfile, now: number): Promise<string | undefined> {
+    const usage = await this.#quotaUsage(profile, now);
+    return usage.kind === 'exhausted' ? usage.resetAt : undefined;
+  }
+
+  async #quotaUsage(profile: ExecutionProfile, now: number): Promise<
+    { kind: 'exhausted'; resetAt: string } | { kind: 'available' | 'unknown' }
+  > {
+    const providerFact = profile.facts?.find((fact) => fact.key === 'provider');
+    if (!providerFact) return { kind: 'unknown' };
+    try {
+      const usage = await this.#usageReader();
+      const providers = Array.isArray(usage) ? usage : usage.providers;
+      if (!Array.isArray(usage) && !usage.available) return { kind: 'unknown' };
+      if (!Array.isArray(providers)) return { kind: 'unknown' };
+      const row = providers.find((entry) =>
+        entry !== null && typeof entry === 'object' &&
+        (entry as Record<string, unknown>).provider === providerFact.value &&
+        (entry as Record<string, unknown>).status === 'ok',
+      ) as Record<string, unknown> | undefined;
+      if (!row) return { kind: 'unknown' };
+      const exhausted = row.remainingPercent === 0 || (typeof row.usedPercent === 'number' && row.usedPercent >= 100);
+      if (exhausted) {
+        const reset = typeof row.resetAt === 'string' ? Date.parse(row.resetAt) : Number.NaN;
+        if (Number.isFinite(reset) && reset > now) return { kind: 'exhausted', resetAt: new Date(reset).toISOString() };
+      }
+      if ((typeof row.remainingPercent === 'number' && row.remainingPercent > 0) ||
+          (typeof row.usedPercent === 'number' && row.usedPercent < 100)) return { kind: 'available' };
+      return { kind: 'unknown' };
+    } catch { return { kind: 'unknown' }; }
   }
 
   /** 候选的可用性快照，供界面显示"为什么停着"。 */
@@ -1121,6 +1327,81 @@ export class Orchestrator {
         ? { profileId: profile.profileId, availability: 'cooldown' as const, until: new Date(until).toISOString() }
         : { profileId: profile.profileId, availability: 'available' as const };
     });
+  }
+
+  /**
+   * 某一角色候选池的冷却快照：每个候选现在能不能用、最早什么时候能用。
+   *
+   * 为什么要有：候选全在短冷却时，方案驱动该在**运行内等**，而不是开升级单。
+   * 判据只能来自权威候选池——注入了 candidateCircuits 就按它读，否则读本进程
+   * 的 #cooldown。拿日志文案猜会把「可用」误判成「冷却」，然后把一次本可以
+   * 自愈的等待写成人工单。
+   *
+   * 三条不许违反的口径：
+   *   - **严格按 role 选池**。混进别的角色的候选，会让「协调者全冷却」看起来
+   *     像「执行者也全冷却」，方案驱动就会去等一个根本不用等的角色。
+   *   - **unknown 不是 cooldown**。half_open 的探针在跑、到期值非法、仓储读到
+   *     解释不了的行，都只能说「不可证明可用」，不能编一个冷却时长出来。
+   *   - **没有候选就是空数组**。池没装配（例如没有独立检视）不等于「全在冷却」。
+   */
+  async roleCooldownSnapshot(
+    role: RolePoolName,
+    now: number = Date.now(),
+  ): Promise<RoleCooldownCandidate[]> {
+    const pool =
+      role === 'coordinator'
+        ? this.#coordinator
+        : role === 'executor'
+          ? this.#executor
+          : this.#independentReviewer;
+    if (!pool) return [];
+    const snapshot: RoleCooldownCandidate[] = [];
+    for (const profile of pool.candidates) {
+      snapshot.push(await this.#candidateCooldown(profile.profileId, now));
+    }
+    return snapshot;
+  }
+
+  /**
+   * 单个候选的冷却状态。判据必须与 #availableCandidates 同源：两处各写一套
+   * 的话，「谁在冷却」会同时有两个答案，而排障的人会同时看到两者。
+   */
+  async #candidateCooldown(profileId: string, now: number): Promise<RoleCooldownCandidate> {
+    if (!this.#candidateCircuits) {
+      const until = this.#cooldown.get(profileId) ?? 0;
+      return until > now
+        ? {
+            profileId,
+            availability: 'cooldown' as const,
+            until: new Date(until).toISOString(),
+            retryAfterMs: until - now,
+          }
+        : { profileId, availability: 'available' as const, retryAfterMs: 0 };
+    }
+    let circuit: CandidateCircuit | undefined;
+    try {
+      circuit = await this.#candidateCircuits.get(profileId);
+    } catch {
+      // 读不出来（状态文件损坏、IO 失败）只能说这一个候选不可证明可用。
+      // 既不能编一个冷却时长（等于把「仓储坏了要人看」写成「等一会就好」），
+      // 也不能让整张快照抛出去——别的候选的可用性与它无关。
+      return { profileId, availability: 'unknown' as const };
+    }
+    if (circuit?.state === 'closed') {
+      return { profileId, availability: 'available' as const, retryAfterMs: 0 };
+    }
+    if (circuit?.state === 'open') {
+      const until = Date.parse(circuit.openUntil);
+      if (!Number.isFinite(until)) return { profileId, availability: 'unknown' as const };
+      return {
+        profileId,
+        availability: 'cooldown' as const,
+        until: new Date(until).toISOString(),
+        retryAfterMs: Math.max(0, until - now),
+      };
+    }
+    // half_open（探针已被领取）或读不到/读不懂的行：不可证明可用。
+    return { profileId, availability: 'unknown' as const };
   }
 
   /**
@@ -1170,6 +1451,23 @@ export class Orchestrator {
     };
   }
 
+  /**
+   * 组装 waiting 结果。
+   *
+   * candidateRole 有值才把字段放进去，**不放 `undefined`**：消费方（方案
+   * 驱动的等待探针）判「这次缺不缺候选」用的是 `'candidateRole' in outcome`，
+   * 恒存在的字段会让那个判断永远为真，等于把非候选故障也当成缺候选。
+   */
+  #waitingOutcome(
+    reason: WaitReason,
+    detail: string,
+    candidateRole?: RolePoolName,
+  ): MissionRunOutcome {
+    return candidateRole
+      ? { kind: 'waiting', reason, detail, candidateRole }
+      : { kind: 'waiting', reason, detail };
+  }
+
   /** 把停机原因翻译成人能直接照做的一句话。 */
   #stallDetail(reason: WaitReason, workItemId?: string): string {
     const where = workItemId ? `工作项 ${workItemId}` : '协调者';
@@ -1204,6 +1502,61 @@ export class Orchestrator {
   }
 
   /**
+   * Standard：工作项确实处于 submitted 就跑冻结命令并存报告；其它状态什么都不做。
+   *
+   * 出错一律吞掉。报告是给协调者的**证据**，不是它能不能被叫起来的前提：缺
+   * validation 依赖、缺基线（历史工单）、刚跑完又被改成别的状态，这些都只意味着
+   * “这一次没有报告”，协调者照样该醒过来自己看。把异常放出去只会让一跳失败、
+   * 把整条 Mission 卡在一个平台自己没准备好的地方。
+   */
+  async #validateStandardIfSubmitted(
+    missionId: string,
+    workItemId: string,
+    cwd: string,
+  ): Promise<void> {
+    try {
+      // 重新读一次：这一跳跑完执行者之后，工作项状态已经变了，入参里的 view 是旧的。
+      const live = await this.#platform.getMissionView(missionId);
+      const item = live.workItems.find((row) => row.id === workItemId);
+      if (item?.status !== 'submitted') return;
+      await this.#platform.validateStandardWorkItem({ missionId, workItemId, cwd });
+    } catch {
+      // 见上：没有报告也要让协调者接手，不替它评审。
+    }
+  }
+
+  /**
+   * 这一次交卷是不是 partial（半成品）。
+   *
+   * 只拿它决定要不要跑冻结命令：命令是「做完了」的验收材料。工作项不在、或者状态
+   * 已经不是 submitted，一律按 false 处理——那两种情况下后面的验证/交接判断本来
+   * 就会各归各位，不会因为这里猜错而少做什么。
+   */
+  async #standardSubmitIsPartial(missionId: string, workItemId: string): Promise<boolean> {
+    const view = await this.#platform.getMissionView(missionId);
+    const item = view.workItems.find((row) => row.id === workItemId);
+    return item?.status === 'submitted' && item.executionResult?.outcome === 'partial';
+  }
+
+  /**
+   * 机器接续：partial / 验证没过时，让平台把工单退回执行者（最多两次）。
+   *
+   * 返回是否真的续派了——调用方据此决定这一轮要不要走到协调者。所有跳过的理由
+   * （缺报告、报告跑绿、同一次提交已续派过、触顶）都是「交给 L2」：机器能判的只有
+   * 「还能再试」，判不了的绝不替 L2 拿主意。
+   */
+  async #autoRedispatchStandard(missionId: string, workItemId: string): Promise<boolean> {
+    try {
+      const result = await this.#platform.autoRedispatchStandardWorkItem({ missionId, workItemId });
+      return result.redispatched;
+    } catch {
+      // 接续本身出错时按「没有续派」处理，落回原来的 L2 路径。少退一轮只是多花一次
+      // 协调者的钱；让异常穿出去，这一跳会失败，而工单明明还停在 submitted 等人看。
+      return false;
+    }
+  }
+
+  /**
    * 跑一跳。按候选顺序重试，**只有上游失败才往后换**。
    * 返回 undefined 表示候选耗尽。
    */
@@ -1215,10 +1568,25 @@ export class Orchestrator {
     pool: RolePool;
     instruction: string;
     resumeRef?: string;
+    /**
+     * 执行者真要起来之前调一次（协调者、快车道都不传）。
+     *
+     * 验证基线必须落在这一刻，不能由调用方在 #runHop 之前自己记：候选耗尽、
+     * 队列项已完成这两条出口执行者根本没跑，在它们之前记下的基线是假的——等
+     * 这条工单以后交卷，补验会拿交卷之后的 HEAD 当起点，diff 算成空，而报告
+     * 看起来和正常的一模一样。
+     */
+    onExecutorStart?: () => Promise<void>;
   }): Promise<
     | { endedBy: string; resumeRef?: string; persistentUnknown?: boolean }
-    /** detail 有值时用它，别再拼一句泛泛的盖掉。 */
-    | { exhausted: WaitReason; detail?: string }
+    /**
+     * detail 有值时用它，别再拼一句泛泛的盖掉。
+     *
+     * candidateRole 只在「候选拿不出人」那两条出口上带：进了 usable 就说明
+     * 缺的不是候选，后面所有的失败出口都不是候选不可用（检查点失败最典型，
+     * 它也返回 no_available_agent）。
+     */
+    | { exhausted: WaitReason; detail?: string; candidateRole?: RolePoolName }
     | { alreadyCompleted: true }
     /** 已等到退避；由 runMission 下一轮重新领取，以便 maxRounds 能拦住 Q。 */
     | { retrySameSlot: true }
@@ -1231,12 +1599,14 @@ export class Orchestrator {
     });
     if (parked) return parked;
 
-    const now = Date.now();
+    const now = this.#now().getTime();
     const usable = await this.#availableCandidates(input.pool, now);
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
       // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
-      return { exhausted: 'no_available_agent' };
+      //
+      // 带上角色：这一跳没跑起来的原因**只有**候选不可用一个，调用方不用再猜。
+      return { exhausted: 'no_available_agent', candidateRole: input.role };
     }
 
     // 租约必须钉在即将启动的候选上。先领再选会让 failover 把 B 跑在 A 的 runtime/profile 名额下。
@@ -1247,6 +1617,8 @@ export class Orchestrator {
 
     const limit = input.pool.maxAttempts ?? 3;
     let used = 0;
+    // 只调一次：同一跳换候选之前工作区已回滚到 startRevision，HEAD 没有变。
+    let startHook = input.onExecutorStart;
     for (const profile of usable) {
       // Attempt 起点。换候选之前要回到这里：下一个候选应该从干净的起点
       // 开始，而不是接手上一个改到一半的代码（S06.3）。
@@ -1256,7 +1628,7 @@ export class Orchestrator {
         const circuit = await this.#candidateCircuits.get(profile.profileId);
         if (circuit.state === 'open') {
           claimedProbe = await this.#candidateCircuits.tryClaimProbe({
-            profileId: profile.profileId, now: new Date().toISOString(),
+            profileId: profile.profileId, now: this.#now().toISOString(),
           });
           if (!claimedProbe) continue;
         } else if (circuit.state === 'half_open') {
@@ -1302,6 +1674,13 @@ export class Orchestrator {
         claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
       }
       used += 1;
+
+      // 候选已经拿到、退避也已经等到：执行者这一步是真的要跑了。
+      if (startHook) {
+        const hook = startHook;
+        startHook = undefined;
+        await hook();
+      }
 
       const claim = this.#trustedQueueClaim(claimedHop);
       const { attemptId, token } =
@@ -1584,7 +1963,9 @@ export class Orchestrator {
         endedBy === 'upstream_failure' || endedBy === 'killed_idle' ||
         classification?.failureClass === 'local_adapter_error';
       if (this.#candidateCircuits) {
-        const openUntil = new Date(Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000)).toISOString();
+        const openUntil = failureClass === 'quota'
+          ? resolveQuotaResetTime({ message, now: this.#now().toISOString() })
+          : new Date(this.#now().getTime() + (input.pool.cooldownMs ?? 5 * 60 * 1000)).toISOString();
         if (endedBy === 'platform_unreachable') {
           // A platform outage is not a candidate outcome; keep a claimed probe from
           // remaining stuck without changing the existing circuit row.
@@ -1741,9 +2122,15 @@ export class Orchestrator {
       };
     }
     if (capacityBlocked && used === 0) {
+      // 队列容量挡住的**不是候选不可用**：人其实是有的，只是名额被占着。
+      // 这层 reason 和候选冷却分得开，绝不能给它贴角色。
       return { exhausted: capacityBlocked.reason, detail: capacityBlocked.detail };
     }
-    return undefined;
+    // 候选在，但一个都没跑成（都失败了、都在 half_open、或者全被身份/容量跳过）：
+    // 结果和"池子里没人"一样——这个角色的候选这一跳用不上，所以同样带上角色。
+    // 之前这里返回 undefined、由调用方兜成 no_available_agent，那条路上没人
+    // 知道缺的是哪个角色，方案驱动只能干等。
+    return { exhausted: 'no_available_agent', candidateRole: input.role };
   }
 
   /**

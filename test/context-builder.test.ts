@@ -15,6 +15,8 @@ import {
   buildContextBundle,
   projectStartupBriefFields,
   type BoundWorkItem,
+  type WorkItemIndexEntry,
+  type SinceLastHopEntry,
 } from '../src/application/context-builder.ts';
 import {
   FixedClock,
@@ -64,6 +66,15 @@ const ORDER: WorkOrder = {
 };
 
 const WORK_ITEM = { id: 'W1', title: 'W', order: ORDER };
+
+const WORK_ITEMS_INDEX: readonly WorkItemIndexEntry[] = [
+  { id: 'W1', title: 'W', status: 'dispatched', attempts: 1, lastReviewVerdict: 'approved' },
+  { id: 'W2', title: 'W2', status: 'pending', attempts: 0 },
+];
+
+const SINCE_LAST_HOP: SinceLastHopEntry = [
+  { summary: 'W1 已通过，建议进入 merged 放行。' },
+];
 
 const REVIEW: FinalReview = {
   verdict: 'send_back',
@@ -144,12 +155,74 @@ async function upTo(platform: Platform, root: string) {
     title: 'W',
     order: ORDER,
   });
+  // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+  await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
   const exec = await platform.startExecutorAttempt('M1', workItemId);
   return { coordId: coord.attemptId, execId: exec.attemptId, workItemId };
 }
 
 describe('buildContextBundle', () => {
+  test('简报仅向协调者投影 mission.routed 分类事实', async () => {
+    const platform = makePlatform();
+    await platform.createClassifiedMission({
+      projectId: 'P', missionId: 'M-route', contract: CONTRACT,
+      facts: {
+        mutationSideEffect: true, readOnlyProven: 'unknown',
+        highAssurance: { productionDeployRelease: false, externalPaidOp: false, destructiveData: false, credentialsPermissionsSecurity: false, schemaPublicApiPersistenceCompat: false, unrecoverableExternalSideEffect: false },
+        standardFloor: { publicInterface: true, buildSystemOrDependency: false, multipleDomainModules: false, acceptanceNotCheckableUpfront: false, rootCauseOrCompetingDesigns: false },
+      } as never,
+      assessment: {
+        goalUncertainty: 1, changeScope: 1, operationalRisk: 1,
+        verificationDifficulty: 1, coordinationNeed: 1, recoveryDifficulty: 2,
+        reasons: ['评估说明'], decidedBy: 'rule', assessedAt: '2026-03-21T12:00:00.000Z',
+      } as never,
+    });
+    const coord = await platform.startCoordinatorAttempt('M-route');
+    const brief = await platform.getStartupBrief('M-route', coord.attemptId);
+    const entry = brief.contextBundle.entries.find((item) => item.source === 'classification');
+    assert.ok(entry);
+    assert.ok(entry.estimatedTokens > 0);
+    const content = String(entry.content);
+    assert.match(content, /mutationSideEffect/);
+    assert.match(content, /unknown/);
+    assert.doesNotMatch(content, /productionDeployRelease/);
+    assert.match(content, /publicInterface/);
+    assert.doesNotMatch(content, /multipleDomainModules/);
+    assert.match(content, /unknowns:/);
+    assert.match(content, /reasons:/);
+    assert.match(content, /评估说明/);
+
+    await platform.updatePlan('M-route', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M-route', coord.attemptId, {
+      title: 'W', order: ORDER,
+    });
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await platform.submitContractCheck('M-route', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M-route', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M-route', workItemId);
+    const executorBrief = await platform.getStartupBrief('M-route', exec.attemptId);
+    assert.equal(executorBrief.contextBundle.entries.some((item) => item.source === 'classification'), false);
+
+    await platform.createMission({ projectId: 'P', missionId: 'M-plain', contract: CONTRACT });
+    const plainCoord = await platform.startCoordinatorAttempt('M-plain');
+    const plainBrief = await platform.getStartupBrief('M-plain', plainCoord.attemptId);
+    assert.equal(plainBrief.contextBundle.entries.some((item) => item.source === 'classification'), false);
+
+    await platform.createMission({ projectId: 'P', missionId: 'M-long', contract: CONTRACT });
+    await platform.recordStandardFallbackRoute('M-long', {
+      classification: {
+        recommended: 'standard', confidence: 'high', facts: { confirmed: true },
+        unknowns: [], criticalUnknowns: [], reasons: ['理由'.repeat(3000)],
+      } as never,
+      fallbackReason: 'fallback',
+    });
+    const longCoord = await platform.startCoordinatorAttempt('M-long');
+    const longBrief = await platform.getStartupBrief('M-long', longCoord.attemptId);
+    const longContent = String(longBrief.contextBundle.entries.find((item) => item.source === 'classification')?.content);
+    assert.ok(longContent.length <= 2000);
+    assert.match(longContent, /已截断/);
+  });
   test('相同输入重复构造深度相等', () => {
     const input = coordinatorInput();
     assert.deepEqual(buildContextBundle(input), buildContextBundle(input));
@@ -162,7 +235,7 @@ describe('buildContextBundle', () => {
     const exec = buildContextBundle(executorInput());
     assert.deepEqual(
       coord.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
     assert.deepEqual(
       exec.entries.map((e) => e.source),
@@ -172,6 +245,75 @@ describe('buildContextBundle', () => {
     assert.equal(exec.entries.some((e) => e.source === 'contract'), false);
     assert.equal(exec.entries.some((e) => e.source === 'plan'), false);
     assert.equal(exec.entries.some((e) => e.source === 'final_review'), false);
+  });
+
+  test('classification 仅作为显式 coordinator 来源并投影', () => {
+    const classification = '分类阶段已查明：问题来自上下文投影。';
+    const coord = buildContextBundle(coordinatorInput({ classification }));
+    const entry = coord.entries.find((item) => item.source === 'classification');
+    assert.ok(entry);
+    assert.ok(entry.estimatedTokens > 0);
+    assert.equal(projectStartupBriefFields(coord).classification, classification);
+    assert.deepEqual(
+      coord.entries.map((item) => item.source),
+      [...COORDINATOR_SOURCE_ORDER],
+    );
+
+    const exec = buildContextBundle(executorInput({ classification }));
+    assert.equal(exec.entries.some((item) => item.source === 'classification'), false);
+    assert.equal(projectStartupBriefFields(exec).classification, undefined);
+  });
+
+  test('协调者显式喂两项索引/增量时按序追加并投影，plan 完整；执行者不含两项', () => {
+    const coord = buildContextBundle(
+      coordinatorInput({ workItemsIndex: WORK_ITEMS_INDEX, sinceLastHop: SINCE_LAST_HOP }),
+    );
+    assert.deepEqual(
+      coord.entries.map((e) => e.source),
+      [...COORDINATOR_SOURCE_ORDER.filter((s) => s !== 'classification'), 'work_items_index', 'since_last_hop'],
+    );
+    const idx = coord.entries.find((e) => e.source === 'work_items_index');
+    const since = coord.entries.find((e) => e.source === 'since_last_hop');
+    assert.ok(idx);
+    assert.ok(since);
+    assert.ok(idx.estimatedTokens > 0);
+    assert.ok(since.estimatedTokens > 0);
+    assert.match(idx.hash ?? '', SHA256_HEX);
+    assert.match(since.hash ?? '', SHA256_HEX);
+    assert.ok(idx.reason.length > 0);
+    assert.ok(since.reason.length > 0);
+    // hash 反映内容：换一份索引得到不同的 hash。
+    const otherCoord = buildContextBundle(
+      coordinatorInput({
+        workItemsIndex: [{ id: 'W9', title: '别的', status: 'pending', attempts: 0 }],
+        sinceLastHop: SINCE_LAST_HOP,
+      }),
+    );
+    const otherIdx = otherCoord.entries.find((e) => e.source === 'work_items_index');
+    assert.notEqual(otherIdx?.hash, idx.hash);
+    const plan = coord.entries.find((e) => e.source === 'plan');
+    assert.equal(plan?.revision, 1);
+    assert.deepEqual(plan?.content, PLAN);
+    const projected = projectStartupBriefFields(coord);
+    assert.deepEqual(projected.workItemsIndex, WORK_ITEMS_INDEX);
+    assert.deepEqual(projected.sinceLastHop, SINCE_LAST_HOP);
+    assert.deepEqual(projected.plan, PLAN);
+    assert.equal(projected.planRevision, 1);
+
+    const emptyCoord = buildContextBundle(
+      coordinatorInput({ workItemsIndex: [], sinceLastHop: [] }),
+    );
+    assert.equal(emptyCoord.entries.some((e) => e.source === 'work_items_index'), true);
+    assert.equal(emptyCoord.entries.some((e) => e.source === 'since_last_hop'), true);
+
+    const exec = buildContextBundle(
+      executorInput({ workItemsIndex: WORK_ITEMS_INDEX, sinceLastHop: SINCE_LAST_HOP }),
+    );
+    assert.equal(exec.entries.some((e) => e.source === 'work_items_index'), false);
+    assert.equal(exec.entries.some((e) => e.source === 'since_last_hop'), false);
+    const execProjected = projectStartupBriefFields(exec);
+    assert.equal(execProjected.workItemsIndex, undefined);
+    assert.equal(execProjected.sinceLastHop, undefined);
   });
 
   test('每条含 source、revision 或 SHA-256 hash、reason、estimatedTokens', () => {
@@ -340,7 +482,7 @@ describe('buildContextBundle 预算裁剪', () => {
     const atBudget = buildContextBundle(input, N);
     assert.deepEqual(
       atBudget.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
     assert.deepEqual(atBudget.entries, full.entries);
     assert.deepEqual(atBudget.budgetReport?.omittedSources, []);
@@ -423,7 +565,7 @@ describe('buildContextBundle 预算裁剪', () => {
     assert.equal('budgetReport' in full, false);
     assert.deepEqual(
       full.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
     const projected = projectStartupBriefFields(full);
     assert.equal(projected.projectRules, RULES);
@@ -495,7 +637,7 @@ describe('getStartupBrief 从 Bundle 投影旧字段', () => {
     assert.equal(coord.contextBundle.role, 'coordinator');
     assert.deepEqual(
       coord.contextBundle.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      [...COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'), 'work_items_index', 'since_last_hop', 'contract_check'],
     );
 
     const execProjected = projectStartupBriefFields(exec.contextBundle);

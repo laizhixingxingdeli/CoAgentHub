@@ -6,9 +6,13 @@
 
 ## 角色视图
 
-- 协调者 Bundle 的固定来源顺序：`project_rules`、`environment_notes`、`contract`、`plan`、`final_review`；投影旧字段 `projectRules`、`environmentNotes`、`contract`、`contractRevision`、`plan`、`planRevision`、`finalReview`，不含 `workItem`。
-- 执行者 Bundle 的固定来源顺序：`project_rules`、`environment_notes`、`work_order`；投影旧字段 `projectRules`、`environmentNotes`、绑定的 `workItem`（含 `id`、`title`、`order`），不含契约、规划、打回及它们的修订字段。两个角色均保留简报原有 `role`、`projectId`、`missionId`、`status`。
-- 来源缺省仍占位，旧投影保持对应 `undefined` 缺省；没有 `.coagent` 项目记忆也能取得简报，`projectRules` 缺省。`environmentNotes` 保持既有系统注记。
+- 协调者 Bundle 的固定来源顺序：`project_rules`、`environment_notes`、`contract`、`classification`（仅有路由事件时）、`plan`、`final_review`；投影旧字段 `projectRules`、`environmentNotes`、`contract`、`contractRevision`、`classification`（可选）、`plan`、`planRevision`、`finalReview`，不含 `workItem`。
+- 执行者 Bundle 的固定来源顺序：`project_rules`、`environment_notes`、`work_order`；投影旧字段 `projectRules`、`environmentNotes`、绑定的 `workItem`（含 `id`、`title`、`order`，及适用时最近一次 reject 的修改要求、L3 send_back 理由、已答问答），不含完整契约、规划、终审正文及它们的修订字段，也不含 `classification`。两个角色均保留简报原有 `role`、`projectId`、`missionId`、`status`。
+- 来源缺省仍占位，旧投影保持对应 `undefined` 缺省；没有 `.coagent` 项目记忆也能取得简报，`projectRules` 缺省。`environmentNotes` 保持既有系统注记。`classification` 例外：没有 `mission.routed` 时不创建空来源。
+
+## 分类阶段已查明
+
+仅协调者的开跑简报从当前 Mission 的 `mission.routed` 事件投影可选的 `classification` 来源，标题为「分类阶段已查明」；事实只列 `facts` 中 true 或 `unknown` 的叶子（嵌套事实保留父级标签），另列 `unknowns`、`reasons`，可用时列复杂度评估每条理由及 `fallbackReason`。内容最多 2,000 字，超过时在上限内注明「已截断」。它只是规划的起点，不写入 Mission plan，也不能满足建工作项之前必须由协调者提交 plan 的检查。QueryRun 只记录工具名，不据此猜测或列出分类读过的文件。方案运行分类有结论、但因 HA 路关闭或只读 query 回落普通 Standard 时，普通建单后也记录含推荐、事实、未知、理由及回落原因的 `mission.routed`，从而可用同一简报来源；分类失败、无结论的回落不记。执行者简报始终不含该来源。
 
 ## 条目与标识
 

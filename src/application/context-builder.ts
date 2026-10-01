@@ -19,6 +19,7 @@ import type {
 export const COORDINATOR_SOURCE_ORDER = [
   'project_rules',
   'environment_notes',
+  'classification',
   'contract',
   'plan',
   'final_review',
@@ -32,7 +33,34 @@ export const EXECUTOR_SOURCE_ORDER = [
 
 export type ContextBundleSource =
   | (typeof COORDINATOR_SOURCE_ORDER)[number]
-  | (typeof EXECUTOR_SOURCE_ORDER)[number];
+  | (typeof EXECUTOR_SOURCE_ORDER)[number]
+  | 'work_items_index'
+  | 'since_last_hop'
+  | 'contract_check';
+
+/** 协调者专用：工作项索引条目，与后续 platform 取数可衔接。 */
+export interface WorkItemIndexEntry {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly attempts: number;
+  readonly lastReviewVerdict?: string;
+}
+
+/** 协调者专用：上一跳以来的新情况摘要，与后续 platform 取数可衔接。 */
+export type SinceLastHopEntry = readonly { readonly summary: string }[];
+
+/**
+ * 协调者专用：开工前的契约核对结论。只投影给协调者——执行者看到会被读成
+ * 「上一层的核对已替我判过」，于是自己不再核对。
+ */
+export interface ContractCheck {
+  readonly contractRevision: number;
+  readonly verdict: 'ok' | 'issues';
+  readonly summary: string;
+  readonly issues?: readonly string[];
+  readonly escalationIndex?: number;
+}
 
 export type ContextBundleRole = Extract<AttemptKind, 'coordinator' | 'executor'>;
 
@@ -44,6 +72,13 @@ export interface BoundWorkItem {
   readonly question?: string;
   readonly answer?: string;
   readonly answeredAt?: string;
+  /**
+   * 最近一次 reject 的 requiredChanges。**没有 reject 就没有这个键**——空数组会被
+   * 执行者读成「上次要求是空」。与 WorkOrderView 的同名字段逐字一致，两处投影同源。
+   */
+  readonly previousRequiredChanges?: readonly string[];
+  /** L3 打回整个 Mission 的理由；只在 finalReview 是 send_back 时出现。 */
+  readonly l3SendBackReasons?: readonly string[];
 }
 
 /**
@@ -60,6 +95,13 @@ export interface ContextBuilderInput {
   readonly planRevision?: number;
   readonly workItem?: BoundWorkItem;
   readonly finalReview?: Readonly<FinalReview>;
+  readonly classification?: string;
+  /** 协调者专用；仅在显式给出时进入 Bundle，空数组也算明确存在。 */
+  readonly workItemsIndex?: readonly WorkItemIndexEntry[];
+  /** 协调者专用；仅在显式给出时进入 Bundle，空数组也算明确存在。 */
+  readonly sinceLastHop?: SinceLastHopEntry;
+  /** 协调者专用；未核对时缺省，使「没核对」和「核对结论为空」不混成一种形状。 */
+  readonly contractCheck?: Readonly<ContractCheck>;
 }
 
 export interface ContextBundleEntry {
@@ -97,6 +139,10 @@ export interface StartupBriefProjection {
   readonly planRevision?: number;
   readonly workItem?: BoundWorkItem;
   readonly finalReview?: Readonly<FinalReview>;
+  readonly classification?: string;
+  readonly workItemsIndex?: readonly WorkItemIndexEntry[];
+  readonly sinceLastHop?: SinceLastHopEntry;
+  readonly contractCheck?: Readonly<ContractCheck>;
 }
 
 const REASON: Record<ContextBundleSource, string> = {
@@ -104,11 +150,18 @@ const REASON: Record<ContextBundleSource, string> = {
     '项目层面不可协商的架构红线；两个角色都要，执行者没有取红线的工具。',
   environment_notes:
     '平台知道自己跑在什么系统上、agent 不知道；只提前说会静默出错的那几条。',
+  classification: '分类阶段已查明的内容，供协调者作为规划起点。',
   contract: '协调者要按契约规划；不给执行者，避免它重新定义目标。',
   plan: '协调者接着上次的规划往下做。',
   final_review: '被打回之后重跑时，这是最该先看到的东西。',
   work_order:
     '执行者只拿冻结工单动手；contextRefs 保持引用，正文按需 getContext / read。',
+  work_items_index:
+    '协调者规划时需要全局工作项索引；不进执行者，避免它重新定义目标。',
+  since_last_hop:
+    '上一跳以来的新情况；协调者按增量衔接，执行者不拿，避免重复搬运。',
+  contract_check:
+    '开工前的契约核对结论；只给协调者，执行者不拿，避免它以为上一层已替它核对过。',
 };
 
 function canonicalJson(value: unknown): string {
@@ -237,9 +290,21 @@ export function buildContextBundle(input: ContextBuilderInput, budget?: number):
       : [
           hashedEntry('project_rules', input.projectRules),
           hashedEntry('environment_notes', input.environmentNotes),
+          ...(input.classification === undefined
+            ? []
+            : [hashedEntry('classification', input.classification)]),
           revisionEntry('contract', input.contract, input.contractRevision ?? 0),
           revisionEntry('plan', input.plan, input.planRevision ?? 0),
           hashedEntry('final_review', input.finalReview),
+          ...(input.workItemsIndex === undefined
+            ? []
+            : [hashedEntry('work_items_index', input.workItemsIndex)]),
+          ...(input.sinceLastHop === undefined
+            ? []
+            : [hashedEntry('since_last_hop', input.sinceLastHop)]),
+          ...(input.contractCheck === undefined
+            ? []
+            : [hashedEntry('contract_check', input.contractCheck)]),
         ];
 
   if (budget === undefined) {
@@ -279,5 +344,14 @@ export function projectStartupBriefFields(bundle: ContextBundle): StartupBriefPr
     plan: plan?.content as Readonly<PlanBody> | undefined,
     planRevision: plan?.revision,
     finalReview: bySource.get('final_review')?.content as Readonly<FinalReview> | undefined,
+    classification: bySource.get('classification')?.content as string | undefined,
+    workItemsIndex: bySource.get('work_items_index')?.content as
+      | readonly WorkItemIndexEntry[]
+      | undefined,
+    sinceLastHop: bySource.get('since_last_hop')?.content as SinceLastHopEntry | undefined,
+    // 仅在存在时给键：无核对时旧简报的键集合与形状必须一字不变。
+    ...(bySource.get('contract_check') === undefined
+      ? {}
+      : { contractCheck: bySource.get('contract_check')?.content as Readonly<ContractCheck> }),
   };
 }

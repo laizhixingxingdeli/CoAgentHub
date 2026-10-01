@@ -137,6 +137,11 @@ async function readyForReview(
     title: 'W',
     order: ORDER,
   });
+  // Standard 的首次派发前必须先落一条当前修订的契约核对，否则派发被门禁拒掉；
+  // 从仓储直放的 high_assurance 夹具不经过这道门禁，保持原样。
+  if (!options?.executionMode) {
+    await platform.submitContractCheck(missionId, coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+  }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
@@ -431,6 +436,8 @@ describe('方案放弃失败的 Mission', () => {
       title: 'W2',
       order: ORDER,
     });
+    // 门禁在 PROJECT_BUSY 之前：先落核对结论，下面这条派发才照旧以 PROJECT_BUSY 被拒。
+    await platform.submitContractCheck('M2', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await assert.rejects(
       () => platform.dispatchWorkItems('M2', coord.attemptId, [workItemId]),
       (error: unknown) => error instanceof PlatformRuleError && error.code === 'PROJECT_BUSY',

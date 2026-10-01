@@ -94,6 +94,7 @@ async function driveToReview(
     updatePlan: (missionId: string, attemptId: string, plan: typeof PLAN) => Promise<unknown>;
     createWorkItem: (missionId: string, attemptId: string, input: { title: string; order: WorkOrder }) => Promise<{ workItemId: string }>;
     dispatchWorkItems: (missionId: string, attemptId: string, ids: string[]) => Promise<unknown>;
+    submitContractCheck: (missionId: string, attemptId: string, input: { verdict: 'ok'; summary: string }) => Promise<unknown>;
     startExecutorAttempt: (missionId: string, workItemId: string) => Promise<{ attemptId: string }>;
     submitEvidence: (missionId: string, attemptId: string, evidence: object) => Promise<unknown>;
     submitExecutionResult: (missionId: string, attemptId: string, result: object) => Promise<unknown>;
@@ -104,12 +105,14 @@ async function driveToReview(
   workspace: GitWorktreeManager,
   repo: string,
   missionId: string,
+  options?: { executionMode?: 'high_assurance' },
 ) {
   const prepared = await workspace.prepare(missionId, repo);
   await platform.recordWorkspace(missionId, {
     projectRoot: repo,
     branch: prepared.branch,
     baseRevision: prepared.baseRevision,
+    targetBranch: prepared.targetBranch,
   });
   const coord = await platform.startCoordinatorAttempt(missionId);
   await platform.updatePlan(missionId, coord.attemptId, PLAN);
@@ -117,6 +120,11 @@ async function driveToReview(
     title: 'W',
     order: ORDER,
   });
+  // Standard 的首次派发前必须先落一条当前修订的契约核对，否则派发被门禁拒掉；
+  // 高保障路径不经过这道门禁，夹具保持原样。
+  if (options?.executionMode === undefined) {
+    await platform.submitContractCheck(missionId, coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+  }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
@@ -171,7 +179,7 @@ async function fixtureAwaitingReview(missionId: string, options?: { executionMod
   } else {
     await built.platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
   }
-  await driveToReview(built.platform, workspace, repo, missionId);
+  await driveToReview(built.platform, workspace, repo, missionId, options);
   if (options?.bait) {
     await built.platform.createMission({ projectId: 'P-bait', missionId: 'M-bait', contract: CONTRACT });
     await built.platform.startCoordinatorAttempt('M-bait');
@@ -540,5 +548,27 @@ describe('l3 show：HA 子态与阻塞原因', () => {
     // 夹具的历史 Attempt 没记 profileId：独立性先卡在「无法证明」，阻塞原因是它而不是缺候选。
     assert.match(fault.out, /history_missing_profile/);
     assert.match(fault.out, /缺 profileId/);
+  });
+
+  test('Mission park 与签名续跑走独立入口；缺签名的 answer 不会走旧恢复', async () => {
+    const { statePath, missionId } = await fixtureAwaitingReview('M-park');
+    const parked = l3(statePath, 'park', missionId, '--reason', '等用户答复', '--as', 'reviewer');
+    assert.equal(parked.status, 0, parked.out);
+    let built = await buildPersistentPlatform(statePath, { reconcile: false });
+    const parkedView = await built.platform.getMissionView(missionId);
+    assert.equal(parkedView.parked, true);
+    assert.equal(parkedView.parkReason, '等用户答复');
+    assert.equal(parkedView.status, 'awaiting_review');
+
+    const resumed = l3(statePath, 'resume', missionId, '--reason', '不再等待', '--as', 'reviewer');
+    assert.equal(resumed.status, 0, resumed.out);
+    built = await buildPersistentPlatform(statePath, { reconcile: false });
+    const resumedView = await built.platform.getMissionView(missionId);
+    assert.equal(resumedView.parked, false);
+    assert.equal(resumedView.status, 'awaiting_review');
+
+    const missing = l3(statePath, 'resume', missionId, '--answer', '不可漏签');
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.out, /只能与带检视者签名/);
   });
 });

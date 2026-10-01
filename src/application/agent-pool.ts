@@ -16,6 +16,8 @@
  * 还是下一跳？），那不是这次的范围 —— 而且这个界面没有鉴权。
  */
 
+import type { UsageRow } from './runtime-catalog.ts';
+
 /* ------------------------------ 类型 ------------------------------ */
 
 export type AgentRole = 'coordinator' | 'executor' | 'independent_reviewer';
@@ -65,11 +67,21 @@ export interface AgentPoolSnapshot {
   readonly independent_reviewer: readonly AgentPoolCandidate[];
 }
 
-/** GET /api/pools 在原候选上附加的只读健康；不进仓储、不影响 POST。 */
+/**
+ * GET /api/pools 在原候选上附加的只读健康；不进仓储、不影响 POST。
+ *
+ * 后面三个可选键只有读到了才有：**取不到就不给，不编一个。** 额度那两句话
+ * 是给人抄着执行的，凭空编出来的复位命令比没有更糟。
+ */
 export interface AgentPoolCandidateHealth {
   readonly circuit:
     | { readonly state: 'closed' }
-    | { readonly state: 'open'; readonly failureClass: string; readonly openUntil: string }
+    /**
+     * openUntil 为 null 只发生在 quota 上（见 candidate-circuit.ts）：预付额度
+     * 用完、适配层也没给出重置时间，它不会自己恢复。写成 `string` 会把 null
+     * 挤成 "null" 或让整条健康序列化失败 —— 那正是最该看得见的那一格。
+     */
+    | { readonly state: 'open'; readonly failureClass: string; readonly openUntil: string | null }
     | {
         readonly state: 'half_open';
         readonly failureClass: string;
@@ -92,6 +104,17 @@ export interface AgentPoolCandidateHealth {
   readonly runtime:
     | { readonly running: true; readonly hopId: string; readonly runtimeKind: string }
     | { readonly running: false; readonly reason: string };
+  /**
+   * 对上该候选 provider 的那条适配层用量（PI-Q1 的 UsageRow 原样）。
+   *
+   * 原样转出去，平台不解释字段 —— 界面才能显示适配层后来新加的套餐、重置时间
+   * 之类。摘几个字段出来重命名，等于又抄一份会过期的表。
+   */
+  readonly usage?: UsageRow;
+  /** 熔断原因是 quota 时给人看的一句话：说清是等定时重置还是得人工复位。 */
+  readonly quotaReason?: string;
+  /** 上一条走到「人工复位」分支时才带的、可直接复制执行的命令。 */
+  readonly resetCommand?: string;
 }
 
 export interface AgentPoolCandidateWithHealth extends AgentPoolCandidate {

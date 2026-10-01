@@ -17,6 +17,15 @@
 
 不采用：把 CLI `--as` / `--confirmed-by` 两个任意字符串当成已核验确认；把 Jev SHADOW 判断当放行；机器 L3 放行 HA。
 
+## 修订（2026-09-30）：高保证通道继续关着
+
+用户定：HAOFF1 从临时措施改为常设，直到用户另行决定。
+
+- 判为 high_assurance 的票按 Standard 走：协调者验收，机器 L3 凭集成验证放行。高保证通道（独立检视 + 检视者签名放行）的代码保留，不启用。
+- 四类禁止副作用（`productionDeployRelease` / `externalPaidOp` / `unrecoverableExternalSideEffect` / `destructiveData`）仍在建单前拒绝，不受 HAOFF1 影响。
+- 恢复方法不变：删掉 `decideRoute` 里的回落分支、放回原分类条件，并去掉 7 条 HA 测试的 skip。
+- 下文「不修订 ADR-0005」已被 ADR-0005 的 2026-09-30 修订（票级费用硬停）取代。
+
 ## 与既有 ADR
 
 - **修订 ADR-0004**：原文「HA 合并永远要人 / 机器 L3 不放行 HA」收窄为「人或显式配置的高保证 Principal」。当前该 Principal 是按常设授权登记的检视者签名。「概率判断只选路、不开门」仍适用于分类和 Jev SHADOW，并不因此否定经配置、证据和确认约束的独立审批。
