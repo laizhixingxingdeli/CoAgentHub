@@ -32,7 +32,7 @@ import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
-import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage } from '../application/runtime-catalog.ts';
+import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage, type UsageRow } from '../application/runtime-catalog.ts';
 import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
 import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -403,6 +403,43 @@ function circuitHealth(circuit: CandidateCircuit): Exclude<AgentPoolCandidateHea
   };
 }
 
+/**
+ * 人工复位的命令模板。
+ *
+ * 界面只显示不执行：复位是有人确认过「已经充值」之后的动作，API 替人做等于
+ * 把「额度耗尽」这条熔断当成一个可以自动重试的普通失败 —— 那正是它要挡的事
+ * （每一跳都先探测它再失败换候选，PLAT3 一张票里就撞了 11 次）。
+ */
+const CANDIDATE_RESET_COMMAND = 'node src/l3.ts candidate reset <profileId> --reason "…"';
+
+function resetCommandFor(profileId: string): string {
+  return CANDIDATE_RESET_COMMAND.replace('<profileId>', profileId);
+}
+
+/**
+ * 熔断原因是 quota 时给人看的那句话。
+ *
+ * 两种必须分开说：一个是「等到某个时刻就好」，一个是「没人充值就永远不好」。
+ * 合成一句话的后果是运维一直等一个不会到来的自动恢复。
+ */
+function quotaExtras(circuit: CandidateCircuit): Pick<AgentPoolCandidateHealth, 'quotaReason' | 'resetCommand'> {
+  if (circuit.state !== 'open' || circuit.failureClass !== 'quota') return {};
+  if (circuit.openUntil === null) {
+    return {
+      quotaReason: '额度已用完，适配层没有给出重置时间 —— 不会自动恢复，要等充值后人工复位。',
+      resetCommand: resetCommandFor(circuit.profileId),
+    };
+  }
+  return { quotaReason: `额度已用完，${circuit.openUntil} 重置后再派活。` };
+}
+
+/** 候选 facts 里的 provider 对上哪条用量行。没有 provider fact 就无从对应 —— 不猜。 */
+function usageRowFor(candidate: AgentPoolCandidate, rows: readonly UsageRow[]): UsageRow | undefined {
+  const provider = candidate.facts.find((fact) => fact.key === 'provider')?.value;
+  if (!provider) return undefined;
+  return rows.find((row) => row.provider === provider && row.status === 'ok');
+}
+
 function runtimeHealth(lease: QueuedHop | undefined): AgentPoolCandidateHealth['runtime'] {
   if (!lease) return { running: false, reason: 'no_active_lease' };
   if (typeof lease.runtimeKind !== 'string' || lease.runtimeKind.length === 0) {
@@ -542,6 +579,7 @@ async function buildPoolsHealth(
   queuedHops: QueuedHopRepository | undefined,
   candidateCircuits: CandidateCircuitRepository | undefined,
   nowMsValue: number,
+  usageRows: readonly UsageRow[],
 ) {
   const hops = queuedHops ? await queuedHops.list() : [];
   const nowIso = new Date(nowMsValue).toISOString();
@@ -562,11 +600,16 @@ async function buildPoolsHealth(
       };
     }
     const circuit = await candidateCircuits.get(candidate.profileId);
+    const usage = usageRowFor(candidate, usageRows);
     return {
       circuit: circuitHealth(circuit),
       lastFailure: resolveCandidateLastFailure(circuit, hints),
       window7d,
       runtime,
+      // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，
+      // 平台摘几个出来重命名等于又抄一份会过期的表。
+      ...(usage ? { usage } : {}),
+      ...quotaExtras(circuit),
     };
   };
   const attach = async (rows: readonly AgentPoolCandidate[]) => {
@@ -592,6 +635,32 @@ export function createApi(deps: ApiDeps): Server {
   /** 成功清单按实例缓存。失败不进这里——否则一次适配层故障会锁死 10 分钟旧错误。 */
   let cachedRuntimeCatalog: { readonly at: number; readonly catalog: RuntimeCatalog } | undefined;
   let cachedRuntimeUsage: { readonly at: number; readonly usage: RuntimeUsage } | undefined;
+
+  /**
+   * 这一次请求要用的适配层用量行。
+   *
+   * 与 GET /api/runtime/usage **共用同一份缓存**：两个页面都在问适配层同一个
+   * 问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只
+   * 降级不进缓存 —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。
+   *
+   * 拿不到（适配层不在 / 返回不可用）就是空数组：资源池照原样返回，用量那几
+   * 个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
+   */
+  const readUsageRows = async (): Promise<readonly UsageRow[]> => {
+    const hit = cachedRuntimeUsage;
+    if (hit && nowMs() - hit.at < RUNTIME_MODELS_CACHE_MS) {
+      return Array.isArray(hit.usage) ? hit.usage : [];
+    }
+    try {
+      const usage = await (deps.getRuntimeUsage ?? getRuntimeUsage)();
+      if (Array.isArray(usage) || usage.available === true) {
+        cachedRuntimeUsage = { at: nowMs(), usage };
+      }
+      return Array.isArray(usage) ? usage : [];
+    } catch {
+      return [];
+    }
+  };
 
   const requireRun = (req: IncomingMessage): RunContext => {
     const header = req.headers['x-coagent-run'];
@@ -1106,6 +1175,9 @@ export function createApi(deps: ApiDeps): Server {
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
       const snapshot = await agentPool.list();
+      // 用量是附加信息：它读不到（失败 / 适配层不在 / 抛异常）时资源池仍要原样
+      // 返回。先取再拼，取失败就当没有 —— 一个页面的可选列不该让整个池 500。
+      const usageRows = await readUsageRows();
       return send(
         res,
         200,
@@ -1116,6 +1188,7 @@ export function createApi(deps: ApiDeps): Server {
             deps.queuedHops,
             deps.candidateCircuits,
             nowMs(),
+            usageRows,
           ),
         ),
       );
