@@ -2853,15 +2853,15 @@ export class Platform {
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
     // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
     // 只审计、不硬拒——超限的工单照常建出来，由协调者照建议拆单/补引用。
-    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(input.order) : [];
+    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(input.order) : undefined;
     await this.#event(
       mission,
       'work_item.created',
-      { title: input.title, ...(warnings.length ? { warnings } : {}) },
+      { title: input.title, ...(warnings ? { warnings } : {}) },
       workItemId,
       attemptId,
     );
-    return { workItemId, warnings };
+    return warnings ? { workItemId, warnings } : { workItemId };
   }
 
   /**
@@ -2924,17 +2924,19 @@ export class Platform {
     const revision = item.order?.orderRevision ?? 'r1';
     // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
     // 只审计、不硬拒——超限的修订照常生效，由协调者照建议拆单/补引用。
-    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(order) : [];
+    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(order) : undefined;
     // 只记修订号与字段名，不把工单全文写进事件：事件流是给人看的，
     // 全文会在每条时间线上重复一遍工单。超工单标准的警告一并带上，不另造事件种类。
     await this.#event(
       mission,
       'work_item.order_revised',
-      { revision, changedFields, ...(warnings.length ? { warnings } : {}) },
+      { revision, changedFields, ...(warnings ? { warnings } : {}) },
       workItemId,
       attemptId,
     );
-    return { workItemId, revision, changedFields, warnings };
+    return warnings
+      ? { workItemId, revision, changedFields, warnings }
+      : { workItemId, revision, changedFields };
   }
 
   /**
