@@ -223,6 +223,51 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 /**
+ * URL 里的 profileId。名字带 / 等字符时是百分号编码进来的，原样用会和池里的名字
+ * 对不上；编码坏了（比如孤零零一个 %）必须当时报错，不能拿半截名字去查。
+ */
+function decodeProfileId(raw: string): string {
+  let profileId: string;
+  try {
+    profileId = decodeURIComponent(raw);
+  } catch {
+    throw new HttpError(400, 'INVALID_PROFILE_ID', 'profileId 不是合法的百分号编码');
+  }
+  if (!profileId.trim()) throw new HttpError(400, 'INVALID_PROFILE_ID', 'profileId 不能为空');
+  return profileId;
+}
+
+/**
+ * 复位审计里的 actor 必须来自受控主体，不是请求体。没有 resolver 时无从得知身份 ——
+ * 记固定的 'operator'，也不放行让调用方自己填名字。
+ */
+function controlActor(
+  resolve: ControlPrincipalResolver | undefined,
+  req: IncomingMessage,
+): Promise<string> {
+  if (!resolve) return Promise.resolve('operator');
+  return Promise.resolve(resolve(req)).then((resolved) => {
+    if (resolved && !('status' in resolved) && resolved.id.trim()) return resolved.id;
+    return 'operator';
+  });
+}
+
+/**
+ * 仓储只说「不存在 / 已 closed」，HTTP 要把它翻成明确的 4xx 与固定文案。
+ * 原样透出仓储消息会把内部路径与实现细节带进应答。
+ */
+function circuitResetHttpError(error: unknown, profileId: string): HttpError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/does not exist/.test(message)) {
+    return new HttpError(404, 'CIRCUIT_NOT_FOUND', `还没有熔断记录，无需复位：${profileId}`);
+  }
+  if (/closed/.test(message)) {
+    return new HttpError(409, 'CIRCUIT_NOT_OPEN', `熔断已经是 closed，无需复位：${profileId}`);
+  }
+  return new HttpError(500, 'CIRCUIT_RESET_FAILED', '复位失败');
+}
+
+/**
  * 显式 Bundle 预算。缺省 = 不裁；只接受十进制非负安全整数。
  * 1e2 / 01 / -1 若被 Number() 吞掉，调用方分不清「没裁」和「裁过」。
  */
@@ -1185,10 +1230,54 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.listProjects());
     }
 
-    /* ---- 候选池（资源池页的原料）。只有列与追加两个动作 ---- */
+    /* ---- 候选池（资源池页的原料）。列、追加，以及额度熔断的人工复位 ---- */
 
     // 没有 DELETE / PATCH / PUT，也没有播种：GET 只读且受 control-read 门禁；
-    // 「打开界面看一眼」不会改写候选池配置。
+    // 「打开界面看一眼」不会改写候选池配置。复位是唯一的写例外，走下面的 POST。
+
+    // 人工复位额度熔断。quota 熔断「没人充值就永远不会自己好」，只能靠人复位，
+    // 所以这条写路径必须存在；每一次复位都留下 actor/at/reason 的审计记录 ——
+    // 谁在什么时候为什么解的，事后要有据可查。
+    const resetMatch = /^\/api\/pools\/([^/]+)\/circuit\/reset$/.exec(path);
+    if (method === 'POST' && resetMatch) {
+      await requireControl(req, POLICY_ACTION.poolAdd);
+      const profileId = decodeProfileId(resetMatch[1]);
+      const body = await readJson(req);
+      const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+      // 没写理由的复位是审计里一条空白：事后分不清是充值了还是手滑。
+      if (!reason) throw new HttpError(400, 'RESET_REASON_REQUIRED', 'reason 必须是非空字符串');
+      const circuits = deps.candidateCircuits;
+      // 缺仓储要明说「不可用」：静默 200 会让运维以为复位成功了。
+      if (!circuits) {
+        throw new HttpError(503, 'CIRCUIT_UNAVAILABLE', '本服务没有候选熔断仓储，无法复位');
+      }
+      const pool = await agentPool.list();
+      const known = [
+        ...pool.coordinator,
+        ...pool.executor,
+        ...pool.independent_reviewer,
+      ].some((row) => row.profileId === profileId);
+      if (!known) throw new HttpError(404, 'CANDIDATE_NOT_FOUND', `候选池里没有：${profileId}`);
+      // actor 只取受控主体：调用方自称是谁不作数，审计要由凭据说话。
+      const actor = await controlActor(resolveControlPrincipal, req);
+      const at = new Date(nowMs()).toISOString();
+      const circuit = await circuits.reset({ profileId, actor, at, reason }).catch((error: unknown) => {
+        throw circuitResetHttpError(error, profileId);
+      });
+      return send(res, 200, { profileId, circuit: circuitHealth(circuit) });
+    }
+
+    // 复位审计只读。查历史不该要求写权限，所以走 poolList 而不是 poolAdd。
+    const resetEventsMatch = /^\/api\/pools\/([^/]+)\/circuit\/reset-events$/.exec(path);
+    if (method === 'GET' && resetEventsMatch) {
+      await requireControl(req, POLICY_ACTION.poolList);
+      const profileId = decodeProfileId(resetEventsMatch[1]);
+      const circuits = deps.candidateCircuits;
+      if (!circuits) {
+        throw new HttpError(503, 'CIRCUIT_UNAVAILABLE', '本服务没有候选熔断仓储，读不到复位记录');
+      }
+      return send(res, 200, { profileId, events: await circuits.listResetEvents(profileId) });
+    }
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
       const snapshot = await agentPool.list();

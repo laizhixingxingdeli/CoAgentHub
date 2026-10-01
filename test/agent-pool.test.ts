@@ -35,7 +35,11 @@ import type {
   AgentPoolRepository,
   AgentPoolSnapshot,
 } from '../src/application/agent-pool.ts';
-import { FileAgentPoolRepository, FileStateStore } from '../src/application/file-store.ts';
+import {
+  FileAgentPoolRepository,
+  FileCandidateCircuitRepository,
+  FileStateStore,
+} from '../src/application/file-store.ts';
 import type { RuntimeUsage } from '../src/application/runtime-catalog.ts';
 import { PgAgentPoolRepository, PgStateStore } from '../src/application/pg-store.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
@@ -596,7 +600,12 @@ describe('run-mission.ts 改用候选池', () => {
 /* --------------------------------- HTTP --------------------------------- */
 
 describe('候选池 API', () => {
-  async function withApi(agentPool?: AgentPoolRepository, getRuntimeUsage?: () => Promise<RuntimeUsage>) {
+  async function withApi(
+    agentPool?: AgentPoolRepository,
+    getRuntimeUsage?: () => Promise<RuntimeUsage>,
+    candidateCircuits?: CandidateCircuitRepository,
+    onMutation?: () => void,
+  ) {
     const built = buildPlatform();
     const server = createApi({
       platform: built.platform,
@@ -604,6 +613,8 @@ describe('候选池 API', () => {
       deliveries: built.deliveries,
       ...(agentPool ? { agentPool } : {}),
       ...(getRuntimeUsage ? { getRuntimeUsage } : {}),
+      ...(candidateCircuits ? { candidateCircuits } : {}),
+      ...(onMutation ? { onMutation } : {}),
     });
     await listenLoopback(server, 0);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -804,6 +815,100 @@ describe('候选池 API', () => {
         (after.json as unknown as AgentPoolSnapshot).executor.map((row) => row.profileId),
         ['keep'],
       );
+    } finally {
+      close();
+    }
+  });
+
+  test('人工复位：open quota 候选带 reason 复位成 closed，并留下一条可查的审计', async () => {
+    // quota 熔断不会自己好，只能靠人复位；所以复位必须是受控的写端点，且每次复位
+    // 都要留下 actor/at/reason —— 事后要能说清是谁在什么时候为什么解的。
+    const path = tempPath();
+    const circuits = new FileCandidateCircuitRepository(new FileStateStore(path));
+    let mutations = 0;
+    const { base, close } = await withApi(
+      new InMemoryAgentPoolRepository(),
+      undefined,
+      circuits,
+      () => {
+        mutations += 1;
+      },
+    );
+    try {
+      await post(base, '/api/pools', { role: 'executor', profileId: 'exec-quota', endpoint: 'local' });
+      await circuits.open({ profileId: 'exec-quota', failureClass: 'quota', openUntil: null });
+      assert.equal((await circuits.get('exec-quota')).state, 'open');
+      const before = mutations;
+
+      const reset = await post(base, '/api/pools/exec-quota/circuit/reset', { reason: 'recharged' });
+      assert.equal(reset.status, 200);
+      assert.deepEqual(reset.json, { profileId: 'exec-quota', circuit: { state: 'closed' } });
+      assert.equal((await circuits.get('exec-quota')).state, 'closed', '复位要真的落进仓储');
+      assert.equal(mutations, before + 1, '复位走既有 onMutation 落盘路径');
+
+      const events = await get(base, '/api/pools/exec-quota/circuit/reset-events');
+      assert.equal(events.status, 200);
+      const body = events.json as unknown as {
+        profileId: string;
+        events: Array<{ profileId: string; actor: string; at: string; reason: string }>;
+      };
+      assert.equal(body.profileId, 'exec-quota');
+      assert.equal(body.events.length, 1);
+      assert.equal(body.events[0]?.profileId, 'exec-quota');
+      assert.equal(body.events[0]?.actor, 'operator');
+      assert.match(
+        String(body.events[0]?.at),
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+        'at 是 ISO 时间，界面能直接排序与显示',
+      );
+      assert.equal(body.events[0]?.reason, 'recharged');
+    } finally {
+      close();
+    }
+  });
+
+  test('候选不存在 / 熔断已 closed / 缺 reason 都是明确非 2xx，且不新增审计', async () => {
+    const path = tempPath();
+    const circuits = new FileCandidateCircuitRepository(new FileStateStore(path));
+    const { base, close } = await withApi(
+      new InMemoryAgentPoolRepository(),
+      undefined,
+      circuits,
+    );
+    try {
+      await post(base, '/api/pools', { role: 'executor', profileId: 'exec-open', endpoint: 'local' });
+      await post(base, '/api/pools', { role: 'executor', profileId: 'exec-virgin', endpoint: 'local' });
+      await circuits.open({ profileId: 'exec-open', failureClass: 'quota', openUntil: null });
+
+      const absent = await post(base, '/api/pools/exec-absent/circuit/reset', { reason: 'x' });
+      assert.equal(absent.status, 404);
+      assert.equal(absent.json.error, 'CANDIDATE_NOT_FOUND', '不在池里的名字不能复位');
+
+      const noCircuit = await post(base, '/api/pools/exec-virgin/circuit/reset', { reason: 'x' });
+      assert.equal(noCircuit.status, 404);
+      assert.equal(noCircuit.json.error, 'CIRCUIT_NOT_FOUND', '没有熔断记录就无所谓复位');
+
+      const noReason = await post(base, '/api/pools/exec-open/circuit/reset', {});
+      assert.equal(noReason.status, 400);
+      assert.equal(noReason.json.error, 'RESET_REASON_REQUIRED');
+      assert.equal((await circuits.get('exec-open')).state, 'open', '拒绝时不许顺手改状态');
+
+      const first = await post(base, '/api/pools/exec-open/circuit/reset', { reason: 'recharged' });
+      assert.equal(first.status, 200);
+      const again = await post(base, '/api/pools/exec-open/circuit/reset', { reason: 'again' });
+      assert.equal(again.status, 409);
+      assert.equal(again.json.error, 'CIRCUIT_NOT_OPEN', '已 closed 不能再复位一次');
+
+      // 审计只该有成功那一条；GET 事件是只读的，多读几次也不新增。
+      const events = await get(base, '/api/pools/exec-open/circuit/reset-events');
+      assert.equal(events.status, 200);
+      assert.equal(
+        (events.json as unknown as { events: unknown[] }).events.length,
+        1,
+        '失败的请求不写审计',
+      );
+      const virgin = await get(base, '/api/pools/exec-virgin/circuit/reset-events');
+      assert.deepEqual((virgin.json as unknown as { events: unknown[] }).events, []);
     } finally {
       close();
     }
