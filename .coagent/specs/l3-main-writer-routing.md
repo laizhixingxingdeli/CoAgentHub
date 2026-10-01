@@ -8,4 +8,6 @@ HTTP 控制面补充 reviewer finalize、work-item retire、mission rerun；其�
 
 方案运行中的 Mission 升级只通过 `node src/l3.ts plan decide <E-n> --action answer --answer "…" --as <检视者> [--run <记录>]` 答复；普通 `l3 answer` 只用于方案运行之外，不取代方案独立决定。PlanRun 的 decide、approve、send-back 继续仅写独立记录/决定短锁，不被主状态锁阻塞；inbox/show/plan/runs 等只读路径不做启动收敛。答复后的续跑仍由方案驱动按既有 AQ1 规则处理，HTTP 入口不复制该规则。详见 `plan-run` capability。
 
+`node src/l3.ts candidate reset <profileId> --reason "…"` 是主状态写命令：无服务时在独占写者平台将存在且 open 的候选复位为 closed，事件记录 actor=`operator`、ISO 时间和非空原因；有已验证 live 持锁服务则经 `/api/pools/:profileId/circuit/reset` 在服务内复位并记录受控主体、时间、原因，不另建写者也不在回环失败时本地回退。缺理由、候选不存在或已 closed 明确失败，不写新审计；审计可经候选 reset-events 接口查询。
+
 源：`src/l3.ts`、`src/application/loopback-control-client.ts`、`src/application/lock.ts`、`src/api/server.ts`、`src/main.ts`。验证：`test/l3-plan.test.ts`、`test/run-mission-wiring.test.ts`、`test/l3-reviewer-signature.test.ts`、`test/lock.test.ts`、`test/api.test.ts`、`test/start-server.test.ts`。
