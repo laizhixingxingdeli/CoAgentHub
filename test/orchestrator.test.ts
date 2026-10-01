@@ -204,6 +204,10 @@ const COORDINATOR_HAPPY: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+      // W-334 门禁：Standard 派发前必须先落一条**当前契约修订**的核对结论。
+      // 少了这一步，派发被拒会让整条 Mission 停在「候选全在冷却」上，
+      // 于是这些用例测的调度性质全都被一个前置条件挡住。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -932,6 +936,8 @@ describe('调度器：整条 Mission 自己走完', () => {
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER }, expectFailure: true },
           { tool: 'coagent_update_plan', body: PLAN },
           { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+          // W-334 门禁：核对结论要在派发之前落，否则这一跳只会得到 CONTRACT_CHECK_REQUIRED。
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
           {
             tool: 'coagent_dispatch_work_item',
             body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -1440,6 +1446,8 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
               { tool: 'coagent_get_mission', body: {} },
               { tool: 'coagent_update_plan', body: PLAN },
               { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+              // W-334 门禁：这张表单独用，没走 COORDINATOR_HAPPY，所以核对结论要自己带上。
+              { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
               {
                 tool: 'coagent_dispatch_work_item',
                 body: (previous) => ({ workItemIds: [previous.workItemId] }),
