@@ -12,7 +12,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -21,8 +21,10 @@ import { basename, dirname, join } from 'node:path';
 import {
   LockBusyError,
   acquireLock,
+  acquireRecoverableLock,
   probeLocalWriter,
   publishLockPort,
+  readLockAudit,
   stateIdFor,
   type LockInfo,
 } from '../src/application/lock.ts';
@@ -673,5 +675,144 @@ describe('常驻写者身份与本机探测', () => {
     } finally {
       release();
     }
+  });
+});
+
+describe('残锁安全接管', () => {
+  // 心跳停在 00:00，探测时刻取 00:10：停摆 10 分钟，超过 120 秒阈值。
+  const STALE_HEARTBEAT = new Date(Date.parse('2026-01-01T00:00:00.000Z')).toISOString();
+  const PROBE_NOW = Date.parse('2026-01-01T00:10:00.000Z');
+
+  function plantStaleLock(statePath: string, holder: Partial<LockInfo> & { pid: number }): string {
+    const lockPath = lockDirOf(statePath);
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify({ since: STALE_HEARTBEAT, what: '意外退出前的写者', ...holder }, null, 2),
+      'utf8',
+    );
+    return lockPath;
+  }
+
+  /** 接管期间临时建的 guard / 隔离目录都不该留在状态目录里。 */
+  function takeoverTemps(statePath: string): string[] {
+    return readdirSync(dirname(statePath)).filter(
+      (name) => name.includes('takeover') || name.includes('stale-'),
+    );
+  }
+
+  test('死 pid + 停摆心跳 + 端口无人监听：接管并留下可读审计', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const lockPath = plantStaleLock(statePath, {
+      pid: 2147483646,
+      heartbeatAt: STALE_HEARTBEAT,
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-dead',
+      apiVersion: 'v-dead',
+      port: 45678,
+    });
+
+    const release = await acquireRecoverableLock(
+      statePath,
+      '常驻服务重启后接管',
+      { instanceId: 'inst-new', apiVersion: 'v-new' },
+      { now: () => PROBE_NOW, pidAlive: () => false, portListening: async () => false },
+    );
+    try {
+      const held = readHolderFile(statePath);
+      assert.equal(held.pid, process.pid);
+      assert.equal(held.what, '常驻服务重启后接管');
+      assert.equal(held.instanceId, 'inst-new');
+      assert.deepEqual(takeoverTemps(statePath), [], 'guard 与隔离目录都要清干净');
+    } finally {
+      release();
+    }
+    assert.ok(!existsSync(lockPath), '正常释放只删自己的锁');
+
+    const audit = readLockAudit(statePath);
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].oldPid, 2147483646);
+    assert.equal(audit[0].oldInstanceId, 'inst-dead');
+    assert.equal(audit[0].oldHeartbeatAt, STALE_HEARTBEAT);
+    assert.equal(audit[0].newPid, process.pid);
+    assert.equal(audit[0].newInstanceId, 'inst-new');
+    assert.equal(audit[0].at, new Date(PROBE_NOW).toISOString());
+  });
+
+  test('活 pid / 无心跳 / 端口状态未知都不接管，旧锁原样不动', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const lockPath = plantStaleLock(statePath, {
+      pid: 2147483647,
+      heartbeatAt: STALE_HEARTBEAT,
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-live',
+      apiVersion: 'v-live',
+      port: 45679,
+    });
+    const planted = readHolderFile(statePath);
+
+    // 1) 进程还活着：停摆再久也不接管，且把"怎么人工核实端口"一起给出。
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => true,
+          portListening: async () => false,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.match(error.message, /仍然存活/);
+        assert.match(error.message, /lsof -nP -iTCP:45679/);
+        assert.match(error.message, /Get-NetTCPConnection -LocalPort 45679/);
+        assert.match(error.message, /rm -rf --/);
+        return true;
+      },
+    );
+    assert.deepEqual(readHolderFile(statePath), planted, '拒绝时旧锁元数据不动');
+    assert.equal(readLockAudit(statePath).length, 0, '拒绝不写审计');
+
+    // 2) 没有 heartbeatAt 的旧版本锁：说不清停摆多久，拒绝。
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify({ pid: 2147483647, since: STALE_HEARTBEAT, what: '旧版本锁' }, null, 2),
+      'utf8',
+    );
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => false,
+          portListening: async () => false,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.match(error.message, /heartbeatAt/);
+        return true;
+      },
+    );
+    assert.equal(readHolderFile(statePath).what, '旧版本锁');
+
+    // 3) 端口探测报的是未知网络错误（不是明确的 ECONNREFUSED）：一律 fail closed。
+    writeFileSync(join(lockPath, 'holder.json'), JSON.stringify(planted, null, 2), 'utf8');
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => false,
+          portListening: async () => {
+            throw new Error('EHOSTUNREACH 网络不可达');
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.match(error.message, /状态未知/);
+        return true;
+      },
+    );
+    assert.deepEqual(readHolderFile(statePath), planted);
+    assert.ok(existsSync(lockPath), '拒绝时旧锁目录仍在');
+    assert.deepEqual(takeoverTemps(statePath), [], '拒绝也要清掉自己的 guard');
   });
 });
