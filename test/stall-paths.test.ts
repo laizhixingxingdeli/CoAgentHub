@@ -107,6 +107,7 @@ const PLAN_AND_DISPATCH: ScriptTable = {
     steps: [
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -214,6 +215,7 @@ describe('多工作项', () => {
           { tool: 'coagent_update_plan', body: PLAN },
           { tool: 'coagent_create_work_item', body: { title: 'W1', ...ORDER } },
           { tool: 'coagent_create_work_item', body: { title: 'W2', ...ORDER } },
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
           { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1', 'W-2'] } },
         ],
       },
