@@ -215,13 +215,10 @@ describe('SPAWN_ENV_BASE_ALLOWLIST 冻结名单', () => {
 });
 
 describe('spawn.ts 源码锁', () => {
-  test('不再整份下发 process.env', () => {
-    const source = readFileSync(spawnSourcePath, 'utf8');
-    // 锁的是 spawn 选项里的 `env: process.env` 整份下发；评论里也不许再写这串，
-    // 否则 mutation 把代码改回去时本断言仍可能被注释「陪葬」成假绿。
-    assert.doesNotMatch(source, /env:\s*process\.env/);
-  });
-
+  // 只留零凭据约定：源码里不得出现厂商凭证形键名（见文件头「只用 HUB_TEST_* 假名」，
+  // 对应项目红线「不在输出/日志/提交里出现 key」）。
+  // 「不再整份下发 process.env」那条已删：它由下面真实 spawn 金丝雀用例覆盖——
+  // 子进程实际拿到的 env 里不含未声明金丝雀，比源码拼写更能锁住行为。
   test('源码不含凭证形键名', () => {
     const source = readFileSync(spawnSourcePath, 'utf8');
     assert.doesNotMatch(source, /API_KEY|ACCESS_KEY|SECRET_ACCESS/);
