@@ -953,3 +953,134 @@ describe('Mission 视图：提交证据可见但已验收输出不泄露', () =>
     assert.equal(item?.reviewSummary?.verdict, 'reject');
   });
 });
+
+describe('W-292：blocked/partial 工单未修订禁止原样重派', () => {
+  test('blocked 后同修订号重派被拒且状态不变，修订后可 dispatch', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M292', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M292');
+    await platform.updatePlan('M292', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M292', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('M292', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M292', workItemId);
+    await platform.reportBlocked('M292', exec.attemptId, {
+      reason: '前提不成立',
+      whatWasTried: ['试过 X'],
+      needsFromUpstream: '',
+    });
+    // 工单仍是 r1，原样重派必须被拒，且被拒不能留下半套流转（状态仍是 blocked）。
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M292', coord.attemptId, [workItemId]),
+      (e: unknown) => (e as PlatformRuleError).code === 'WORK_ORDER_REVISION_REQUIRED',
+    );
+    assert.equal((await platform.getMissionView('M292')).workItems[0].status, 'blocked');
+
+    // 修订后修订号递增（r2），可正常重派。
+    const { revision } = await platform.reviseWorkOrder('M292', coord.attemptId, workItemId, {
+      ...ORDER,
+      objective: '把前提改对再派',
+    });
+    assert.equal(revision, 'r2');
+    await platform.dispatchWorkItems('M292', coord.attemptId, [workItemId]);
+    assert.equal((await platform.getMissionView('M292')).workItems[0].status, 'dispatched');
+  });
+
+  test('partial 被 reject 后同修订号重派被拒，修订后可 dispatch；普通 rejected/accepted 不误拦', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M293', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M293');
+    await platform.updatePlan('M293', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M293', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M293', workItemId);
+    await platform.submitEvidence('M293', exec.attemptId, {
+      kind: 'test',
+      summary: 'x',
+      command: 'node --test',
+      exitCode: 1,
+    });
+    await platform.submitExecutionResult('M293', exec.attemptId, {
+      outcome: 'partial',
+      summary: '只做了一半',
+      changedFiles: [],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M293', exec.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M293', coord.attemptId, {
+      workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'fail' as const })),
+      reasons: ['没做完'],
+      requiredChanges: ['做完'],
+    });
+    assert.equal((await platform.getMissionView('M293')).workItems[0].status, 'rejected');
+
+    // 同修订号（r1）重派被拒。
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M293', coord.attemptId, [workItemId]),
+      (e: unknown) => (e as PlatformRuleError).code === 'WORK_ORDER_REVISION_REQUIRED',
+    );
+
+    // 修订后恢复派发。
+    const { revision } = await platform.reviseWorkOrder('M293', coord.attemptId, workItemId, {
+      ...ORDER,
+      objective: '做完',
+    });
+    assert.equal(revision, 'r2');
+    await platform.dispatchWorkItems('M293', coord.attemptId, [workItemId]);
+    assert.equal((await platform.getMissionView('M293')).workItems[0].status, 'dispatched');
+
+    // 不误拦 1：普通「completed 提交后被 reject」不是 blocked/partial，可重派。
+    const normal = await platform.createWorkItem('M293', coord.attemptId, { title: '正常', order: ORDER });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [normal.workItemId]);
+    const ne = await platform.startExecutorAttempt('M293', normal.workItemId);
+    await platform.submitEvidence('M293', ne.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M293', ne.attemptId, {
+      outcome: 'completed',
+      summary: '做完了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M293', ne.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M293', coord.attemptId, {
+      workItemId: normal.workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'fail' as const })),
+      reasons: ['差一点'],
+      requiredChanges: ['补一处'],
+    });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [normal.workItemId]);
+    assert.equal(
+      (await platform.getMissionView('M293')).workItems.find((i) => i.id === normal.workItemId)?.status,
+      'dispatched',
+    );
+
+    // 不误拦 2：accepted（L3 send_back 重开）重派不受门禁影响。
+    const acc = await platform.createWorkItem('M293', coord.attemptId, { title: '已验收', order: ORDER });
+    await platform.dispatchWorkItems('M293', coord.attemptId, [acc.workItemId]);
+    const ae = await platform.startExecutorAttempt('M293', acc.workItemId);
+    await platform.submitEvidence('M293', ae.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M293', ae.attemptId, {
+      outcome: 'completed',
+      summary: '做完了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.reviewExecutionResult('M293', coord.attemptId, {
+      workItemId: acc.workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    // 模拟 L3 send_back 后该 accepted 工作项被重开重派：门禁不应触发。
+    await platform.dispatchWorkItems('M293', coord.attemptId, [acc.workItemId]);
+    assert.equal(
+      (await platform.getMissionView('M293')).workItems.find((i) => i.id === acc.workItemId)?.status,
+      'dispatched',
+    );
+  });
+});

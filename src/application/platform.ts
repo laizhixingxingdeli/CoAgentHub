@@ -3452,6 +3452,37 @@ export class Platform {
         );
       }
     }
+    // 门禁（W-292）：执行者曾报 blocked 或交 partial/blocked 结果的工作项，
+    // 未修订不得原样重派。查「最近一次」相关事件（不是只看当前状态），
+    // 与当前 orderRevision 比较；修订后不相等即可派发，旧快照没记则兼容放行。
+    // 必须在 #acquireMutationSlotForDispatch / PRE_DISPATCH shadow / 状态修改之前判定，
+    // 否则被拒的调用会留下半套流转。
+    const history = await this.#activity.list(mission.id);
+    for (const item of items) {
+      const lastRelevant = [...history].reverse().find((event) => {
+        if (event.workItemId !== item.id) return false;
+        if (event.kind === 'blocked.reported') return true;
+        if (event.kind === 'execution_result.submitted') {
+          const outcome = (event.data as { outcome?: string } | undefined)?.outcome;
+          return outcome === 'blocked' || outcome === 'partial';
+        }
+        return false;
+      });
+      if (!lastRelevant) continue;
+      const recorded = (lastRelevant.data as { orderRevision?: string } | undefined)?.orderRevision;
+      if (recorded === undefined) continue; // 老快照未记，兼容放行
+      const current = item.order?.orderRevision ?? 'r1';
+      if (recorded === current) {
+        throw new PlatformRuleError(
+          'WORK_ORDER_REVISION_REQUIRED',
+          `工作项 ${item.id} 最近一次被报 blocked 或提交 partial/blocked 结果时工单仍是 ${recorded}，` +
+            '未修订的同一张工单不能原样重派。请先做其一：' +
+            '(1) 用 coagent_revise_work_order 修订工单（修订号递增）后重派；' +
+            '(2) 若这张工单已无意义，用 retire/作废取代重派；' +
+            '(3) 若重派不成立，升级给 L3 重新判断。',
+        );
+      }
+    }
     // Standard 调用顺序保持原样：先 startExecuting/处理 PROJECT_BUSY，
     // 再 PRE_DISPATCH shadow，再 item.dispatch。
     await this.#acquireMutationSlotForDispatch(mission, project);
@@ -4932,7 +4963,13 @@ export class Platform {
     await this.#event(
       mission,
       'execution_result.submitted',
-      { outcome: body.outcome, changedFiles: body.changedFiles.length },
+      {
+        outcome: body.outcome,
+        changedFiles: body.changedFiles.length,
+        // 记当时工单修订号：重派门禁据此判断「未修订是否原样重派」，
+        // 不另造事件种类、不依赖当前状态（修订后当前会变大）。
+        orderRevision: item.order?.orderRevision ?? 'r1',
+      },
       workItemId,
       attemptId,
     );
@@ -4964,7 +5001,18 @@ export class Platform {
       throw new PlatformRuleError('UNKNOWN_WORK_ITEM', `工作项 ${workItemId} 不存在`);
     }
     item.recordBlocked({ ...body, attemptId });
-    await this.#event(mission, 'blocked.reported', { reason: body.reason }, workItemId, attemptId);
+    await this.#event(
+      mission,
+      'blocked.reported',
+      {
+        reason: body.reason,
+        // 记当时工单修订号：重派门禁据此判断「未修订是否原样重派」，
+        // 不另造事件种类、不依赖当前状态。
+        orderRevision: item.order?.orderRevision ?? 'r1',
+      },
+      workItemId,
+      attemptId,
+    );
     // Lightweight 没有协调者：执行者提问只能走 Mission 升级，否则 L3 看不到。
     // Standard 和空白需求不是提问，保持只记 blocked。
     const needs = typeof body.needsFromUpstream === 'string' ? body.needsFromUpstream : '';
