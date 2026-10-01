@@ -29,7 +29,7 @@ import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
 import { preflightPlanMissionSlots, preflightPlanRepo } from './application/plan-preflight.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
-import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, runPlanOnPlatform } from './application/plan-runtime.ts';
+import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, createPlanWaitEligibility, runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import {
   candidateHandoffText,
@@ -640,10 +640,20 @@ async function main() {
       executor: { runtime, candidates: executors },
       independentReviewer: { runtime, candidates: independentReviewers },
     });
+    // 共享资格工厂：project_busy 委托队列探针认本 Mission 的退避/占位，
+    // no_available_agent 接上 runner 的同池角色快照认全部候选短冷却。
+    // 即使没装队列也启用冷却判断——指定角色候选全在 15 分钟内冷却时就在运行内等待续跑，
+    // 不把未知或非候选失败误当冷却、也不开升级单。
+    const waitEligibility = createPlanWaitEligibility({
+      ...(queuedHops ? { queuedHops } : {}),
+      roleCooldownSnapshot: (role, now) => runner.roleCooldownSnapshot(role, now),
+      now: () => Date.now(),
+    });
     const stop = await runPlanOnPlatform(plan, selection, {
       store,
       projectRoot,
       platform,
+      ...(waitEligibility ? { waitEligibility } : {}),
       runMission: (missionId, options) => runner.run(missionId, missionRunOptions(options, maxRounds)),
       ...(runQuery ? { runQuery } : {}),
       ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
