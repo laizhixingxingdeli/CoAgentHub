@@ -6625,7 +6625,8 @@ function agentEvidenceSummary(
         summary,
         command: opts.dropCommand ? undefined : e.command !== undefined ? redactSecrets(e.command) : undefined,
         exitCode: e.exitCode,
-        outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-maxTail),
+        // maxTail=0 必须产出空串：slice(-0) 实际返回整串，会漏掉裁切。
+        outputTail: maxTail > 0 ? (e.output !== undefined ? redactSecrets(e.output) : '').slice(-maxTail) : '',
       });
     }
   }
@@ -6741,10 +6742,12 @@ function buildAgentWorkItemView(
     }
   }
 
-  // 仍超大：只保留索引字段的紧凑摘要，明确标 truncated（必然远小于上限）。
-  return {
+  // 仍超大：只保留索引字段的紧凑摘要，明确标 truncated。标题本身也可能极长，
+  // 必须按 UTF-8 实测复核并逐级截断到上限内——否则极长标题会撑爆 20KB，
+  // 违背「任何情况下 JSON UTF-8 <=20KB 并标 truncated」的硬约束。
+  const buildFallback = (title: string): AgentWorkItemView => ({
     workItemId: item.id,
-    title: redactedTitle,
+    title,
     status: item.status,
     orderRevision,
     order: undefined,
@@ -6752,7 +6755,15 @@ function buildAgentWorkItemView(
     reviews: [],
     evidenceSummary: [],
     truncated: true,
-  };
+  });
+  let fallbackTitleCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  while (
+    fallbackTitleCap > 1 &&
+    byteSize(buildFallback(capString(redactedTitle, fallbackTitleCap))) > MAX_AGENT_WORK_ITEM_BYTES
+  ) {
+    fallbackTitleCap = Math.floor(fallbackTitleCap / 2);
+  }
+  return buildFallback(capString(redactedTitle, fallbackTitleCap));
 }
 
 function viewOf(mission: Mission): MissionView {
