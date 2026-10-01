@@ -121,6 +121,7 @@ import {
   buildContextBundle,
   projectStartupBriefFields,
   type BoundWorkItem,
+  type ContractCheck,
   type ContextBundle,
   type WorkItemIndexEntry,
 } from './context-builder.ts';
@@ -2839,6 +2840,8 @@ export class Platform {
     workItem?: BoundWorkItem;
     /** L3 打回的理由。被打回之后重跑时，这是最该先看到的东西。 */
     finalReview?: Readonly<FinalReview>;
+    /** 当前契约修订的核对结论；无当前修订核对时缺省，旧简报形状不变。 */
+    contractCheck?: Readonly<ContractCheck>;
     /** 可追溯的角色视图；旧字段从这里投影，缺省语义保持不变。 */
     contextBundle: ContextBundle;
   }> {
@@ -2913,6 +2916,7 @@ export class Platform {
           sinceLastHop: CoordinatorSinceLastHopEntry;
         }
       | undefined;
+    let contractCheck: Readonly<ContractCheck> | undefined;
     if (attempt.kind === 'coordinator') {
       const events = await this.#activity.list(missionId);
       briefSources = coordinatorStartupSources(
@@ -2921,6 +2925,14 @@ export class Platform {
         events,
         await this.#workItemValidationReportViews(mission, events),
       );
+      // 当前修订最近的核对结论：契约改版后旧修订事件被跳过，未重新核对前保持旧简报形状。
+      const checkEvent = [...events].reverse().find(
+        (event) =>
+          event.kind === 'contract_check.submitted' &&
+          (event.data as { contractRevision?: number } | undefined)?.contractRevision ===
+            mission.contractRevision,
+      );
+      contractCheck = checkEvent?.data as Readonly<ContractCheck> | undefined;
     }
     const contextBundle = buildContextBundle(
       {
@@ -2940,6 +2952,7 @@ export class Platform {
               sinceLastHop: briefSources.sinceLastHop,
             }
           : {}),
+        ...(contractCheck ? { contractCheck } : {}),
       },
       budget,
     );
