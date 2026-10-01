@@ -301,15 +301,16 @@ describe('WorkItem: 封装', () => {
     }
   });
 
-  test('公开方法只有 dispatch / startAttempt / submit / review / recordBlocked / retire', () => {
+  test('公开方法只有 dispatch / startAttempt / submit / review / recordBlocked / retire / reviseOrder', () => {
     // 没有 accept() / forceAccepted() 之类的后门：只有 review('accept') 能到 accepted。
     // recordBlocked 与 retire 都会流转，但一个只到 blocked、一个只到 retired
-    // （逐项证明见 invariants.test.ts）。
+    // （逐项证明见 invariants.test.ts）。reviseOrder 是新增的受控原子替换入口。
     assert.deepEqual(publicMethodNames(WorkItem), [
       'dispatch',
       'recordBlocked',
       'retire',
       'review',
+      'reviseOrder',
       'startAttempt',
       'submit',
       'toSnapshot',
@@ -817,5 +818,83 @@ describe('ReviewRecord 审计语义', () => {
     item.review('accept');
     assert.equal(item.status, 'accepted');
     assert.equal(item.reviews.length, 0);
+  });
+});
+
+describe('WorkItem.reviseOrder：修订号递增与快照往返', () => {
+  function fresh(): WorkItem {
+    return new WorkItem({
+      id: 'W-rev',
+      missionId: 'M1',
+      title: 'revise',
+      order: { ...BASE_ORDER },
+    });
+  }
+
+  test('created/rejected/blocked 可修订且修订号递增；toSnapshot 往返恢复一致（老快照缺 revision 视作 r1）', () => {
+    // 三个允许状态分别独立驱动，再各自修订：修订号在各自既有号上 +1。
+    const created = fresh();
+    assert.equal(created.order?.orderRevision, 'r1');
+    created.reviseOrder({ ...BASE_ORDER, objective: 'objective-r2' });
+    assert.equal(created.order?.orderRevision, 'r2');
+    assert.equal(created.order?.objective, 'objective-r2');
+
+    // rejected 只能从 submitted 进。
+    const rejected = fresh();
+    rejected.dispatch();
+    rejected.submit();
+    rejected.review('reject', { attemptId: 'c1', reasons: ['错'], requiredChanges: [] });
+    assert.equal(rejected.status, 'rejected');
+    rejected.reviseOrder({ ...BASE_ORDER, objective: 'objective-r2' });
+    assert.equal(rejected.order?.orderRevision, 'r2');
+
+    // blocked 可直接从 created 进。
+    const blocked = fresh();
+    blocked.recordBlocked({ attemptId: 'l3', reason: 'x', whatWasTried: [], needsFromUpstream: 'y' });
+    assert.equal(blocked.status, 'blocked');
+    blocked.reviseOrder({ ...BASE_ORDER, objective: 'objective-r2' });
+    assert.equal(blocked.order?.orderRevision, 'r2');
+
+    // 快照往返：修订后恢复一致。
+    const snap = blocked.toSnapshot();
+    assert.equal(snap.order?.orderRevision, 'r2');
+    const restored = WorkItem.restore(snap);
+    assert.equal(restored.order?.orderRevision, 'r2');
+    assert.equal(restored.order?.objective, 'objective-r2');
+    assert.deepEqual(restored.toSnapshot().order, snap.order);
+
+    // 老快照缺 orderRevision：restore 视作 r1，且与 toSnapshot 往返一致。
+    const legacy = WorkItem.restore({
+      id: 'W-leg',
+      missionId: 'M1',
+      title: 'legacy',
+      status: 'created',
+      order: { ...BASE_ORDER },
+    } as ReturnType<WorkItem['toSnapshot']>);
+    assert.equal(legacy.order?.orderRevision, 'r1');
+    assert.equal(legacy.toSnapshot().order?.orderRevision, 'r1');
+  });
+
+  test('dispatched/submitted/accepted/retired 拒绝修订且失败不污染原工单', () => {
+    const cases: Array<{ setup: (w: WorkItem) => void; status: string }> = [
+      { setup: (w) => w.dispatch(), status: 'dispatched' },
+      { setup: (w) => { w.dispatch(); w.submit(); }, status: 'submitted' },
+      { setup: (w) => { w.dispatch(); w.submit(); w.review('accept'); }, status: 'accepted' },
+      { setup: (w) => w.retire('作废'), status: 'retired' },
+    ];
+    for (const { setup, status } of cases) {
+      const item = fresh();
+      setup(item);
+      assert.equal(item.status, status);
+      const before = item.order;
+      assert.throws(
+        () => item.reviseOrder({ ...BASE_ORDER, objective: 'hacked' }),
+        illegal('WorkItem', status, 'reviseOrder'),
+      );
+      // 失败不得污染原工单：objective 与修订号都没变。
+      assert.equal(item.order, before);
+      assert.equal(item.order?.objective, BASE_ORDER.objective);
+      assert.equal(item.order?.orderRevision, 'r1');
+    }
   });
 });
