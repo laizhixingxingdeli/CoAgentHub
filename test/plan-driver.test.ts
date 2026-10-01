@@ -9,7 +9,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -2489,22 +2489,8 @@ describe('注入式方案运行入口', () => {
       assert.ok(h.calls.includes('create R1-Alpha'));
       assert.ok(!h.calls.some((c) => c.startsWith('create-classified')));
       assert.match(h.logs.join('\n'), /分类员不可用/);
-      const src = readFileSync(join(import.meta.dirname, '..', 'src', 'application', 'plan-runtime.ts'), 'utf8');
-      assert.match(src, /export async function runPlanOnPlatform/);
-      assert.match(src, /drivePlan\(/);
-      assert.match(src, /runWithDeadline/);
-      assert.match(src, /buildRoutingPrompt/);
-      assert.match(src, /parseRoutingProposal/);
-      assert.doesNotMatch(src, /new Orchestrator/);
-      assert.doesNotMatch(src, /createApi\s*\(/);
-      assert.doesNotMatch(src, /listenLoopback/);
-      assert.doesNotMatch(src, /acquireLock/);
-      assert.doesNotMatch(src, /buildPersistentPlatform/);
-      assert.doesNotMatch(src, /buildPgPlatform/);
-      assert.match(
-        src,
-        /answerEscalation:\s*\(missionId, answer\) =>\s*persistAfter\(deps\.persist, deps\.platform\.answerEscalation\(missionId, answer\)\)/,
-      );
+      // 实现语句（runPlanOnPlatform 用了哪些函数、没另建平台/锁/API）是重构自由的，不在这里钉源码文本；
+      // answerEscalation 的接线由 test/run-plan-wiring.test.ts「runtime adapter 用 persistAfter 包住 platform.answerEscalation」覆盖。
     });
 
   test('到点调用暂停并持久化，run 后仍持久化',
