@@ -770,9 +770,11 @@ describe('调度器：整条 Mission 自己走完', () => {
 
   test('两个 MissionRunner 共用持久仓储：到期 P 只探测一次，成功关闭后可再启动', async () => {
     const circuits = candidateCircuitRepository();
+    // 通用半开探测夹具：这一类只测并发/探测/恢复，不测 quota —— quota 在
+    // 无 provider/usage 的 harness 下正确地不得半开，会让下面的 execAStarted 一直等。
     await circuits.open({
       profileId: 'exec-a',
-      failureClass: 'quota',
+      failureClass: 'rate_limit',
       openUntil: new Date(Date.now() - 60_000).toISOString(),
     });
 
@@ -862,7 +864,7 @@ describe('调度器：整条 Mission 自己走完', () => {
     const expiredUntil = new Date(Date.now() - 60_000).toISOString();
     await circuits.open({
       profileId: 'exec-a',
-      failureClass: 'quota',
+      failureClass: 'rate_limit',
       openUntil: expiredUntil,
     });
     const before = await circuits.get('exec-a');
@@ -912,7 +914,7 @@ describe('调度器：整条 Mission 自己走完', () => {
     const circuits = candidateCircuitRepository();
     await circuits.open({
       profileId: 'exec-a',
-      failureClass: 'quota',
+      failureClass: 'rate_limit',
       openUntil: new Date(Date.now() - 60_000).toISOString(),
     });
     const before = await circuits.get('exec-a');
