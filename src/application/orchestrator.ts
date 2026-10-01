@@ -1271,7 +1271,10 @@ export class Orchestrator {
         }
         available.push(profile);
       } else if (circuit.state === 'open' && circuit.openUntil !== null && Date.parse(circuit.openUntil) <= now) {
-        if (circuit.failureClass === 'quota' && await this.#usageResetAt(profile, now)) continue;
+        if (circuit.failureClass === 'quota') {
+          const usage = await this.#quotaUsage(profile, now);
+          if (usage.kind !== 'available') continue;
+        }
         available.push(profile);
       }
     }
@@ -1279,22 +1282,35 @@ export class Orchestrator {
   }
 
   async #usageResetAt(profile: ExecutionProfile, now: number): Promise<string | undefined> {
+    const usage = await this.#quotaUsage(profile, now);
+    return usage.kind === 'exhausted' ? usage.resetAt : undefined;
+  }
+
+  async #quotaUsage(profile: ExecutionProfile, now: number): Promise<
+    { kind: 'exhausted'; resetAt: string } | { kind: 'available' | 'unknown' }
+  > {
     const providerFact = profile.facts?.find((fact) => fact.key === 'provider');
-    if (!providerFact) return undefined;
+    if (!providerFact) return { kind: 'unknown' };
     try {
       const usage = await this.#usageReader();
       const providers = Array.isArray(usage) ? usage : usage.providers;
-      if (!Array.isArray(usage) && !usage.available) return undefined;
-      if (!Array.isArray(providers)) return undefined;
+      if (!Array.isArray(usage) && !usage.available) return { kind: 'unknown' };
+      if (!Array.isArray(providers)) return { kind: 'unknown' };
       const row = providers.find((entry) =>
         entry !== null && typeof entry === 'object' &&
-        (entry as Record<string, unknown>).provider === providerFact.value,
+        (entry as Record<string, unknown>).provider === providerFact.value &&
+        (entry as Record<string, unknown>).status === 'ok',
       ) as Record<string, unknown> | undefined;
-      if (!row) return undefined;
+      if (!row) return { kind: 'unknown' };
       const exhausted = row.remainingPercent === 0 || (typeof row.usedPercent === 'number' && row.usedPercent >= 100);
-      return exhausted && typeof row.resetAt === 'string' && Date.parse(row.resetAt) > now
-        ? new Date(Date.parse(row.resetAt)).toISOString() : undefined;
-    } catch { return undefined; }
+      if (exhausted) {
+        const reset = typeof row.resetAt === 'string' ? Date.parse(row.resetAt) : Number.NaN;
+        if (Number.isFinite(reset) && reset > now) return { kind: 'exhausted', resetAt: new Date(reset).toISOString() };
+      }
+      if ((typeof row.remainingPercent === 'number' && row.remainingPercent > 0) ||
+          (typeof row.usedPercent === 'number' && row.usedPercent < 100)) return { kind: 'available' };
+      return { kind: 'unknown' };
+    } catch { return { kind: 'unknown' }; }
   }
 
   /** 候选的可用性快照，供界面显示"为什么停着"。 */

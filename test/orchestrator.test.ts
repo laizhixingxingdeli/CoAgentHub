@@ -563,7 +563,7 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal(recorded.state, 'open');
     if (recorded.state === 'open') {
       assert.equal(recorded.failureClass, 'quota');
-      assert.ok(Date.parse(recorded.openUntil) > Date.now());
+      assert.equal(recorded.openUntil, null);
     }
 
     const view = await current.platform.getMissionView('M-failover');
