@@ -29,6 +29,7 @@ import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
 import { preflightPlanMissionSlots, preflightPlanRepo } from './application/plan-preflight.ts';
 import { renderPlanHandoff } from './application/plan-handoff.ts';
+import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, createPlanWaitEligibility, runPlanOnPlatform } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import {
@@ -468,6 +469,11 @@ async function main() {
       throw new Error(occupiedMessage(probe.reason));
     }
   }
+
+  // 本进程的用量查询要问本次 --adapter 所在仓库：只有走到这里才是独立本地写者，
+  // 转发给常驻服务时仍由服务按 body 记目录，不能让 CLI 子进程盖掉服务已缓存的目录。
+  // COAGENT_ADAPTER_DIR 优先级更高，由 adapterDir() 自己判。
+  rememberAdapterDir(resolve(adapter, '../..'));
 
   const workspace = new GitWorktreeManager(arg('--worktrees'));
   // 分类员：同一个适配器的只读模式。工具表只有 read / grep / find / ls，由 QueryRunner 强制。
