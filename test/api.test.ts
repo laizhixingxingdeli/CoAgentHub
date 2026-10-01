@@ -548,7 +548,7 @@ describe('HTTP 队列 Attempt 身份', () => {
         fresh.token,
       );
       assert.equal(ok.status, 200);
-      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'current-gen');
+      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'live\n\n—— 第 2 次补充\ncurrent-gen');
       assert.equal(tokens.resolve(fresh.token)?.attemptId, attemptId);
     } finally {
       await closeServer(server);
