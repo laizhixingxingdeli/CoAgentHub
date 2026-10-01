@@ -430,7 +430,10 @@ function quotaExtras(circuit: CandidateCircuit): Pick<AgentPoolCandidateHealth, 
       resetCommand: resetCommandFor(circuit.profileId),
     };
   }
-  return { quotaReason: `额度已用完，${circuit.openUntil} 重置后再派活。` };
+  return {
+    quotaReason: `额度已用完，${circuit.openUntil} 重置后再派活。`,
+    resetCommand: resetCommandFor(circuit.profileId),
+  };
 }
 
 /** 候选 facts 里的 provider 对上哪条用量行。没有 provider fact 就无从对应 —— 不猜。 */
