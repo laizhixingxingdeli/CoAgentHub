@@ -2990,3 +2990,60 @@ describe('调度器：运行时 contextMetrics 透传到平台收尾',
         assert.deepEqual(hit.metrics, VALID_CONTEXT_METRICS);
       });
   });
+
+describe('调度器：按角色读取候选冷却快照', () => {
+  test('协调者唯一候选 open 五分钟时给出到期，执行者不被混算', async () => {
+    const now = Date.parse('2026-10-01T12:00:00.000Z');
+    const openUntil = new Date(now + 5 * 60_000).toISOString();
+    const circuits = candidateCircuitRepository();
+    await circuits.open({ profileId: 'coordinator-a', failureClass: 'rate_limit', openUntil });
+    // exec-b：到期后探针已被领取，停在 half_open。快照必须说「不可证明可用」，
+    // 不能折算成一个冷却时长——那会把「有人正在试探」说成「等一会就好」。
+    const probeAt = new Date(now).toISOString();
+    await circuits.open({ profileId: 'exec-b', failureClass: 'rate_limit', openUntil: probeAt });
+    assert.equal(await circuits.tryClaimProbe({ profileId: 'exec-b', now: probeAt }), true);
+
+    // 直构编排器，不起 server、不碰真实状态目录：这一跳只读候选池与熔断仓储。
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const platform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries,
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    const tokens = new RunTokenRegistry();
+    const runner = new Orchestrator({
+      platform,
+      tokens: makeIssuer(platform, tokens),
+      baseUrl: 'http://cooldown-snapshot.invalid',
+      workspace: new InPlaceWorkspaceManager(),
+      candidateCircuits: circuits,
+      coordinator: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [{ endpoint: 'local', profileId: 'coordinator-a' }],
+      },
+      executor: {
+        runtime: new ScriptedRuntime({}),
+        candidates: [
+          { endpoint: 'local', profileId: 'exec-a' },
+          { endpoint: 'local', profileId: 'exec-b' },
+        ],
+      },
+    });
+
+    assert.deepEqual(await runner.roleCooldownSnapshot('coordinator', now), [
+      { profileId: 'coordinator-a', availability: 'cooldown', until: openUntil, retryAfterMs: 5 * 60_000 },
+    ]);
+    // 执行者这一侧一个都不能沾上协调者的冷却；exec-b 是 unknown，不是 cooldown。
+    assert.deepEqual(await runner.roleCooldownSnapshot('executor', now), [
+      { profileId: 'exec-a', availability: 'available', retryAfterMs: 0 },
+      { profileId: 'exec-b', availability: 'unknown' },
+    ]);
+    // 池没装配 = 没有候选，不是「全在冷却」。
+    assert.deepEqual(await runner.roleCooldownSnapshot('independent_reviewer', now), []);
+  });
+});

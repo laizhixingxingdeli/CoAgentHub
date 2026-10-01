@@ -30,7 +30,7 @@ import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
-import { classifyCandidateFailure } from './candidate-circuit.ts';
+import { classifyCandidateFailure, type CandidateCircuit } from './candidate-circuit.ts';
 import {
   acquireQueuedHop,
   compareHopFairness,
@@ -73,6 +73,32 @@ export interface RolePool {
 
 /** 候选的可用性。v1 只有这三种，不做 closed/open/half-open。 */
 export type CandidateAvailability = 'available' | 'cooldown';
+
+/** 三类 agent 各自的候选池名字。与 RolePool 一一对应，不含旁路。 */
+export type RolePoolName = 'coordinator' | 'executor' | 'independent_reviewer';
+
+/**
+ * 冷却快照里的可用性。比 CandidateAvailability 多一档 unknown。
+ *
+ * unknown 的语义是**不可证明可用**——持久熔断处在 half_open（探针在跑）、
+ * 到期值读不出来、或者仓储给了读不懂的行。它**不是**冷却：把 unknown 折算成
+ * 一个等待时长，等于把一个「仓储坏了，要人看」的情况伪装成「等一会就好」。
+ */
+export type RoleCooldownAvailability = 'available' | 'cooldown' | 'unknown';
+
+export interface RoleCooldownCandidate {
+  readonly profileId: string;
+  readonly availability: RoleCooldownAvailability;
+  /** 冷却到期（ISO）。只有 availability === 'cooldown' 时出现。 */
+  readonly until?: string;
+  /**
+   * 从调用方给的 now 起还要等多久（毫秒）。available 是 0。
+   *
+   * 已过期的 open 会给出 0：调度器把这种行当可用（见 #availableCandidates）。
+   * 调用方据此决定等不等，而不是拿 availability 字符串当等待时长。
+   */
+  readonly retryAfterMs?: number;
+}
 
 /**
  * 心跳间隔。
@@ -1145,6 +1171,73 @@ export class Orchestrator {
         ? { profileId: profile.profileId, availability: 'cooldown' as const, until: new Date(until).toISOString() }
         : { profileId: profile.profileId, availability: 'available' as const };
     });
+  }
+
+  /**
+   * 某一角色候选池的冷却快照：每个候选现在能不能用、最早什么时候能用。
+   *
+   * 为什么要有：候选全在短冷却时，方案驱动该在**运行内等**，而不是开升级单。
+   * 判据只能来自权威候选池——注入了 candidateCircuits 就按它读，否则读本进程
+   * 的 #cooldown。拿日志文案猜会把「可用」误判成「冷却」，然后把一次本可以
+   * 自愈的等待写成人工单。
+   *
+   * 三条不许违反的口径：
+   *   - **严格按 role 选池**。混进别的角色的候选，会让「协调者全冷却」看起来
+   *     像「执行者也全冷却」，方案驱动就会去等一个根本不用等的角色。
+   *   - **unknown 不是 cooldown**。half_open 的探针在跑、到期值非法、仓储读到
+   *     解释不了的行，都只能说「不可证明可用」，不能编一个冷却时长出来。
+   *   - **没有候选就是空数组**。池没装配（例如没有独立检视）不等于「全在冷却」。
+   */
+  async roleCooldownSnapshot(
+    role: RolePoolName,
+    now: number = Date.now(),
+  ): Promise<RoleCooldownCandidate[]> {
+    const pool =
+      role === 'coordinator'
+        ? this.#coordinator
+        : role === 'executor'
+          ? this.#executor
+          : this.#independentReviewer;
+    if (!pool) return [];
+    const snapshot: RoleCooldownCandidate[] = [];
+    for (const profile of pool.candidates) {
+      snapshot.push(await this.#candidateCooldown(profile.profileId, now));
+    }
+    return snapshot;
+  }
+
+  /**
+   * 单个候选的冷却状态。判据必须与 #availableCandidates 同源：两处各写一套
+   * 的话，「谁在冷却」会同时有两个答案，而排障的人会同时看到两者。
+   */
+  async #candidateCooldown(profileId: string, now: number): Promise<RoleCooldownCandidate> {
+    if (!this.#candidateCircuits) {
+      const until = this.#cooldown.get(profileId) ?? 0;
+      return until > now
+        ? {
+            profileId,
+            availability: 'cooldown' as const,
+            until: new Date(until).toISOString(),
+            retryAfterMs: until - now,
+          }
+        : { profileId, availability: 'available' as const, retryAfterMs: 0 };
+    }
+    const circuit: CandidateCircuit | undefined = await this.#candidateCircuits.get(profileId);
+    if (circuit?.state === 'closed') {
+      return { profileId, availability: 'available' as const, retryAfterMs: 0 };
+    }
+    if (circuit?.state === 'open') {
+      const until = Date.parse(circuit.openUntil);
+      if (!Number.isFinite(until)) return { profileId, availability: 'unknown' as const };
+      return {
+        profileId,
+        availability: 'cooldown' as const,
+        until: new Date(until).toISOString(),
+        retryAfterMs: Math.max(0, until - now),
+      };
+    }
+    // half_open（探针已被领取）或读不到/读不懂的行：不可证明可用。
+    return { profileId, availability: 'unknown' as const };
   }
 
   /**
