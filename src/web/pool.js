@@ -75,6 +75,51 @@ function windowCostText(reportedCost) {
 }
 
 /**
+ * 用量行的重置时刻。ISO 原串在格子里占掉整行宽度，只留到分钟；解析不了就原样，
+ * 让人自己看——编一个时刻出来会让人按错的时刻等恢复。
+ */
+function resetAtText(value) {
+  const raw = text(value);
+  if (!raw) return '';
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return raw;
+  const d = new Date(parsed);
+  const pad = (n) => String(n).padStart(2, '0');
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+/**
+ * 用量那一格：套餐、剩余百分比、重置时刻（PI-Q1 的 UsageRow 原样对象）。
+ *
+ * 三个字段都不认识就整行不出现，而不是显示成 0%：这一格的读数是要拿去决定
+ * 停不停派的，「没读到」和「用完了」在屏幕上看上去一样，后果却相反。
+ */
+function usageCellHtml(usage) {
+  const u = usage && typeof usage === 'object' ? usage : {};
+  const plan = text(u.plan);
+  const remaining = Number.isFinite(Number(u.remainingPercent)) ? Number(u.remainingPercent) : null;
+  const reset = resetAtText(u.resetAt);
+  if (!plan && remaining === null && !reset) return '';
+  let line = plan ? esc(plan) : '';
+  if (remaining !== null) line += (line ? ' ' : '') + '剩 ' + remaining + '%';
+  if (reset) line += (line ? ' · ' : '') + esc(reset) + ' 重置';
+  return '<div data-health-usage>' + line + '</div>';
+}
+
+/**
+ * 额度那一格：原因原样上屏，复位命令放进 code 让人复制。
+ *
+ * 命令**只显示不执行**：复位是「人确认过充值」之后的动作，让页面自己发一次，
+ * 等于把熔断开关交给一个还没充值的额度。
+ */
+function quotaCellHtml(health) {
+  const reason = text(health.quotaReason);
+  const command = text(health.resetCommand);
+  return (reason ? '<div data-health-quota-reason>' + esc(reason) + '</div>' : '')
+    + (command ? '<div data-health-quota-reset>复位：<code>' + esc(command) + '</code></div>' : '');
+}
+
+/**
  * 候选健康格。字段按 W-130 容错：缺 health、缺子对象、reason 码原样上屏。
  * 不在这里建熔断中文表——跨页文案该进 narrate.js，本单不能改那份文件。
  */
@@ -119,6 +164,8 @@ export function healthCellHtml(health) {
     + '<div data-health-window>' + esc(windowLine) + '</div>'
     + '<div data-health-failure>' + esc(failLine) + '</div>'
     + '<div data-health-runtime>' + esc(runtimeLine) + '</div>'
+    + usageCellHtml(health.usage)
+    + quotaCellHtml(health)
     + '</td>';
 }
 
