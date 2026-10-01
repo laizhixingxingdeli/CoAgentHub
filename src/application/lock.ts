@@ -99,7 +99,7 @@ export class LockBusyError extends Error {
    */
   readonly reasons: readonly string[];
 
-  constructor(path: string, holder: LockInfo | undefined, reasons?: readonly string[]) {
+  constructor(path: string, holder: LockInfo | undefined, reasons?: ReadonlyArray<string>) {
     super(lockBusyMessage(path, holder, reasons));
     this.name = 'LockBusyError';
     this.holder = holder;
