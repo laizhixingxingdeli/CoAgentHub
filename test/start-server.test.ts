@@ -665,6 +665,7 @@ describe('buildPlatform decisionProvider 透传', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M1', attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
 
     assert.ok(sink.calls >= 1, '注入的 provider 应在 dispatch 被调用');
@@ -707,6 +708,7 @@ describe('buildPersistentPlatform decisionHooks 透传（J1）', () => {
       const { attemptId } = await platform.startCoordinatorAttempt('M1');
       await platform.updatePlan('M1', attemptId, plan);
       const { workItemId } = await platform.createWorkItem('M1', attemptId, { title: 'w', order });
+      await platform.submitContractCheck('M1', attemptId, { verdict: 'ok', summary: '测试契约已核对' });
       await platform.dispatchWorkItems('M1', attemptId, [workItemId]);
       assert.equal(sink.calls, expected, hooks ? '开了 PRE 应调一次' : '不传钩子应零次');
     }
@@ -1324,6 +1326,10 @@ const COORDINATOR_HAPPY: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: HOSTED_PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...HOSTED_ORDER } },
+      // W-334 门禁：Standard 派发前必须先落一条当前契约修订的核对结论。
+      // 缺这一步脚本协调者的派发会被拒，整个 hosted run 停在
+      // investigating，后面测的就不是原场景了。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous: Record<string, unknown>) => ({ workItemIds: [previous.workItemId] }),
