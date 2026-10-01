@@ -125,6 +125,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   平台在 `src/application/platform.ts` 的 `getStartupBrief` 原有读取路径上收集项目红线、环境注记和 Mission/Attempt 所需的现有值，将它们交给 `src/application/
 - **context-replay-baseline** — 离线 Attempt 用量基线
   `scripts/context-replay-report.mjs` 只读显式指定的 version:1 状态 JSON，接受 `--input E1 <path>` / `--input main <path>`（可多次）及可选 `--
+- **coordinator-handoff** — 协调者交接包与按需工作项详情
+  `featureContract` 生成某条方案功能点的 Mission 契约时，保留原有非目标，只将直接上游依赖、直接下游依赖或 `allowedScope` 路径相同/目录祖先重叠的其他条目加入「方案其他条目」，逐条一行 `id：标题`
 - **credential-redaction** — 凭据脱敏（credential-redaction）
   agent 产出、要落盘或给人看的文本，进门先过一遍脱敏（优化方案 §7 P0.3 末条、Phase 1 第 4 条）。起因：agent 一句 `env` 或 `cat .env`，本机的 key 就进了证据、失败原文、实时输出，落盘后在 
 - **decision-jev-off-shadow** — Decision / Jev：OFF 与 SHADOW

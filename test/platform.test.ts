@@ -1154,3 +1154,126 @@ describe('W-292：blocked/partial 工单未修订禁止原样重派', () => {
     );
   });
 });
+
+describe('W-317 协调者简报：工作项索引 + 上一跳增量（生产接线）', () => {
+  test('首次 coordinator 有索引、增量为空、plan 不变；后续 coordinator 取到提交证据增量；executor 不携带两来源', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W317a', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('W317a');
+    await platform.updatePlan('W317a', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('W317a', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('W317a', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('W317a', workItemId);
+    await platform.submitEvidence('W317a', exec.attemptId, {
+      kind: 'test', summary: '绿', command: 'node --test', exitCode: 0,
+    });
+    await platform.submitExecutionResult('W317a', exec.attemptId, {
+      outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无',
+    });
+    await platform.finishAttempt('W317a', exec.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317a', coord.attemptId, {
+      workItemId, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+
+    const coordBrief = await platform.getStartupBrief('W317a', coord.attemptId);
+    assert.deepEqual(coordBrief.plan, PLAN, 'coordinator 简报不能改动 plan');
+    assert.ok(Array.isArray(coordBrief.workItemsIndex), 'coordinator 应带工作项索引');
+    assert.equal(coordBrief.workItemsIndex!.length, 1);
+    assert.deepEqual(coordBrief.workItemsIndex![0], {
+      id: workItemId, title: 'W', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept',
+    });
+    assert.deepEqual(coordBrief.sinceLastHop, [], '首次 coordinator 无上一跳，增量为空');
+
+    // 收尾第一跳，开第二次 coordinator，并在两跳之间产生新活动。
+    await platform.finishAttempt('W317a', coord.attemptId, { endedBy: 'structured_submit' });
+    const coord2 = await platform.startCoordinatorAttempt('W317a');
+    const { workItemId: w2 } = await platform.createWorkItem('W317a', coord2.attemptId, { title: 'W2', order: ORDER });
+    await platform.dispatchWorkItems('W317a', coord2.attemptId, [w2]);
+    const exec2 = await platform.startExecutorAttempt('W317a', w2);
+    await platform.submitEvidence('W317a', exec2.attemptId, { kind: 'test', summary: '第二跳证据', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('W317a', exec2.attemptId, { outcome: 'completed', summary: '又改好了', changedFiles: ['src/bar.ts'], evidenceIds: [], notes: '无' });
+    await platform.finishAttempt('W317a', exec2.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317a', coord2.attemptId, {
+      workItemId: w2, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+
+    const coord2Brief = await platform.getStartupBrief('W317a', coord2.attemptId);
+    assert.deepEqual(coord2Brief.plan, PLAN, '第二跳 plan 仍不变');
+    assert.equal(coord2Brief.workItemsIndex!.length, 2, '第二跳索引含两项工作项');
+    const w2Index = coord2Brief.workItemsIndex!.find((e) => e.id === w2);
+    assert.deepEqual(w2Index, { id: w2, title: 'W2', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept' });
+    assert.ok(coord2Brief.sinceLastHop!.length >= 1, '第二跳应有上一跳增量');
+    const summaries = coord2Brief.sinceLastHop!.map((e) => e.summary);
+    assert.ok(
+      summaries.some((s) => s.includes('提交[') && s.includes('改动1个文件')),
+      `应有证据提交摘要，实际：${JSON.stringify(summaries)}`,
+    );
+
+    // 执行者简报不应携带两来源（投影与 Bundle 都没有）。
+    await platform.dispatchWorkItems('W317a', coord2.attemptId, [workItemId]);
+    const exec3 = await platform.startExecutorAttempt('W317a', workItemId);
+    const execBrief = await platform.getStartupBrief('W317a', exec3.attemptId);
+    assert.equal(execBrief.workItemsIndex, undefined);
+    assert.equal(execBrief.sinceLastHop, undefined);
+    assert.equal(
+      execBrief.contextBundle.entries.find((e) => e.source === 'work_items_index'),
+      undefined,
+      'executor 的 Bundle 不得含工作项索引来源',
+    );
+    assert.equal(
+      execBrief.contextBundle.entries.find((e) => e.source === 'since_last_hop'),
+      undefined,
+      'executor 的 Bundle 不得含上一跳增量来源',
+    );
+  });
+
+  test('后续 coordinator 增量含证据提交与 blocked 报告摘要，plan 不变', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'W317b', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('W317b');
+    await platform.updatePlan('W317b', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('W317b', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('W317b', coord.attemptId, [workItemId]);
+    const exec1 = await platform.startExecutorAttempt('W317b', workItemId);
+    await platform.submitEvidence('W317b', exec1.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('W317b', exec1.attemptId, { outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无' });
+    await platform.finishAttempt('W317b', exec1.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317b', coord.attemptId, { workItemId, verdict: 'accept', acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })), reasons: ['ok'], requiredChanges: [] });
+    await platform.finishAttempt('W317b', coord.attemptId, { endedBy: 'structured_submit' });
+
+    // 第二跳：先有一个完成的提交（产生带证据的执行结果事件），再有一个 blocked 报告。
+    const coord2 = await platform.startCoordinatorAttempt('W317b');
+    await platform.dispatchWorkItems('W317b', coord2.attemptId, [workItemId]);
+    const exec2 = await platform.startExecutorAttempt('W317b', workItemId);
+    await platform.submitEvidence('W317b', exec2.attemptId, { kind: 'test', summary: '第二跳证据', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('W317b', exec2.attemptId, { outcome: 'completed', summary: '又改好了', changedFiles: ['src/bar.ts'], evidenceIds: [], notes: '无' });
+    await platform.finishAttempt('W317b', exec2.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('W317b', coord2.attemptId, { workItemId, verdict: 'accept', acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })), reasons: ['ok'], requiredChanges: [] });
+    await platform.dispatchWorkItems('W317b', coord2.attemptId, [workItemId]);
+    const exec3 = await platform.startExecutorAttempt('W317b', workItemId);
+    await platform.reportBlocked('W317b', exec3.attemptId, { reason: '依赖没装', whatWasTried: ['试过 npm i'], needsFromUpstream: '' });
+
+    const brief = await platform.getStartupBrief('W317b', coord2.attemptId);
+    assert.deepEqual(brief.plan, PLAN, 'plan 保持完整');
+    const summaries = brief.sinceLastHop!.map((e) => e.summary);
+    assert.ok(
+      summaries.some((s) => s.includes('提交[') && s.includes('改动1个文件')),
+      `应有证据提交摘要，实际：${JSON.stringify(summaries)}`,
+    );
+    assert.ok(
+      summaries.some((s) => s.includes('卡住报告')),
+      `应有 blocked 报告摘要，实际：${JSON.stringify(summaries)}`,
+    );
+    assert.equal(brief.workItemsIndex!.length, 1);
+    const idx = brief.workItemsIndex![0];
+    assert.equal(idx.id, workItemId);
+    assert.equal(idx.title, 'W');
+    assert.equal(idx.status, 'blocked');
+    assert.equal(idx.attempts, 3);
+    assert.equal(idx.lastReviewVerdict, 'accept');
+  });
+});

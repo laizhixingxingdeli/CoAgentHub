@@ -671,7 +671,21 @@ export function createApi(deps: ApiDeps): Server {
     (run: RunContext, body: Record<string, never>) => Promise<unknown>
   > = {
     async coagent_get_mission(run) {
-      return platform.getMissionView(run.missionId);
+      return platform.getAgentMissionView(run.missionId);
+    },
+
+    async coagent_get_work_item(run, body) {
+      const { workItemId } = body as unknown as { workItemId: unknown };
+      if (typeof workItemId !== 'string' || workItemId.length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
+      }
+      // 只有协调者能取精简详情。enforceAgentPolicy 对非 coordinator 的 ACTION_DENIED
+      // 保留「让 Platform 抛 WRONG_ROLE」的旧工具兼容回退（不在此改动），executor
+      // 会落到放行，故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
+      if (run.role !== 'coordinator') {
+        throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取工作项详情。');
+      }
+      return platform.getAgentWorkItem(run.missionId, workItemId);
     },
 
     async coagent_get_contract(run) {

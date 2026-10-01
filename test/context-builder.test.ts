@@ -15,6 +15,8 @@ import {
   buildContextBundle,
   projectStartupBriefFields,
   type BoundWorkItem,
+  type WorkItemIndexEntry,
+  type SinceLastHopEntry,
 } from '../src/application/context-builder.ts';
 import {
   FixedClock,
@@ -64,6 +66,15 @@ const ORDER: WorkOrder = {
 };
 
 const WORK_ITEM = { id: 'W1', title: 'W', order: ORDER };
+
+const WORK_ITEMS_INDEX: readonly WorkItemIndexEntry[] = [
+  { id: 'W1', title: 'W', status: 'dispatched', attempts: 1, lastReviewVerdict: 'approved' },
+  { id: 'W2', title: 'W2', status: 'pending', attempts: 0 },
+];
+
+const SINCE_LAST_HOP: SinceLastHopEntry = [
+  { summary: 'W1 已通过，建议进入 merged 放行。' },
+];
 
 const REVIEW: FinalReview = {
   verdict: 'send_back',
@@ -247,6 +258,58 @@ describe('buildContextBundle', () => {
     const exec = buildContextBundle(executorInput({ classification }));
     assert.equal(exec.entries.some((item) => item.source === 'classification'), false);
     assert.equal(projectStartupBriefFields(exec).classification, undefined);
+  });
+
+  test('协调者显式喂两项索引/增量时按序追加并投影，plan 完整；执行者不含两项', () => {
+    const coord = buildContextBundle(
+      coordinatorInput({ workItemsIndex: WORK_ITEMS_INDEX, sinceLastHop: SINCE_LAST_HOP }),
+    );
+    assert.deepEqual(
+      coord.entries.map((e) => e.source),
+      [...COORDINATOR_SOURCE_ORDER.filter((s) => s !== 'classification'), 'work_items_index', 'since_last_hop'],
+    );
+    const idx = coord.entries.find((e) => e.source === 'work_items_index');
+    const since = coord.entries.find((e) => e.source === 'since_last_hop');
+    assert.ok(idx);
+    assert.ok(since);
+    assert.ok(idx.estimatedTokens > 0);
+    assert.ok(since.estimatedTokens > 0);
+    assert.match(idx.hash ?? '', SHA256_HEX);
+    assert.match(since.hash ?? '', SHA256_HEX);
+    assert.ok(idx.reason.length > 0);
+    assert.ok(since.reason.length > 0);
+    // hash 反映内容：换一份索引得到不同的 hash。
+    const otherCoord = buildContextBundle(
+      coordinatorInput({
+        workItemsIndex: [{ id: 'W9', title: '别的', status: 'pending', attempts: 0 }],
+        sinceLastHop: SINCE_LAST_HOP,
+      }),
+    );
+    const otherIdx = otherCoord.entries.find((e) => e.source === 'work_items_index');
+    assert.notEqual(otherIdx?.hash, idx.hash);
+    const plan = coord.entries.find((e) => e.source === 'plan');
+    assert.equal(plan?.revision, 1);
+    assert.deepEqual(plan?.content, PLAN);
+    const projected = projectStartupBriefFields(coord);
+    assert.deepEqual(projected.workItemsIndex, WORK_ITEMS_INDEX);
+    assert.deepEqual(projected.sinceLastHop, SINCE_LAST_HOP);
+    assert.deepEqual(projected.plan, PLAN);
+    assert.equal(projected.planRevision, 1);
+
+    const emptyCoord = buildContextBundle(
+      coordinatorInput({ workItemsIndex: [], sinceLastHop: [] }),
+    );
+    assert.equal(emptyCoord.entries.some((e) => e.source === 'work_items_index'), true);
+    assert.equal(emptyCoord.entries.some((e) => e.source === 'since_last_hop'), true);
+
+    const exec = buildContextBundle(
+      executorInput({ workItemsIndex: WORK_ITEMS_INDEX, sinceLastHop: SINCE_LAST_HOP }),
+    );
+    assert.equal(exec.entries.some((e) => e.source === 'work_items_index'), false);
+    assert.equal(exec.entries.some((e) => e.source === 'since_last_hop'), false);
+    const execProjected = projectStartupBriefFields(exec);
+    assert.equal(execProjected.workItemsIndex, undefined);
+    assert.equal(execProjected.sinceLastHop, undefined);
   });
 
   test('每条含 source、revision 或 SHA-256 hash、reason、estimatedTokens', () => {
@@ -570,7 +633,7 @@ describe('getStartupBrief 从 Bundle 投影旧字段', () => {
     assert.equal(coord.contextBundle.role, 'coordinator');
     assert.deepEqual(
       coord.contextBundle.entries.map((e) => e.source),
-      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
+      [...COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'), 'work_items_index', 'since_last_hop'],
     );
 
     const execProjected = projectStartupBriefFields(exec.contextBundle);

@@ -546,6 +546,173 @@ describe('HTTP 面', () => {
       '直接调用不应带软警告字段',
     );
   });
+
+  test('W-319 T1: 60 项 Mission 精简视图 <=30KB 仅索引，网页 GET 仍给完整 60 工单', async () => {
+    await call('/api/missions', { projectId: 'P-60', missionId: 'M-60', contract: CONTRACT });
+    const coord = await call('/api/missions/M-60/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const shortOrder = {
+      objective: 'o',
+      allowedScope: ['x.ts'],
+      requiredBehaviour: 'b',
+      constraints: [],
+      acceptance: ['a'],
+      verification: ['v'],
+      doNot: [],
+      contextRefs: [],
+    };
+    for (let i = 0; i < 60; i++) {
+      const wi = await call(
+        '/api/agent/coagent_create_work_item',
+        { title: `W-${i}`, ...shortOrder },
+        coordToken,
+      );
+      assert.equal(wi.status, 200, `第 ${i} 个工单应建成功`);
+    }
+
+    const agentView = await call('/api/agent/coagent_get_mission', {}, coordToken);
+    assert.equal(agentView.status, 200);
+    const av = agentView.json as unknown as Record<string, unknown>;
+    const serialized = JSON.stringify(av);
+    assert.ok(
+      Buffer.byteLength(serialized, 'utf8') <= 30 * 1024,
+      `精简视图应 <=30KB，实际 ${Buffer.byteLength(serialized, 'utf8')}`,
+    );
+    const index = av.workItemIndex as unknown[];
+    assert.equal(index.length, 60, '精简视图应恰含 60 条索引');
+    for (const entry of index) {
+      const e = entry as Record<string, unknown>;
+      assert.equal('order' in e, false, '索引不得含工单正文');
+      assert.equal('executionResult' in e, false, '索引不得含执行结果');
+      assert.equal('reviews' in e, false, '索引不得含评审');
+    }
+    assert.equal('order' in av, false);
+    assert.equal('executionResult' in av, false);
+    assert.equal('reviews' in av, false);
+
+    const full = await call('/api/missions/M-60');
+    assert.equal(full.status, 200);
+    const fv = full.json as unknown as { workItems: unknown[] };
+    assert.equal(fv.workItems.length, 60, '网页 GET 应仍返回完整 60 工单');
+  });
+
+  test('W-319 T2: 协调者取详情含最新正文/证据/评审与旧摘要，executor 403，空 id 400，超长标截断', async () => {
+    await call('/api/missions', { projectId: 'P-det', missionId: 'M-det', contract: CONTRACT });
+    const coord = await call('/api/missions/M-det/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const detOrder = {
+      objective: '细项',
+      allowedScope: ['x.ts'],
+      requiredBehaviour: 'b',
+      constraints: [],
+      acceptance: ['a'],
+      verification: ['v'],
+      doNot: [],
+      contextRefs: [],
+    };
+    const wi = await call('/api/agent/coagent_create_work_item', { title: 'W-det', ...detOrder }, coordToken);
+    assert.equal(wi.status, 200);
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+
+    const exec1 = await call(`/api/missions/M-det/work-items/${workItemId}/executor-attempts`, {});
+    const exec1Id = (exec1.json as { attemptId: string }).attemptId;
+    const exec1Token = (exec1.json as { token: string }).token;
+    const ev1 = await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: '证据一', command: 'node --test', exitCode: 0 }, exec1Token);
+    assert.equal(ev1.status, 200);
+    const sub1 = await call(
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: '旧提交全文', changedFiles: ['x.ts'], evidenceIds: [(ev1.json as { evidenceId: string }).evidenceId], notes: 'n1' },
+      exec1Token,
+    );
+    assert.equal(sub1.status, 200);
+    await call(`/api/missions/M-det/attempts/${exec1Id}/finish`, { endedBy: 'structured_submit' });
+
+    const reviewed = await call(
+      '/api/agent/coagent_review_execution_result',
+      {
+        workItemId,
+        verdict: 'accept',
+        acceptanceResults: detOrder.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '逐条核过' })),
+        reasons: ['跑过'],
+        requiredChanges: [],
+      },
+      coordToken,
+    );
+    assert.equal(reviewed.status, 200);
+
+    // 重派（accepted 可派发）后第二次提交，制造「旧正文未保存」摘要。
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec2 = await call(`/api/missions/M-det/work-items/${workItemId}/executor-attempts`, {});
+    const exec2Token = (exec2.json as { token: string }).token;
+    const ev2 = await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: '证据二', command: 'node --test', exitCode: 0 }, exec2Token);
+    assert.equal(ev2.status, 200);
+    const sub2 = await call(
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: '最新提交全文', changedFiles: ['x.ts'], evidenceIds: [(ev2.json as { evidenceId: string }).evidenceId], notes: 'n2' },
+      exec2Token,
+    );
+    assert.equal(sub2.status, 200);
+
+    const detail = await call('/api/agent/coagent_get_work_item', { workItemId }, coordToken);
+    assert.equal(detail.status, 200);
+    const d = detail.json as unknown as Record<string, unknown>;
+    const result = d.executionResult as { summary?: string } | undefined;
+    assert.equal(result?.summary, '最新提交全文', '应给最新提交全文');
+    const evSum = d.evidenceSummary as { summary?: string }[];
+    assert.ok(evSum.some((e) => e.summary === '证据一'));
+    assert.ok(evSum.some((e) => e.summary === '证据二'));
+    const reviews = d.reviews as { verdict?: string }[];
+    assert.ok(reviews.length >= 1);
+    assert.equal(reviews[reviews.length - 1]?.verdict, 'accept');
+    const subs = d.submissionSummaries as { isLatest?: boolean; note?: string }[];
+    assert.equal(subs.length, 2);
+    const oldOne = subs.find((s) => s.isLatest !== true);
+    assert.equal(oldOne?.note, '旧正文未保存');
+    const latest = subs.find((s) => s.isLatest === true);
+    assert.equal(latest?.note, undefined);
+
+    const execFetch = await call('/api/agent/coagent_get_work_item', { workItemId }, exec2Token);
+    assert.equal(execFetch.status, 403);
+
+    const empty = await call('/api/agent/coagent_get_work_item', {}, coordToken);
+    assert.equal(empty.status, 400);
+
+    // 合法超长数据触发截断。
+    await call('/api/missions', { projectId: 'P-big', missionId: 'M-big', contract: CONTRACT });
+    const coordB = await call('/api/missions/M-big/coordinator-attempts', {});
+    const coordBToken = (coordB.json as { token: string }).token;
+    await call('/api/agent/coagent_update_plan', { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] }, coordBToken);
+    const bigWi = await call('/api/agent/coagent_create_work_item', { title: 'W-big', ...detOrder }, coordBToken);
+    const bigId = (bigWi.json as { workItemId: string }).workItemId;
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [bigId] }, coordBToken);
+    const execB = await call(`/api/missions/M-big/work-items/${bigId}/executor-attempts`, {});
+    const execBToken = (execB.json as { token: string }).token;
+    await call('/api/agent/coagent_submit_evidence', { kind: 'test', summary: 'e', command: 'c', exitCode: 0 }, execBToken);
+    const huge = 'x'.repeat(100 * 1024);
+    const subB = await call(
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: huge, changedFiles: ['x.ts'], evidenceIds: [], notes: 'n' },
+      execBToken,
+    );
+    assert.equal(subB.status, 200);
+    const bigDetail = await call('/api/agent/coagent_get_work_item', { workItemId: bigId }, coordBToken);
+    assert.equal(bigDetail.status, 200);
+    const bd = bigDetail.json as unknown as Record<string, unknown>;
+    assert.equal(bd.truncated, true, '超长详情应标截断');
+    const bigBytes = Buffer.byteLength(JSON.stringify(bd), 'utf8');
+    assert.ok(bigBytes <= 20 * 1024, `截断后 JSON 应 <=20KB，实际 ${bigBytes}`);
+  });
 });
 
 const QUEUE_NOW = '2025-01-01T00:00:00Z';
@@ -1209,7 +1376,7 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(coordBrief.contextBundle?.role, 'coordinator');
           assert.deepEqual(
             coordBrief.contextBundle?.entries?.map((e) => e.source),
-            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review', 'work_items_index', 'since_last_hop'],
           );
           const coordContract = coordBrief.contextBundle?.entries?.find((e) => e.source === 'contract');
           const coordPlan = coordBrief.contextBundle?.entries?.find((e) => e.source === 'plan');
@@ -1557,7 +1724,7 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
         assert.equal(none.contextBundle?.budgetReport, undefined);
         assert.deepEqual(
           none.contextBundle?.entries?.map((e) => e.source),
-          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review', 'work_items_index', 'since_last_hop'],
         );
         assert.equal(none.contract?.intent, BRIEF_CONTRACT_R2.intent);
         assert.equal(none.plan?.direction, BRIEF_PLAN.direction);
@@ -1590,6 +1757,8 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
           'environment_notes',
           'contract',
           'final_review',
+          'work_items_index',
+          'since_last_hop',
         ]);
         assert.deepEqual(cut.contextBundle?.budgetReport?.omittedSources, ['plan']);
         assert.equal(cut.contextBundle?.budgetReport?.estimatedBefore, N);

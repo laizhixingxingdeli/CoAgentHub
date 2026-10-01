@@ -101,6 +101,8 @@ export const POLICY_ACTION = {
   workItemReview: { scope: 'workItem', name: 'review' },
   workItemRevise: { scope: 'workItem', name: 'revise' },
   workItemGetOrder: { scope: 'workItem', name: 'getOrder' },
+  /** agent 专用：协调者读取精简工作项详情，执行者不可（missionRead 对 executor 也开放，故单列）。 */
+  workItemGetAgentDetail: { scope: 'workItem', name: 'getAgentDetail' },
   attemptStartCoordinator: { scope: 'attempt', name: 'startCoordinator' },
   attemptStartExecutor: { scope: 'attempt', name: 'startExecutor' },
   attemptStartIndependentReviewer: { scope: 'attempt', name: 'startIndependentReviewer' },
@@ -199,6 +201,7 @@ const ALLOWED: ReadonlySet<string> = new Set([
   cell('coordinator', POLICY_ACTION.attemptEscalate),
   cell('coordinator', POLICY_ACTION.attemptSubmitMissionResult),
   cell('coordinator', POLICY_ACTION.attemptGetContext),
+  cell('coordinator', POLICY_ACTION.workItemGetAgentDetail),
   // —— executor：Run Token 绑定的 Mission / Attempt / WorkItem ——
   cell('executor', POLICY_ACTION.missionRead),
   cell('executor', POLICY_ACTION.workItemGetOrder),
@@ -234,6 +237,7 @@ export const AGENT_TOOL_ACTION: Readonly<Record<string, PolicyAction>> = {
   coagent_escalate_to_l3: POLICY_ACTION.attemptEscalate,
   coagent_submit_mission_result: POLICY_ACTION.attemptSubmitMissionResult,
   coagent_get_work_order: POLICY_ACTION.workItemGetOrder,
+  coagent_get_work_item: POLICY_ACTION.workItemGetAgentDetail,
   coagent_get_context: POLICY_ACTION.attemptGetContext,
   coagent_submit_evidence: POLICY_ACTION.attemptSubmitEvidence,
   coagent_submit_execution_result: POLICY_ACTION.attemptSubmitExecutionResult,

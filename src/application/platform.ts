@@ -19,6 +19,7 @@ import type {
   AttemptKind,
   BlockedRecord,
   EscalationBody,
+  EvidenceKind,
   EvidenceRecord,
   ExecutionResultBody,
   FinalReview,
@@ -59,6 +60,7 @@ import {
   CONTEXT_METRICS_TOOL_KINDS,
 } from './ports.ts';
 import type {
+  ActivityEvent,
   ActivityLog,
   Clock,
   CommandTransaction,
@@ -89,7 +91,7 @@ import type { ArtifactStore } from './artifact-store.ts';
 import type { CommandRunner } from './validation/ports.ts';
 import { VALIDATION_POLICY_REVISION } from './validation/engine.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
-import { redactSecrets } from './redact.ts';
+import { redactSecrets, redactSecretsDeep } from './redact.ts';
 import { collectAttemptLiveTail, mergeAttemptOutput, type LiveOutput } from './live.ts';
 import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from './policy-engine.ts';
 import {
@@ -120,6 +122,8 @@ import {
   projectStartupBriefFields,
   type BoundWorkItem,
   type ContextBundle,
+  type SinceLastHopEntry,
+  type WorkItemIndexEntry,
 } from './context-builder.ts';
 import {
   anyHardAuthoritativeExceeded,
@@ -2385,6 +2389,30 @@ export class Platform {
     return view;
   }
 
+  /**
+   * agent 专用紧凑 Mission 视图：契约 + 完整规划 + 工作项索引 + 升级问答摘要，
+   * 不含工单正文、执行结果或评审正文。网页 getMissionView 不受影响（不改动它）。
+   * 只读投影，不写任何状态。
+   */
+  async getAgentMissionView(missionId: string): Promise<AgentMissionView> {
+    const { mission } = await this.#locate(missionId);
+    return {
+      missionId: mission.id,
+      projectId: mission.projectId,
+      status: mission.status,
+      executionMode: mission.executionMode,
+      runKind: mission.runKind,
+      updatedAt: mission.updatedAt,
+      contractRevision: mission.contractRevision,
+      planRevision: mission.planRevision,
+      contract: mission.contract,
+      plan: mission.plan,
+      workItemIndex: agentWorkItemIndex(mission),
+      escalations: agentEscalationAnswers(mission),
+      openEscalations: mission.openEscalations.length,
+    };
+  }
+
   async #haReviewHold(
     mission: Mission,
   ): Promise<'pending_dispatch' | 'in_review' | 'pending_release' | 'fault'> {
@@ -2661,6 +2689,10 @@ export class Platform {
       }
     }
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
+    const briefSources =
+      attempt.kind === 'coordinator'
+        ? coordinatorStartupSources(mission, attemptId, await this.#activity.list(missionId))
+        : undefined;
     const contextBundle = buildContextBundle(
       {
         role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
@@ -2673,6 +2705,12 @@ export class Platform {
         workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
         finalReview: mission.finalReview,
         classification,
+        ...(briefSources
+          ? {
+              workItemsIndex: briefSources.workItemsIndex,
+              sinceLastHop: briefSources.sinceLastHop,
+            }
+          : {}),
       },
       budget,
     );
@@ -4826,6 +4864,43 @@ export class Platform {
     };
   }
 
+  /**
+   * agent 专用单项详情：沿用 #locateItem 的 UNKNOWN_WORK_ITEM 规则（不存在即抛）。
+   * 返回工单及 orderRevision、历次执行结果证据摘要（脱敏截尾）与评审信息。
+   * 单项序列化 UTF-8 不超过 20 KB，超长显式标记 truncated。只读投影，不写状态。
+   */
+  async getAgentWorkItem(missionId: string, workItemId: string): Promise<AgentWorkItemView> {
+    const { mission, item } = await this.#locateItem(missionId, workItemId);
+    // 取该工作项全部 execution_result.submitted 事件，保留原时间顺序，
+    // 仅提取事件里实际存的 outcome / changedFiles(数量) / orderRevision / at。
+    // 旧提交正文未被持久化、不可恢复，只留元数据并标「旧正文未保存」；
+    // 最新一次正文经 item.executionResult 仍可取，不臆造。
+    const submittedEvents = (await this.#activity.list(missionId))
+      .filter((e) => e.workItemId === workItemId && e.kind === 'execution_result.submitted')
+      .map((e) => e as ActivityEvent);
+    const lastIndex = submittedEvents.length - 1;
+    const submissionSummaries: AgentWorkItemSubmissionSummary[] = submittedEvents.map((e, i) => {
+      const data = e.data as { outcome?: string; changedFiles?: number; orderRevision?: string } | undefined;
+      const isLatest = i === lastIndex;
+      return {
+        at: e.at,
+        outcome: data?.outcome,
+        changedFiles: data?.changedFiles,
+        orderRevision: data?.orderRevision,
+        isLatest,
+        // 只有最新一次有完整全文（经 executionResult 取），旧正文未保存、不可恢复。
+        note: isLatest ? undefined : '旧正文未保存',
+      };
+    });
+    return buildAgentWorkItemView(
+      item,
+      item.order?.orderRevision,
+      item.order,
+      item.executionResult ?? undefined,
+      submissionSummaries,
+    );
+  }
+
 /**
    * 解析工单里的 ContextRef（S09.3 的 coagent_get_context）。
    *
@@ -6468,6 +6543,114 @@ function priorGuidanceForWorkItem(
   };
 }
 
+/* ===================== 协调者简报：工作项索引 + 上一跳增量 ===================== */
+
+/** 上一跳以来的新情况摘要里，单条摘要的最大字符数；超长显式截断，不放输出全文。 */
+const SINCE_LAST_HOP_SUMMARY_CAP = 200;
+
+/**
+ * 把上一段 coordinator 结束之后的活动，按事件原序压成一条条短摘要。
+ *
+ * 只列「有的才列」：证据提交、卡住报告、升级答复、L3 最终决定各自独立判断；
+ * 同一类多次出现就各列一条。不放输出全文——摘要里只留脱敏后的概要，
+ * 避免把几十万字符的输出又搬回协调者上下文。
+ */
+function summarizeSinceLastHop(
+  mission: Mission,
+  events: readonly ActivityEvent[],
+): SinceLastHopEntry {
+  const summaries: string[] = [];
+  for (const event of events) {
+    switch (event.kind) {
+      case 'execution_result.submitted': {
+        const data = event.data as
+          | { outcome?: string; changedFiles?: number; orderRevision?: string }
+          | undefined;
+        const workItemId = event.workItemId;
+        const title = workItemId ? mission.workItem(workItemId)?.title : undefined;
+        const latest = workItemId
+          ? mission.workItem(workItemId)?.attempts.at(-1)?.evidence.at(-1)
+          : undefined;
+        const evidenceNote = latest
+          ? `最近证据：${latest.kind}${latest.summary ? '：' + latest.summary : ''}`
+          : '（无已存证据）';
+        summaries.push(
+          `提交[${title ?? workItemId ?? '?'}] ${data?.outcome ?? '?'} ` +
+            `改动${data?.changedFiles ?? '?'}个文件 工单修订${data?.orderRevision ?? '?'}；${evidenceNote}`,
+        );
+        break;
+      }
+      case 'blocked.reported': {
+        const data = event.data as { reason?: string; orderRevision?: string } | undefined;
+        summaries.push(`卡住报告：${data?.reason ?? '（无理由）'}（工单修订${data?.orderRevision ?? '?'}，待协调者处理）`);
+        break;
+      }
+      case 'escalation.answered': {
+        const data = event.data as { question?: string; answer?: string } | undefined;
+        summaries.push(`升级答复：${data?.question ?? '（无问题）'} → ${data?.answer ?? '（无答复）'}`);
+        break;
+      }
+      case 'final_review.send_back':
+      case 'final_review.abandoned':
+      case 'final_review.merged':
+      case 'final_review.merge_failed':
+      case 'final_review.ha_unsafe':
+      case 'final_review.ha_authorized':
+      case 'final_review.integration_anchor':
+      case 'final_review.integration_verified':
+      case 'final_review.merge_applied': {
+        const data = (event.data ?? {}) as Record<string, unknown>;
+        const reasons = Array.isArray(data.reasons) ? data.reasons.join('；') : '';
+        summaries.push(`L3 最终决定[${event.kind.replace('final_review.', '')}]${reasons ? '：' + reasons : ''}`);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return summaries.map((s) => ({ summary: capString(redactSecrets(s), SINCE_LAST_HOP_SUMMARY_CAP) }));
+}
+
+/**
+ * 从活动原序里找到「上一个结束的 coordinator 跳」，取其 attempt.ended 事件。
+ * 用 attemptId 是否落在 mission.coordinatorAttempts 里判断角色，并严格用
+ * 序列位置（而非相同时间戳）定位——同一秒内多事件是常态，靠时间戳会错配。
+ */
+function previousCoordinatorEndEvent(
+  mission: Mission,
+  currentAttemptId: string,
+  events: readonly ActivityEvent[],
+): ActivityEvent | undefined {
+  const coordIds = new Set(mission.coordinatorAttempts.map((a) => a.id));
+  const endedCoord = events.filter(
+    (e) => e.kind === 'attempt.ended' && e.attemptId !== undefined && coordIds.has(e.attemptId),
+  );
+  // 最后一个不是当前这一跳的 coordinator 结束事件，就是「上一跳」。
+  const prev = endedCoord.filter((e) => e.attemptId !== currentAttemptId).at(-1);
+  return prev;
+}
+
+function coordinatorStartupSources(
+  mission: Mission,
+  attemptId: string,
+  events: readonly ActivityEvent[],
+): { workItemsIndex: readonly WorkItemIndexEntry[]; sinceLastHop: SinceLastHopEntry } {
+  const index: readonly WorkItemIndexEntry[] = agentWorkItemIndex(mission).map((entry) => ({
+    id: entry.id,
+    title: entry.title,
+    status: entry.status,
+    attempts: entry.attempts,
+    lastReviewVerdict: entry.lastReviewVerdict,
+  }));
+  const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
+  if (!prevEnd) {
+    return { workItemsIndex: index, sinceLastHop: [] };
+  }
+  const prevIndex = events.findIndex((e) => e === prevEnd);
+  const after = events.slice(prevIndex + 1);
+  return { workItemsIndex: index, sinceLastHop: summarizeSinceLastHop(mission, after) };
+}
+
 function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
   return {
     id: item.id,
@@ -6475,6 +6658,343 @@ function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkIt
     order: item.order,
     ...priorGuidanceForWorkItem(mission, item),
   };
+}
+
+/* ===================== agent 专用只读投影（不写状态） ===================== */
+
+/** 单项序列化后允许的最大 UTF-8 字节数；超长显式标记 truncated。 */
+const MAX_AGENT_WORK_ITEM_BYTES = 20 * 1024;
+
+/**
+ * agent 紧凑视图里的工作项索引：只给「编号/标题/状态/执行次数/最后评审 verdict」，
+ * 不含工单正文、执行结果或评审理由——那些按需按 id 取（getAgentWorkItem）。
+ * 抽成 module 级只读 helper，协调者简报后续可复用同一份投影。
+ */
+export interface AgentWorkItemIndexEntry {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly planRevision: number | undefined;
+  readonly attempts: number;
+  readonly attemptIds: readonly string[];
+  readonly lastReviewVerdict: 'accept' | 'reject' | undefined;
+}
+
+function agentWorkItemIndex(mission: Mission): readonly AgentWorkItemIndexEntry[] {
+  return mission.workItems.map((item) => ({
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    planRevision: item.planRevision,
+    attempts: item.attempts.length,
+    attemptIds: item.attempts.map((a) => a.id),
+    lastReviewVerdict: item.reviews.at(-1)?.verdict,
+  }));
+}
+
+/**
+ * 升级问答摘要：只取已被 L3 答复的升级，给「问了什么、答了什么、何时答」三件套。
+ * 不带未答复升级的草稿，也不带 why / optionsConsidered 等内部字段。
+ */
+export interface AgentEscalationAnswer {
+  readonly question: string;
+  readonly answer: string;
+  readonly answeredAt: string;
+}
+
+function agentEscalationAnswers(mission: Mission): readonly AgentEscalationAnswer[] {
+  return mission.escalations
+    .filter((e) => e.answer && e.answeredAt)
+    .map((e) => ({ question: e.question, answer: e.answer!, answeredAt: e.answeredAt! }));
+}
+
+export interface AgentMissionView {
+  readonly missionId: string;
+  readonly projectId: string;
+  readonly status: string;
+  readonly executionMode: string;
+  readonly runKind: string;
+  readonly updatedAt: string;
+  readonly contractRevision: number;
+  readonly planRevision: number;
+  /** 完整契约（不截断）。 */
+  readonly contract: MissionContract | undefined;
+  /** 完整规划（不截断）。 */
+  readonly plan: PlanBody | undefined;
+  /** 只含工作项索引，不含工单、执行结果或评审正文。 */
+  readonly workItemIndex: readonly AgentWorkItemIndexEntry[];
+  /** 升级问答摘要。 */
+  readonly escalations: readonly AgentEscalationAnswer[];
+  readonly openEscalations: number;
+}
+
+export interface AgentWorkItemEvidenceSummary {
+  readonly attemptId: string;
+  readonly kind: EvidenceKind;
+  readonly summary: string;
+  readonly command: string | undefined;
+  readonly exitCode: number | undefined;
+  readonly outputTail: string;
+}
+
+/**
+ * 单次 execution_result.submitted 的现存元数据摘要。
+ * 只记事件里实际存下的 outcome / changedFiles(数量) / orderRevision / 时间；
+ * 非最新的提交正文（执行结果全文）未被持久化、不可恢复，显式标注「旧正文未保存」。
+ * 绝不臆造旧正文——旧记录只给上述元数据，最新一次正文仍经 executionResult 取。
+ */
+export interface AgentWorkItemSubmissionSummary {
+  /** 事件发生时间（ISO 字符串），保留原时间顺序。 */
+  readonly at: string;
+  readonly outcome: string | undefined;
+  readonly changedFiles: number | undefined;
+  readonly orderRevision: string | undefined;
+  /** 是否最新一次提交：只有它对应的全文经 executionResult 可取。 */
+  readonly isLatest: boolean;
+  /** 非最新提交：正文未保存、仅存元数据，不可恢复。 */
+  readonly note: string | undefined;
+}
+
+export interface AgentWorkItemView {
+  readonly workItemId: string;
+  readonly title: string;
+  readonly status: string;
+  readonly orderRevision: string | undefined;
+  readonly order: WorkOrder | undefined;
+  readonly executionResult: ExecutionResultBody | undefined;
+  readonly reviews: readonly { readonly verdict: 'accept' | 'reject'; readonly reasons: readonly string[]; readonly requiredChanges: readonly string[] }[];
+  readonly evidenceSummary: readonly AgentWorkItemEvidenceSummary[];
+  /** 历次 execution_result.submitted 的现存元数据；早于最新的标「旧正文未保存」。 */
+  readonly submissionSummaries: readonly AgentWorkItemSubmissionSummary[];
+  /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
+  readonly truncated: boolean;
+}
+
+/**
+ * 把一次 attempt 的证据投影成脱敏 + 截尾的摘要。output 一律先 redactSecrets 再截尾——
+ * 顺序反了会把截出来的尾巴里的 token 明文露出去。maxTail 控制尾巴长度；summary 过长时按
+ * summaryCap 截断、dropCommand 时直接丢弃 command，均为超限时逐步收紧所用。
+ */
+function agentEvidenceSummary(
+  attempts: readonly Readonly<{ id: string; evidence: readonly Readonly<EvidenceRecord>[] }>[],
+  maxTail: number,
+  opts: { summaryCap?: number; dropCommand?: boolean } = {},
+): AgentWorkItemEvidenceSummary[] {
+  const out: AgentWorkItemEvidenceSummary[] = [];
+  for (const attempt of attempts) {
+    for (const e of attempt.evidence) {
+      const summary =
+        opts.summaryCap !== undefined
+          ? capString(redactSecrets(e.summary), opts.summaryCap)
+          : redactSecrets(e.summary);
+      out.push({
+        attemptId: attempt.id,
+        kind: e.kind,
+        summary,
+        command: opts.dropCommand ? undefined : e.command !== undefined ? redactSecrets(e.command) : undefined,
+        exitCode: e.exitCode,
+        // maxTail=0 必须产出空串：slice(-0) 实际返回整串，会漏掉裁切。
+        outputTail: maxTail > 0 ? (e.output !== undefined ? redactSecrets(e.output) : '').slice(-maxTail) : '',
+      });
+    }
+  }
+  return out;
+}
+
+/** 超长字符串按 n 字符截断并注明被裁掉多少，避免静默丢失"这里有内容"的信息。 */
+function capString(s: string, n: number): string {
+  return s.length <= n ? s : `${s.slice(0, n)}…[truncated ${s.length - n} chars]`;
+}
+
+/** 工单里会膨胀的长文本字段按 n 字符上限收紧；contextRefs 是取上下文用的结构，保留。 */
+function capOrderText(order: WorkOrder, n: number): WorkOrder {
+  return {
+    ...order,
+    objective: capString(order.objective, n),
+    requiredBehaviour: capString(order.requiredBehaviour, n),
+    constraints: order.constraints.map((s) => capString(s, n)),
+    acceptance: order.acceptance.map((s) => capString(s, n)),
+    verification: order.verification.map((s) => capString(s, n)),
+    doNot: order.doNot.map((s) => capString(s, n)),
+  };
+}
+
+/** 执行结果里 summary / notes 会膨胀，按 n 字符上限收紧；文件清单保留为有用结构。 */
+function capResultText(result: ExecutionResultBody, n: number): ExecutionResultBody {
+  return {
+    ...result,
+    summary: capString(result.summary, n),
+    notes: capString(result.notes, n),
+  };
+}
+
+/**
+ * 构造单项视图并按 20 KB 上限收紧：所有外显文本先深层脱敏（redactSecretsDeep），
+ * 之后按 UTF-8 实测大小逐级收紧——先裁证据 output 尾巴，再裁证据 summary/command，
+ * 再裁工单 / 执行结果 / 评审 / 历史提交摘要的长文本，始终保留 id/status/orderRevision
+ * 与有用结构；仍超大时返回仅含索引字段与历史提交摘要的紧凑 truncated 摘要。
+ * 每条 return 前都复核 <=20KB。
+ */
+function buildAgentWorkItemView(
+  item: WorkItem,
+  orderRevision: string | undefined,
+  order: WorkOrder | undefined,
+  executionResult: ExecutionResultBody | undefined,
+  submissionSummaries: readonly AgentWorkItemSubmissionSummary[],
+): AgentWorkItemView {
+  // 外显文本先统一深层脱敏：order / executionResult / reviews / title 都可能含凭据。
+  const redactedTitle = redactSecrets(item.title);
+  const redactedOrder = order !== undefined ? redactSecretsDeep(order) : undefined;
+  const redactedSubmissionSummaries = submissionSummaries.map((s) => ({
+    ...s,
+    orderRevision: s.orderRevision !== undefined ? redactSecrets(s.orderRevision) : undefined,
+    note: s.note !== undefined ? redactSecrets(s.note) : undefined,
+  }));
+  const redactedResult = executionResult !== undefined ? redactSecretsDeep(executionResult) : undefined;
+  const reviews = item.reviews.map((r) => ({
+    verdict: r.verdict,
+    reasons: r.reasons.map((t) => redactSecrets(t)),
+    requiredChanges: r.requiredChanges.map((t) => redactSecrets(t)),
+  }));
+
+  const byteSize = (v: AgentWorkItemView): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+
+  // 一条候选视图：证据尾巴 maxTail，summary/command/order/result/reviews 的字符上限可选。
+  const build = (
+    maxTail: number,
+    t: { summaryCap?: number; dropCommand: boolean; orderCap?: number; resultCap?: number; reviewCap?: number },
+  ): AgentWorkItemView => {
+    const evidenceSummary = agentEvidenceSummary(item.attempts, maxTail, {
+      summaryCap: t.summaryCap,
+      dropCommand: t.dropCommand,
+    });
+    const cappedOrder =
+      t.orderCap !== undefined && redactedOrder !== undefined ? capOrderText(redactedOrder, t.orderCap) : redactedOrder;
+    const cappedResult =
+      t.resultCap !== undefined && redactedResult !== undefined
+        ? capResultText(redactedResult, t.resultCap)
+        : redactedResult;
+    const cappedReviews =
+      t.reviewCap !== undefined
+        ? reviews.map((r) => {
+            const cap = t.reviewCap as number;
+            return {
+              verdict: r.verdict,
+              reasons: r.reasons.map((s) => capString(s, cap)),
+              requiredChanges: r.requiredChanges.map((s) => capString(s, cap)),
+            };
+          })
+        : reviews;
+    return {
+      workItemId: item.id,
+      title: redactedTitle,
+      status: item.status,
+      orderRevision,
+      order: cappedOrder,
+      executionResult: cappedResult,
+      reviews: cappedReviews,
+      evidenceSummary,
+      submissionSummaries: redactedSubmissionSummaries,
+      truncated: false,
+    };
+  };
+
+  // 完整（1000 字符尾巴、不裁其它字段）若已在上限内，直接返回、未截断。
+  const base = build(1000, { dropCommand: false });
+  if (byteSize(base) <= MAX_AGENT_WORK_ITEM_BYTES) return base;
+
+  // 逐级收紧：证据尾巴优先，再依次裁 summary/command、工单、执行结果、评审。每级都复核大小。
+  const levels: { summaryCap?: number; dropCommand: boolean; orderCap?: number; resultCap?: number; reviewCap?: number }[] = [
+    { dropCommand: false },
+    { dropCommand: true, summaryCap: 400 },
+    { dropCommand: true, summaryCap: 300, orderCap: 300 },
+    { dropCommand: true, summaryCap: 200, orderCap: 200, resultCap: 200 },
+    { dropCommand: true, summaryCap: 120, orderCap: 120, resultCap: 120, reviewCap: 120 },
+  ];
+  for (const lvl of levels) {
+    for (const mt of [1000, 500, 250, 100, 0]) {
+      const candidate = build(mt, lvl);
+      if (byteSize(candidate) <= MAX_AGENT_WORK_ITEM_BYTES) return { ...candidate, truncated: true };
+    }
+  }
+
+  // 仍超大：只保留索引字段与历史提交摘要的紧凑摘要，明确标 truncated。
+  // item.id / orderRevision / 标题 / 历史摘要都可能极长或多到撑爆 20KB，必须按 UTF-8
+  // 实测逐级缩减文本并省略最早提交，始终 <= 上限才返回，绝不在上限外返回。
+  const buildFallback = (
+    workItemId: string,
+    title: string,
+    orderRevision: string | undefined,
+    summaries: readonly AgentWorkItemSubmissionSummary[],
+    omitted: number,
+  ): AgentWorkItemView => ({
+    workItemId,
+    title,
+    status: item.status,
+    orderRevision,
+    order: undefined,
+    executionResult: undefined,
+    reviews: [],
+    evidenceSummary: [],
+    submissionSummaries:
+      omitted > 0
+        ? [
+            ...summaries,
+            {
+              at: '',
+              outcome: undefined,
+              changedFiles: undefined,
+              orderRevision: undefined,
+              isLatest: false,
+              note: `另有 ${omitted} 条较早的历史提交摘要已省略（受 20KB 上限约束）`,
+            },
+          ]
+        : summaries,
+    truncated: true,
+  });
+
+  // 逐级收紧：先压各摘要文本、再删最早提交、再压标题、最后压 id/orderRevision，
+  // 每步都以 Buffer.byteLength(JSON.stringify(...),'utf8') 实测复核 <=20KB。
+  let idCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let revCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let titleCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let sumCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 8));
+  let summaries = redactedSubmissionSummaries;
+  const tryFallback = (): AgentWorkItemView =>
+    buildFallback(
+      capString(item.id, idCap),
+      capString(redactedTitle, titleCap),
+      orderRevision !== undefined ? capString(orderRevision, revCap) : undefined,
+      summaries.map((s) => ({
+        ...s,
+        at: capString(s.at, sumCap),
+        outcome: s.outcome !== undefined ? capString(s.outcome, sumCap) : undefined,
+        orderRevision: s.orderRevision !== undefined ? capString(s.orderRevision, sumCap) : undefined,
+        note: s.note !== undefined ? capString(s.note, sumCap) : undefined,
+      })),
+      redactedSubmissionSummaries.length - summaries.length,
+    );
+  // 循环每轮都实测整个候选对象大小；收敛到 <= 上限即退出，绝不在上限外返回。
+  // 优先级：压摘要文本 -> 删最早一半提交 -> 压标题 -> 压 id/orderRevision。
+  let guard = 0;
+  while (byteSize(tryFallback()) > MAX_AGENT_WORK_ITEM_BYTES && guard < 10000) {
+    guard++;
+    if (sumCap > 1) {
+      sumCap = Math.max(1, Math.floor(sumCap / 2));
+    } else if (summaries.length > 1) {
+      // 摘要字段已压到极限仍超，删最早一半（数组末尾为最新，保留最新）。
+      summaries = summaries.slice(Math.ceil(summaries.length / 2));
+    } else if (titleCap > 1) {
+      titleCap = Math.max(1, Math.floor(titleCap / 2));
+    } else if (idCap > 1 || revCap > 1) {
+      idCap = Math.max(1, Math.floor(idCap / 2));
+      revCap = Math.max(1, Math.floor(revCap / 2));
+    } else {
+      // 一切字段已 clip 到 1 字符、历史也已清空，理论上不可能仍超；兜底跳出。
+      break;
+    }
+  }
+  return tryFallback();
 }
 
 function viewOf(mission: Mission): MissionView {

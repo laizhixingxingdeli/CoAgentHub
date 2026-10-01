@@ -33,7 +33,21 @@ export const EXECUTOR_SOURCE_ORDER = [
 
 export type ContextBundleSource =
   | (typeof COORDINATOR_SOURCE_ORDER)[number]
-  | (typeof EXECUTOR_SOURCE_ORDER)[number];
+  | (typeof EXECUTOR_SOURCE_ORDER)[number]
+  | 'work_items_index'
+  | 'since_last_hop';
+
+/** 协调者专用：工作项索引条目，与后续 platform 取数可衔接。 */
+export interface WorkItemIndexEntry {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly attempts: number;
+  readonly lastReviewVerdict?: string;
+}
+
+/** 协调者专用：上一跳以来的新情况摘要，与后续 platform 取数可衔接。 */
+export type SinceLastHopEntry = readonly { readonly summary: string }[];
 
 export type ContextBundleRole = Extract<AttemptKind, 'coordinator' | 'executor'>;
 
@@ -69,6 +83,10 @@ export interface ContextBuilderInput {
   readonly workItem?: BoundWorkItem;
   readonly finalReview?: Readonly<FinalReview>;
   readonly classification?: string;
+  /** 协调者专用；仅在显式给出时进入 Bundle，空数组也算明确存在。 */
+  readonly workItemsIndex?: readonly WorkItemIndexEntry[];
+  /** 协调者专用；仅在显式给出时进入 Bundle，空数组也算明确存在。 */
+  readonly sinceLastHop?: SinceLastHopEntry;
 }
 
 export interface ContextBundleEntry {
@@ -107,6 +125,8 @@ export interface StartupBriefProjection {
   readonly workItem?: BoundWorkItem;
   readonly finalReview?: Readonly<FinalReview>;
   readonly classification?: string;
+  readonly workItemsIndex?: readonly WorkItemIndexEntry[];
+  readonly sinceLastHop?: SinceLastHopEntry;
 }
 
 const REASON: Record<ContextBundleSource, string> = {
@@ -120,6 +140,10 @@ const REASON: Record<ContextBundleSource, string> = {
   final_review: '被打回之后重跑时，这是最该先看到的东西。',
   work_order:
     '执行者只拿冻结工单动手；contextRefs 保持引用，正文按需 getContext / read。',
+  work_items_index:
+    '协调者规划时需要全局工作项索引；不进执行者，避免它重新定义目标。',
+  since_last_hop:
+    '上一跳以来的新情况；协调者按增量衔接，执行者不拿，避免重复搬运。',
 };
 
 function canonicalJson(value: unknown): string {
@@ -254,6 +278,12 @@ export function buildContextBundle(input: ContextBuilderInput, budget?: number):
           revisionEntry('contract', input.contract, input.contractRevision ?? 0),
           revisionEntry('plan', input.plan, input.planRevision ?? 0),
           hashedEntry('final_review', input.finalReview),
+          ...(input.workItemsIndex === undefined
+            ? []
+            : [hashedEntry('work_items_index', input.workItemsIndex)]),
+          ...(input.sinceLastHop === undefined
+            ? []
+            : [hashedEntry('since_last_hop', input.sinceLastHop)]),
         ];
 
   if (budget === undefined) {
@@ -294,5 +324,9 @@ export function projectStartupBriefFields(bundle: ContextBundle): StartupBriefPr
     planRevision: plan?.revision,
     finalReview: bySource.get('final_review')?.content as Readonly<FinalReview> | undefined,
     classification: bySource.get('classification')?.content as string | undefined,
+    workItemsIndex: bySource.get('work_items_index')?.content as
+      | readonly WorkItemIndexEntry[]
+      | undefined,
+    sinceLastHop: bySource.get('since_last_hop')?.content as SinceLastHopEntry | undefined,
   };
 }
