@@ -637,7 +637,7 @@ describe('getStartupBrief 从 Bundle 投影旧字段', () => {
     assert.equal(coord.contextBundle.role, 'coordinator');
     assert.deepEqual(
       coord.contextBundle.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'), 'work_items_index', 'since_last_hop'],
+      [...COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'), 'work_items_index', 'since_last_hop', 'contract_check'],
     );
 
     const execProjected = projectStartupBriefFields(exec.contextBundle);
