@@ -215,6 +215,24 @@ describe('定路由', () => {
     assert.deepEqual(route.kind === 'classified' ? route.facts : undefined, facts);
   });
 
+  test('HA/query 有结论回落保留分类与评估，无结论回落不带分类', () => {
+    const haFacts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, credentialsPermissionsSecurity: true } };
+    const ha = decideRoute(parsed({ facts: haFacts, assessment: SMALL }), FEATURE);
+    assert.equal(ha.kind, 'standard_fallback');
+    assert.equal(ha.kind === 'standard_fallback' && ha.classification?.recommended.executionMode, 'high_assurance');
+    assert.equal(ha.kind === 'standard_fallback' && ha.assessment?.decidedBy, 'coordinator');
+
+    const queryFacts = { ...QUIET_FACTS, mutationSideEffect: false, readOnlyProven: true };
+    const query = decideRoute(parsed({ facts: queryFacts, assessment: SMALL }), FEATURE);
+    assert.equal(query.kind, 'standard_fallback');
+    assert.equal(query.kind === 'standard_fallback' && query.classification?.recommended.runKind, 'query');
+    assert.equal(query.kind === 'standard_fallback' && query.assessment?.decidedBy, 'coordinator');
+
+    const unread = decideRoute(undefined, FEATURE);
+    assert.equal(unread.kind, 'standard_fallback');
+    assert.equal(unread.kind === 'standard_fallback' ? unread.classification : undefined, undefined);
+  });
+
   test('合格 HA 分类回落 Standard，禁止副作用未证明仍需人工且不建单', () => {
     const haFacts = { ...QUIET_FACTS, highAssurance: { ...QUIET_FACTS.highAssurance, credentialsPermissionsSecurity: true } };
     const route = decideRoute(parsed({ facts: haFacts, assessment: SMALL }), FEATURE);
