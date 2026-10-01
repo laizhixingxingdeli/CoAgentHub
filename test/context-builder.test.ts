@@ -162,7 +162,7 @@ describe('buildContextBundle', () => {
     const exec = buildContextBundle(executorInput());
     assert.deepEqual(
       coord.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
     assert.deepEqual(
       exec.entries.map((e) => e.source),
@@ -172,6 +172,23 @@ describe('buildContextBundle', () => {
     assert.equal(exec.entries.some((e) => e.source === 'contract'), false);
     assert.equal(exec.entries.some((e) => e.source === 'plan'), false);
     assert.equal(exec.entries.some((e) => e.source === 'final_review'), false);
+  });
+
+  test('classification 仅作为显式 coordinator 来源并投影', () => {
+    const classification = '分类阶段已查明：问题来自上下文投影。';
+    const coord = buildContextBundle(coordinatorInput({ classification }));
+    const entry = coord.entries.find((item) => item.source === 'classification');
+    assert.ok(entry);
+    assert.ok(entry.estimatedTokens > 0);
+    assert.equal(projectStartupBriefFields(coord).classification, classification);
+    assert.deepEqual(
+      coord.entries.map((item) => item.source),
+      [...COORDINATOR_SOURCE_ORDER],
+    );
+
+    const exec = buildContextBundle(executorInput({ classification }));
+    assert.equal(exec.entries.some((item) => item.source === 'classification'), false);
+    assert.equal(projectStartupBriefFields(exec).classification, undefined);
   });
 
   test('每条含 source、revision 或 SHA-256 hash、reason、estimatedTokens', () => {
@@ -340,7 +357,7 @@ describe('buildContextBundle 预算裁剪', () => {
     const atBudget = buildContextBundle(input, N);
     assert.deepEqual(
       atBudget.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
     assert.deepEqual(atBudget.entries, full.entries);
     assert.deepEqual(atBudget.budgetReport?.omittedSources, []);
@@ -423,7 +440,7 @@ describe('buildContextBundle 预算裁剪', () => {
     assert.equal('budgetReport' in full, false);
     assert.deepEqual(
       full.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
     const projected = projectStartupBriefFields(full);
     assert.equal(projected.projectRules, RULES);
@@ -495,7 +512,7 @@ describe('getStartupBrief 从 Bundle 投影旧字段', () => {
     assert.equal(coord.contextBundle.role, 'coordinator');
     assert.deepEqual(
       coord.contextBundle.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER],
+      COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'),
     );
 
     const execProjected = projectStartupBriefFields(exec.contextBundle);

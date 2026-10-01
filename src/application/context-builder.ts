@@ -19,6 +19,7 @@ import type {
 export const COORDINATOR_SOURCE_ORDER = [
   'project_rules',
   'environment_notes',
+  'classification',
   'contract',
   'plan',
   'final_review',
@@ -60,6 +61,7 @@ export interface ContextBuilderInput {
   readonly planRevision?: number;
   readonly workItem?: BoundWorkItem;
   readonly finalReview?: Readonly<FinalReview>;
+  readonly classification?: string;
 }
 
 export interface ContextBundleEntry {
@@ -97,6 +99,7 @@ export interface StartupBriefProjection {
   readonly planRevision?: number;
   readonly workItem?: BoundWorkItem;
   readonly finalReview?: Readonly<FinalReview>;
+  readonly classification?: string;
 }
 
 const REASON: Record<ContextBundleSource, string> = {
@@ -104,6 +107,7 @@ const REASON: Record<ContextBundleSource, string> = {
     '项目层面不可协商的架构红线；两个角色都要，执行者没有取红线的工具。',
   environment_notes:
     '平台知道自己跑在什么系统上、agent 不知道；只提前说会静默出错的那几条。',
+  classification: '分类阶段已查明的内容，供协调者作为规划起点。',
   contract: '协调者要按契约规划；不给执行者，避免它重新定义目标。',
   plan: '协调者接着上次的规划往下做。',
   final_review: '被打回之后重跑时，这是最该先看到的东西。',
@@ -237,6 +241,9 @@ export function buildContextBundle(input: ContextBuilderInput, budget?: number):
       : [
           hashedEntry('project_rules', input.projectRules),
           hashedEntry('environment_notes', input.environmentNotes),
+          ...(input.classification === undefined
+            ? []
+            : [hashedEntry('classification', input.classification)]),
           revisionEntry('contract', input.contract, input.contractRevision ?? 0),
           revisionEntry('plan', input.plan, input.planRevision ?? 0),
           hashedEntry('final_review', input.finalReview),
@@ -279,5 +286,6 @@ export function projectStartupBriefFields(bundle: ContextBundle): StartupBriefPr
     plan: plan?.content as Readonly<PlanBody> | undefined,
     planRevision: plan?.revision,
     finalReview: bySource.get('final_review')?.content as Readonly<FinalReview> | undefined,
+    classification: bySource.get('classification')?.content as string | undefined,
   };
 }
