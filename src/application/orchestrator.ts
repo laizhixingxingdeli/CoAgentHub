@@ -723,13 +723,19 @@ export class Orchestrator {
       let redispatchedOnRecovery = false;
       for (const item of view.workItems) {
         if (item.status !== 'submitted') continue;
-        if ((item.order?.validation?.commands?.length ?? 0) === 0) continue;
-        // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
-        if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
-          await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+        // 只在**有命令且不是 partial** 时才补验。**不能因为 commands 为空就提前
+        // continue**：无命令的 partial 若在 pending 自动接续前停机，恢复后这里漏掉
+        // 续派就会错误叫醒 L2。
+        if ((item.order?.validation?.commands?.length ?? 0) > 0) {
+          // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
+          if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
+            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+          }
         }
-        // 补上报告之后走**同一判断**：机器能判的退回，不该因为「重启过」就多叫一次
-        // 协调者。幂等——同一次提交已经续派过、或已经触顶，这里都是 no-op。
+        // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为
+        // 「重启过」就多叫一次协调者。幂等——同一次提交已经续派过、或已经触顶，
+        // 或者平台判定无可续派依据（绿报告 / 缺报告 / blocked / 非 partial），
+        // 这里都是 no-op，原样交给 L2。
         if (await this.#autoRedispatchStandard(missionId, item.id)) redispatchedOnRecovery = true;
       }
       // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
