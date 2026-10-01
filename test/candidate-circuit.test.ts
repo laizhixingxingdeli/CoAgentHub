@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimCandidateProbe, classifyCandidateFailure, closedCandidateCircuit, openCandidateCircuit, resolveCandidateLastFailure, resolveCandidateProbe, validateClaimCandidateProbe, validateOpenCandidateCircuit, validateResolveCandidateProbe, type CandidateCircuit } from '../src/application/candidate-circuit.ts';
+import { claimCandidateProbe, classifyCandidateFailure, closedCandidateCircuit, openCandidateCircuit, resolveQuotaResetTime, resolveCandidateLastFailure, resolveCandidateProbe, validateClaimCandidateProbe, validateOpenCandidateCircuit, validateResolveCandidateProbe, type CandidateCircuit } from '../src/application/candidate-circuit.ts';
 
 const opened: CandidateCircuit = { profileId: 'p1', state: 'open', failureClass: 'timeout', openUntil: '2030-01-01T00:00:00.000Z' };
 
@@ -107,6 +107,28 @@ test('non-probe open transition can open/reopen from any state', () => {
   assert.deepEqual(openCandidateCircuit(input), opened);
   assert.equal(openCandidateCircuit({ ...input, failureClass: 'new-class' }).failureClass, 'new-class');
   assert.notEqual(claimed.state, openCandidateCircuit(input).state);
+});
+
+test('quota circuits can remain open indefinitely and reset time parsing uses explicit inputs', () => {
+  const forever = openCandidateCircuit({ profileId: 'p1', failureClass: 'quota', openUntil: null });
+  assert.equal(forever.openUntil, null);
+  assert.equal(claimCandidateProbe(forever, '2030-01-01T00:00:00.000Z'), undefined);
+  assert.throws(() => openCandidateCircuit({ profileId: 'p1', failureClass: 'auth', openUntil: null }));
+  const now = '2030-01-01T00:00:00.000Z';
+  const cases: Array<[Parameters<typeof resolveQuotaResetTime>[0], string]> = [
+    [{ now, headers: { 'Retry-After': '60' } }, '2030-01-01T00:01:00.000Z'],
+    [{ now, headers: { 'retry-after': 'Tue, 01 Jan 2030 00:01:00 GMT' } }, '2030-01-01T00:01:00.000Z'],
+    [{ now, headers: { 'x-ratelimit-reset': '1893456060' } }, '2030-01-01T00:01:00.000Z'],
+    [{ now, headers: { 'x-ratelimit-reset': '1893456060000' } }, '2030-01-01T00:01:00.000Z'],
+    [{ now, message: 'try again in 2 minutes' }, '2030-01-01T00:02:00.000Z'],
+    [{ now, message: 'try again in 3 小时' }, '2030-01-01T03:00:00.000Z'],
+    [{ now, message: 'Resets at 2030-01-02T00:00:00.000Z' }, '2030-01-02T00:00:00.000Z'],
+    [{ now, message: '重置于 2030-01-02T00:00:00.000Z' }, '2030-01-02T00:00:00.000Z'],
+    [{ now, message: '(QUOTA RESETS AT 2030-01-02T00:00:00.000Z)' }, '2030-01-02T00:00:00.000Z'],
+  ];
+  for (const [input, expected] of cases) assert.equal(resolveQuotaResetTime(input), expected);
+  assert.equal(resolveQuotaResetTime({ now, message: 'resets at yesterday' }), null);
+  assert.equal(resolveQuotaResetTime({ now, headers: { 'Retry-After': '0' } }), null);
 });
 
 test('probe claim respects strict time boundary and is single-use', () => {

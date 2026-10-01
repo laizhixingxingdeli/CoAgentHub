@@ -35,7 +35,8 @@ import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
-import { classifyCandidateFailure, type CandidateCircuit } from './candidate-circuit.ts';
+import { classifyCandidateFailure, resolveQuotaResetTime, type CandidateCircuit } from './candidate-circuit.ts';
+import { getRuntimeUsage } from './runtime-catalog.ts';
 import {
   acquireQueuedHop,
   compareHopFairness,
@@ -174,6 +175,8 @@ export interface OrchestratorDeps {
    * 缺省 0：立刻 waiting，保持 D7。生产 CLI 传 120000，让首次 1s 退避不必结束运行。
    */
   inRunBackoffWaitMs?: number;
+  usageReader?: () => Promise<{ readonly available: boolean; readonly [key: string]: unknown } | readonly unknown[]>;
+  now?: () => Date;
 }
 
 /** 运行内退避等待上限：非负安全整数，缺省 0。非法值必须在构造时抛，不能拖到第一跳失败。 */
@@ -404,6 +407,8 @@ export class Orchestrator {
   #workspace: WorkspaceManager;
   #wallClockMs: number;
   #candidateCircuits: CandidateCircuitRepository | undefined;
+  #usageReader: () => Promise<{ readonly available: boolean; readonly [key: string]: unknown } | readonly unknown[]>;
+  #now: () => Date;
   #queuedHops: QueuedHopRepository | undefined;
   #hopScheduler: DurableScheduler | undefined;
   #hopClock: Clock;
@@ -442,6 +447,8 @@ export class Orchestrator {
     this.#workspace = deps.workspace;
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
     this.#candidateCircuits = deps.candidateCircuits;
+    this.#usageReader = deps.usageReader ?? getRuntimeUsage;
+    this.#now = deps.now ?? (() => new Date());
     this.#staleAcknowledged = deps.acceptStaleBase ?? false;
     this.#queuedHops = deps.queuedHops;
     this.#hopClock = deps.hopClock ?? { now: () => new Date() };
@@ -1256,12 +1263,54 @@ export class Orchestrator {
     const available: ExecutionProfile[] = [];
     for (const profile of pool.candidates) {
       const circuit = await this.#candidateCircuits.get(profile.profileId);
-      if (circuit.state === 'closed') available.push(profile);
-      else if (circuit.state === 'open' && Date.parse(circuit.openUntil) <= now) {
+      if (circuit.state === 'closed') {
+        const resetAt = await this.#usageResetAt(profile, now);
+        if (resetAt) {
+          await this.#candidateCircuits.open({ profileId: profile.profileId, failureClass: 'quota', openUntil: resetAt });
+          continue;
+        }
+        available.push(profile);
+      } else if (circuit.state === 'open' && circuit.openUntil !== null && Date.parse(circuit.openUntil) <= now) {
+        if (circuit.failureClass === 'quota') {
+          const usage = await this.#quotaUsage(profile, now);
+          if (usage.kind !== 'available') continue;
+        }
         available.push(profile);
       }
     }
     return available;
+  }
+
+  async #usageResetAt(profile: ExecutionProfile, now: number): Promise<string | undefined> {
+    const usage = await this.#quotaUsage(profile, now);
+    return usage.kind === 'exhausted' ? usage.resetAt : undefined;
+  }
+
+  async #quotaUsage(profile: ExecutionProfile, now: number): Promise<
+    { kind: 'exhausted'; resetAt: string } | { kind: 'available' | 'unknown' }
+  > {
+    const providerFact = profile.facts?.find((fact) => fact.key === 'provider');
+    if (!providerFact) return { kind: 'unknown' };
+    try {
+      const usage = await this.#usageReader();
+      const providers = Array.isArray(usage) ? usage : usage.providers;
+      if (!Array.isArray(usage) && !usage.available) return { kind: 'unknown' };
+      if (!Array.isArray(providers)) return { kind: 'unknown' };
+      const row = providers.find((entry) =>
+        entry !== null && typeof entry === 'object' &&
+        (entry as Record<string, unknown>).provider === providerFact.value &&
+        (entry as Record<string, unknown>).status === 'ok',
+      ) as Record<string, unknown> | undefined;
+      if (!row) return { kind: 'unknown' };
+      const exhausted = row.remainingPercent === 0 || (typeof row.usedPercent === 'number' && row.usedPercent >= 100);
+      if (exhausted) {
+        const reset = typeof row.resetAt === 'string' ? Date.parse(row.resetAt) : Number.NaN;
+        if (Number.isFinite(reset) && reset > now) return { kind: 'exhausted', resetAt: new Date(reset).toISOString() };
+      }
+      if ((typeof row.remainingPercent === 'number' && row.remainingPercent > 0) ||
+          (typeof row.usedPercent === 'number' && row.usedPercent < 100)) return { kind: 'available' };
+      return { kind: 'unknown' };
+    } catch { return { kind: 'unknown' }; }
   }
 
   /** 候选的可用性快照，供界面显示"为什么停着"。 */
@@ -1550,7 +1599,7 @@ export class Orchestrator {
     });
     if (parked) return parked;
 
-    const now = Date.now();
+    const now = this.#now().getTime();
     const usable = await this.#availableCandidates(input.pool, now);
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
@@ -1579,7 +1628,7 @@ export class Orchestrator {
         const circuit = await this.#candidateCircuits.get(profile.profileId);
         if (circuit.state === 'open') {
           claimedProbe = await this.#candidateCircuits.tryClaimProbe({
-            profileId: profile.profileId, now: new Date().toISOString(),
+            profileId: profile.profileId, now: this.#now().toISOString(),
           });
           if (!claimedProbe) continue;
         } else if (circuit.state === 'half_open') {
@@ -1914,7 +1963,9 @@ export class Orchestrator {
         endedBy === 'upstream_failure' || endedBy === 'killed_idle' ||
         classification?.failureClass === 'local_adapter_error';
       if (this.#candidateCircuits) {
-        const openUntil = new Date(Date.now() + (input.pool.cooldownMs ?? 5 * 60 * 1000)).toISOString();
+        const openUntil = failureClass === 'quota'
+          ? resolveQuotaResetTime({ message, now: this.#now().toISOString() })
+          : new Date(this.#now().getTime() + (input.pool.cooldownMs ?? 5 * 60 * 1000)).toISOString();
         if (endedBy === 'platform_unreachable') {
           // A platform outage is not a candidate outcome; keep a claimed probe from
           // remaining stuck without changing the existing circuit row.
