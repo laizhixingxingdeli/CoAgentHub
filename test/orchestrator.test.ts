@@ -387,6 +387,66 @@ describe('调度器：整条 Mission 自己走完', () => {
     }
   });
 
+  // 方案驱动的等待探针要能直接从结果里读出「这次缺的是哪个角色的人」。
+  // 为什么不能拿 reason 顶替：`no_available_agent` 这个字符串同时盖着
+  // 「候选在冷却」和「检查点失败」两件处置相反的事——后者要人来看，
+  // 探针若一律当成候选冷却，就会去等一个永远不会自己好的东西。
+  test('缺候选的 waiting 带出角色；非候选故障不带', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-candidate-role-'));
+    const circuits = candidateCircuitRepository();
+    // 检查点抛错的 workspace 只服务这条 Mission；候选冷却那条根本启动不了 Agent。
+    const workspace = Object.assign(new InPlaceWorkspaceManager(), {
+      checkpoint: async () => {
+        throw new Error('checkpoint-denied');
+      },
+    });
+    const coordinator = new ScriptedRuntime(COORDINATOR_HAPPY);
+    try {
+      current = await harness({
+        coordinator,
+        executor: new ScriptedRuntime(EXECUTOR_HAPPY),
+      }, circuits, undefined, workspace);
+      await current.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-checkpoint-no-role',
+        contract: CONTRACT,
+      });
+      await current.platform.createMission({
+        projectId: 'P',
+        missionId: 'M-coord-cold',
+        contract: CONTRACT,
+      });
+
+      // 先跑非候选故障那条：它的 reason 同样是 no_available_agent，
+      // 但缺的东西不是候选，所以不许带角色。
+      const orchestrator = current.makeOrchestrator();
+      const checkpointFault = await orchestrator.runMission('M-checkpoint-no-role', { projectRoot });
+      assert.equal(checkpointFault.kind, 'waiting');
+      assert.equal((checkpointFault as { reason: string }).reason, 'no_available_agent');
+      assert.match((checkpointFault as { detail: string }).detail, /checkpoint-denied/);
+      assert.equal(
+        Object.hasOwn(checkpointFault, 'candidateRole'),
+        false,
+        '检查点失败不是候选不可用，不许贴角色',
+      );
+
+      // 再让协调者唯一的候选进冷却。执行者的候选没动，不许混算成 executor。
+      await circuits.open({
+        profileId: 'coordinator-a',
+        failureClass: 'rate_limit',
+        openUntil: new Date(Date.now() + 5 * 60_000).toISOString(),
+      });
+      const cold = await orchestrator.runMission('M-coord-cold', { projectRoot });
+      assert.equal(cold.kind, 'waiting');
+      assert.equal((cold as { reason: string }).reason, 'no_available_agent');
+      assert.equal((cold as { candidateRole?: string }).candidateRole, 'coordinator');
+      assert.equal(coordinator.specs.length, 1, '候选不可用不得启动协调者');
+      assert.equal(orchestrator.hops.length, 2, '这一跳连 Attempt 都不该开');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('缺少冻结授权时停靠且不继续下一跳', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-missing-scope-'));
     const marker = join(projectRoot, 'executor-handoff.marker');
