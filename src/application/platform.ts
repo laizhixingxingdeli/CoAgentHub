@@ -122,6 +122,8 @@ import {
   projectStartupBriefFields,
   type BoundWorkItem,
   type ContextBundle,
+  type SinceLastHopEntry,
+  type WorkItemIndexEntry,
 } from './context-builder.ts';
 import {
   anyHardAuthoritativeExceeded,
@@ -2687,6 +2689,10 @@ export class Platform {
       }
     }
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
+    const briefSources =
+      attempt.kind === 'coordinator'
+        ? coordinatorStartupSources(mission, attemptId, await this.#activity.list(missionId))
+        : undefined;
     const contextBundle = buildContextBundle(
       {
         role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
@@ -2699,6 +2705,12 @@ export class Platform {
         workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
         finalReview: mission.finalReview,
         classification,
+        ...(briefSources
+          ? {
+              workItemsIndex: briefSources.workItemsIndex,
+              sinceLastHop: briefSources.sinceLastHop,
+            }
+          : {}),
       },
       budget,
     );
@@ -6529,6 +6541,114 @@ function priorGuidanceForWorkItem(
       : {}),
     ...(answered ?? {}),
   };
+}
+
+/* ===================== 协调者简报：工作项索引 + 上一跳增量 ===================== */
+
+/** 上一跳以来的新情况摘要里，单条摘要的最大字符数；超长显式截断，不放输出全文。 */
+const SINCE_LAST_HOP_SUMMARY_CAP = 200;
+
+/**
+ * 把上一段 coordinator 结束之后的活动，按事件原序压成一条条短摘要。
+ *
+ * 只列「有的才列」：证据提交、卡住报告、升级答复、L3 最终决定各自独立判断；
+ * 同一类多次出现就各列一条。不放输出全文——摘要里只留脱敏后的概要，
+ * 避免把几十万字符的输出又搬回协调者上下文。
+ */
+function summarizeSinceLastHop(
+  mission: Mission,
+  events: readonly ActivityEvent[],
+): SinceLastHopEntry {
+  const summaries: string[] = [];
+  for (const event of events) {
+    switch (event.kind) {
+      case 'execution_result.submitted': {
+        const data = event.data as
+          | { outcome?: string; changedFiles?: number; orderRevision?: string }
+          | undefined;
+        const workItemId = event.workItemId;
+        const title = workItemId ? mission.workItem(workItemId)?.title : undefined;
+        const latest = workItemId
+          ? mission.workItem(workItemId)?.attempts.at(-1)?.evidence.at(-1)
+          : undefined;
+        const evidenceNote = latest
+          ? `最近证据：${latest.kind}${latest.summary ? '：' + latest.summary : ''}`
+          : '（无已存证据）';
+        summaries.push(
+          `提交[${title ?? workItemId ?? '?'}] ${data?.outcome ?? '?'} ` +
+            `改动${data?.changedFiles ?? '?'}个文件 工单修订${data?.orderRevision ?? '?'}；${evidenceNote}`,
+        );
+        break;
+      }
+      case 'blocked.reported': {
+        const data = event.data as { reason?: string; orderRevision?: string } | undefined;
+        summaries.push(`卡住报告：${data?.reason ?? '（无理由）'}（工单修订${data?.orderRevision ?? '?'}，待协调者处理）`);
+        break;
+      }
+      case 'escalation.answered': {
+        const data = event.data as { question?: string; answer?: string } | undefined;
+        summaries.push(`升级答复：${data?.question ?? '（无问题）'} → ${data?.answer ?? '（无答复）'}`);
+        break;
+      }
+      case 'final_review.send_back':
+      case 'final_review.abandoned':
+      case 'final_review.merged':
+      case 'final_review.merge_failed':
+      case 'final_review.ha_unsafe':
+      case 'final_review.ha_authorized':
+      case 'final_review.integration_anchor':
+      case 'final_review.integration_verified':
+      case 'final_review.merge_applied': {
+        const data = (event.data ?? {}) as Record<string, unknown>;
+        const reasons = Array.isArray(data.reasons) ? data.reasons.join('；') : '';
+        summaries.push(`L3 最终决定[${event.kind.replace('final_review.', '')}]${reasons ? '：' + reasons : ''}`);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return summaries.map((s) => ({ summary: capString(redactSecrets(s), SINCE_LAST_HOP_SUMMARY_CAP) }));
+}
+
+/**
+ * 从活动原序里找到「上一个结束的 coordinator 跳」，取其 attempt.ended 事件。
+ * 用 attemptId 是否落在 mission.coordinatorAttempts 里判断角色，并严格用
+ * 序列位置（而非相同时间戳）定位——同一秒内多事件是常态，靠时间戳会错配。
+ */
+function previousCoordinatorEndEvent(
+  mission: Mission,
+  currentAttemptId: string,
+  events: readonly ActivityEvent[],
+): ActivityEvent | undefined {
+  const coordIds = new Set(mission.coordinatorAttempts.map((a) => a.id));
+  const endedCoord = events.filter(
+    (e) => e.kind === 'attempt.ended' && e.attemptId !== undefined && coordIds.has(e.attemptId),
+  );
+  // 最后一个不是当前这一跳的 coordinator 结束事件，就是「上一跳」。
+  const prev = endedCoord.filter((e) => e.attemptId !== currentAttemptId).at(-1);
+  return prev;
+}
+
+function coordinatorStartupSources(
+  mission: Mission,
+  attemptId: string,
+  events: readonly ActivityEvent[],
+): { workItemsIndex: readonly WorkItemIndexEntry[]; sinceLastHop: SinceLastHopEntry } {
+  const index: readonly WorkItemIndexEntry[] = agentWorkItemIndex(mission).map((entry) => ({
+    id: entry.id,
+    title: entry.title,
+    status: entry.status,
+    attempts: entry.attempts,
+    lastReviewVerdict: entry.lastReviewVerdict,
+  }));
+  const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
+  if (!prevEnd) {
+    return { workItemsIndex: index, sinceLastHop: [] };
+  }
+  const prevIndex = events.findIndex((e) => e === prevEnd);
+  const after = events.slice(prevIndex + 1);
+  return { workItemsIndex: index, sinceLastHop: summarizeSinceLastHop(mission, after) };
 }
 
 function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
