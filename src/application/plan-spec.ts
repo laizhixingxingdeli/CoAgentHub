@@ -164,6 +164,23 @@ function pathBaseName(value: string): string | undefined {
   return segments.at(-1);
 }
 
+/**
+ * 两个条目的改动范围是否重叠：路径相同，或某目录是另一文件/目录的祖先。
+ * 非目标只列相关票——否则方案一大段「其他功能点」清单会随工作项线性膨胀（见 missionIntent）。
+ */
+function scopeOverlaps(left: readonly string[], right: readonly string[]): boolean {
+  for (const a of left) {
+    const na = posixPath(a);
+    for (const b of right) {
+      const nb = posixPath(b);
+      if (na === nb) return true;
+      if (na.endsWith('/') && nb.startsWith(na)) return true;
+      if (nb.endsWith('/') && na.startsWith(nb)) return true;
+    }
+  }
+  return false;
+}
+
 /** Project Truth 在 Git 的 .coagent/；VIBE.md 是生成物。写进工单范围会让 L1 一开跑就升级。 */
 function isProjectTruthScope(scope: string): boolean {
   const path = posixPath(scope);
@@ -509,7 +526,15 @@ export function parsePlanSpec(raw: unknown, options?: { reviewer?: string }): Pl
  * 协调者不要自己切分支或合并。
  */
 export function featureContract(plan: PlanSpec, feature: PlanFeatureSpec): MissionContract {
-  const others = plan.features.filter((f) => f.id !== feature.id).map((f) => `${f.id}「${f.title}」`);
+  // 非目标只列与本票相关的其它功能点：双向依赖，或改动范围重叠；无关的整段不列，
+  // 否则方案里一长串「其他功能点」会随工作项线性膨胀进每一跳的上下文。
+  const related = plan.features.filter(
+    (f) =>
+      f.id !== feature.id &&
+      (feature.dependsOn?.includes(f.id) === true ||
+        f.dependsOn?.includes(feature.id) === true ||
+        scopeOverlaps(feature.allowedScope, f.allowedScope)),
+  );
   return Object.freeze({
     // 只有候选会走到这里，候选一定有 why；万一没有也不拼出「标题：」这种半句。
     intent: feature.why ? `${feature.title}：${feature.why}` : feature.title,
@@ -520,9 +545,7 @@ export function featureContract(plan: PlanSpec, feature: PlanFeatureSpec): Missi
     ]),
     nonGoals: Object.freeze([
       ...(feature.nonGoals ?? []),
-      ...(others.length > 0
-        ? [`方案 ${plan.planId} 里的其他功能点（${others.join('、')}）不在本 Mission 范围内。`]
-        : []),
+      ...related.map((f) => `${f.id}：${f.title}`),
     ]),
     guardrails: Object.freeze([
       `这是方案 ${plan.planId} 的无人值守运行：合并由平台在集成分支 ${plan.integrationBranch} 上` +

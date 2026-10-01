@@ -147,7 +147,8 @@ describe('功能点 → Mission 契约', () => {
     assert.match(contract.intent, /因为/);
     assert.deepEqual(contract.acceptance, ['可区分']);
     assert.deepEqual(contract.constraints, ['只改方案为它声明的范围：src/l3.ts、src/web/。']);
-    assert.deepEqual(contract.nonGoals, ['方案 PLAN-x 里的其他功能点（F1「已合的」、F3「也要跑」）不在本 Mission 范围内。']);
+    // F2 与 F1、F3 既无双向依赖、改动范围也不重叠：非目标里不再列其它功能点。
+    assert.deepEqual(contract.nonGoals, []);
     assert.ok(contract.guardrails.some((c) => c.includes('auto/plan-x') && /不要自己合并/.test(c)));
   });
 
@@ -165,6 +166,32 @@ describe('功能点 → Mission 契约', () => {
     const defaultContract = featureContract(defaults, defaults.features[0]);
     assert.deepEqual(defaultContract.constraints, ['只改方案为它声明的范围：a.ts。']);
     assert.deepEqual(defaultContract.nonGoals, []);
+  });
+
+  test('10 项方案：非目标只列双向依赖与范围重叠的其它票，无关不出现', () => {
+    const plan = planOf([
+      { id: 'A', title: '核内甲', why: 'w', allowedScope: ['src/kernel/a.ts'], acceptance: ['x'] },
+      { id: 'B', title: '核内目录', why: 'w', allowedScope: ['src/kernel/'], acceptance: ['x'], dependsOn: ['A'] },
+      { id: 'C', title: '应用甲', why: 'w', allowedScope: ['src/app/c.ts'], acceptance: ['x'] },
+      { id: 'D', title: '应用目录', why: 'w', allowedScope: ['src/app/'], acceptance: ['x'], dependsOn: ['C'] },
+      { id: 'E', title: '网页甲', why: 'w', allowedScope: ['src/web/e.ts'], acceptance: ['x'], dependsOn: ['B'] },
+      { id: 'F', title: '网页目录', why: 'w', allowedScope: ['src/web/'], acceptance: ['x'] },
+      { id: 'G', title: '其它甲', why: 'w', allowedScope: ['other/g.ts'], acceptance: ['x'] },
+      { id: 'H', title: '其它乙', why: 'w', allowedScope: ['other/h.ts'], acceptance: ['x'] },
+      { id: 'I', title: '孤立甲', why: 'w', allowedScope: ['x/i.ts'], acceptance: ['x'] },
+      { id: 'J', title: '孤立乙', why: 'w', allowedScope: ['y/j.ts'], acceptance: ['x'] },
+    ]);
+    // 对 B 而言：A 是正向依赖且范围重叠（src/kernel/ 是 src/kernel/a.ts 的祖先）；
+    // E 反向依赖（E.dependsOn 含 B）；其余既不依赖也不重叠，不应出现。
+    const contract = featureContract(plan, plan.features[1]);
+    assert.deepEqual(contract.nonGoals, ['A：核内甲', 'E：网页甲']);
+    // 无关票一律不出现在非目标里。
+    for (const id of ['C', 'D', 'F', 'G', 'H', 'I', 'J']) {
+      assert.ok(!contract.nonGoals.some((ng) => ng.startsWith(`${id}：`)), `不应含 ${id}`);
+    }
+    // 原条目 nonGoals、验收、guardrails 保持不变。
+    assert.deepEqual(contract.acceptance, ['x']);
+    assert.ok(contract.guardrails.some((c) => /不要自己合并/.test(c)));
   });
 });
 
