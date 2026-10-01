@@ -616,6 +616,30 @@ const EVENT_TABLE = {
     };
   },
 
+  /*
+   * 机器自动接续（platform 把 partial / 验证失败退回执行者，每条最多两次）。
+   * 这条要回答的是「谁退的、为什么、第几次」，所以依据与次数都得出现，缺了直说。
+   * summary 在落盘前已由 platform 侧脱敏截尾，这里原样展示；再截一次会把
+   * 「为什么退回去」的尾巴切掉，而界面要回答的正是这个。
+   */
+  'work_item.auto_redispatched': (event, ctx) => {
+    const data = (event && event.data) || {};
+    const rawReason = text(data.reason);
+    const reason = rawReason === 'validation_failed'
+      ? '验证没过'
+      : rawReason === 'partial'
+        ? '只交了半成品'
+        : '（没有写退回依据）';
+    const count = data.count === undefined || data.count === null ? '（没有写续派次数）' : `续派第 ${num(data.count)} 次`;
+    const workItem = titleOf(ctx, event && event.workItemId) || '（不知道是哪个工作项）';
+    const summary = text(data.summary);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '自动退回执行者',
+      detail: [`${reason} · ${workItem} · ${count}`, summary].filter(Boolean).join('：'),
+    };
+  },
+
   'final_review.send_back': (event) => ({
     badge: 'L3',
     action: '打回',
