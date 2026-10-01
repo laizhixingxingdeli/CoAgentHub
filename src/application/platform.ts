@@ -3015,6 +3015,79 @@ export class Platform {
   }
 
   /**
+   * 协调者开工前的契约核对（Standard）。
+   *
+   * 为什么要这个口：第 33 波返工的三处源头都在检视者的票上（范围漏文件、
+   * 没写输入位置、诊断错误），协调者本可以开工时就发现，却直接派工，
+   * 执行者卡住后又原样重派。核对结论必须落成事件，会话被压缩或换人接手后
+   * 才恢复得出「核过没有、核出什么」；判为 issues 时不能只记一条——只记不投，
+   * 协调者被唤醒后只会再升级一次，所以走既有的可答复升级通道。
+   */
+  async submitContractCheck(
+    missionId: string,
+    attemptId: string,
+    input: { verdict: 'ok' | 'issues'; summary: string; issues?: readonly string[] },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ contractRevision: number; verdict: 'ok' | 'issues' }> {
+    // 单事务命令（C2）：核对事件、升级、投递一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, async () => {
+      const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
+      if (input.verdict !== 'ok' && input.verdict !== 'issues') {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_VERDICT_INVALID',
+          `verdict 只能是 ok 或 issues，收到 ${String(input.verdict)}。`,
+        );
+      }
+      // 空结论等于没核对：压缩后重读事件只看得到「核对过」三个字。
+      const summary = input.summary?.trim() ?? '';
+      if (summary.length === 0) {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_SUMMARY_REQUIRED',
+          'summary 不能为空：核对结论必须写清查了什么、结论是什么。',
+        );
+      }
+      const issues = (input.issues ?? []).map((issue) => issue.trim());
+      if (input.verdict === 'issues' && (issues.length === 0 || issues.some((issue) => issue.length === 0))) {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_ISSUES_REQUIRED',
+          'verdict=issues 时必须给出非空的 issues，且每项都要写清是哪条验收/输入对不上。',
+        );
+      }
+      const contractRevision = mission.contractRevision;
+      let escalationIndex: number | undefined;
+      if (input.verdict === 'issues') {
+        // 复用既有升级与投递：另写一条路会变成两次升级、两封信。
+        await this.#recordEscalationAndDeliver(mission, {
+          attemptId,
+          question:
+            `契约核对发现问题（r${contractRevision}），需要 L3 裁决：\n` +
+            issues.map((issue) => `- ${issue}`).join('\n'),
+          why: `协调者开工前核对契约发现问题：${summary}`,
+          optionsConsidered: [
+            '按现契约直接派工（对不上的那条执行者必然卡住）',
+            '由协调者自行修订契约（契约只由 L3 修订，越权）',
+            '升级给 L3 修订契约后再派工',
+          ],
+        });
+        escalationIndex = mission.escalations.length - 1;
+      }
+      await this.#event(
+        mission,
+        'contract_check.submitted',
+        {
+          contractRevision,
+          verdict: input.verdict,
+          summary,
+          ...(input.verdict === 'issues' ? { issues, escalationIndex } : {}),
+        },
+        undefined,
+        attemptId,
+      );
+      return { contractRevision, verdict: input.verdict };
+    });
+  }
+
+  /**
    * 只更新调查发现（S09.2 的 coagent_update_findings）。
    *
    * 落到同一份 Plan 上，但**不要求协调者把整份规划重写一遍**：调查途中它
