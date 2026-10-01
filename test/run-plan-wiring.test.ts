@@ -329,6 +329,8 @@ describe('持久化装配里机器 L3 可用', () => {
     const coord = await platform.startCoordinatorAttempt('M1');
     await platform.updatePlan('M1', coord.attemptId, { summary: 'p', steps: ['s'], risks: [] } as never);
     const { workItemId } = await platform.createWorkItem('M1', coord.attemptId, { title: 'W', order: ORDER });
+    // Standard 派发前必须先落一条**当前契约修订**的核对结论（W-334 门禁）。
+    await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
     writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
     const exec = await platform.startExecutorAttempt('M1', workItemId);
@@ -466,6 +468,8 @@ describe('真平台 + 真 git 跑一份方案', () => {
       title: 'W',
       order: { ...ORDER, allowedScope: [file] },
     });
+    // Standard 派发前必须先落一条**当前契约修订**的核对结论（W-334 门禁）。
+    await platform.submitContractCheck(missionId, coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     // 名额被占着的话，这里就是 PROJECT_BUSY——方案就此卡死。
     await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
     writeFileSync(join(prepared.cwd, file), content);
@@ -622,6 +626,8 @@ describe('开跑前：项目的改动名额被谁占着', () => {
       const coord = await seeded.platform.startCoordinatorAttempt('R0-F2');
       await seeded.platform.updatePlan('R0-F2', coord.attemptId, { summary: 'p', steps: ['s'], risks: [] } as never);
       const { workItemId } = await seeded.platform.createWorkItem('R0-F2', coord.attemptId, { title: 'W', order: ORDER });
+      // Standard 派发前必须先落一条**当前契约修订**的核对结论（W-334 门禁）。
+      await seeded.platform.submitContractCheck('R0-F2', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
       await seeded.platform.dispatchWorkItems('R0-F2', coord.attemptId, [workItemId]);
       assert.equal((await seeded.platform.getMissionView('R0-F2')).isMutating, true);
       const hop: QueuedHop = {
@@ -2633,6 +2639,8 @@ describe('run-plan 方案驱动：真实 MissionRunner 失败停靠队列',
                   },
                 },
                 { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+                // Standard 派发前必须先落一条**当前契约修订**的核对结论（W-334 门禁）。
+                { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
                 {
                   tool: 'coagent_dispatch_work_item',
                   body: (previous) => ({ workItemIds: [previous.workItemId] }),
