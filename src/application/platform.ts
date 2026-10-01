@@ -3823,6 +3823,40 @@ export class Platform {
         );
       }
     }
+    // 契约核对门禁（W-334）：Standard 的第一次派发前必须先落一条核对结论。
+    // 会话被压缩或换人接手后，「核过没有、核出什么」只能从事件里恢复，所以查的是
+    // 事件而不是某个内存标志。只认**当前契约修订**的结论：改过契约之后，旧修订的
+    // ok 或旧升级的答复都给不了新修订的解闸——那正是「拿旧结论派新契约」的漏洞。
+    // 与 W-292 一样必须在抢名额 / PRE_DISPATCH shadow / 状态修改之前，否则被拒的
+    // 调用会留下半套流转。轻量路径不经过协调者派发，不受此门禁影响。
+    if (mission.executionMode === 'standard') {
+      const check = [...history].reverse().find((event) => {
+        if (event.kind !== 'contract_check.submitted') return false;
+        const data = event.data as { contractRevision?: number } | undefined;
+        return data?.contractRevision === mission.contractRevision;
+      });
+      if (!check) {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_REQUIRED',
+          `Mission ${mission.id} 当前契约修订是 r${mission.contractRevision}，派发前必须先提交契约核对。` +
+            '先逐条核对：验收涉及的文件是否都在范围内、提到的输入是否存在、诊断与假设是否证实、' +
+            '验收之间是否矛盾。核对通过用 verdict=ok 提交；发现问题用 verdict=issues 提交，平台会升级给 L3。',
+        );
+      }
+      const checkData = check.data as { verdict?: string; escalationIndex?: number } | undefined;
+      if (checkData?.verdict === 'issues') {
+        // 只认这次 issues 自己那条升级的答复：另有一条旧升级被答复过，不能替这次解闸。
+        const index = checkData.escalationIndex;
+        const escalation = index === undefined ? undefined : mission.escalations[index];
+        if (escalation?.answer?.trim() !== '照原契约做') {
+          throw new PlatformRuleError(
+            'CONTRACT_CHECK_ISSUES_PENDING',
+            `契约核对（r${mission.contractRevision}）判为 issues：在 L3 对这次升级明确答复「照原契约做」` +
+              '之前不能派发。请把问题升级给 L3，等答复后再按原契约继续。',
+          );
+        }
+      }
+    }
     // Standard 调用顺序保持原样：先 startExecuting/处理 PROJECT_BUSY，
     // 再 PRE_DISPATCH shadow，再 item.dispatch。
     await this.#acquireMutationSlotForDispatch(mission, project);
