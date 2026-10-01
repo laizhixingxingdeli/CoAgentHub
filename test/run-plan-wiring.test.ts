@@ -11,9 +11,9 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createServer, type Server } from 'node:http';
@@ -21,7 +21,7 @@ import { createServer, type Server } from 'node:http';
 import { API_VERSION, createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
 import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
-import { acquireLock, publishLockPort, stateIdFor } from '../src/application/lock.ts';
+import { acquireLock, publishLockPort, readLockAudit, stateIdFor } from '../src/application/lock.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import {
@@ -784,6 +784,49 @@ describe('run-plan 周期投递修复接线', () => {
     assert.doesNotMatch(startServerSrc, /startPeriodicReconcile/);
     assert.doesNotMatch(startServerSrc, /runFileObserverDeliveryRepairTick/);
     assert.doesNotMatch(startServerSrc, /runPgDeliveryRepairTick/);
+  });
+});
+
+describe('buildPersistentPlatform 残锁安全接管', () => {
+  test('临时状态残锁满足三条件时从生产入口接管并留审计，释放后不留锁', async () => {
+    const home = temp('coagent-stale-lock-');
+    const statePath = join(home, 'state.json');
+    const workspace = new GitWorktreeManager(temp('coagent-stale-lock-wt-'));
+    // 先把主锁目录建出来（状态文件不必存在：stateIdFor 落到父目录即可）。
+    const lockPath = join(dirname(stateIdFor(statePath)), `.lock-${basename(stateIdFor(statePath))}`);
+    mkdirSync(lockPath, { recursive: true });
+    // 旧 holder：远大于系统可能 PID、心跳停在 >2min 前、无 port（不探测真实进程/端口）。
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify({
+        pid: 9_999_999_999,
+        since: new Date(Date.now() - 10 * 60_000).toISOString(),
+        what: '旧常驻写者',
+        heartbeatAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+      }),
+      'utf8',
+    );
+
+    assert.equal(existsSync(lockPath), true, '前置：残锁已植入');
+
+    // 生产入口：exclusive 走 acquireRecoverableLock，会按三条件接管这把死锁。
+    const built = await buildPersistentPlatform(statePath, {
+      workspace,
+      exclusive: { what: '接管测试', instanceId: 'takeover-test', apiVersion: API_VERSION },
+    });
+    try {
+      assert.equal(typeof built.releaseLock, 'function');
+
+      const audit = readLockAudit(statePath);
+      assert.equal(audit.length, 1, '应留下一条接管审计');
+      assert.equal(audit[0].oldPid, 9_999_999_999);
+      assert.equal(audit[0].newPid, process.pid);
+    } finally {
+      built.releaseLock();
+    }
+
+    // 释放后锁目录应被清掉，不留残锁。
+    assert.equal(existsSync(lockPath), false, '释放后目录不留锁');
   });
 });
 
