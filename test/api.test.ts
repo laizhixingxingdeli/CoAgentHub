@@ -2461,6 +2461,7 @@ describe('L3 写路由与落盘后应答', () => {
     try {
       const health = await request(base, '/api/health');
       assert.equal(health.status, 200);
+      assert.equal(health.json.ok, true);
       assert.equal(health.headers.get('x-coagent-api'), API_VERSION);
       assert.equal(health.headers.get('x-coagent-instance'), identity.instanceId);
       assert.equal(health.headers.get('x-coagent-state-id'), identity.stateId);
