@@ -1243,6 +1243,25 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.getMissionView(missionMatch[1]));
     }
 
+    // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks
+    // 可能很长，列表页不该为了显示一行状态把它整个拉过来。
+    // 取报告与取 Mission 同级只读，共用 missionRead；报告的不可变性与归属判断都在
+    // Platform.getValidationReport 里，这里只透传，不直连任何存储适配器。
+    // 归属不符与不存在同样回 404：报告是 append-only 机器证据，若告诉调用方
+    // 「这份报告属于别的 Mission」，等于给了跨 Mission 探测报告 id 的接口。
+    const validationReportMatch = /^\/api\/missions\/([^/]+)\/validation-reports\/([^/]+)$/.exec(path);
+    if (method === 'GET' && validationReportMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const report = await platform.getValidationReport(
+        validationReportMatch[1],
+        validationReportMatch[2],
+      );
+      if (!report) {
+        throw new HttpError(404, 'VALIDATION_REPORT_NOT_FOUND', '没有这份验证报告');
+      }
+      return send(res, 200, report);
+    }
+
     /* ---- L3 面：最终检视 ---- */
 
     const diffMatch = /^\/api\/missions\/([^/]+)\/diff$/.exec(path);
