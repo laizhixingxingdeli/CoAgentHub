@@ -113,6 +113,12 @@ async function driveToLanded(platform: Platform, missionId: string): Promise<voi
     title: 'W',
     order: ORDER,
   });
+  // 派发门禁：Standard 首次派发前必须落一条契约核对结论。这里要测的是
+  // 「落地后重跑能看出来」，不是门禁本身，所以照实核对、不绕门禁。
+  await platform.submitContractCheck(missionId, coord.attemptId, {
+    verdict: 'ok',
+    summary: '测试契约已核对',
+  });
   await platform.dispatchWorkItems(missionId, coord.attemptId, [item.workItemId]);
 
   const exec = await platform.startExecutorAttempt(missionId, item.workItemId);
