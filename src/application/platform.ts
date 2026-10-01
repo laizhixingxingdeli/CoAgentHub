@@ -6933,16 +6933,22 @@ function summarizeSinceLastHop(
       }
       case 'validation.reported': {
         // 机器验收是平台自己跑出来的：协调者上一跳之后才出现的这一条，正是它这一跳
-        // 要看的「新情况」。报告按 workItemId + submittedAttemptId 取，取不到（比如
-        // HA 的整 Mission 验证，或报告还没落盘）就只留一行文字，不造简版。
+        // 要看的「新情况」。报告 map 以 workItemId 为键（见 #workItemValidationReportViews），
+        // 不是 workItemId+attempt 的复合键，所以这里只能按 workItemId 取。
+        // 取到的必须是**当前**提交的那一份：拿旧提交的事件去取，会把新交卷的报告
+        // 误挂到旧事件上——串了一份 append-only 报告比没有更糟。对不上（比如 HA 的
+        // 整 Mission 验证，或报告还没落盘）就只留一行文字，不造简版。
         const data = event.data as { submittedAttemptId?: unknown } | undefined;
         const workItemId = event.workItemId;
-        const title = workItemId ? mission.workItem(workItemId)?.title : undefined;
+        const item = workItemId !== undefined ? mission.workItem(workItemId) : undefined;
+        const title = item?.title;
         const submittedAttemptId =
           typeof data?.submittedAttemptId === 'string' ? data.submittedAttemptId : undefined;
         const report =
-          workItemId !== undefined && submittedAttemptId !== undefined
-            ? validationReports.get(validationReportKey(workItemId, submittedAttemptId))
+          item !== undefined &&
+          submittedAttemptId !== undefined &&
+          submittedAttemptId === item.submittedAttemptId
+            ? validationReports.get(item.id)
             : undefined;
         push(
           `机器验证[${title ?? workItemId ?? '?'}]：${
