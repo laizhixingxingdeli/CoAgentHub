@@ -52,6 +52,9 @@ test('--check 发现主状态中的占位 Mission，给出处理命令且不写�
     const coord = await seeded.platform.startCoordinatorAttempt('R0-F2');
     await seeded.platform.updatePlan('R0-F2', coord.attemptId, { summary: 'p', steps: ['s'], risks: [] } as never);
     const { workItemId } = await seeded.platform.createWorkItem('R0-F2', coord.attemptId, { title: 'W', order: ORDER });
+    // Standard 派发前必须先落当前修订的契约核对结论，否则 CONTRACT_CHECK_REQUIRED；
+    // 这里只是造占位状态，核对结论不影响本用例要验证的 --check 行为。
+    await seeded.platform.submitContractCheck('R0-F2', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await seeded.platform.dispatchWorkItems('R0-F2', coord.attemptId, [workItemId]);
     assert.equal((await seeded.platform.getMissionView('R0-F2')).isMutating, true);
     await seeded.persist();
