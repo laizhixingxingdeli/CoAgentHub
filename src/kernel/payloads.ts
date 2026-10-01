@@ -273,6 +273,11 @@ export interface WorkOrder {
    * 在既有号上 +1。它随 `order` 一起进入快照，故快照恢复后修订号一致。
    */
   readonly orderRevision?: string;
+  /**
+   * 本工单覆盖的 Mission acceptance 序号，1-based。
+   * 缺省 = 旧工单（尚未投影），校验必须按「无关联」处理而不是判错，否则存量工单全废。
+   */
+  readonly criteria?: number[];
 }
 
 export type ExecutionOutcome = 'completed' | 'partial';
