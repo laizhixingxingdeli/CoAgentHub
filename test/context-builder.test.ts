@@ -152,15 +152,18 @@ async function upTo(platform: Platform, root: string) {
 describe('buildContextBundle', () => {
   test('简报仅向协调者投影 mission.routed 分类事实', async () => {
     const platform = makePlatform();
-    await platform.createMission({ projectId: 'P', missionId: 'M-route', contract: CONTRACT });
-    await platform.recordStandardFallbackRoute('M-route', {
-      classification: {
-        recommended: 'standard', confidence: 'high',
-        facts: { confirmed: true, rejected: false, uncertain: 'unknown' },
-        unknowns: ['scope'], criticalUnknowns: [], reasons: ['有边界理由'],
+    await platform.createClassifiedMission({
+      projectId: 'P', missionId: 'M-route', contract: CONTRACT,
+      facts: {
+        mutationSideEffect: true, readOnlyProven: 'unknown',
+        highAssurance: { productionDeployRelease: false, externalPaidOp: false, destructiveData: false, credentialsPermissionsSecurity: false, schemaPublicApiPersistenceCompat: false, unrecoverableExternalSideEffect: false },
+        standardFloor: { publicInterface: false, buildSystemOrDependency: false, multipleDomainModules: false, acceptanceNotCheckableUpfront: false, rootCauseOrCompetingDesigns: false },
       } as never,
-      fallbackReason: '评估理由不足',
-      assessment: { reasons: ['评估说明'] } as never,
+      assessment: {
+        goalUncertainty: 1, changeScope: 1, operationalRisk: 1,
+        verificationDifficulty: 1, coordinationNeed: 1, recoveryDifficulty: 2,
+        reasons: ['评估说明'], decidedBy: 'rule', assessedAt: '2026-03-21T12:00:00.000Z',
+      } as never,
     });
     const coord = await platform.startCoordinatorAttempt('M-route');
     const brief = await platform.getStartupBrief('M-route', coord.attemptId);
@@ -168,11 +171,11 @@ describe('buildContextBundle', () => {
     assert.ok(entry);
     assert.ok(entry.estimatedTokens > 0);
     const content = String(entry.content);
-    assert.match(content, /confirmed/);
-    assert.match(content, /uncertain/);
-    assert.doesNotMatch(content, /rejected/);
-    assert.match(content, /scope/);
-    assert.match(content, /有边界理由/);
+    assert.match(content, /mutationSideEffect/);
+    assert.match(content, /unknown/);
+    assert.doesNotMatch(content, /productionDeployRelease/);
+    assert.match(content, /unknowns:/);
+    assert.match(content, /reasons:/);
     assert.match(content, /评估说明/);
 
     await platform.updatePlan('M-route', coord.attemptId, PLAN);
@@ -183,6 +186,25 @@ describe('buildContextBundle', () => {
     const exec = await platform.startExecutorAttempt('M-route', workItemId);
     const executorBrief = await platform.getStartupBrief('M-route', exec.attemptId);
     assert.equal(executorBrief.contextBundle.entries.some((item) => item.source === 'classification'), false);
+
+    await platform.createMission({ projectId: 'P', missionId: 'M-plain', contract: CONTRACT });
+    const plainCoord = await platform.startCoordinatorAttempt('M-plain');
+    const plainBrief = await platform.getStartupBrief('M-plain', plainCoord.attemptId);
+    assert.equal(plainBrief.contextBundle.entries.some((item) => item.source === 'classification'), false);
+
+    await platform.createMission({ projectId: 'P', missionId: 'M-long', contract: CONTRACT });
+    await platform.recordStandardFallbackRoute('M-long', {
+      classification: {
+        recommended: 'standard', confidence: 'high', facts: { confirmed: true },
+        unknowns: [], criticalUnknowns: [], reasons: ['理由'.repeat(3000)],
+      } as never,
+      fallbackReason: 'fallback',
+    });
+    const longCoord = await platform.startCoordinatorAttempt('M-long');
+    const longBrief = await platform.getStartupBrief('M-long', longCoord.attemptId);
+    const longContent = String(longBrief.contextBundle.entries.find((item) => item.source === 'classification')?.content);
+    assert.ok(longContent.length <= 2000);
+    assert.match(longContent, /已截断/);
   });
   test('相同输入重复构造深度相等', () => {
     const input = coordinatorInput();
