@@ -1188,7 +1188,7 @@ describe('HTTP 简报与按需引用权限',
             contractRevision?: number;
             plan?: { direction?: string; findings?: string };
             planRevision?: number;
-            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown } };
+            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown }; l3SendBackReasons?: string[] };
             finalReview?: { verdict?: string; reasons?: string[] };
             contextBundle?: { role?: string; entries?: BundleEntry[] };
           };
@@ -1225,6 +1225,9 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(execBrief.workItem?.id, workItemId);
           assert.equal(execBrief.workItem?.title, 'W1');
           assert.deepEqual(execBrief.workItem?.order?.contextRefs, BRIEF_REFS);
+          assert.deepEqual(execBrief.workItem?.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
           assert.equal(execBrief.contract, undefined);
           assert.equal(execBrief.plan, undefined);
           assert.equal(execBrief.finalReview, undefined);
@@ -1252,13 +1255,13 @@ describe('HTTP 简报与按需引用权限',
             order?: { contextRefs?: unknown; objective?: string };
             missionIntent?: string;
             guardrails?: unknown;
-            previousRequiredChanges?: unknown;
+            l3SendBackReasons?: unknown;
           };
           assert.deepEqual(Object.keys(order.json).sort(), [
             'guardrails',
+            'l3SendBackReasons',
             'missionIntent',
             'order',
-            'previousRequiredChanges',
             'status',
             'title',
             'workItemId',
@@ -1269,7 +1272,11 @@ describe('HTTP 简报与按需引用权限',
           assert.deepEqual(orderJson.order?.contextRefs, BRIEF_REFS);
           assert.equal(orderJson.missionIntent, BRIEF_CONTRACT_R2.intent);
           assert.deepEqual(orderJson.guardrails, BRIEF_CONTRACT_R2.guardrails);
-          assert.deepEqual(orderJson.previousRequiredChanges, []);
+          // 此 fixture 是 contract r2 触发的 send_back，从未 reject：只带 L3 理由，
+          // 不带空的 previousRequiredChanges（空数组会被读成「上次要求是空」）。
+          assert.deepEqual(orderJson.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
           assert.equal(JSON.stringify(orderJson.order).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
 
           const coordOrder = await postJson(base, '/api/agent/coagent_get_work_order', {}, coordToken);

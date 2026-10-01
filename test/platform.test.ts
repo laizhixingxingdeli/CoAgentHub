@@ -413,6 +413,76 @@ describe('打回重做', () => {
     const view = await platform.getMissionView('M1');
     assert.equal(view.workItems[0].attempts, 2);
   });
+
+  test('L3 send_back 后重派：工单视图与开跑简报都带 L3 理由与最近 reject 要求，冻结工单不变', async () => {
+    const { platform, coord, exec, workItemId } = await upToSubmitted();
+    await platform.finishAttempt('M1', exec, { endedBy: 'structured_submit' });
+    const requiredChanges = ['把 verification 里的命令实际执行并交退出码'];
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
+      reasons: ['测试没真跑'],
+      requiredChanges,
+    });
+
+    // 重派、重做、验收通过，最后交卷给 L3。
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const second = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', second.attemptId, {
+      kind: 'test',
+      summary: '绿',
+      command: 'node --test',
+      exitCode: 0,
+    });
+    await platform.submitExecutionResult('M1', second.attemptId, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    await platform.finishAttempt('M1', second.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '逐条核过' })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    await platform.submitMissionResult('M1', coord, {
+      outcome: 'delivered',
+      summary: '做完了',
+      acceptanceEvidence: ['证据'],
+      memoryDelta: [],
+      openRisks: [],
+    });
+
+    // L3 打回整个 Mission。此时工单最后一条评审是 accept、requiredChanges 为空，
+    // 单看它执行者读到的「上次要改什么」是空——本投影要救的正是这个场景。
+    const l3Reasons = ['Contract 已更新到 r2，需要按新契约重新核对'];
+    await platform.finalizeMissionByReviewer('M1', {
+      verdict: 'send_back',
+      reasons: l3Reasons,
+      reviewerId: 'reviewer-1',
+      confirmedBy: 'user-1',
+    });
+
+    // 重派已验收的工作项，并开新的执行者尝试。
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const third = await platform.startExecutorAttempt('M1', workItemId);
+
+    const orderView = await platform.getWorkOrder('M1', workItemId);
+    assert.deepEqual(orderView.l3SendBackReasons, l3Reasons);
+    assert.deepEqual(orderView.previousRequiredChanges, requiredChanges);
+    // 打回理由与要求是事后补的，不能写进冻结 order。
+    assert.equal(orderView.order.orderRevision, 'r1');
+
+    const brief = await platform.getStartupBrief('M1', third.attemptId);
+    assert.deepEqual(brief.workItem?.l3SendBackReasons, l3Reasons);
+    assert.deepEqual(brief.workItem?.previousRequiredChanges, requiredChanges);
+    assert.equal(brief.workItem?.order?.orderRevision, 'r1');
+  });
 });
 
 describe('用量聚合', () => {
