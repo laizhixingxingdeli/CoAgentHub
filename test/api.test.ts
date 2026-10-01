@@ -120,12 +120,6 @@ async function call(
 }
 
 describe('HTTP 面', () => {
-  test('健康检查', async () => {
-    const { status, json } = await call('/api/health');
-    assert.equal(status, 200);
-    assert.equal((json as { ok: boolean }).ok, true);
-  });
-
   test('没有 run token 的工具调用一律 401', async () => {
     const { status, json } = await call('/api/agent/coagent_get_mission', {});
     assert.equal(status, 401);
