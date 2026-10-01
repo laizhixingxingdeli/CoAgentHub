@@ -434,6 +434,118 @@ describe('HTTP 面', () => {
     assert.equal(stolen.status, 409);
     assert.equal((stolen.json as { error: string }).error, 'WRONG_ROLE');
   });
+  test('协调者经 HTTP 工具建/修超标工单：软警告审计同步、直接调用无警告字段', async () => {
+    // --- HTTP 路径：超标工单照常成功，响应与事件同步含软警告 ---
+    await call('/api/missions', {
+      projectId: 'P-warn',
+      missionId: 'M-warn',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-warn/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+
+    // 触发三类软警告：allowedScope 超 2 项（含一目录冒充文件）、verification 超 2 条、contextRefs 为空。
+    const violatingOrder = {
+      objective: '改多个文件',
+      allowedScope: ['src/a.ts', 'src/b.ts', 'src/c/dir'],
+      requiredBehaviour: '做点事',
+      constraints: [],
+      acceptance: ['a() === 1', 'b() === 1'],
+      verification: ['v1', 'v2', 'v3'],
+      doNot: [],
+      contextRefs: [],
+    };
+
+    const created = await call(
+      '/api/agent/coagent_create_work_item',
+      { title: 'W-warn', ...violatingOrder },
+      coordToken,
+    );
+    assert.ok(created.status >= 200 && created.status < 300);
+    const workItemId = (created.json as { workItemId: string }).workItemId;
+    assert.ok(workItemId);
+    const createWarnings = (created.json as { warnings?: { rule: string; suggestion: string }[] })
+      .warnings;
+    assert.ok(Array.isArray(createWarnings) && createWarnings.length >= 1);
+    // 标出违规项，且每条都有可照做的下一步建议。
+    for (const w of createWarnings!) {
+      assert.ok(['allowedScope', 'verification', 'contextRefs'].includes(w.rule));
+      assert.ok(typeof w.suggestion === 'string' && w.suggestion.length > 0);
+    }
+
+    // 原事件 work_item.created 同步含 warnings。
+    const events = (await call('/api/missions/M-warn/activity')).json as unknown as ActivityRow[];
+    const createdEvt = events.find((row) => row.kind === 'work_item.created');
+    assert.ok(createdEvt);
+    assert.deepEqual(
+      (createdEvt?.data as { warnings?: unknown[] }).warnings,
+      createWarnings,
+    );
+
+    // 经协调者工具修订成另一份超标工单：成功、revision/changedFields、warnings 与事件同步。
+    const revisedOrder = {
+      ...violatingOrder,
+      objective: '改更多文件',
+      allowedScope: ['src/x.ts', 'src/y.ts', 'src/z/another'],
+    };
+    const revised = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...revisedOrder },
+      coordToken,
+    );
+    assert.equal(revised.status, 200);
+    assert.equal((revised.json as { revision: string }).revision, 'r2');
+    assert.ok(Array.isArray((revised.json as { changedFields: string[] }).changedFields));
+    assert.ok((revised.json as { changedFields: string[] }).changedFields.length >= 1);
+    const revWarnings = (revised.json as { warnings?: { rule: string }[] }).warnings;
+    assert.ok(Array.isArray(revWarnings) && revWarnings.length >= 1);
+
+    const events2 = (await call('/api/missions/M-warn/activity')).json as unknown as ActivityRow[];
+    const revisedEvt = events2.find((row) => row.kind === 'work_item.order_revised');
+    assert.ok(revisedEvt);
+    assert.deepEqual((revisedEvt?.data as { warnings?: unknown[] }).warnings, revWarnings);
+    assert.equal((revisedEvt?.data as { revision: string }).revision, 'r2');
+
+    // --- 直接调用路径：独立内存 Platform，不传 viaCoordinatorTool -> 无 warnings 字段、不硬拒 ---
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const directPlatform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    await directPlatform.createMission({
+      projectId: 'P-warn-direct',
+      missionId: 'M-warn-direct',
+      contract: CONTRACT,
+    });
+    const directAttempt = await directPlatform.startCoordinatorAttempt('M-warn-direct');
+    await directPlatform.updatePlan('M-warn-direct', directAttempt.attemptId, {
+      findings: 'f',
+      rejectedHypotheses: [],
+      decisions: [],
+      direction: 'd',
+      risks: [],
+    });
+    // 同样的超标工单，但直接调用（不带 viaCoordinatorTool）：应照常建出、不返回 warnings。
+    const directRes = await directPlatform.createWorkItem('M-warn-direct', directAttempt.attemptId, {
+      title: 'W-direct',
+      order: violatingOrder,
+    });
+    assert.ok(directRes.workItemId);
+    assert.equal(
+      (directRes as Record<string, unknown>).warnings,
+      undefined,
+      '直接调用不应带软警告字段',
+    );
+  });
 });
 
 const QUEUE_NOW = '2025-01-01T00:00:00Z';
