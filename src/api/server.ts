@@ -671,7 +671,15 @@ export function createApi(deps: ApiDeps): Server {
     (run: RunContext, body: Record<string, never>) => Promise<unknown>
   > = {
     async coagent_get_mission(run) {
-      return platform.getMissionView(run.missionId);
+      return platform.getAgentMissionView(run.missionId);
+    },
+
+    async coagent_get_work_item(run, body) {
+      const { workItemId } = body as unknown as { workItemId: unknown };
+      if (typeof workItemId !== 'string' || workItemId.length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
+      }
+      return platform.getAgentWorkItem(run.missionId, workItemId);
     },
 
     async coagent_get_contract(run) {
