@@ -13,6 +13,7 @@ import {
 } from '../kernel/index.ts';
 import type {
   AcceptanceResult,
+  ComplexityAssessment,
   Attempt,
   AttemptEndReason,
   AttemptKind,
@@ -550,6 +551,48 @@ export class Platform {
   async createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#createMission(input));
+  }
+
+  async recordStandardFallbackRoute(
+    missionId: string,
+    input: {
+      classification: ClassificationResult;
+      fallbackReason: string;
+      assessment?: ComplexityAssessment;
+    },
+  ): Promise<void> {
+    return this.#tx(async () => {
+      const { mission } = await this.#locate(missionId);
+      if (mission.executionMode !== 'standard' || mission.runKind !== 'mutation') {
+        throw new PlatformRuleError(
+          'STANDARD_FALLBACK_ROUTE_FORBIDDEN',
+          '分类回落路由事件仅适用于普通 Standard mutation Mission。',
+        );
+      }
+      if (typeof input.fallbackReason !== 'string' || input.fallbackReason.trim().length === 0) {
+        throw new PlatformRuleError('EMPTY_FALLBACK_REASON', 'fallbackReason 不能为空。');
+      }
+      if ((await this.#activity.list(missionId)).some((event) => event.kind === 'mission.routed')) {
+        throw new PlatformRuleError('DUPLICATE_MISSION_ROUTE', 'Mission 已有 mission.routed 事件。');
+      }
+      const { classification } = input;
+      const routedData: Record<string, unknown> = {
+        recommended: classification.recommended,
+        confidence: classification.confidence,
+        facts: classification.facts,
+        unknowns: classification.unknowns,
+        criticalUnknowns: classification.criticalUnknowns,
+        reasons: classification.reasons,
+        fallbackReason: input.fallbackReason,
+      };
+      if (classification.assessmentRef !== undefined) {
+        routedData.assessmentRef = classification.assessmentRef;
+      }
+      if (input.assessment !== undefined) {
+        routedData.assessmentReasons = input.assessment.reasons;
+      }
+      await this.#event(mission, 'mission.routed', routedData);
+    });
   }
 
   async #createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
