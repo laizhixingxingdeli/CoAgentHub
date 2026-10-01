@@ -21,7 +21,12 @@ import type {
   QueuedHopRepository,
   RuntimeOutcome,
 } from './ports.ts';
-import type { MissionView, Platform, QueueClaimIdentity } from './platform.ts';
+import type {
+  MissionView,
+  Platform,
+  QueueClaimIdentity,
+  StandardAutoRedispatchHandoff,
+} from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
@@ -256,6 +261,25 @@ function coordinatorInstruction(view: {
     ...view.conflictFiles.map((file) => `- ${file}`),
     '',
     freshBody,
+  ].join('\n');
+}
+
+/**
+ * 机器接续这一跳时对执行者说什么。
+ *
+ * 上一轮为什么被退回、上轮说明是什么，本来会被这一跳从头忘掉——执行者于是可能
+ * 把同一个错再犯一遍。平台把它持久化在事件流里，这里只负责把它说清楚，并且
+ * 重申「冻结工单才是权威」：摘要是人话，不是可以拿来改目标的依据。
+ */
+function executorContinuationInstruction(handoff: StandardAutoRedispatchHandoff): string {
+  const why =
+    handoff.reason === 'partial'
+      ? `你上一轮提交的是半成品（这是第 ${handoff.count} 次接着做）`
+      : `你上一轮交付的冻结命令验证没通过（这是第 ${handoff.count} 次退回重做）`;
+  return [
+    `${why}，平台把同一个工作项退回给你。接着做，不要从头再来。`,
+    '先调用 coagent_get_work_order 重新读一遍冻结工单——它才是权威，下面的说明只是补充。',
+    `上一轮说明：${handoff.summary}`,
   ].join('\n');
 }
 
@@ -617,14 +641,23 @@ export class Orchestrator {
           // 没命令的一律不进这条路：给它们记基线等于凭空多出一批事件，而 W-321
           // 的验证入口对空命令本来就是 no-op。
           const needsStandardValidation = (item.order?.validation?.commands?.length ?? 0) > 0;
+          // 这一跳是不是「接着上一轮做」：平台把退回原因和上轮说明持久化在事件里，
+          // 断线重启后照样读得回来。读到了就写进唤醒语，并把 partial 留下的续跑句柄
+          // 原样交给运行时——执行者不必把同一件事从头再做一遍。
+          const handoff = await this.#platform.getStandardAutoRedispatchHandoff(
+            missionId,
+            item.id,
+          );
           const hop = await this.#runHop({
             role: 'executor',
             missionId,
             workItemId: item.id,
             cwd,
             pool: this.#executor,
-            instruction:
-              '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+            instruction: handoff
+              ? executorContinuationInstruction(handoff)
+              : '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+            ...(handoff?.resumeRef !== undefined ? { resumeRef: handoff.resumeRef } : {}),
             ...(needsStandardValidation
               ? {
                   // 基线要在执行者真起来之前落盘：那时候 cwd 的 HEAD 才是这条工单的
@@ -662,7 +695,10 @@ export class Orchestrator {
           }
           // 交卷了：趁协调者还没被叫起来，先把冻结命令跑一遍存成报告。报告只是给
           // 协调者的证据，不是验收——跑绿了也不 reject/retry，机器不替它评审。
-          if (needsStandardValidation) {
+          //
+          // **partial 不跑。** 冻结命令是给「做完了」的交付当验收材料的；拿半成品
+          // 去跑，等于把「还没做完」判成「做法不对」，然后退回一次本来就要接着做的交付。
+          if (needsStandardValidation && !(await this.#standardSubmitIsPartial(missionId, item.id))) {
             await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
           }
           // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
@@ -672,6 +708,11 @@ export class Orchestrator {
           const gate = await this.#enforceAuthoritativeBudget(missionId);
           if (gate.kind === 'stop') return gate.outcome;
           if (gate.kind === 'continue') break;
+
+          // 机器接续：partial、或验证没过，平台直接把工单退回执行者（最多两次）。
+          // 续派成功就不用叫协调者——下一轮 pending 会把这条工单重新领起来；
+          // 绿报告 / 缺报告 / blocked / 触顶都返回 false，原样交给 L2。
+          await this.#autoRedispatchStandard(missionId, item.id);
         }
         continue;
       }
@@ -679,11 +720,26 @@ export class Orchestrator {
       // 补验：重启续跑、或上一轮验完没落盘时，工作项已经 submitted 但还没有报告。
       // 放在协调者 hop 之前——它这一跳读的就是这份报告。W-321 幂等：已有报告
       // （同一次 submitted attempt）不会重跑命令，只把那份报告原样返回。
+      let redispatchedOnRecovery = false;
       for (const item of view.workItems) {
         if (item.status !== 'submitted') continue;
-        if ((item.order?.validation?.commands?.length ?? 0) === 0) continue;
-        await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+        // 只在**有命令且不是 partial** 时才补验。**不能因为 commands 为空就提前
+        // continue**：无命令的 partial 若在 pending 自动接续前停机，恢复后这里漏掉
+        // 续派就会错误叫醒 L2。
+        if ((item.order?.validation?.commands?.length ?? 0) > 0) {
+          // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
+          if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
+            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+          }
+        }
+        // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为
+        // 「重启过」就多叫一次协调者。幂等——同一次提交已经续派过、或已经触顶，
+        // 或者平台判定无可续派依据（绿报告 / 缺报告 / blocked / 非 partial），
+        // 这里都是 no-op，原样交给 L2。
+        if (await this.#autoRedispatchStandard(missionId, item.id)) redispatchedOnRecovery = true;
       }
+      // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
+      if (redispatchedOnRecovery) continue;
 
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
       //
@@ -1417,6 +1473,37 @@ export class Orchestrator {
       await this.#platform.validateStandardWorkItem({ missionId, workItemId, cwd });
     } catch {
       // 见上：没有报告也要让协调者接手，不替它评审。
+    }
+  }
+
+  /**
+   * 这一次交卷是不是 partial（半成品）。
+   *
+   * 只拿它决定要不要跑冻结命令：命令是「做完了」的验收材料。工作项不在、或者状态
+   * 已经不是 submitted，一律按 false 处理——那两种情况下后面的验证/交接判断本来
+   * 就会各归各位，不会因为这里猜错而少做什么。
+   */
+  async #standardSubmitIsPartial(missionId: string, workItemId: string): Promise<boolean> {
+    const view = await this.#platform.getMissionView(missionId);
+    const item = view.workItems.find((row) => row.id === workItemId);
+    return item?.status === 'submitted' && item.executionResult?.outcome === 'partial';
+  }
+
+  /**
+   * 机器接续：partial / 验证没过时，让平台把工单退回执行者（最多两次）。
+   *
+   * 返回是否真的续派了——调用方据此决定这一轮要不要走到协调者。所有跳过的理由
+   * （缺报告、报告跑绿、同一次提交已续派过、触顶）都是「交给 L2」：机器能判的只有
+   * 「还能再试」，判不了的绝不替 L2 拿主意。
+   */
+  async #autoRedispatchStandard(missionId: string, workItemId: string): Promise<boolean> {
+    try {
+      const result = await this.#platform.autoRedispatchStandardWorkItem({ missionId, workItemId });
+      return result.redispatched;
+    } catch {
+      // 接续本身出错时按「没有续派」处理，落回原来的 L2 路径。少退一轮只是多花一次
+      // 协调者的钱；让异常穿出去，这一跳会失败，而工单明明还停在 submitted 等人看。
+      return false;
     }
   }
 

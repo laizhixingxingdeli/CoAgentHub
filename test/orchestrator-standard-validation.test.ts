@@ -12,6 +12,10 @@
  *
  * 失败场景额外守住两件事：报告简版的 outputTail 是「先脱敏、再截尾 1000」，
  * 并且机器跑红**不会**替 L2 评审——工作项老老实实留在 submitted。
+ *
+ * W-328：机器接续。验证没过 / 交 partial 时，编排器直接把工单退回执行者（最多两次），
+ * 前两次不叫协调者；第三次才把 submitted 连各次报告一起交给 L2。守住的是「机器能判的
+ * 不叫醒协调者」这个省钱的判断本身——它一旦失效，症状只是账单变大，没有测试就不会有人发现。
  */
 
 import { after, describe, test } from 'node:test';
@@ -32,7 +36,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator } from '../src/application/orchestrator.ts';
-import { Platform } from '../src/application/platform.ts';
+import { Platform, STANDARD_AUTO_REDISPATCH_EVENT_KIND } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
@@ -120,6 +124,31 @@ const EXECUTOR_SCRIPTS: ScriptTable = {
   },
 };
 
+const PARTIAL_SUMMARY = '只改完一半：foo() 的边界还没处理';
+
+/** 执行者每跳都只交 partial：这条链要靠机器接续往前走，前两次不叫协调者。 */
+const PARTIAL_EXECUTOR_SCRIPTS: ScriptTable = {
+  'executor:W-1': {
+    steps: [
+      { tool: 'coagent_get_work_order', body: {} },
+      {
+        tool: 'coagent_submit_evidence',
+        body: { kind: 'test', summary: '改了一半', command: 'node --test', exitCode: 0 },
+      },
+      {
+        tool: 'coagent_submit_execution_result',
+        body: (previous) => ({
+          outcome: 'partial',
+          summary: PARTIAL_SUMMARY,
+          changedFiles: ['src/foo.ts'],
+          evidenceIds: [previous.evidenceId],
+          notes: '还在改边界',
+        }),
+      },
+    ],
+  },
+};
+
 function fakeRunner(impl: CommandRunner['run']): CommandRunner {
   return { run: impl };
 }
@@ -145,7 +174,12 @@ after(() => {
  * 装配方式与 test/orchestrator.test.ts 一致。cwd 是每次自建的 mkdtemp 临时目录，
  * 被测目标不是进程 cwd；原地工作区不隔离，所以也不涉及 worktree / 真 git。
  */
-async function harness(opts: { runner: CommandRunner; paths: ChangedPathReader }) {
+async function harness(opts: {
+  runner: CommandRunner;
+  paths: ChangedPathReader;
+  /** partial 场景要换一套执行者脚本；不传就用默认的「交 completed」。 */
+  executorScripts?: ScriptTable;
+}) {
   const clock = new FixedClock('2026-06-01T12:00:00.000Z');
   const activity = new InMemoryActivityLog(clock);
   const projects = new InMemoryProjectRepository();
@@ -174,11 +208,18 @@ async function harness(opts: { runner: CommandRunner; paths: ChangedPathReader }
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   servers.push(server);
 
+  // 两个 runtime 留成实例，测试才能断言「叫醒语里说了什么、有没有接上一跳的会话」——
+  // 这两件事没有别的外部可见症状。
+  const coordinatorRuntime = new ScriptedRuntime(COORDINATOR_SCRIPTS);
+  const executorRuntime = new ScriptedRuntime(opts.executorScripts ?? EXECUTOR_SCRIPTS);
+
   return {
     platform,
     projects,
     reports,
     activity,
+    coordinatorRuntime,
+    executorRuntime,
     makeOrchestrator: () =>
       new Orchestrator({
         platform,
@@ -186,11 +227,11 @@ async function harness(opts: { runner: CommandRunner; paths: ChangedPathReader }
         baseUrl,
         workspace,
         coordinator: {
-          runtime: new ScriptedRuntime(COORDINATOR_SCRIPTS),
+          runtime: coordinatorRuntime,
           candidates: [{ endpoint: 'local', profileId: 'coordinator-a' }],
         },
         executor: {
-          runtime: new ScriptedRuntime(EXECUTOR_SCRIPTS),
+          runtime: executorRuntime,
           candidates: [{ endpoint: 'local', profileId: 'exec-a' }],
         },
       }),
@@ -204,9 +245,13 @@ function tempProjectRoot(prefix: string): string {
 }
 
 /** Orchestrator 主链走完；maxRounds 恰好覆盖 coord0 / executor / coord1 三轮。 */
-async function runStandardChain(h: Awaited<ReturnType<typeof harness>>, projectRoot: string) {
+async function runStandardChain(
+  h: Awaited<ReturnType<typeof harness>>,
+  projectRoot: string,
+  maxRounds = 3,
+) {
   await h.platform.createMission({ projectId: 'P', missionId: 'M-std', contract: CONTRACT });
-  await h.makeOrchestrator().runMission('M-std', { projectRoot, maxRounds: 3 });
+  await h.makeOrchestrator().runMission('M-std', { projectRoot, maxRounds });
 }
 
 /** 取交卷之后的第二跳协调者简报——上一跳增量就是它这一跳要看的「新情况」。 */
@@ -276,7 +321,7 @@ describe('Standard 交卷后的机器验证报告', () => {
     assert.equal(events.filter((e) => e.kind === 'validation.reported').length, 1);
   });
 
-  test('命令失败：简报 outputTail 先脱敏再截尾 1000，report passed=false，item 不被自动评审', async () => {
+  test('命令连续失败：前两次机器退回执行者，第三次失败才交 L2 复核各次报告', async () => {
     // >1000 字，且尾部带一个非数字后缀的凭据值——脱敏器认得出。
     const secret = `sk-${'b'.repeat(30)}`;
     const rawOutput = `${'x'.repeat(1500)}\napi_key=${secret}\nEND-MARKER`;
@@ -287,8 +332,56 @@ describe('Standard 交卷后的机器验证报告', () => {
       output: rawOutput,
     }));
     const h = await harness({ runner, paths: fakePaths(['src/foo.ts']) });
-    await runStandardChain(h, tempProjectRoot('orchestrator-std-fail-'));
+    // 每轮 pending 只领一条工单：开局派发 + 三次执行者 + 触顶后收尾，共五轮。
+    await runStandardChain(h, tempProjectRoot('orchestrator-std-fail-'), 5);
 
+    const view = await h.platform.getMissionView('M-std');
+    // 前两次失败由机器自己退回执行者，协调者不出场：只有开局派发与触顶后的收尾两跳。
+    assert.equal(
+      view.coordinatorAttemptIds.length,
+      2,
+      `前两轮不该叫协调者：${JSON.stringify(view.coordinatorAttemptIds)}`,
+    );
+    // 每轮都是新的一次执行者 Attempt 接续，而不是把同一跳重跑。
+    const itemView = view.workItems.find((row) => row.id === 'W-1');
+    assert.equal(itemView?.attemptIds.length, 3, '三次提交各对应一次新的执行者 Attempt');
+
+    // 失败摘要随唤醒语到达下一跳：执行者拿得到「上一轮哪条命令、怎么挂的」。
+    const instructions = h.executorRuntime.instructions;
+    assert.equal(instructions.length, 3);
+    assert.match(instructions[1]!, /第 1 次退回重做/);
+    assert.match(instructions[1]!, /node --test: command exited 1/);
+    assert.match(instructions[2]!, /第 2 次退回重做/);
+
+    // 验证失败**不**接上一跳的会话：那条会话产出的结果已经被机器判为不合格。
+    assert.deepEqual(h.executorRuntime.resumeRefs, [undefined, undefined, undefined]);
+
+    // 触顶：第三次失败留在 submitted，机器不再退回（也就没有第三条 auto 事件）。
+    const events = await h.activity.list('M-std');
+    const auto = events.filter((event) => event.kind === STANDARD_AUTO_REDISPATCH_EVENT_KIND);
+    assert.equal(auto.length, 2, '只有前两次失败被自动退回');
+    assert.deepEqual(
+      auto.map((event) => (event.data as { reason: string }).reason),
+      ['validation_failed', 'validation_failed'],
+    );
+    assert.deepEqual(
+      auto.map((event) => (event.data as { count: number }).count),
+      [1, 2],
+    );
+    assert.match((auto[0]!.data as { summary: string }).summary, /node --test: command exited 1/);
+
+    // 各次报告都留在仓储里：L2 逐份复核，不是只看最后那份。
+    const reported = events.filter((event) => event.kind === 'validation.reported');
+    assert.equal(reported.length, 3);
+    const reportIds = reported.map((event) => (event.data as { reportId: string }).reportId);
+    assert.equal(new Set(reportIds).size, 3, '每次失败都是新报告，不覆盖上一份');
+    for (const reportId of reportIds) {
+      const stored = await h.reports.get(reportId);
+      assert.ok(stored, `报告 ${reportId} 必须可复核`);
+      assert.equal(stored.passed, false);
+    }
+
+    // 触顶那次失败的报告就是 L2 这一跳看到的「新情况」。
     const brief = await lastCoordinatorBrief(h);
 
     const withReport = brief.sinceLastHop!.filter((entry) => entry.validationReport !== undefined);
@@ -297,13 +390,13 @@ describe('Standard 交卷后的机器验证报告', () => {
     assert.match(entry.summary, /机器验证/);
     assert.match(entry.summary, /failed/);
 
-    const view = entry.validationReport!;
-    assert.equal(view.passed, false);
-    assert.equal(view.commands.length, 1);
-    assert.equal(view.commands[0]!.passed, false);
-    assert.equal(view.commands[0]!.durationMs, 7);
+    const reportView = entry.validationReport!;
+    assert.equal(reportView.passed, false);
+    assert.equal(reportView.commands.length, 1);
+    assert.equal(reportView.commands[0]!.passed, false);
+    assert.equal(reportView.commands[0]!.durationMs, 7);
 
-    const outputTail = view.commands[0]!.outputTail;
+    const outputTail = reportView.commands[0]!.outputTail;
     assert.ok(outputTail !== undefined, '失败命令必须带输出尾');
     // 顺序反了（先截尾再脱敏）时，被切掉的值不再命中形状，长度也会短一截：
     // 恰好 1000 字 + 值被替换，才说明是「先脱敏、再截尾」。
@@ -314,11 +407,12 @@ describe('Standard 交卷后的机器验证报告', () => {
     assert.ok(outputTail.endsWith('END-MARKER'));
 
     // report passed=false，按 ID 能取到完整报告。
-    const stored = await h.platform.getValidationReport('M-std', view.reportId);
+    const stored = await h.platform.getValidationReport('M-std', reportView.reportId);
     assert.ok(stored, '按 reportId 必须能取到完整报告');
     assert.equal(stored.passed, false);
     assert.equal(stored.missionId, 'M-std');
     assert.equal(stored.workItemId, 'W-1');
+    assert.ok(reportIds.includes(stored.id), 'L2 看的就是这一次提交的报告');
 
     // 机器跑红也不替 L2 评审：item 仍 submitted，没有接受也没有退回。
     const { item, mission } = await liveItem(h);
@@ -326,8 +420,75 @@ describe('Standard 交卷后的机器验证报告', () => {
     assert.equal(item.reviews.length, 0);
     assert.equal(item.submittedAttemptId, stored.attemptId);
     assert.equal(mission.status, 'executing');
+    assert.equal(events.filter((event) => event.kind === 'review.recorded').length, 0);
+  });
+
+  test('partial 连续两次接着做：上轮说明与 resumeRef 传下去，第三次才叫 L2', async () => {
+    const runner = fakeRunner(async () => ({
+      exitCode: 0,
+      timedOut: false,
+      durationMs: 3,
+      output: 'pass',
+    }));
+    const h = await harness({
+      runner,
+      paths: fakePaths(['src/foo.ts']),
+      executorScripts: PARTIAL_EXECUTOR_SCRIPTS,
+    });
+    // 同上：开局派发 + 三次 partial + 触顶后收尾。
+    await runStandardChain(h, tempProjectRoot('orchestrator-std-partial-'), 5);
+
+    const view = await h.platform.getMissionView('M-std');
+    assert.equal(
+      view.coordinatorAttemptIds.length,
+      2,
+      `两次 partial 之间不该有协调者：${JSON.stringify(view.coordinatorAttemptIds)}`,
+    );
+    assert.equal(view.workItems.find((row) => row.id === 'W-1')?.attemptIds.length, 3);
+
+    // 上一轮说明确实带到了下一跳（从持久事件读回来的，不是内存里的）。
+    const instructions = h.executorRuntime.instructions;
+    assert.equal(instructions.length, 3);
+    assert.match(instructions[1]!, /半成品/);
+    assert.match(instructions[1]!, /只改完一半/);
+    assert.match(instructions[2]!, /第 2 次接着做/);
+    assert.match(instructions[2]!, /只改完一半/);
+
+    // partial 有已存 resumeRef 就传给运行时：接着上一跳那个会话做最省。
+    assert.deepEqual(h.executorRuntime.resumeRefs, [
+      undefined,
+      'scripted:executor:W-1:0',
+      'scripted:executor:W-1:1',
+    ]);
+
+    // partial 不是「做完了」：冻结命令一次都没跑。
     const events = await h.activity.list('M-std');
-    assert.equal(events.filter((e) => e.kind === 'review.recorded').length, 0);
-    assert.equal(events.filter((e) => e.kind === 'validation.reported').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'validation.reported').length, 0);
+
+    const auto = events.filter((event) => event.kind === STANDARD_AUTO_REDISPATCH_EVENT_KIND);
+    assert.equal(auto.length, 2);
+    assert.deepEqual(
+      auto.map((event) => (event.data as { reason: string }).reason),
+      ['partial', 'partial'],
+    );
+    assert.deepEqual(
+      auto.map((event) => (event.data as { count: number }).count),
+      [1, 2],
+    );
+    assert.equal((auto[0]!.data as { summary: string }).summary, PARTIAL_SUMMARY);
+
+    // 第三次 partial 触顶：留在 submitted 交 L2，机器不再退回。
+    const { item } = await liveItem(h);
+    assert.equal(item.status, 'submitted');
+    assert.equal(item.reviews.length, 0);
+
+    // L2 这一跳才被叫起来，简报里看得到三次 partial 提交。
+    const brief = await lastCoordinatorBrief(h);
+    assert.equal(
+      brief.sinceLastHop!.filter((entry) => entry.summary.includes('partial')).length,
+      3,
+      `L2 应看到三次 partial 提交：${JSON.stringify(brief.sinceLastHop)}`,
+    );
+    assert.equal(events.filter((event) => event.kind === 'review.recorded').length, 0);
   });
 });
