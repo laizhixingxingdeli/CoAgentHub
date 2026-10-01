@@ -44,7 +44,7 @@ function makePlatform() {
   return { platform, activity, projects, deliveries };
 }
 
-/** 建 Mission → 写 Plan → 建一条带 criteria 的工作项。返回协调者 attempt。 */
+/** 建 Mission → 写 Plan → 拿到协调者 attempt。之后每次派发前都要先交契约核对结论。 */
 async function bootstrap() {
   const { platform, activity, projects, deliveries } = makePlatform();
   await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
@@ -60,39 +60,21 @@ async function bootstrap() {
 }
 
 /**
- * 送到「已提交、待验收」。Standard 派发前必须先交契约核对结论。
+ * 送到「已提交、待验收」。
  *
- * 这一跳怎么结束的（`endReason`）留到提交之后才记：attempt 一旦收尾就不能再
- * 提交证据/结果，而「上次是怎么没的」正是诊断卡要读的东西——所以先交卷、
- * 再 finishAttempt 记 endedBy。
+ * 这一跳怎么结束的（`endReason`）留到提交之后才记：attempt 一旦收尾就不能再提交
+ * 证据/结果，而「上次是怎么没的」正是诊断卡要读的东西——所以先交卷、再 finishAttempt。
  */
-async function toSubmitted(
-  platform: Platform,
-  coord: string,
-  workItemId: string,
-  endReason: 'structured_submit' | 'upstream_failure' | 'killed_idle' = 'structured_submit',
-) {
+async function toSubmitted(platform: Platform, coord: string, workItemId: string, endReason: 'structured_submit' | 'upstream_failure' = 'structured_submit') {
   await platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M1', coord, [workItemId]);
   const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
-  await platform.submitEvidence('M1', exec, {
-    kind: 'test',
-    summary: 'node --test 全绿',
-    command: 'node --test',
-    exitCode: 0,
-  });
-  await platform.submitExecutionResult('M1', exec, {
-    outcome: 'completed',
-    summary: '改好了',
-    changedFiles: ['src/foo.ts'],
-    evidenceIds: [],
-    notes: '无',
-  });
+  await platform.submitEvidence('M1', exec, { kind: 'test', summary: 'node --test 全绿', command: 'node --test', exitCode: 0 });
+  await platform.submitExecutionResult('M1', exec, { outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无' });
   await platform.finishAttempt('M1', exec, {
     endedBy: endReason,
     ...(endReason === 'structured_submit' ? {} : { failureMessage: `这一跳是 ${endReason}` }),
   });
-  return { exec };
 }
 
 /**
@@ -102,20 +84,11 @@ async function toSubmitted(
  * finishAttempt 才落进事件流；reportBlocked 又只接受在途的 attempt。
  * 所以先跑掉一跳（留下 killed_* 记录），再开一跳报 blocked。
  */
-async function toBlockedAfterKilled(
-  platform: Platform,
-  coord: string,
-  workItemId: string,
-  reason: string,
-  killedBy: 'killed_idle' | 'killed_wall_clock' = 'killed_idle',
-): Promise<void> {
+async function toBlockedAfterKilled(platform: Platform, coord: string, workItemId: string, reason: string, killedBy: 'killed_idle' | 'killed_wall_clock' = 'killed_idle') {
   await platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M1', coord, [workItemId]);
   const first = await platform.startExecutorAttempt('M1', workItemId);
-  await platform.finishAttempt('M1', first.attemptId, {
-    endedBy: killedBy,
-    failureMessage: `这一跳是 ${killedBy}`,
-  });
+  await platform.finishAttempt('M1', first.attemptId, { endedBy: killedBy, failureMessage: `这一跳是 ${killedBy}` });
   const second = await platform.startExecutorAttempt('M1', workItemId);
   await platform.reportBlocked('M1', second.attemptId, { reason, whatWasTried: [], needsFromUpstream: '' });
 }
@@ -132,22 +105,14 @@ describe('同一条验收标准连续三个工作项没过（AC1）', () => {
     const c = (await platform.createWorkItem('M1', coord, { title: 'C', order: order([1]) })).workItemId;
 
     // ---- 建/修单时 criteria 的合法性：越界与非法整份拒绝，不留一半变更 ----
-    await assert.rejects(
-      () => platform.createWorkItem('M1', coord, { title: 'bad', order: order([9]) }),
-      (e: unknown) => isRuleError(e, 'BAD_WORK_ITEM_CRITERIA'),
-    );
-    await assert.rejects(
-      () => platform.createWorkItem('M1', coord, { title: 'bad2', order: order([0]) }),
-      (e: unknown) => isRuleError(e, 'BAD_WORK_ITEM_CRITERIA'),
-    );
+    const bad = (e: unknown) => isRuleError(e, 'BAD_WORK_ITEM_CRITERIA');
+    await assert.rejects(() => platform.createWorkItem('M1', coord, { title: 'bad', order: order([9]) }), bad);
+    await assert.rejects(() => platform.createWorkItem('M1', coord, { title: 'bad2', order: order([0]) }), bad);
     // 被拒的建单没有留下任何状态：工作项仍只有三条。
     assert.equal((await platform.getMissionView('M1')).workItems.length, 3);
     // 修订同理：非法 criteria 不改工单与修订号。
     const before = await platform.getMissionView('M1');
-    await assert.rejects(
-      () => platform.reviseWorkOrder('M1', coord, a, order([7])),
-      (e: unknown) => isRuleError(e, 'BAD_WORK_ITEM_CRITERIA'),
-    );
+    await assert.rejects(() => platform.reviseWorkOrder('M1', coord, a, order([7])), bad);
     const after = await platform.getMissionView('M1');
     assert.equal(after.workItems.length, before.workItems.length);
 
@@ -219,10 +184,7 @@ describe('同一条验收标准连续三个工作项没过（AC1）', () => {
 
     // ---- 停派：直接派发被挡，且不留状态副作用 ----
     const beforeBlocked = await platform.getMissionView('M1');
-    await assert.rejects(
-      () => platform.dispatchWorkItems('M1', coord, [c]),
-      (e: unknown) => isRuleError(e, 'CRITERIA_FAILURE_STOPPED'),
-    );
+    await assert.rejects(() => platform.dispatchWorkItems('M1', coord, [c]), (e: unknown) => isRuleError(e, 'CRITERIA_FAILURE_STOPPED'));
     const afterBlocked = await platform.getMissionView('M1');
     assert.equal(afterBlocked.workItems.length, beforeBlocked.workItems.length);
     assert.equal(
