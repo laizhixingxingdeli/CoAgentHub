@@ -851,3 +851,105 @@ describe('调查发现追加（S09.2）', () => {
     assert.equal((await platform.getMissionView('F1')).plan?.findings, '整体替换');
   });
 });
+
+describe('Mission 视图：提交证据可见但已验收输出不泄露', () => {
+  // 自带 setup：提交带 >1000 字输出的证据后再交执行结果，避免 upToSubmitted 已交过一次结果。
+  async function submittedWithEvidence(evidence: {
+    kind: 'test' | 'command' | 'diff' | 'typecheck' | 'build' | 'observation';
+    summary: string;
+    command?: string;
+    exitCode?: number;
+    output?: string;
+  }) {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const { attemptId: coord } = await platform.startCoordinatorAttempt('M1');
+    await platform.updatePlan('M1', coord, PLAN);
+    const { workItemId } = await platform.createWorkItem('M1', coord, { title: 'W', order: ORDER });
+    await platform.dispatchWorkItems('M1', coord, [workItemId]);
+    const { attemptId: exec } = await platform.startExecutorAttempt('M1', workItemId);
+    await platform.submitEvidence('M1', exec, evidence);
+    await platform.submitExecutionResult('M1', exec, {
+      outcome: 'completed',
+      summary: '改好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: [],
+      notes: '无',
+    });
+    return { platform, coord, exec, workItemId };
+  }
+
+  test('submitted 视图带脱敏截尾证据，accepted 仅给条数与结论', async () => {
+    // 形状凭据：redactSecrets 按形状命中 `api_key=…` 这类赋值，替换为 [REDACTED]。
+    // 长输出在前，凭据行放尾部，确保落在截尾的最后 1000 字里（先脱敏再截尾）。
+    const secretLine = '环境变量 api_key=sk-supersecret0123456789abcdefghij 已注入';
+    const longOutput = 'x'.repeat(1200) + '\n' + secretLine;
+    const { platform, coord, workItemId } = await submittedWithEvidence({
+      kind: 'command',
+      summary: '跑了 build，token api_key=sk-supersecret0123456789abcdefghij 在用',
+      command: 'npm run build --token api_key=sk-supersecret0123456789abcdefghij',
+      exitCode: 0,
+      output: longOutput,
+    });
+
+    const submitted = await platform.getMissionView('M1');
+    const submittedItem = submitted.workItems[0];
+    assert.equal(submittedItem?.status, 'submitted');
+    assert.ok(submittedItem?.submittedEvidence, 'submitted 视图带 submittedEvidence');
+    assert.equal(submittedItem?.submittedEvidence?.length, 1);
+    const ev = submittedItem!.submittedEvidence![0];
+    assert.equal(ev.exitCode, 0);
+
+    // 命令与摘要均脱敏：api_key=… 的值被 [REDACTED] 替换。
+    assert.ok(!ev.command.includes('sk-supersecret0123456789abcdefghij'), '命令中的 token 被脱敏');
+    assert.ok(!ev.summary.includes('sk-supersecret0123456789abcdefghij'), '摘要中的 token 被脱敏');
+    assert.ok(ev.command.includes('[REDACTED]'));
+    assert.ok(ev.summary.includes('[REDACTED]'));
+
+    // 输出先脱敏再截尾：原始 1200+ 字截到最后 1000 字，且 token 已被 [REDACTED] 替换。
+    assert.ok(!ev.outputTail.includes('sk-supersecret0123456789abcdefghij'), '输出尾部 token 被脱敏');
+    assert.ok(ev.outputTail.includes('[REDACTED]'), '输出尾部含脱敏标记');
+    assert.equal(ev.outputTail.length, 1000, '输出截到最后的 1000 字');
+    assert.equal(submittedItem?.reviewSummary, undefined, 'submitted 不含 reviewSummary');
+
+    // 验收后：只给条数和结论，不返回证据输出。
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
+      reasons: ['ok'],
+      requiredChanges: [],
+    });
+    const accepted = await platform.getMissionView('M1');
+    const acceptedItem = accepted.workItems[0];
+    assert.equal(acceptedItem?.status, 'accepted');
+    assert.equal(acceptedItem?.submittedEvidence, undefined, 'accepted 不含证据输出');
+    assert.ok(acceptedItem?.reviewSummary, 'accepted 带 reviewSummary');
+    assert.equal(acceptedItem?.reviewSummary?.evidenceCount, 1, '条数 = 1');
+    assert.equal(acceptedItem?.reviewSummary?.verdict, 'accept', '结论 = accept');
+  });
+
+  test('rejected 视图同样仅给条数与结论，不泄露证据输出', async () => {
+    const { platform, coord, workItemId } = await submittedWithEvidence({
+      kind: 'test',
+      summary: 'x',
+      command: 'node --test',
+      exitCode: 0,
+      output: 'y'.repeat(1500),
+    });
+    await platform.reviewExecutionResult('M1', coord, {
+      workItemId,
+      verdict: 'reject',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail' as const })),
+      reasons: ['不行'],
+      requiredChanges: ['改'],
+    });
+    const rejected = await platform.getMissionView('M1');
+    const item = rejected.workItems[0];
+    assert.equal(item?.status, 'rejected');
+    assert.equal(item?.submittedEvidence, undefined);
+    assert.ok(item?.reviewSummary);
+    assert.equal(item?.reviewSummary?.evidenceCount, 1);
+    assert.equal(item?.reviewSummary?.verdict, 'reject');
+  });
+});

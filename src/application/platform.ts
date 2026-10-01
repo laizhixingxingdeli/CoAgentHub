@@ -5815,6 +5815,27 @@ export interface MissionView {
     attemptIds: string[];
     lastReview?: ReviewRecord;
     /**
+     * submitted 工作项：最新提交 attempt 的**每条**证据，脱敏后再截尾，协调者直接拿到可核实的
+     * 产物，不必再自己重跑测试（实测每跳命令输出平均 40 KB）。每条 {command,exitCode,
+     * summary,outputTail}；output 先 redactSecrets 再 slice(-1000)，command/summary 也过脱敏。
+     * 其它状态（含已验收）为 undefined——已验收成果看 executionResult 摘要即可，不返还证据输出。
+     */
+    submittedEvidence?: readonly {
+      readonly command: string | undefined;
+      readonly exitCode: number | undefined;
+      readonly summary: string;
+      readonly outputTail: string;
+    }[];
+    /**
+     * accepted / rejected 工作项：只给证据条数和最后一次评审结论，不泄露证据输出。
+     * evidenceCount 取自最新提交 attempt 的证据条数；verdict 即该工作项当前验收态
+     * （= 最后一次评审的 verdict）。其它状态为 undefined；submitted 走 submittedEvidence，不填这一格。
+     */
+    reviewSummary?: {
+      readonly evidenceCount: number;
+      readonly verdict: 'accept' | 'reject';
+    };
+    /**
      * 工单正文。**这是 L2 交给 L1 的那封信**——目标、范围、怎么验证、
      * 什么算做完。观测面要让人看到 agent 之间到底传了什么，缺了它就只剩
      * 一个标题，而"为什么它做成了这样"全在这份正文里。
@@ -6322,6 +6343,29 @@ function viewOf(mission: Mission): MissionView {
       attempts: item.attempts.length,
       attemptIds: item.attempts.map((a) => a.id),
       lastReview: item.reviews.at(-1),
+      // submitted：只投影最新提交 attempt（item.submittedAttemptId）的证据，脱敏后再截尾。
+      // 先 redactSecrets 再 slice(-1000)——顺序反了会把截出来的尾巴里的 token 明文露出去。
+      ...(item.status === 'submitted' && item.submittedAttemptId !== undefined
+        ? {
+            submittedEvidence: (item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence ?? []).map(
+              (e) => ({
+                command: e.command !== undefined ? redactSecrets(e.command) : undefined,
+                exitCode: e.exitCode,
+                summary: redactSecrets(e.summary),
+                outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-1000),
+              }),
+            ),
+          }
+        : {}),
+      // accepted / rejected：只给证据条数和验收结论，不泄露证据输出。
+      ...((item.status === 'accepted' || item.status === 'rejected')
+        ? {
+            reviewSummary: {
+              evidenceCount: item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence.length ?? 0,
+              verdict: item.status === 'accepted' ? 'accept' : 'reject',
+            },
+          }
+        : {}),
       // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
       // 光有 title 和一个 hasResult 布尔量回答不了。
       order: item.order,
