@@ -64,6 +64,8 @@ const PLAN_AND_DISPATCH = {
     steps: [
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+      // Standard 派发前必须先落一条当前契约修订的核对结论（W-334 门禁）。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1'] } },
     ],
   },
@@ -223,6 +225,10 @@ describe('取消', () => {
       title: 'W',
       order: ORDER,
     });
+    await platform.submitContractCheck('M2', coord.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
+    });
     await platform.dispatchWorkItems('M2', coord.attemptId, [workItemId]);
     assert.equal((await platform.getMissionView('M2')).isMutating, true);
   });
@@ -332,6 +338,10 @@ describe('分叉基线过期（S05.3 / S14.7）', () => {
     const item = await platform.createWorkItem(again.missionId, attempt.attemptId, {
       title: 'W',
       order: ORDER,
+    });
+    await platform.submitContractCheck(again.missionId, attempt.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
     });
     await platform.dispatchWorkItems(again.missionId, attempt.attemptId, [item.workItemId]);
     await platform.finishAttempt(again.missionId, attempt.attemptId, {
