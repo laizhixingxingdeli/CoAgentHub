@@ -116,6 +116,7 @@ interface StateFile {
   validationReports: ValidationReport[];
   queuedHops: QueuedHop[];
   candidateCircuits: CandidateCircuit[];
+  candidateCircuitResetEvents?: Array<{ profileId: string; actor: string; at: string; reason: string }>;
 }
 
 function packageKey(projectId: string, missionId: string): string {
@@ -1308,6 +1309,29 @@ export class FileCandidateCircuitRepository implements CandidateCircuitRepositor
       this.#store.flush();
       return true;
     });
+  }
+
+  async reset(input: { profileId: string; actor: string; at: string; reason: string }): Promise<CandidateCircuit> {
+    for (const key of ['profileId', 'actor', 'at', 'reason'] as const) if (!input[key]?.trim()) throw new Error(`${key} must be non-empty`);
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const index = rows.findIndex((item) => item.profileId === input.profileId);
+      if (index < 0 || rows[index]?.state === 'closed') throw new Error(index < 0 ? 'candidate circuit does not exist' : 'candidate circuit is closed');
+      rows[index] = closedCandidateCircuit(input.profileId);
+      const state = this.#store.raw();
+      if (!Array.isArray(state.candidateCircuitResetEvents)) state.candidateCircuitResetEvents = [];
+      state.candidateCircuitResetEvents.push({ ...input });
+      this.#store.flush();
+      return { ...rows[index] };
+    });
+  }
+
+  async listResetEvents(profileId?: string): Promise<Array<{ profileId: string; actor: string; at: string; reason: string }>> {
+    this.#store.refreshIfChanged();
+    const events = this.#store.raw().candidateCircuitResetEvents ?? [];
+    return events.filter((event) => profileId === undefined || event.profileId === profileId).map((event) => ({ ...event }));
   }
 
   async resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit> {

@@ -32,7 +32,7 @@ import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
-import { listRuntimeModels, type RuntimeCatalog } from '../application/runtime-catalog.ts';
+import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage } from '../application/runtime-catalog.ts';
 import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
 import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -178,6 +178,7 @@ export interface ApiDeps {
    * 必须用假函数数调用次数。不注入不得改默认路径，否则页面拿到的就不是适配层真相。
    */
   listRuntimeModels?: () => Promise<RuntimeCatalog>;
+  getRuntimeUsage?: () => Promise<RuntimeUsage>;
   /**
    * 模型清单缓存用的时钟（epoch ms）。缺省 Date.now。
    *
@@ -590,6 +591,7 @@ export function createApi(deps: ApiDeps): Server {
   const nowMs = deps.now ?? Date.now;
   /** 成功清单按实例缓存。失败不进这里——否则一次适配层故障会锁死 10 分钟旧错误。 */
   let cachedRuntimeCatalog: { readonly at: number; readonly catalog: RuntimeCatalog } | undefined;
+  let cachedRuntimeUsage: { readonly at: number; readonly usage: RuntimeUsage } | undefined;
 
   const requireRun = (req: IncomingMessage): RunContext => {
     const header = req.headers['x-coagent-run'];
@@ -1082,6 +1084,14 @@ export function createApi(deps: ApiDeps): Server {
         cachedRuntimeCatalog = { at: nowMs(), catalog };
       }
       return send(res, 200, catalog);
+    }
+
+    if (method === 'GET' && path === '/api/runtime/usage') {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      if (cachedRuntimeUsage && nowMs() - cachedRuntimeUsage.at < RUNTIME_MODELS_CACHE_MS) return send(res, 200, cachedRuntimeUsage.usage);
+      const usage = await (deps.getRuntimeUsage ?? getRuntimeUsage)();
+      if (Array.isArray(usage) || usage.available === true) cachedRuntimeUsage = { at: nowMs(), usage };
+      return send(res, 200, usage);
     }
 
     if (method === 'GET' && path === '/api/projects') {

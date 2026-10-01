@@ -33,6 +33,11 @@ export type RuntimeCatalog =
   | { readonly available: true; readonly runtime: string; readonly models: RuntimeModel[] }
   | { readonly available: false; readonly note: string };
 
+export type RuntimeUsage = ({ readonly available: true } & Record<string, unknown>) | readonly unknown[] | { readonly available: false; readonly note: string };
+
+let latestAdapterDir: string | undefined;
+export function rememberAdapterDir(dir: string): void { latestAdapterDir = resolve(dir); }
+
 /**
  * 适配层所在目录。没配就找项目的同级目录。
  *
@@ -43,12 +48,28 @@ export type RuntimeCatalog =
  */
 export function adapterDir(): string {
   if (process.env.COAGENT_ADAPTER_DIR) return resolve(process.env.COAGENT_ADAPTER_DIR);
+  if (latestAdapterDir) return latestAdapterDir;
   // src/application/ → 上三层是项目根的同级。
   const fromModule = new URL('../../../coagent-pi/', import.meta.url).pathname.replace(
     /^\/([A-Za-z]:)/,
     '$1',
   );
   return resolve(fromModule);
+}
+
+export async function getRuntimeUsage(dir = adapterDir(), runner = run): Promise<RuntimeUsage> {
+  if (!existsSync(dir)) return { available: false, note: `找不到适配层目录 ${dir}` };
+  try {
+    const { stdout } = await runner('npx', ['tsx', 'src/cli.ts', 'usage'], {
+      cwd: dir, shell: process.platform === 'win32', timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
+    });
+    const usage: unknown = JSON.parse(stdout.trim());
+    if (usage === null || typeof usage !== 'object') return { available: false, note: '适配层没有返回有效用量信息' };
+    if (Array.isArray(usage)) return usage;
+    return { ...(usage as Record<string, unknown>), available: true };
+  } catch (error) {
+    return { available: false, note: `读取适配层用量失败：${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 export async function listRuntimeModels(dir = adapterDir()): Promise<RuntimeCatalog> {
