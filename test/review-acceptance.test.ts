@@ -74,6 +74,9 @@ async function submitted(platform: Platform, missionId = 'M1', order: WorkOrder 
   const coord = await platform.startCoordinatorAttempt(missionId);
   await platform.updatePlan(missionId, coord.attemptId, PLAN);
   const { workItemId } = await platform.createWorkItem(missionId, coord.attemptId, { title: 'W', order });
+  // Standard 派发前必须先交当前契约修订的核对结论，否则门禁拒派；
+  // 不补这一条，后面测的评审规则全被派发失败挡住，红的原因就不是原场景了。
+  await platform.submitContractCheck(missionId, coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
   await platform.submitEvidence(missionId, exec.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
