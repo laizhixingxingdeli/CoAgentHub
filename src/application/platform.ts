@@ -122,7 +122,6 @@ import {
   projectStartupBriefFields,
   type BoundWorkItem,
   type ContextBundle,
-  type SinceLastHopEntry,
   type WorkItemIndexEntry,
 } from './context-builder.ts';
 import {
@@ -2390,7 +2389,10 @@ export class Platform {
     const { mission, project } = await this.#locate(missionId);
     // 谁挡着我。要 Project 才算得出来，所以在这一层补，不放进 viewOf。
     const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
-    const view = { ...viewOf(mission), blockedByMission: holder?.id };
+    const view = {
+      ...viewOf(mission, await this.#workItemValidationReportViews(mission)),
+      blockedByMission: holder?.id,
+    };
     if (mission.executionMode === 'high_assurance' && mission.status === 'awaiting_review') {
       return { ...view, haReviewHold: await this.#haReviewHold(mission) };
     }
@@ -2415,7 +2417,7 @@ export class Platform {
       planRevision: mission.planRevision,
       contract: mission.contract,
       plan: mission.plan,
-      workItemIndex: agentWorkItemIndex(mission),
+      workItemIndex: agentWorkItemIndex(mission, await this.#workItemValidationReportViews(mission)),
       escalations: agentEscalationAnswers(mission),
       openEscalations: mission.openEscalations.length,
     };
@@ -2697,10 +2699,24 @@ export class Platform {
       }
     }
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
-    const briefSources =
-      attempt.kind === 'coordinator'
-        ? coordinatorStartupSources(mission, attemptId, await this.#activity.list(missionId))
-        : undefined;
+    //
+    // 机器验证简版只进协调者那份：执行者拿到「上一跳机器验收过没过」等于提前知道
+    // 自己的东西会被怎么判，而那不是它该看的。
+    let briefSources:
+      | {
+          workItemsIndex: readonly CoordinatorWorkItemIndexEntry[];
+          sinceLastHop: CoordinatorSinceLastHopEntry;
+        }
+      | undefined;
+    if (attempt.kind === 'coordinator') {
+      const events = await this.#activity.list(missionId);
+      briefSources = coordinatorStartupSources(
+        mission,
+        attemptId,
+        events,
+        await this.#workItemValidationReportViews(mission, events),
+      );
+    }
     const contextBundle = buildContextBundle(
       {
         role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
@@ -4883,7 +4899,8 @@ export class Platform {
     // 仅提取事件里实际存的 outcome / changedFiles(数量) / orderRevision / at。
     // 旧提交正文未被持久化、不可恢复，只留元数据并标「旧正文未保存」；
     // 最新一次正文经 item.executionResult 仍可取，不臆造。
-    const submittedEvents = (await this.#activity.list(missionId))
+    const events = await this.#activity.list(missionId);
+    const submittedEvents = events
       .filter((e) => e.workItemId === workItemId && e.kind === 'execution_result.submitted')
       .map((e) => e as ActivityEvent);
     const lastIndex = submittedEvents.length - 1;
@@ -4906,6 +4923,7 @@ export class Platform {
       item.order,
       item.executionResult ?? undefined,
       submissionSummaries,
+      (await this.#workItemValidationReportViews(mission, events)).get(item.id),
     );
   }
 
@@ -5342,6 +5360,51 @@ export class Platform {
     const report = await this.#validation.reports.get(reportId);
     if (!report || report.missionId !== missionId) return undefined;
     return report;
+  }
+
+  /**
+   * 已交卷工作项 → 机器验证简版（视图共用同一份只读投影）。
+   *
+   * 一个 Mission 一条活动流：正序扫一遍得到「每个 (workItemId, submittedAttemptId)
+   * 最近一条 validation.reported」，再按工作项**当前**的 submittedAttemptId 精确取。
+   * 旧提交的报告因此挂不到新交卷头上；报告自己记的 workItem/attempt 也要对得上，
+   * 对不上就当没有——串了一份 append-only 报告比没有更糟。
+   *
+   * 没报告的工作项不进 map，视图就不带这个字段（不臆造）。没注入 validation 依赖
+   * （内存 / 轻量测试）或整条 Mission 没人交卷过时不读活动流。
+   */
+  async #workItemValidationReportViews(
+    mission: Mission,
+    events?: readonly ActivityEvent[],
+  ): Promise<Map<string, ValidationReportView>> {
+    const out = new Map<string, ValidationReportView>();
+    const reports = this.#validation?.reports;
+    if (!reports) return out;
+    if (!mission.workItems.some((item) => item.submittedAttemptId !== undefined)) return out;
+    const reportIdByKey = new Map<string, string>();
+    for (const event of events ?? (await this.#activity.list(mission.id))) {
+      if (event.kind !== 'validation.reported' || event.workItemId === undefined) continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const row = data as { reportId?: unknown; submittedAttemptId?: unknown };
+      if (typeof row.reportId !== 'string' || row.reportId.length === 0) continue;
+      // HA 的整 Mission 验证没有 submittedAttemptId（也不是某一条工作项的提交），跳过。
+      if (typeof row.submittedAttemptId !== 'string' || row.submittedAttemptId.length === 0) continue;
+      // 正序扫、后写盖前写：留下的是同一组键里最后（最新）那条。
+      reportIdByKey.set(validationReportKey(event.workItemId, row.submittedAttemptId), row.reportId);
+    }
+    for (const item of mission.workItems) {
+      const submittedAttemptId = item.submittedAttemptId;
+      if (submittedAttemptId === undefined) continue;
+      const reportId = reportIdByKey.get(validationReportKey(item.id, submittedAttemptId));
+      if (reportId === undefined) continue;
+      const report = await reports.get(reportId);
+      if (!report || report.missionId !== mission.id) continue;
+      if (report.workItemId !== undefined && report.workItemId !== item.id) continue;
+      if (report.attemptId !== undefined && report.attemptId !== submittedAttemptId) continue;
+      out.set(item.id, validationReportView(report));
+    }
+    return out;
   }
 
   /* ================================ 内部 ================================ */
@@ -6232,6 +6295,11 @@ export interface MissionView {
       readonly verdict: 'accept' | 'reject';
     };
     /**
+     * 最近一次交卷的机器验证简版。只读，来自 W-321 落盘的报告而非命令输出自报；
+     * 不是 Evidence，也不是 validator accept。没有报告时不带这一格。
+     */
+    validationReport?: ValidationReportView;
+    /**
      * 工单正文。**这是 L2 交给 L1 的那封信**——目标、范围、怎么验证、
      * 什么算做完。观测面要让人看到 agent 之间到底传了什么，缺了它就只剩
      * 一个标题，而"为什么它做成了这样"全在这份正文里。
@@ -6795,6 +6863,26 @@ function priorGuidanceForWorkItem(
 const SINCE_LAST_HOP_SUMMARY_CAP = 200;
 
 /**
+ * 协调者索引条目：与 context-builder 的 WorkItemIndexEntry 同形，另带机器验证简版。
+ *
+ * 简版以**可选键**留在对象里：context-builder 把整份内容哈希进 bundle，多出来的
+ * 键就是内容的一部分——所以没报告的工作项一定不带这个键，否则索引的指纹会变。
+ */
+type CoordinatorWorkItemIndexEntry = WorkItemIndexEntry & {
+  readonly validationReport?: ValidationReportView;
+};
+
+/**
+ * 增量条目：短摘要文本，外加可选的机器验证简版。
+ * 简版只在「上一跳之后真的新记了 validation.reported」时才出现——它回答的是
+ * “这次新验了什么”，而不是“历史上验过什么”。
+ */
+type CoordinatorSinceLastHopEntry = readonly {
+  readonly summary: string;
+  readonly validationReport?: ValidationReportView;
+}[];
+
+/**
  * 把上一段 coordinator 结束之后的活动，按事件原序压成一条条短摘要。
  *
  * 只列「有的才列」：证据提交、卡住报告、升级答复、L3 最终决定各自独立判断；
@@ -6804,8 +6892,15 @@ const SINCE_LAST_HOP_SUMMARY_CAP = 200;
 function summarizeSinceLastHop(
   mission: Mission,
   events: readonly ActivityEvent[],
-): SinceLastHopEntry {
-  const summaries: string[] = [];
+  validationReports: ReadonlyMap<string, ValidationReportView>,
+): CoordinatorSinceLastHopEntry {
+  const entries: { summary: string; validationReport?: ValidationReportView }[] = [];
+  const push = (summary: string, validationReport?: ValidationReportView): void => {
+    entries.push({
+      summary: capString(redactSecrets(summary), SINCE_LAST_HOP_SUMMARY_CAP),
+      ...(validationReport !== undefined ? { validationReport } : {}),
+    });
+  };
   for (const event of events) {
     switch (event.kind) {
       case 'execution_result.submitted': {
@@ -6820,7 +6915,7 @@ function summarizeSinceLastHop(
         const evidenceNote = latest
           ? `最近证据：${latest.kind}${latest.summary ? '：' + latest.summary : ''}`
           : '（无已存证据）';
-        summaries.push(
+        push(
           `提交[${title ?? workItemId ?? '?'}] ${data?.outcome ?? '?'} ` +
             `改动${data?.changedFiles ?? '?'}个文件 工单修订${data?.orderRevision ?? '?'}；${evidenceNote}`,
         );
@@ -6828,12 +6923,33 @@ function summarizeSinceLastHop(
       }
       case 'blocked.reported': {
         const data = event.data as { reason?: string; orderRevision?: string } | undefined;
-        summaries.push(`卡住报告：${data?.reason ?? '（无理由）'}（工单修订${data?.orderRevision ?? '?'}，待协调者处理）`);
+        push(`卡住报告：${data?.reason ?? '（无理由）'}（工单修订${data?.orderRevision ?? '?'}，待协调者处理）`);
         break;
       }
       case 'escalation.answered': {
         const data = event.data as { question?: string; answer?: string } | undefined;
-        summaries.push(`升级答复：${data?.question ?? '（无问题）'} → ${data?.answer ?? '（无答复）'}`);
+        push(`升级答复：${data?.question ?? '（无问题）'} → ${data?.answer ?? '（无答复）'}`);
+        break;
+      }
+      case 'validation.reported': {
+        // 机器验收是平台自己跑出来的：协调者上一跳之后才出现的这一条，正是它这一跳
+        // 要看的「新情况」。报告按 workItemId + submittedAttemptId 取，取不到（比如
+        // HA 的整 Mission 验证，或报告还没落盘）就只留一行文字，不造简版。
+        const data = event.data as { submittedAttemptId?: unknown } | undefined;
+        const workItemId = event.workItemId;
+        const title = workItemId ? mission.workItem(workItemId)?.title : undefined;
+        const submittedAttemptId =
+          typeof data?.submittedAttemptId === 'string' ? data.submittedAttemptId : undefined;
+        const report =
+          workItemId !== undefined && submittedAttemptId !== undefined
+            ? validationReports.get(validationReportKey(workItemId, submittedAttemptId))
+            : undefined;
+        push(
+          `机器验证[${title ?? workItemId ?? '?'}]：${
+            report === undefined ? '（报告不在本次增量里）' : report.passed ? 'passed' : 'failed'
+          }`,
+          report,
+        );
         break;
       }
       case 'final_review.send_back':
@@ -6847,14 +6963,14 @@ function summarizeSinceLastHop(
       case 'final_review.merge_applied': {
         const data = (event.data ?? {}) as Record<string, unknown>;
         const reasons = Array.isArray(data.reasons) ? data.reasons.join('；') : '';
-        summaries.push(`L3 最终决定[${event.kind.replace('final_review.', '')}]${reasons ? '：' + reasons : ''}`);
+        push(`L3 最终决定[${event.kind.replace('final_review.', '')}]${reasons ? '：' + reasons : ''}`);
         break;
       }
       default:
         break;
     }
   }
-  return summaries.map((s) => ({ summary: capString(redactSecrets(s), SINCE_LAST_HOP_SUMMARY_CAP) }));
+  return entries;
 }
 
 /**
@@ -6880,13 +6996,21 @@ function coordinatorStartupSources(
   mission: Mission,
   attemptId: string,
   events: readonly ActivityEvent[],
-): { workItemsIndex: readonly WorkItemIndexEntry[]; sinceLastHop: SinceLastHopEntry } {
-  const index: readonly WorkItemIndexEntry[] = agentWorkItemIndex(mission).map((entry) => ({
+  validationReports: ReadonlyMap<string, ValidationReportView>,
+): {
+  workItemsIndex: readonly CoordinatorWorkItemIndexEntry[];
+  sinceLastHop: CoordinatorSinceLastHopEntry;
+} {
+  const index: readonly CoordinatorWorkItemIndexEntry[] = agentWorkItemIndex(
+    mission,
+    validationReports,
+  ).map((entry) => ({
     id: entry.id,
     title: entry.title,
     status: entry.status,
     attempts: entry.attempts,
     lastReviewVerdict: entry.lastReviewVerdict,
+    ...(entry.validationReport !== undefined ? { validationReport: entry.validationReport } : {}),
   }));
   const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
   if (!prevEnd) {
@@ -6894,7 +7018,7 @@ function coordinatorStartupSources(
   }
   const prevIndex = events.findIndex((e) => e === prevEnd);
   const after = events.slice(prevIndex + 1);
-  return { workItemsIndex: index, sinceLastHop: summarizeSinceLastHop(mission, after) };
+  return { workItemsIndex: index, sinceLastHop: summarizeSinceLastHop(mission, after, validationReports) };
 }
 
 function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
@@ -6912,6 +7036,85 @@ function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkIt
 const MAX_AGENT_WORK_ITEM_BYTES = 20 * 1024;
 
 /**
+ * 机器验证简版里单条命令的结果。
+ *
+ * `outputTail` **只在命令失败时出现**：简版要进协调者索引与启动简报，把每条命令
+ * 最多 4096 字符的尾巴全搬回去，等于换一种方式把测试输出重新灌进上下文；协调者
+ * 要看的是「过没过、慢不慢、哪儿越界」，只有失败的那条需要原文。
+ */
+export interface ValidationReportCommandView {
+  readonly passed: boolean;
+  readonly durationMs: number;
+  /** 失败命令的输出尾：先 redactSecrets 再只留尾 1000 字。 */
+  readonly outputTail?: string;
+}
+
+/**
+ * 机器验证简版：W-321 落盘 ValidationReport 的只读投影。
+ *
+ * 它不是 Evidence（执行者自报的证据），也不是 validator accept——报告来自 platform
+ * 自己跑出来、存在仓储里的事实。只按 workItemId + submittedAttemptId 对应，旧提交的
+ * 报告绝不挂到新交卷头上；没有报告就不带这一格，不臆造。
+ */
+export interface ValidationReportView {
+  readonly reportId: string;
+  readonly passed: boolean;
+  readonly commands: readonly ValidationReportCommandView[];
+  /** changed-paths（allowedScope 越界）检查；报告里没有这条检查时缺省。 */
+  readonly changedPaths?: {
+    readonly passed: boolean;
+    readonly violations: readonly string[];
+  };
+}
+
+/** 失败命令输出保留的尾巴长度；与 MissionView.submittedEvidence 同一口径。 */
+const VALIDATION_REPORT_OUTPUT_TAIL = 1000;
+
+/** 验证简版索引键：workItemId + 提交 attempt。id 里不可能有 NUL，键不会撞。 */
+function validationReportKey(workItemId: string, submittedAttemptId: string): string {
+  return `${workItemId}\u0000${submittedAttemptId}`;
+}
+
+/**
+ * ValidationReport → 只读简版。
+ *
+ * 输出先 redactSecrets 再 slice(-1000)：顺序反了会把截出来的尾巴里的 token
+ * 明文露出去。
+ */
+function validationReportView(report: ValidationReport): ValidationReportView {
+  const commands: ValidationReportCommandView[] = [];
+  for (const check of report.checks) {
+    if (check.kind !== 'command') continue;
+    const command = check.command;
+    const tail = command?.outputTail;
+    const outputTail =
+      check.passed || tail === undefined
+        ? undefined
+        : redactSecrets(tail).slice(-VALIDATION_REPORT_OUTPUT_TAIL);
+    commands.push({
+      passed: check.passed,
+      durationMs: command?.durationMs ?? 0,
+      ...(outputTail !== undefined ? { outputTail } : {}),
+    });
+  }
+  const changed = report.checks.find((check) => check.kind === 'changed-paths');
+  const changedPaths = changed?.changedPaths;
+  return {
+    reportId: report.id,
+    passed: report.passed,
+    commands,
+    ...(changed !== undefined && changedPaths !== undefined
+      ? {
+          changedPaths: {
+            passed: changed.passed,
+            violations: changedPaths.violations.map((path) => redactSecrets(path)),
+          },
+        }
+      : {}),
+  };
+}
+
+/**
  * agent 紧凑视图里的工作项索引：只给「编号/标题/状态/执行次数/最后评审 verdict」，
  * 不含工单正文、执行结果或评审理由——那些按需按 id 取（getAgentWorkItem）。
  * 抽成 module 级只读 helper，协调者简报后续可复用同一份投影。
@@ -6924,18 +7127,27 @@ export interface AgentWorkItemIndexEntry {
   readonly attempts: number;
   readonly attemptIds: readonly string[];
   readonly lastReviewVerdict: 'accept' | 'reject' | undefined;
+  /** 最近一次交卷的机器验证简版；没有报告时整格缺省（不臆造）。 */
+  readonly validationReport?: ValidationReportView;
 }
 
-function agentWorkItemIndex(mission: Mission): readonly AgentWorkItemIndexEntry[] {
-  return mission.workItems.map((item) => ({
-    id: item.id,
-    title: item.title,
-    status: item.status,
-    planRevision: item.planRevision,
-    attempts: item.attempts.length,
-    attemptIds: item.attempts.map((a) => a.id),
-    lastReviewVerdict: item.reviews.at(-1)?.verdict,
-  }));
+function agentWorkItemIndex(
+  mission: Mission,
+  validationReports?: ReadonlyMap<string, ValidationReportView>,
+): readonly AgentWorkItemIndexEntry[] {
+  return mission.workItems.map((item) => {
+    const validationReport = validationReports?.get(item.id);
+    return {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      planRevision: item.planRevision,
+      attempts: item.attempts.length,
+      attemptIds: item.attempts.map((a) => a.id),
+      lastReviewVerdict: item.reviews.at(-1)?.verdict,
+      ...(validationReport !== undefined ? { validationReport } : {}),
+    };
+  });
 }
 
 /**
@@ -7012,6 +7224,12 @@ export interface AgentWorkItemView {
   readonly evidenceSummary: readonly AgentWorkItemEvidenceSummary[];
   /** 历次 execution_result.submitted 的现存元数据；早于最新的标「旧正文未保存」。 */
   readonly submissionSummaries: readonly AgentWorkItemSubmissionSummary[];
+  /**
+   * 最近一次交卷的机器验证简版（W-321 落盘报告）。不是 Evidence，也不是
+   * validator accept；没有报告时不带这一格。受下面 20 KB 上限约束：极端超限时
+   * 只保索引字段与历史提交摘要，它会被丢掉。
+   */
+  readonly validationReport?: ValidationReportView;
   /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
   readonly truncated: boolean;
 }
@@ -7087,6 +7305,7 @@ function buildAgentWorkItemView(
   order: WorkOrder | undefined,
   executionResult: ExecutionResultBody | undefined,
   submissionSummaries: readonly AgentWorkItemSubmissionSummary[],
+  validationReport: ValidationReportView | undefined,
 ): AgentWorkItemView {
   // 外显文本先统一深层脱敏：order / executionResult / reviews / title 都可能含凭据。
   const redactedTitle = redactSecrets(item.title);
@@ -7141,6 +7360,7 @@ function buildAgentWorkItemView(
       reviews: cappedReviews,
       evidenceSummary,
       submissionSummaries: redactedSubmissionSummaries,
+      ...(validationReport !== undefined ? { validationReport } : {}),
       truncated: false,
     };
   };
@@ -7243,7 +7463,10 @@ function buildAgentWorkItemView(
   return tryFallback();
 }
 
-function viewOf(mission: Mission): MissionView {
+function viewOf(
+  mission: Mission,
+  validationReports?: ReadonlyMap<string, ValidationReportView>,
+): MissionView {
   return {
     missionId: mission.id,
     projectId: mission.projectId,
@@ -7266,45 +7489,51 @@ function viewOf(mission: Mission): MissionView {
     contract: mission.contract,
     planRevision: mission.planRevision,
     plan: mission.plan,
-    workItems: mission.workItems.map((item) => ({
-      id: item.id,
-      title: item.title,
-      status: item.status,
-      hasResult: item.hasResult,
-      // 拆它时的规划版本（S05.2）。和 Mission 当前的 planRevision 不同
-      // 就说明规划在它之后改过——检视时这是必须看得见的。
-      planRevision: item.planRevision,
-      attempts: item.attempts.length,
-      attemptIds: item.attempts.map((a) => a.id),
-      lastReview: item.reviews.at(-1),
-      // submitted：只投影最新提交 attempt（item.submittedAttemptId）的证据，脱敏后再截尾。
-      // 先 redactSecrets 再 slice(-1000)——顺序反了会把截出来的尾巴里的 token 明文露出去。
-      ...(item.status === 'submitted' && item.submittedAttemptId !== undefined
-        ? {
-            submittedEvidence: (item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence ?? []).map(
-              (e) => ({
-                command: e.command !== undefined ? redactSecrets(e.command) : undefined,
-                exitCode: e.exitCode,
-                summary: redactSecrets(e.summary),
-                outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-1000),
-              }),
-            ),
-          }
-        : {}),
-      // accepted / rejected：只给证据条数和验收结论，不泄露证据输出。
-      ...((item.status === 'accepted' || item.status === 'rejected')
-        ? {
-            reviewSummary: {
-              evidenceCount: item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence.length ?? 0,
-              verdict: item.status === 'accepted' ? 'accept' : 'reject',
-            },
-          }
-        : {}),
-      // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
-      // 光有 title 和一个 hasResult 布尔量回答不了。
-      order: item.order,
-      executionResult: item.executionResult,
-    })),
+    workItems: mission.workItems.map((item) => {
+      const validationReport = validationReports?.get(item.id);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        hasResult: item.hasResult,
+        // 拆它时的规划版本（S05.2）。和 Mission 当前的 planRevision 不同
+        // 就说明规划在它之后改过——检视时这是必须看得见的。
+        planRevision: item.planRevision,
+        attempts: item.attempts.length,
+        attemptIds: item.attempts.map((a) => a.id),
+        lastReview: item.reviews.at(-1),
+        // submitted：只投影最新提交 attempt（item.submittedAttemptId）的证据，脱敏后再截尾。
+        // 先 redactSecrets 再 slice(-1000)——顺序反了会把截出来的尾巴里的 token 明文露出去。
+        ...(item.status === 'submitted' && item.submittedAttemptId !== undefined
+          ? {
+              submittedEvidence: (item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence ?? []).map(
+                (e) => ({
+                  command: e.command !== undefined ? redactSecrets(e.command) : undefined,
+                  exitCode: e.exitCode,
+                  summary: redactSecrets(e.summary),
+                  outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-1000),
+                }),
+              ),
+            }
+          : {}),
+        // accepted / rejected：只给证据条数和验收结论，不泄露证据输出。
+        ...((item.status === 'accepted' || item.status === 'rejected')
+          ? {
+              reviewSummary: {
+                evidenceCount: item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence.length ?? 0,
+                verdict: item.status === 'accepted' ? 'accept' : 'reject',
+              },
+            }
+          : {}),
+        // 机器验证简版：与提交严格按 workItemId + 当前 submittedAttemptId 对应，
+        // 写读同一份只读投影（见 validationReportView）。
+        ...(validationReport !== undefined ? { validationReport } : {}),
+        // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
+        // 光有 title 和一个 hasResult 布尔量回答不了。
+        order: item.order,
+        executionResult: item.executionResult,
+      };
+    }),
     result: mission.result,
     escalations: mission.escalations.length,
     openEscalations: [...mission.openEscalations],
