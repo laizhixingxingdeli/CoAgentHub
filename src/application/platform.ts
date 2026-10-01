@@ -19,6 +19,7 @@ import type {
   AttemptKind,
   BlockedRecord,
   EscalationBody,
+  EvidenceKind,
   EvidenceRecord,
   ExecutionResultBody,
   FinalReview,
@@ -2383,6 +2384,30 @@ export class Platform {
       return { ...view, haReviewHold: await this.#haReviewHold(mission) };
     }
     return view;
+  }
+
+  /**
+   * agent 专用紧凑 Mission 视图：契约 + 完整规划 + 工作项索引 + 升级问答摘要，
+   * 不含工单正文、执行结果或评审正文。网页 getMissionView 不受影响（不改动它）。
+   * 只读投影，不写任何状态。
+   */
+  async getAgentMissionView(missionId: string): Promise<AgentMissionView> {
+    const { mission } = await this.#locate(missionId);
+    return {
+      missionId: mission.id,
+      projectId: mission.projectId,
+      status: mission.status,
+      executionMode: mission.executionMode,
+      runKind: mission.runKind,
+      updatedAt: mission.updatedAt,
+      contractRevision: mission.contractRevision,
+      planRevision: mission.planRevision,
+      contract: mission.contract,
+      plan: mission.plan,
+      workItemIndex: agentWorkItemIndex(mission),
+      escalations: agentEscalationAnswers(mission),
+      openEscalations: mission.openEscalations.length,
+    };
   }
 
   async #haReviewHold(
@@ -4826,6 +4851,16 @@ export class Platform {
     };
   }
 
+  /**
+   * agent 专用单项详情：沿用 #locateItem 的 UNKNOWN_WORK_ITEM 规则（不存在即抛）。
+   * 返回工单及 orderRevision、历次执行结果证据摘要（脱敏截尾）与评审信息。
+   * 单项序列化 UTF-8 不超过 20 KB，超长显式标记 truncated。只读投影，不写状态。
+   */
+  async getAgentWorkItem(missionId: string, workItemId: string): Promise<AgentWorkItemView> {
+    const { item } = await this.#locateItem(missionId, workItemId);
+    return buildAgentWorkItemView(item, item.order?.orderRevision, item.order, item.executionResult ?? undefined);
+  }
+
 /**
    * 解析工单里的 ContextRef（S09.3 的 coagent_get_context）。
    *
@@ -6474,6 +6509,167 @@ function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkIt
     title: item.title,
     order: item.order,
     ...priorGuidanceForWorkItem(mission, item),
+  };
+}
+
+/* ===================== agent 专用只读投影（不写状态） ===================== */
+
+/** 单项序列化后允许的最大 UTF-8 字节数；超长显式标记 truncated。 */
+const MAX_AGENT_WORK_ITEM_BYTES = 20 * 1024;
+
+/**
+ * agent 紧凑视图里的工作项索引：只给「编号/标题/状态/执行次数/最后评审 verdict」，
+ * 不含工单正文、执行结果或评审理由——那些按需按 id 取（getAgentWorkItem）。
+ * 抽成 module 级只读 helper，协调者简报后续可复用同一份投影。
+ */
+export interface AgentWorkItemIndexEntry {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly planRevision: number | undefined;
+  readonly attempts: number;
+  readonly attemptIds: readonly string[];
+  readonly lastReviewVerdict: 'accept' | 'reject' | undefined;
+}
+
+function agentWorkItemIndex(mission: Mission): readonly AgentWorkItemIndexEntry[] {
+  return mission.workItems.map((item) => ({
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    planRevision: item.planRevision,
+    attempts: item.attempts.length,
+    attemptIds: item.attempts.map((a) => a.id),
+    lastReviewVerdict: item.reviews.at(-1)?.verdict,
+  }));
+}
+
+/**
+ * 升级问答摘要：只取已被 L3 答复的升级，给「问了什么、答了什么、何时答」三件套。
+ * 不带未答复升级的草稿，也不带 why / optionsConsidered 等内部字段。
+ */
+export interface AgentEscalationAnswer {
+  readonly question: string;
+  readonly answer: string;
+  readonly answeredAt: string;
+}
+
+function agentEscalationAnswers(mission: Mission): readonly AgentEscalationAnswer[] {
+  return mission.escalations
+    .filter((e) => e.answer && e.answeredAt)
+    .map((e) => ({ question: e.question, answer: e.answer!, answeredAt: e.answeredAt! }));
+}
+
+export interface AgentMissionView {
+  readonly missionId: string;
+  readonly projectId: string;
+  readonly status: string;
+  readonly executionMode: string;
+  readonly runKind: string;
+  readonly updatedAt: string;
+  readonly contractRevision: number;
+  readonly planRevision: number;
+  /** 完整契约（不截断）。 */
+  readonly contract: MissionContract | undefined;
+  /** 完整规划（不截断）。 */
+  readonly plan: PlanBody | undefined;
+  /** 只含工作项索引，不含工单、执行结果或评审正文。 */
+  readonly workItemIndex: readonly AgentWorkItemIndexEntry[];
+  /** 升级问答摘要。 */
+  readonly escalations: readonly AgentEscalationAnswer[];
+  readonly openEscalations: number;
+}
+
+export interface AgentWorkItemEvidenceSummary {
+  readonly attemptId: string;
+  readonly kind: EvidenceKind;
+  readonly summary: string;
+  readonly command: string | undefined;
+  readonly exitCode: number | undefined;
+  readonly outputTail: string;
+}
+
+export interface AgentWorkItemView {
+  readonly workItemId: string;
+  readonly title: string;
+  readonly status: string;
+  readonly orderRevision: string | undefined;
+  readonly order: WorkOrder | undefined;
+  readonly executionResult: ExecutionResultBody | undefined;
+  readonly reviews: readonly { readonly verdict: 'accept' | 'reject'; readonly reasons: readonly string[]; readonly requiredChanges: readonly string[] }[];
+  readonly evidenceSummary: readonly AgentWorkItemEvidenceSummary[];
+  /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
+  readonly truncated: boolean;
+}
+
+/**
+ * 把一次 attempt 的证据投影成脱敏 + 截尾的摘要。output 一律先 redactSecrets 再截尾——
+ * 顺序反了会把截出来的尾巴里的 token 明文露出去。maxTail 控制尾巴长度，用于超限时逐步收紧。
+ */
+function agentEvidenceSummary(attempts: readonly Readonly<{ id: string; evidence: readonly Readonly<EvidenceRecord>[] }>[], maxTail: number): AgentWorkItemEvidenceSummary[] {
+  const out: AgentWorkItemEvidenceSummary[] = [];
+  for (const attempt of attempts) {
+    for (const e of attempt.evidence) {
+      out.push({
+        attemptId: attempt.id,
+        kind: e.kind,
+        summary: redactSecrets(e.summary),
+        command: e.command !== undefined ? redactSecrets(e.command) : undefined,
+        exitCode: e.exitCode,
+        outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-maxTail),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 构造单项视图并按 20 KB 上限收紧：先按 1000 字符尾巴试，超限就减半重试，
+ * 仍超则保留最小尾巴并标 truncated。所有外显文本均已 redactSecrets。
+ */
+function buildAgentWorkItemView(
+  item: WorkItem,
+  orderRevision: string | undefined,
+  order: WorkOrder | undefined,
+  executionResult: ExecutionResultBody | undefined,
+): AgentWorkItemView {
+  const reviews = item.reviews.map((r) => ({
+    verdict: r.verdict,
+    reasons: r.reasons,
+    requiredChanges: r.requiredChanges,
+  }));
+  let maxTail = 1000;
+  let evidenceSummary = agentEvidenceSummary(item.attempts, maxTail);
+  let truncated = false;
+  while (maxTail > 0) {
+    const candidate: AgentWorkItemView = {
+      workItemId: item.id,
+      title: item.title,
+      status: item.status,
+      orderRevision,
+      order,
+      executionResult,
+      reviews,
+      evidenceSummary,
+      truncated: false,
+    };
+    if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= MAX_AGENT_WORK_ITEM_BYTES) {
+      return candidate;
+    }
+    maxTail = Math.floor(maxTail / 2);
+    evidenceSummary = agentEvidenceSummary(item.attempts, maxTail);
+  }
+  truncated = true;
+  return {
+    workItemId: item.id,
+    title: item.title,
+    status: item.status,
+    orderRevision,
+    order,
+    executionResult,
+    reviews,
+    evidenceSummary,
+    truncated,
   };
 }
 
