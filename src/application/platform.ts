@@ -6799,10 +6799,16 @@ function buildAgentWorkItemView(
   }
 
   // 仍超大：只保留索引字段与历史提交摘要的紧凑摘要，明确标 truncated。
-  // 标题与历史摘要都可能极长，必须按 UTF-8 实测复核并逐级截断到上限内——
-  // 否则极长标题/海量提交会撑爆 20KB，违背「任何情况下 JSON UTF-8 <=20KB」的硬约束。
-  const buildFallback = (title: string, summaries: readonly AgentWorkItemSubmissionSummary[]): AgentWorkItemView => ({
-    workItemId: item.id,
+  // item.id / orderRevision / 标题 / 历史摘要都可能极长或多到撑爆 20KB，必须按 UTF-8
+  // 实测逐级缩减文本并省略最早提交，始终 <= 上限才返回，绝不在上限外返回。
+  const buildFallback = (
+    workItemId: string,
+    title: string,
+    orderRevision: string | undefined,
+    summaries: readonly AgentWorkItemSubmissionSummary[],
+    omitted: number,
+  ): AgentWorkItemView => ({
+    workItemId,
     title,
     status: item.status,
     orderRevision,
@@ -6810,39 +6816,65 @@ function buildAgentWorkItemView(
     executionResult: undefined,
     reviews: [],
     evidenceSummary: [],
-    submissionSummaries: summaries,
+    submissionSummaries:
+      omitted > 0
+        ? [
+            ...summaries,
+            {
+              at: '',
+              outcome: undefined,
+              changedFiles: undefined,
+              orderRevision: undefined,
+              isLatest: false,
+              note: `另有 ${omitted} 条较早的历史提交摘要已省略（受 20KB 上限约束）`,
+            },
+          ]
+        : summaries,
     truncated: true,
   });
-  let fallbackTitleCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
-  let fallbackSummaryCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 8));
-  while (
-    (fallbackTitleCap > 1 || fallbackSummaryCap > 1) &&
-    byteSize(
-      buildFallback(
-        capString(redactedTitle, fallbackTitleCap),
-        redactedSubmissionSummaries.map((s) => ({
-          ...s,
-          at: capString(s.at, fallbackSummaryCap),
-          outcome: s.outcome !== undefined ? capString(s.outcome, fallbackSummaryCap) : undefined,
-          orderRevision: s.orderRevision !== undefined ? capString(s.orderRevision, fallbackSummaryCap) : undefined,
-          note: s.note !== undefined ? capString(s.note, fallbackSummaryCap) : undefined,
-        })),
-      ),
-    ) > MAX_AGENT_WORK_ITEM_BYTES
-  ) {
-    fallbackTitleCap = Math.floor(fallbackTitleCap / 2);
-    fallbackSummaryCap = Math.floor(fallbackSummaryCap / 2);
+
+  // 逐级收紧：先压各摘要文本、再删最早提交、再压标题、最后压 id/orderRevision，
+  // 每步都以 Buffer.byteLength(JSON.stringify(...),'utf8') 实测复核 <=20KB。
+  let idCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let revCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let titleCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let sumCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 8));
+  let summaries = redactedSubmissionSummaries;
+  const tryFallback = (): AgentWorkItemView =>
+    buildFallback(
+      capString(item.id, idCap),
+      capString(redactedTitle, titleCap),
+      orderRevision !== undefined ? capString(orderRevision, revCap) : undefined,
+      summaries.map((s) => ({
+        ...s,
+        at: capString(s.at, sumCap),
+        outcome: s.outcome !== undefined ? capString(s.outcome, sumCap) : undefined,
+        orderRevision: s.orderRevision !== undefined ? capString(s.orderRevision, sumCap) : undefined,
+        note: s.note !== undefined ? capString(s.note, sumCap) : undefined,
+      })),
+      redactedSubmissionSummaries.length - summaries.length,
+    );
+  // 循环每轮都实测整个候选对象大小；收敛到 <= 上限即退出，绝不在上限外返回。
+  // 优先级：压摘要文本 -> 删最早一半提交 -> 压标题 -> 压 id/orderRevision。
+  let guard = 0;
+  while (byteSize(tryFallback()) > MAX_AGENT_WORK_ITEM_BYTES && guard < 10000) {
+    guard++;
+    if (sumCap > 1) {
+      sumCap = Math.max(1, Math.floor(sumCap / 2));
+    } else if (summaries.length > 1) {
+      // 摘要字段已压到极限仍超，删最早一半（数组末尾为最新，保留最新）。
+      summaries = summaries.slice(Math.ceil(summaries.length / 2));
+    } else if (titleCap > 1) {
+      titleCap = Math.max(1, Math.floor(titleCap / 2));
+    } else if (idCap > 1 || revCap > 1) {
+      idCap = Math.max(1, Math.floor(idCap / 2));
+      revCap = Math.max(1, Math.floor(revCap / 2));
+    } else {
+      // 一切字段已 clip 到 1 字符、历史也已清空，理论上不可能仍超；兜底跳出。
+      break;
+    }
   }
-  return buildFallback(
-    capString(redactedTitle, fallbackTitleCap),
-    redactedSubmissionSummaries.map((s) => ({
-      ...s,
-      at: capString(s.at, fallbackSummaryCap),
-      outcome: s.outcome !== undefined ? capString(s.outcome, fallbackSummaryCap) : undefined,
-      orderRevision: s.orderRevision !== undefined ? capString(s.orderRevision, fallbackSummaryCap) : undefined,
-      note: s.note !== undefined ? capString(s.note, fallbackSummaryCap) : undefined,
-    })),
-  );
+  return tryFallback();
 }
 
 function viewOf(mission: Mission): MissionView {
