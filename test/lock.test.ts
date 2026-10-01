@@ -694,7 +694,7 @@ describe('残锁安全接管', () => {
     return lockPath;
   }
 
-  /** 接管期间临时建的 guard / 隔离目录都不该留在状态目录里。 */
+  /** 接管期间临时建的门 / 隔离目录都不该留在状态目录里。 */
   function takeoverTemps(statePath: string): string[] {
     return readdirSync(dirname(statePath)).filter(
       (name) => name.includes('takeover') || name.includes('stale-'),
@@ -742,7 +742,8 @@ describe('残锁安全接管', () => {
     // 并发窗口（仍在同一条用例内）：另一个候选在「重读校验通过」与「移走旧锁」
     // 之间完成了接管——原路径上已经换成它自己那把新的、活着的锁。
     // 注入探针把这一瞬间造出来（真实进程里这个窗口窄到复现不了），
-    // 检验我们的恢复策略不会覆盖/删掉别人的锁，也不会把隔离目录当垃圾清掉。
+    // 检验接管门把其他写者挡在关键区之外，同时我们的恢复策略不会覆盖/删掉
+    // 别人的锁，也不会把隔离目录当垃圾清掉。
     plantStaleLock(statePath, {
       pid: 2147483645,
       heartbeatAt: STALE_HEARTBEAT,
@@ -763,6 +764,13 @@ describe('残锁安全接管', () => {
     };
 
     let stranded: string | undefined;
+    // 下面这段注入的就是被 review 拒绝的那个窗口：接管关键区里，原路径一度是空的。
+    // 我们要在同一个窗口里验三件事：普通获取者抢不到、第二个接管者碰不动、
+    // 我们自己也不会把另一个活持有者的锁搬走。
+    let plainWriter: (() => void) | undefined;
+    let plainWriterError: unknown;
+    let secondCandidate: Promise<unknown> | undefined;
+    let pathStayedEmpty = false;
     await assert.rejects(
       () =>
         acquireRecoverableLock(statePath, '抢', undefined, {
@@ -770,9 +778,33 @@ describe('残锁安全接管', () => {
           pidAlive: () => false,
           portListening: async () => false,
           onBeforeQuarantine: () => {
-            // 模拟对方：把残锁移走（对方自己的隔离目录不关我们的事），
-            // 在原路径上 mkdir 出它自己的锁并写下持有者。
+            // 模拟对方在它自己的关键区里：把残锁移走（它自己的隔离目录不关我们的事），
+            // 原路径此刻是空的。
             rmSync(lockPath, { recursive: true, force: true });
+
+            // 1) 普通获取者不能趁这个空窗抢到锁：门在我们手里，它必须 fail closed。
+            try {
+              plainWriter = acquireLock(statePath, '普通写者');
+            } catch (error) {
+              plainWriterError = error;
+            }
+            pathStayedEmpty = !existsSync(lockPath);
+
+            // 2) 第二个接管候选也不能越过门去探测条件、搬锁。
+            secondCandidate = acquireRecoverableLock(statePath, '第二个接管者', undefined, {
+              now: () => PROBE_NOW,
+              pidAlive: () => false,
+              portListening: async () => false,
+            }).then(
+              (acquired) => {
+                acquired();
+                return undefined;
+              },
+              (error: unknown) => error,
+            );
+
+            // 3) 原路径上换成对方那把新的、活着的锁：下面的 rename 会把它搬进
+            //    隔离目录，这正是「绝不搬走另一个活持有者的锁」要验证的地方。
             mkdirSync(lockPath);
             writeFileSync(join(lockPath, 'holder.json'), JSON.stringify(competing, null, 2), 'utf8');
           },
@@ -789,6 +821,22 @@ describe('残锁安全接管', () => {
       },
     );
 
+    // 接管门在关键区里是独占的：普通获取者与第二个接管候选都被挡在门外（fail
+    // closed），谁也没能在原路径空着的时候建出一把锁来。
+    assert.ok(
+      plainWriterError instanceof LockBusyError,
+      `普通获取者必须被接管门挡住：${String(plainWriterError)}`,
+    );
+    const plainError = plainWriterError;
+    assert.match(plainError.message, /互斥门/);
+    assert.equal(plainWriter, undefined, '普通获取者不该拿到锁');
+    plainWriter?.();
+    assert.ok(pathStayedEmpty, '门被占用期间原路径必须保持空着');
+
+    const secondError = await secondCandidate;
+    assert.ok(secondError instanceof LockBusyError, `第二个接管者必须被接管门挡住：${String(secondError)}`);
+    assert.match(secondError.message, /互斥门/);
+
     // 别人的锁被完整留在隔离目录里等人工核实：没被删、没被搬回、没被覆盖。
     assert.ok(stranded !== undefined, '错误信息必须指明隔离目录');
     const strandedHolder = JSON.parse(readFileSync(join(stranded, 'holder.json'), 'utf8')) as LockInfo;
@@ -799,7 +847,19 @@ describe('残锁安全接管', () => {
     assert.deepEqual(
       takeoverTemps(statePath).filter((name) => name.includes('takeover')),
       [],
-      'guard 是自己的目录，必须清掉',
+      '接管门是自己的目录，必须清掉',
+    );
+
+    // 竞争结束：原路径上没有任何持有者（对方的活锁在隔离目录里等人工），门也已
+    // 释放——后来者拿得到，而且同一时刻只有一个持有者、没有漏下的门。
+    const settle = acquireLock(statePath, '善后');
+    assert.equal(readHolderFile(statePath).what, '善后');
+    settle();
+    assert.ok(!existsSync(lockPath), '善后释放后不留锁');
+    assert.deepEqual(
+      takeoverTemps(statePath).filter((name) => name.includes('takeover')),
+      [],
+      '所有路径都要释放自己的门',
     );
     rmSync(stranded, { recursive: true, force: true });
   });

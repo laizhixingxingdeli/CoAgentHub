@@ -178,6 +178,121 @@ export function acquireLock(
   options?: LockAcquireOptions,
 ): () => void {
   const lockPath = lockPathFor(statePath);
+  // 先独占这条锁的接管门，再碰锁路径本身。少了这一步，普通写者能在接管方
+  // 「已经把旧锁 rename 走、还没在原路径 mkdir 回来」的那个空窗里 mkdir 成功，
+  // 于是接管方和它同时以为自己是唯一持有者——正是这把锁要防的双写。
+  const gate = acquireTakeoverGate(lockPath);
+  try {
+    return acquireLockHoldingGate(statePath, lockPath, what, identity, options);
+  } finally {
+    releaseTakeoverGate(gate);
+  }
+}
+
+/**
+ * 接管互斥门：与锁路径一一对应、**名字固定**。
+ *
+ * 为什么不能像旧版那样每次取一个唯一名字：唯一名字的目录谁也挡不住谁，两个
+ * 候选各建各的，然后同时走到「把原路径上的锁 rename 走」——后动手的那个会把
+ * 先动手那个刚拿到的新锁搬进自己的隔离目录，原路径空出来，第三个写者 mkdir
+ * 就成功了。三个人、两把锁都以为自己在独占写。
+ *
+ * 名字由锁路径算出（不是随机串），所以两个候选与普通 acquireLock 抢的是同一个
+ * 目录：mkdir 的原子性在这里就是互斥本身，建不出来就说明有人正在这条锁上动手，
+ * fail closed。
+ *
+ * 只护住「mkdir 原路径 / rename 旧锁 / 写持有者」这几步：门被长期持有等于这条锁
+ * 永远拿不到，所以成功拿到锁之后立刻放开。
+ */
+function takeoverGatePathFor(lockPath: string): string {
+  return `${lockPath}.takeover-gate`;
+}
+
+interface TakeoverGate {
+  path: string;
+  /** 本次持有的标记，用来保证放门时只删自己的门。 */
+  token: string;
+}
+
+interface TakeoverGateMarker {
+  pid: number;
+  token: string;
+  since: string;
+}
+
+function readGateMarker(gatePath: string): TakeoverGateMarker | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(gatePath, 'gate.json'), 'utf8')) as Partial<TakeoverGateMarker>;
+    if (typeof value.pid !== 'number' || typeof value.token !== 'string') return undefined;
+    return {
+      pid: value.pid,
+      token: value.token,
+      since: typeof value.since === 'string' ? value.since : '（未记录）',
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 原子独占接管门。冲突一律 fail closed：不抢占、不删除、不越过。
+ */
+function acquireTakeoverGate(lockPath: string): TakeoverGate {
+  const path = takeoverGatePathFor(lockPath);
+  const token = uniqueSiblingPath(lockPath, 'gate-token');
+  try {
+    mkdirSync(path, { recursive: false });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const marker = readGateMarker(path);
+    throw new LockBusyError(lockPath, readHolder(lockPath), [
+      `这条锁的接管互斥门已被其他写者持有：${path}`,
+      marker === undefined
+        ? '门内没有标记，可能是异常退出留下的，也可能是对方还没写完标记。'
+        : `门内登记：pid=${marker.pid}，since=${marker.since}`,
+      '门不会自动清理，也不会被别的进程删除：先核实门内进程已退出、且没有其他写者在这个状态目录上工作，再人工删除这个目录。',
+    ]);
+  }
+  try {
+    // 写下自己的标记：人排障时能一眼看出门是谁留下的。写不进去不影响互斥，
+    // 只是少一条线索。
+    writeFileSync(
+      join(path, 'gate.json'),
+      JSON.stringify({ pid: process.pid, token, since: new Date().toISOString() }, null, 2),
+      'utf8',
+    );
+  } catch {
+    /* 标记写失败不改变互斥语义 */
+  }
+  return { path, token };
+}
+
+/**
+ * 放掉自己的门。
+ *
+ * 只删本次调用建的那一个：门里如果有别人的标记，说明这个目录已经被别人重建过
+ * （我们那扇门不在了），再删就是把别人正用来互斥的门拆掉，等于放第二个写者进去。
+ */
+function releaseTakeoverGate(gate: TakeoverGate): void {
+  const marker = readGateMarker(gate.path);
+  if (marker !== undefined && marker.token !== gate.token) return;
+  rmSync(gate.path, { recursive: true, force: true });
+}
+
+/**
+ * 已经持有这条锁的门时的取锁实现。
+ *
+ * 拆出来是为了让接管路径复用同一段代码而不重入抢门：`acquireAfterQuarantine`
+ * 调用它时门已经在本次调用手里，再 mkdir 一次只会撞上自己的门（fail closed），
+ * 接管就永远做不成。调用方必须保证门由自己持有、并在随后释放。
+ */
+function acquireLockHoldingGate(
+  statePath: string,
+  lockPath: string,
+  what: string,
+  identity: { instanceId: string; apiVersion: string } | undefined,
+  options?: LockAcquireOptions,
+): () => void {
   try {
     mkdirSync(lockPath, { recursive: false });
   } catch (error) {
@@ -590,9 +705,10 @@ type StaleLockAssessment =
  * 逐条写在 LockBusyError 里，连同人工核实与清理命令一起交给人。
  *
  * 与同步入口共享同一套互斥手段（mkdir + holder.json），所以接管期间
- * 照样严守单写者：候选先拿唯一 takeover guard，再重读旧 holder 重做条件判断，
- * 然后才把旧锁目录 rename 到同目录唯一隔离名，最后用 mkdir 对原锁路径
- * 做原子竞争。别人先拿到锁，我们就什么都不碰。
+ * 照样严守单写者：候选先 mkdir 出这条锁共享的接管门（抢不到就放弃，不越过），
+ * 再重读旧 holder 重做条件判断，然后才把旧锁目录 rename 到同目录唯一隔离名，
+ * 最后用 mkdir 对原锁路径做原子竞争；门一直持到自己的新锁落定为止。
+ * 别人先拿到锁，我们就什么都不碰。
  */
 export async function acquireRecoverableLock(
   statePath: string,
@@ -614,15 +730,19 @@ export async function acquireRecoverableLock(
     portListening: options?.portListening ?? probePortListening,
   };
 
-  // 唯一名字的 guard：两个候选的名字不同，所以它不是互斥手段本身，
-  // 真正的互斥在下面 rename + mkdir 那两步的原子性上。它标记的是
-  // 「有人正在这条锁上做接管」，让清理和排障分得清谁留下的目录。
-  const guardPath = uniqueSiblingPath(lockPath, 'takeover');
+  // 接管门是这条锁共享的（名字由锁路径算出），它本身就是互斥手段：两个候选
+  // 以及普通 acquireLock 抢的是同一个目录，抢不到就 fail closed。
+  //
+  // 从拿到门起一直持到自己的新锁落定：接管的关键区横跨几个 await（条件探测、
+  // 重读校验），只护住 rename + mkdir 那两步的话，原路径空着的那一小段时间
+  // 仍会被普通写者钻进来 mkdir 成功。
+  let gate: TakeoverGate;
   try {
-    mkdirSync(guardPath, { recursive: false });
+    gate = acquireTakeoverGate(lockPath);
   } catch (error) {
+    if (error instanceof LockBusyError) throw error;
     throw new LockBusyError(lockPath, readHolder(lockPath), [
-      `接管 guard 目录建不起来（${(error as Error).message}），放弃接管。`,
+      `接管互斥门建不起来（${(error as Error).message}），放弃接管。`,
     ]);
   }
 
@@ -694,10 +814,10 @@ export async function acquireRecoverableLock(
     }
     return release;
   } finally {
-    // 只清自己建的两个目录：二者的名字里都带本次调用的唯一串，撞不上别人的目录。
-    // 隔离目录只有在查出里面确实装着已证实死亡的残锁时才登记进 ownQuarantine；
+    // 门只放自己的（releaseTakeoverGate 会校验标记），绝不删别人的门；
+    // 隔离目录只有在查出里面确实装着已证实死亡的残锁时才登记进 ownQuarantine，
     // 装着别人持有者的那把（隔离对象不符的分支）不登记，也就不在这里被删。
-    rmSync(guardPath, { recursive: true, force: true });
+    releaseTakeoverGate(gate);
     if (ownQuarantine !== undefined) rmSync(ownQuarantine, { recursive: true, force: true });
   }
 }
@@ -822,7 +942,9 @@ function acquireAfterQuarantine(
   heartbeatIntervalMs: number | undefined,
 ): () => void {
   try {
-    return acquireLock(statePath, what, identity, { heartbeatIntervalMs });
+    // 门已经在接管调用手里，这里只能走不抢门的实现：再 mkdir 一次门会撞上
+    // 自己（fail closed），接管就永远做不成。
+    return acquireLockHoldingGate(statePath, lockPath, what, identity, { heartbeatIntervalMs });
   } catch (error) {
     throw new LockBusyError(lockPath, readHolder(lockPath), [
       `隔离旧锁之后锁被其他写者取得（${(error as Error).message}），放弃接管。`,
