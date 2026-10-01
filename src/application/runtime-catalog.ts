@@ -33,7 +33,25 @@ export type RuntimeCatalog =
   | { readonly available: true; readonly runtime: string; readonly models: RuntimeModel[] }
   | { readonly available: false; readonly note: string };
 
-export type RuntimeUsage = ({ readonly available: true } & Record<string, unknown>) | readonly unknown[] | { readonly available: false; readonly note: string };
+/**
+ * PI-Q1 的用量行。适配器是权威：平台只校验形状，不解释字段，
+ * 也不把未知字段丢掉——原样转出去，界面才能显示适配层新加的东西。
+ */
+export interface UsageRow {
+  readonly provider: string;
+  readonly status: 'ok' | 'no_auth' | 'error' | 'timeout';
+  readonly usedPercent?: number;
+  readonly remainingPercent?: number;
+  readonly resetAt?: string;
+  readonly periodStart?: string;
+  readonly plan?: string;
+  readonly fetchedAt?: string;
+  readonly [key: string]: unknown;
+}
+
+export type RuntimeUsage = readonly UsageRow[] | { readonly available: false; readonly note: string };
+
+const USAGE_STATUSES = new Set(['ok', 'no_auth', 'error', 'timeout']);
 
 let latestAdapterDir: string | undefined;
 export function rememberAdapterDir(dir: string): void { latestAdapterDir = resolve(dir); }
@@ -63,10 +81,17 @@ export async function getRuntimeUsage(dir = adapterDir(), runner = run): Promise
     const { stdout } = await runner('npx', ['tsx', 'src/cli.ts', 'usage'], {
       cwd: dir, shell: process.platform === 'win32', timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
     });
-    const usage: unknown = JSON.parse(stdout.trim());
-    if (usage === null || typeof usage !== 'object') return { available: false, note: '适配层没有返回有效用量信息' };
-    if (Array.isArray(usage)) return usage;
-    return { ...(usage as Record<string, unknown>), available: true };
+    const parsed: unknown = JSON.parse(stdout.trim());
+    // 只认 PI-Q1：顶层是数组，且每一行都有 provider / status。
+    // 旧的对象形状（{providers:[...]} 之类）在这里就是「协议不对」——
+    // 照旧强加 available:true 会让下游拿一个空壳继续派活。
+    if (!Array.isArray(parsed)) return { available: false, note: '适配层没有返回有效用量信息' };
+    if (!parsed.every((row) => row !== null && typeof row === 'object' &&
+        typeof (row as Record<string, unknown>).provider === 'string' &&
+        USAGE_STATUSES.has((row as Record<string, unknown>).status as string))) {
+      return { available: false, note: '适配层返回的用量行不是 PI-Q1 的 UsageRow[]' };
+    }
+    return parsed as UsageRow[];
   } catch (error) {
     return { available: false, note: `读取适配层用量失败：${error instanceof Error ? error.message : String(error)}` };
   }

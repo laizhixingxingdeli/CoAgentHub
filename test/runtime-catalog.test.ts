@@ -25,7 +25,7 @@ import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform } from '../src/application/platform.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 import { getRuntimeUsage, adapterDir, rememberAdapterDir } from '../src/application/runtime-catalog.ts';
-import type { RuntimeCatalog } from '../src/application/runtime-catalog.ts';
+import type { RuntimeCatalog, UsageRow } from '../src/application/runtime-catalog.ts';
 
 const SUCCESS: RuntimeCatalog = {
   available: true,
@@ -54,7 +54,7 @@ async function getModels(
 
 async function openCatalogApi(options: {
   listRuntimeModels: () => Promise<RuntimeCatalog>;
-  getRuntimeUsage?: () => Promise<{ available: true } & Record<string, unknown> | readonly unknown[] | { available: false; note: string }>;
+  getRuntimeUsage?: () => Promise<readonly UsageRow[] | { available: false; note: string }>;
   now?: () => number;
   resolveControlPrincipal?: ControlPrincipalResolver;
 }): Promise<{ server: Server; base: string }> {
@@ -85,7 +85,7 @@ async function openCatalogApi(options: {
 }
 
 describe('运行时用量读取', () => {
-  test('fake runner 原样转发可用 JSON，available 固定为 true', async () => {
+  test('fake runner 原样转发 PI-Q1 数组，额外字段不丢', async () => {
     let calls = 0;
     const dir = process.cwd();
     const result = await getRuntimeUsage(dir, async (command, args, options) => {
@@ -93,21 +93,25 @@ describe('运行时用量读取', () => {
       assert.equal(command, 'npx');
       assert.deepEqual(args, ['tsx', 'src/cli.ts', 'usage']);
       assert.equal(options.cwd, dir);
-      return { stdout: '{"available":false,"remaining":7,"resetAt":"later"}', stderr: '' } as never;
+      return { stdout: '[{"provider":"xai","status":"ok","remainingPercent":7,"resetAt":"later","plan":"pro"}]', stderr: '' } as never;
     });
-    assert.deepEqual(result, { available: true, remaining: 7, resetAt: 'later' });
+    assert.deepEqual(result, [{ provider: 'xai', status: 'ok', remainingPercent: 7, resetAt: 'later', plan: 'pro' }]);
     assert.equal(calls, 1);
   });
 
   test('PI-Q1 顶层数组用量协议原样返回', async () => {
-    const result = await getRuntimeUsage(process.cwd(), async () => ({ stdout: '[{"provider":"xai","remaining":3}]', stderr: '' }) as never);
-    assert.deepEqual(result, [{ provider: 'xai', remaining: 3 }]);
+    const result = await getRuntimeUsage(process.cwd(), async () => ({ stdout: '[{"provider":"xai","status":"ok","remaining":3}]', stderr: '' }) as never);
+    assert.deepEqual(result, [{ provider: 'xai', status: 'ok', remaining: 3 }]);
   });
 
   test('无效输出和不存在目录降级为不可用', async () => {
     assert.equal((await getRuntimeUsage('/definitely/not/an/adapter')).available, false);
     const invalid = await getRuntimeUsage(process.cwd(), async () => ({ stdout: 'null', stderr: '' }) as never);
     assert.deepEqual(invalid, { available: false, note: '适配层没有返回有效用量信息' });
+    const legacyObject = await getRuntimeUsage(process.cwd(), async () => ({ stdout: '{"available":true,"providers":[]}', stderr: '' }) as never);
+    assert.deepEqual(legacyObject, { available: false, note: '适配层没有返回有效用量信息' });
+    const badRow = await getRuntimeUsage(process.cwd(), async () => ({ stdout: '[{"provider":"xai"}]', stderr: '' }) as never);
+    assert.equal(badRow.available, false);
     const failed = await getRuntimeUsage(process.cwd(), async () => { throw new Error('missing command'); });
     assert.equal(failed.available, false);
     assert.match(failed.note, /missing command/);
@@ -133,12 +137,12 @@ describe('GET /api/runtime/usage', () => {
     let calls = 0;
     const { server, base } = await openCatalogApi({
       listRuntimeModels: async () => SUCCESS,
-      getRuntimeUsage: async () => { calls += 1; return [{ provider: 'xai', remaining: 2 }]; },
+      getRuntimeUsage: async (): Promise<UsageRow[]> => { calls += 1; return [{ provider: 'xai', status: 'ok', remainingPercent: 2 }]; },
     });
     try {
       for (let i = 0; i < 2; i += 1) {
         const response = await fetch(`${base}/api/runtime/usage`);
-        assert.deepEqual(await response.json(), [{ provider: 'xai', remaining: 2 }]);
+        assert.deepEqual(await response.json(), [{ provider: 'xai', status: 'ok', remainingPercent: 2 }]);
       }
       assert.equal(calls, 1);
     } finally { await closeServer(server); }
@@ -153,7 +157,7 @@ describe('GET /api/runtime/usage', () => {
       resolveControlPrincipal,
       getRuntimeUsage: async () => {
         calls += 1;
-        return calls === 1 ? { available: false, note: 'offline' } : { available: true, remaining: 12 };
+        return calls === 1 ? { available: false, note: 'offline' } : [{ provider: 'xai', status: 'ok', remainingPercent: 12 }];
       },
     });
     try {
@@ -164,9 +168,9 @@ describe('GET /api/runtime/usage', () => {
       const first = await fetch(`${base}/api/runtime/usage`, { headers });
       assert.deepEqual(await first.json(), { available: false, note: 'offline' });
       const recovered = await fetch(`${base}/api/runtime/usage`, { headers });
-      assert.deepEqual(await recovered.json(), { available: true, remaining: 12 });
+      assert.deepEqual(await recovered.json(), [{ provider: 'xai', status: 'ok', remainingPercent: 12 }]);
       const cached = await fetch(`${base}/api/runtime/usage`, { headers });
-      assert.deepEqual(await cached.json(), { available: true, remaining: 12 });
+      assert.deepEqual(await cached.json(), [{ provider: 'xai', status: 'ok', remainingPercent: 12 }]);
       assert.equal(calls, 2);
     } finally {
       await closeServer(server);
