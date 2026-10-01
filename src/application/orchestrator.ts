@@ -613,6 +613,10 @@ export class Orchestrator {
           : [];
       if (pending.length > 0) {
         for (const item of pending) {
+          // 只有冻结工单带了 validation.commands 的工作项才需要机器验证，也才需要基线。
+          // 没命令的一律不进这条路：给它们记基线等于凭空多出一批事件，而 W-321
+          // 的验证入口对空命令本来就是 no-op。
+          const needsStandardValidation = (item.order?.validation?.commands?.length ?? 0) > 0;
           const hop = await this.#runHop({
             role: 'executor',
             missionId,
@@ -621,6 +625,24 @@ export class Orchestrator {
             pool: this.#executor,
             instruction:
               '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+            ...(needsStandardValidation
+              ? {
+                  // 基线要在执行者真起来之前落盘：那时候 cwd 的 HEAD 才是这条工单的
+                  // 起点。重启续跑（交卷之后、报告之前进程被杀）就是靠它才能补验；
+                  // 放到交卷之后记，diff 会把自己刚提交的改动算成没改。
+                  onExecutorStart: async () => {
+                    // 读不到可信 HEAD 就不记：宁可没有基线（验证入口 fail-closed），
+                    // 也不要一条谁都发现不了的假基线。
+                    const head = await this.#workspace.head(cwd).catch(() => undefined);
+                    if (!head) return;
+                    await this.#platform.recordStandardValidationBaseline({
+                      missionId,
+                      workItemId: item.id,
+                      head,
+                    });
+                  },
+                }
+              : {}),
           });
           if (hop && 'alreadyCompleted' in hop) continue;
           if (hop && 'retrySameSlot' in hop) {
@@ -638,6 +660,11 @@ export class Orchestrator {
             await this.#platform.setWaitReason(missionId, 'no_available_agent', detail);
             return { kind: 'waiting', reason: 'no_available_agent', detail };
           }
+          // 交卷了：趁协调者还没被叫起来，先把冻结命令跑一遍存成报告。报告只是给
+          // 协调者的证据，不是验收——跑绿了也不 reject/retry，机器不替它评审。
+          if (needsStandardValidation) {
+            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+          }
           // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
           // 没交卷（这一跳没 structured submit）时平台自己会跳过。
           await this.#platform.runPostExecutionShadow(missionId, item.id);
@@ -647,6 +674,15 @@ export class Orchestrator {
           if (gate.kind === 'continue') break;
         }
         continue;
+      }
+
+      // 补验：重启续跑、或上一轮验完没落盘时，工作项已经 submitted 但还没有报告。
+      // 放在协调者 hop 之前——它这一跳读的就是这份报告。W-321 幂等：已有报告
+      // （同一次 submitted attempt）不会重跑命令，只把那份报告原样返回。
+      for (const item of view.workItems) {
+        if (item.status !== 'submitted') continue;
+        if ((item.order?.validation?.commands?.length ?? 0) === 0) continue;
+        await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
       }
 
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
@@ -1361,6 +1397,30 @@ export class Orchestrator {
   }
 
   /**
+   * Standard：工作项确实处于 submitted 就跑冻结命令并存报告；其它状态什么都不做。
+   *
+   * 出错一律吞掉。报告是给协调者的**证据**，不是它能不能被叫起来的前提：缺
+   * validation 依赖、缺基线（历史工单）、刚跑完又被改成别的状态，这些都只意味着
+   * “这一次没有报告”，协调者照样该醒过来自己看。把异常放出去只会让一跳失败、
+   * 把整条 Mission 卡在一个平台自己没准备好的地方。
+   */
+  async #validateStandardIfSubmitted(
+    missionId: string,
+    workItemId: string,
+    cwd: string,
+  ): Promise<void> {
+    try {
+      // 重新读一次：这一跳跑完执行者之后，工作项状态已经变了，入参里的 view 是旧的。
+      const live = await this.#platform.getMissionView(missionId);
+      const item = live.workItems.find((row) => row.id === workItemId);
+      if (item?.status !== 'submitted') return;
+      await this.#platform.validateStandardWorkItem({ missionId, workItemId, cwd });
+    } catch {
+      // 见上：没有报告也要让协调者接手，不替它评审。
+    }
+  }
+
+  /**
    * 跑一跳。按候选顺序重试，**只有上游失败才往后换**。
    * 返回 undefined 表示候选耗尽。
    */
@@ -1372,6 +1432,15 @@ export class Orchestrator {
     pool: RolePool;
     instruction: string;
     resumeRef?: string;
+    /**
+     * 执行者真要起来之前调一次（协调者、快车道都不传）。
+     *
+     * 验证基线必须落在这一刻，不能由调用方在 #runHop 之前自己记：候选耗尽、
+     * 队列项已完成这两条出口执行者根本没跑，在它们之前记下的基线是假的——等
+     * 这条工单以后交卷，补验会拿交卷之后的 HEAD 当起点，diff 算成空，而报告
+     * 看起来和正常的一模一样。
+     */
+    onExecutorStart?: () => Promise<void>;
   }): Promise<
     | { endedBy: string; resumeRef?: string; persistentUnknown?: boolean }
     /**
@@ -1412,6 +1481,8 @@ export class Orchestrator {
 
     const limit = input.pool.maxAttempts ?? 3;
     let used = 0;
+    // 只调一次：同一跳换候选之前工作区已回滚到 startRevision，HEAD 没有变。
+    let startHook = input.onExecutorStart;
     for (const profile of usable) {
       // Attempt 起点。换候选之前要回到这里：下一个候选应该从干净的起点
       // 开始，而不是接手上一个改到一半的代码（S06.3）。
@@ -1467,6 +1538,13 @@ export class Orchestrator {
         claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
       }
       used += 1;
+
+      // 候选已经拿到、退避也已经等到：执行者这一步是真的要跑了。
+      if (startHook) {
+        const hook = startHook;
+        startHook = undefined;
+        await hook();
+      }
 
       const claim = this.#trustedQueueClaim(claimedHop);
       const { attemptId, token } =

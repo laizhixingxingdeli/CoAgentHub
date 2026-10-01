@@ -122,7 +122,6 @@ import {
   projectStartupBriefFields,
   type BoundWorkItem,
   type ContextBundle,
-  type SinceLastHopEntry,
   type WorkItemIndexEntry,
 } from './context-builder.ts';
 import {
@@ -208,6 +207,14 @@ export interface QueueClaimIdentity {
 }
 
 const ATTEMPT_STARTED_KIND = 'attempt.started';
+
+/**
+ * Standard 工作项验证基线事件。
+ *
+ * 事件流是台账，之后还要翻译给用户看（时间线文案），名字只在本文件写一次，
+ * 不散着拼字符串。
+ */
+const VALIDATION_BASELINE_EVENT_KIND = 'work_item.validation_baseline_recorded';
 
 function queuedAttemptStartedData<T extends { readonly kind: string }>(
   base: T,
@@ -2382,7 +2389,10 @@ export class Platform {
     const { mission, project } = await this.#locate(missionId);
     // 谁挡着我。要 Project 才算得出来，所以在这一层补，不放进 viewOf。
     const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
-    const view = { ...viewOf(mission), blockedByMission: holder?.id };
+    const view = {
+      ...viewOf(mission, await this.#workItemValidationReportViews(mission)),
+      blockedByMission: holder?.id,
+    };
     if (mission.executionMode === 'high_assurance' && mission.status === 'awaiting_review') {
       return { ...view, haReviewHold: await this.#haReviewHold(mission) };
     }
@@ -2407,7 +2417,7 @@ export class Platform {
       planRevision: mission.planRevision,
       contract: mission.contract,
       plan: mission.plan,
-      workItemIndex: agentWorkItemIndex(mission),
+      workItemIndex: agentWorkItemIndex(mission, await this.#workItemValidationReportViews(mission)),
       escalations: agentEscalationAnswers(mission),
       openEscalations: mission.openEscalations.length,
     };
@@ -2689,10 +2699,24 @@ export class Platform {
       }
     }
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
-    const briefSources =
-      attempt.kind === 'coordinator'
-        ? coordinatorStartupSources(mission, attemptId, await this.#activity.list(missionId))
-        : undefined;
+    //
+    // 机器验证简版只进协调者那份：执行者拿到「上一跳机器验收过没过」等于提前知道
+    // 自己的东西会被怎么判，而那不是它该看的。
+    let briefSources:
+      | {
+          workItemsIndex: readonly CoordinatorWorkItemIndexEntry[];
+          sinceLastHop: CoordinatorSinceLastHopEntry;
+        }
+      | undefined;
+    if (attempt.kind === 'coordinator') {
+      const events = await this.#activity.list(missionId);
+      briefSources = coordinatorStartupSources(
+        mission,
+        attemptId,
+        events,
+        await this.#workItemValidationReportViews(mission, events),
+      );
+    }
     const contextBundle = buildContextBundle(
       {
         role: attempt.kind === 'executor' ? 'executor' : 'coordinator',
@@ -4875,7 +4899,8 @@ export class Platform {
     // 仅提取事件里实际存的 outcome / changedFiles(数量) / orderRevision / at。
     // 旧提交正文未被持久化、不可恢复，只留元数据并标「旧正文未保存」；
     // 最新一次正文经 item.executionResult 仍可取，不臆造。
-    const submittedEvents = (await this.#activity.list(missionId))
+    const events = await this.#activity.list(missionId);
+    const submittedEvents = events
       .filter((e) => e.workItemId === workItemId && e.kind === 'execution_result.submitted')
       .map((e) => e as ActivityEvent);
     const lastIndex = submittedEvents.length - 1;
@@ -4898,6 +4923,7 @@ export class Platform {
       item.order,
       item.executionResult ?? undefined,
       submissionSummaries,
+      (await this.#workItemValidationReportViews(mission, events)).get(item.id),
     );
   }
 
@@ -5096,6 +5122,289 @@ export class Platform {
         optionsConsidered: [...(body.whatWasTried ?? [])],
       });
     }
+  }
+
+  /* ================== Standard 机器验收（进程内，不动 L2 评审权） ================== */
+
+  /**
+   * Standard：把 trusted workspace HEAD 记成该 WorkItem 的验证基线。
+   *
+   * 基线必须由 orchestrator 从 trusted workspace 读出来，**不是执行者自报**，也
+   * **不是 Mission 的初始 baseRevision**：Standard 一个 Mission 里有多条工作项各自
+   * 开工，拿 Mission base 算 diff 会把别的工单、甚至同一条工单前面几跳的改动一起
+   * 算进这一条，allowedScope / diffSize 的判断于是全错——而它看起来和判对了一模一样。
+   *
+   * 同一条工作项多次尝试时以最近一次为准（读取方从事件流倒序取）。
+   * 仅进程内 Orchestrator 调用；不进 HTTP/tools——执行者能写基线等于自己给自己划线。
+   */
+  async recordStandardValidationBaseline(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly head: string;
+  }): Promise<{ recorded: true }> {
+    const head = input.head.trim();
+    if (head.length === 0) {
+      throw new PlatformRuleError(
+        'VALIDATION_BASELINE_REQUIRED',
+        '验证基线必须是 trusted workspace HEAD，不接受空值。',
+      );
+    }
+    await this.#tx(async () => {
+      const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
+      await this.#event(mission, VALIDATION_BASELINE_EVENT_KIND, { head }, item.id);
+    });
+    return { recorded: true };
+  }
+
+  /**
+   * 读该 WorkItem 最近一次记下的验证基线。没有就是没有——不回退到 Mission base，
+   * 调用方据此 fail-closed，而不是拿累计 diff 凑一份看起来正常的报告。
+   */
+  async #workItemValidationBaseline(
+    missionId: string,
+    workItemId: string,
+  ): Promise<string | undefined> {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== VALIDATION_BASELINE_EVENT_KIND) continue;
+      if (event.workItemId !== workItemId) continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const head = (data as { head?: unknown }).head;
+      if (typeof head !== 'string' || head.trim().length === 0) continue;
+      return head.trim();
+    }
+    return undefined;
+  }
+
+  /** 同一次 submitted attempt 已经存过报告就返回它的 reportId（事件流倒序取最近一条）。 */
+  async #submittedAttemptReportId(
+    missionId: string,
+    workItemId: string,
+    submittedAttemptId: string,
+  ): Promise<string | undefined> {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== 'validation.reported') continue;
+      if (event.workItemId !== workItemId) continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const row = data as { reportId?: unknown; submittedAttemptId?: unknown };
+      if (row.submittedAttemptId !== submittedAttemptId) continue;
+      if (typeof row.reportId !== 'string' || row.reportId.length === 0) continue;
+      return row.reportId;
+    }
+    return undefined;
+  }
+
+  /**
+   * Standard：对 submitted WorkItem 跑冻结 validation.commands，并存 ValidationReport。
+   *
+   * 与 Lightweight 的 validateAndAccept 只差一处，但那处是关键：**这里不 review**。
+   * 机器报告在 Standard 只是证据，accept/reject 仍归 L2——机器跑绿了不等于工单
+   * 可以放行，所以工单保持 submitted。
+   *
+   * cwd 由 trusted WorkspaceManager 注入并强制覆盖每个命令；allowedScope /
+   * forbiddenPaths / diffSize 只从 frozen order 拷贝，绝不在这里补默认值。
+   * `order.validation.commands` 缺失或为空 = 什么都不做（不存报告、不记事件），
+   * 免得调用方以为跑过验收。
+   */
+  async validateStandardWorkItem(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly cwd: string;
+  }): Promise<{ reportId: string; passed: boolean; status: string } | undefined> {
+    const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
+    const order = item.order;
+    const commands = order?.validation?.commands ?? [];
+    if (!order || commands.length === 0) {
+      // 缺 validation.commands：不改变行为。不存空报告、不记 validation.reported。
+      return undefined;
+    }
+
+    const validation = this.#validation;
+    if (!validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        'Standard 机器验收需要注入 PlatformDeps.validation（engine + reports）。',
+      );
+    }
+    if (item.status !== 'submitted') {
+      throw new PlatformRuleError(
+        'VALIDATION_NOT_SUBMITTED',
+        `工作项 ${item.id} 当前是 ${item.status}，只能对 submitted 跑机器验收。`,
+      );
+    }
+    const submittedAttemptId = item.submittedAttemptId;
+    if (!submittedAttemptId) {
+      throw new PlatformRuleError(
+        'VALIDATION_SUBMITTED_ATTEMPT_REQUIRED',
+        `工作项 ${item.id} 缺少 submittedAttemptId，拒绝机器验收。`,
+      );
+    }
+
+    // 同一次提交已有落盘报告：原样返回，不重跑。重跑会换一个 reportId，
+    // 而 L2 手上、时间线上引用的还是旧那份——一次重试就能把有效证据从
+    // 「查得到」变成「查不到」。
+    const existingReportId = await this.#submittedAttemptReportId(
+      mission.id,
+      item.id,
+      submittedAttemptId,
+    );
+    if (existingReportId) {
+      const existing = await validation.reports.get(existingReportId);
+      if (existing && existing.missionId === mission.id) {
+        return { reportId: existing.id, passed: existing.passed, status: item.status };
+      }
+    }
+
+    const projectRoot = mission.workspaceRef?.projectRoot;
+    if (!projectRoot) {
+      throw new PlatformRuleError(
+        'VALIDATION_WORKSPACE_REQUIRED',
+        `Mission ${mission.id} 缺少 workspaceRef.projectRoot，不跑 engine。`,
+      );
+    }
+    if (typeof input.cwd !== 'string' || input.cwd.trim().length === 0) {
+      throw new PlatformRuleError(
+        'VALIDATION_CWD_REQUIRED',
+        'Standard 机器验收要求非空 cwd（trusted WorkspaceManager.prepare().cwd）。',
+      );
+    }
+    const trustedCwd = input.cwd.trim();
+
+    // 用本工作项自己的基线。没有就 fail-closed：拿 Mission base 顶上等于把别人的
+    // 改动算进这条工单，正是这个入口存在要避免的事。
+    const baseRevision = await this.#workItemValidationBaseline(mission.id, item.id);
+    if (!baseRevision) {
+      throw new PlatformRuleError(
+        'VALIDATION_BASELINE_MISSING',
+        `工作项 ${item.id} 没有记过验证基线，拒绝用 Mission base 代替。`,
+      );
+    }
+
+    // VAL-002：forbiddenPaths / diffSize 仅从 frozen order 拷贝；缺省 = 不在 force。
+    const forbiddenPaths = order.validation?.forbiddenPaths;
+    const diffSize = order.validation?.diffSize;
+
+    const result = await validation.engine.validate({
+      missionId: mission.id,
+      workItemId: item.id,
+      attemptId: submittedAttemptId,
+      projectRoot,
+      baseRevision,
+      allowedScope: [...order.allowedScope],
+      commands: commands.map((command) => ({
+        argv: [...command.argv],
+        timeoutMs: command.timeoutMs,
+        cwd: trustedCwd,
+      })),
+      ...(forbiddenPaths !== undefined ? { forbiddenPaths: [...forbiddenPaths] } : {}),
+      ...(diffSize !== undefined
+        ? {
+            diffSize: {
+              ...(diffSize.maxChangedFiles !== undefined
+                ? { maxChangedFiles: diffSize.maxChangedFiles }
+                : {}),
+              ...(diffSize.maxChangedLines !== undefined
+                ? { maxChangedLines: diffSize.maxChangedLines }
+                : {}),
+            },
+          }
+        : {}),
+    });
+
+    // 跑命令可能要几分钟，不能占着事务（与 Lightweight 同理）：跑完再开事务存报告 + 记事件。
+    return this.#tx(async () => {
+      // 事务里重取：跑命令那几分钟里活对象可能已经被别处换过。
+      const { mission: live, item: liveItem } = await this.#locateItem(
+        input.missionId,
+        input.workItemId,
+      );
+      // append-only 事实先落盘，再记引用它的事件。
+      await validation.reports.save(result.report);
+      await this.#event(
+        live,
+        'validation.reported',
+        {
+          reportId: result.report.id,
+          passed: result.report.passed,
+          submittedAttemptId,
+        },
+        liveItem.id,
+        // attemptId 留空：写这条的是平台，不是执行者，也不是 reviewer。
+      );
+      // 不 review：passed 与否 item 都留在 submitted，等 L2 裁定。
+      return { reportId: result.report.id, passed: result.report.passed, status: liveItem.status };
+    });
+  }
+
+  /**
+   * Standard 只读取报告：报告必须确实属于该 Mission 才返回。
+   * 不校验归属就返回，等于让任何一个 Mission 拿别人的机器证据去放行——
+   * 报告是 append-only 的，串了一份就永远串着。
+   */
+  async getValidationReport(
+    missionId: string,
+    reportId: string,
+  ): Promise<ValidationReport | undefined> {
+    await this.#locate(missionId);
+    if (!this.#validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        '读 ValidationReport 需要注入 PlatformDeps.validation.reports。',
+      );
+    }
+    const report = await this.#validation.reports.get(reportId);
+    if (!report || report.missionId !== missionId) return undefined;
+    return report;
+  }
+
+  /**
+   * 已交卷工作项 → 机器验证简版（视图共用同一份只读投影）。
+   *
+   * 一个 Mission 一条活动流：正序扫一遍得到「每个 (workItemId, submittedAttemptId)
+   * 最近一条 validation.reported」，再按工作项**当前**的 submittedAttemptId 精确取。
+   * 旧提交的报告因此挂不到新交卷头上；报告自己记的 workItem/attempt 也要对得上，
+   * 对不上就当没有——串了一份 append-only 报告比没有更糟。
+   *
+   * 没报告的工作项不进 map，视图就不带这个字段（不臆造）。没注入 validation 依赖
+   * （内存 / 轻量测试）或整条 Mission 没人交卷过时不读活动流。
+   */
+  async #workItemValidationReportViews(
+    mission: Mission,
+    events?: readonly ActivityEvent[],
+  ): Promise<Map<string, ValidationReportView>> {
+    const out = new Map<string, ValidationReportView>();
+    const reports = this.#validation?.reports;
+    if (!reports) return out;
+    if (!mission.workItems.some((item) => item.submittedAttemptId !== undefined)) return out;
+    const reportIdByKey = new Map<string, string>();
+    for (const event of events ?? (await this.#activity.list(mission.id))) {
+      if (event.kind !== 'validation.reported' || event.workItemId === undefined) continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const row = data as { reportId?: unknown; submittedAttemptId?: unknown };
+      if (typeof row.reportId !== 'string' || row.reportId.length === 0) continue;
+      // HA 的整 Mission 验证没有 submittedAttemptId（也不是某一条工作项的提交），跳过。
+      if (typeof row.submittedAttemptId !== 'string' || row.submittedAttemptId.length === 0) continue;
+      // 正序扫、后写盖前写：留下的是同一组键里最后（最新）那条。
+      reportIdByKey.set(validationReportKey(event.workItemId, row.submittedAttemptId), row.reportId);
+    }
+    for (const item of mission.workItems) {
+      const submittedAttemptId = item.submittedAttemptId;
+      if (submittedAttemptId === undefined) continue;
+      const reportId = reportIdByKey.get(validationReportKey(item.id, submittedAttemptId));
+      if (reportId === undefined) continue;
+      const report = await reports.get(reportId);
+      if (!report || report.missionId !== mission.id) continue;
+      if (report.workItemId !== undefined && report.workItemId !== item.id) continue;
+      if (report.attemptId !== undefined && report.attemptId !== submittedAttemptId) continue;
+      out.set(item.id, validationReportView(report));
+    }
+    return out;
   }
 
   /* ================================ 内部 ================================ */
@@ -5986,6 +6295,11 @@ export interface MissionView {
       readonly verdict: 'accept' | 'reject';
     };
     /**
+     * 最近一次交卷的机器验证简版。只读，来自 W-321 落盘的报告而非命令输出自报；
+     * 不是 Evidence，也不是 validator accept。没有报告时不带这一格。
+     */
+    validationReport?: ValidationReportView;
+    /**
      * 工单正文。**这是 L2 交给 L1 的那封信**——目标、范围、怎么验证、
      * 什么算做完。观测面要让人看到 agent 之间到底传了什么，缺了它就只剩
      * 一个标题，而"为什么它做成了这样"全在这份正文里。
@@ -6549,6 +6863,26 @@ function priorGuidanceForWorkItem(
 const SINCE_LAST_HOP_SUMMARY_CAP = 200;
 
 /**
+ * 协调者索引条目：与 context-builder 的 WorkItemIndexEntry 同形，另带机器验证简版。
+ *
+ * 简版以**可选键**留在对象里：context-builder 把整份内容哈希进 bundle，多出来的
+ * 键就是内容的一部分——所以没报告的工作项一定不带这个键，否则索引的指纹会变。
+ */
+type CoordinatorWorkItemIndexEntry = WorkItemIndexEntry & {
+  readonly validationReport?: ValidationReportView;
+};
+
+/**
+ * 增量条目：短摘要文本，外加可选的机器验证简版。
+ * 简版只在「上一跳之后真的新记了 validation.reported」时才出现——它回答的是
+ * “这次新验了什么”，而不是“历史上验过什么”。
+ */
+type CoordinatorSinceLastHopEntry = readonly {
+  readonly summary: string;
+  readonly validationReport?: ValidationReportView;
+}[];
+
+/**
  * 把上一段 coordinator 结束之后的活动，按事件原序压成一条条短摘要。
  *
  * 只列「有的才列」：证据提交、卡住报告、升级答复、L3 最终决定各自独立判断；
@@ -6558,8 +6892,15 @@ const SINCE_LAST_HOP_SUMMARY_CAP = 200;
 function summarizeSinceLastHop(
   mission: Mission,
   events: readonly ActivityEvent[],
-): SinceLastHopEntry {
-  const summaries: string[] = [];
+  validationReports: ReadonlyMap<string, ValidationReportView>,
+): CoordinatorSinceLastHopEntry {
+  const entries: { summary: string; validationReport?: ValidationReportView }[] = [];
+  const push = (summary: string, validationReport?: ValidationReportView): void => {
+    entries.push({
+      summary: capString(redactSecrets(summary), SINCE_LAST_HOP_SUMMARY_CAP),
+      ...(validationReport !== undefined ? { validationReport } : {}),
+    });
+  };
   for (const event of events) {
     switch (event.kind) {
       case 'execution_result.submitted': {
@@ -6574,7 +6915,7 @@ function summarizeSinceLastHop(
         const evidenceNote = latest
           ? `最近证据：${latest.kind}${latest.summary ? '：' + latest.summary : ''}`
           : '（无已存证据）';
-        summaries.push(
+        push(
           `提交[${title ?? workItemId ?? '?'}] ${data?.outcome ?? '?'} ` +
             `改动${data?.changedFiles ?? '?'}个文件 工单修订${data?.orderRevision ?? '?'}；${evidenceNote}`,
         );
@@ -6582,12 +6923,39 @@ function summarizeSinceLastHop(
       }
       case 'blocked.reported': {
         const data = event.data as { reason?: string; orderRevision?: string } | undefined;
-        summaries.push(`卡住报告：${data?.reason ?? '（无理由）'}（工单修订${data?.orderRevision ?? '?'}，待协调者处理）`);
+        push(`卡住报告：${data?.reason ?? '（无理由）'}（工单修订${data?.orderRevision ?? '?'}，待协调者处理）`);
         break;
       }
       case 'escalation.answered': {
         const data = event.data as { question?: string; answer?: string } | undefined;
-        summaries.push(`升级答复：${data?.question ?? '（无问题）'} → ${data?.answer ?? '（无答复）'}`);
+        push(`升级答复：${data?.question ?? '（无问题）'} → ${data?.answer ?? '（无答复）'}`);
+        break;
+      }
+      case 'validation.reported': {
+        // 机器验收是平台自己跑出来的：协调者上一跳之后才出现的这一条，正是它这一跳
+        // 要看的「新情况」。报告 map 以 workItemId 为键（见 #workItemValidationReportViews），
+        // 不是 workItemId+attempt 的复合键，所以这里只能按 workItemId 取。
+        // 取到的必须是**当前**提交的那一份：拿旧提交的事件去取，会把新交卷的报告
+        // 误挂到旧事件上——串了一份 append-only 报告比没有更糟。对不上（比如 HA 的
+        // 整 Mission 验证，或报告还没落盘）就只留一行文字，不造简版。
+        const data = event.data as { submittedAttemptId?: unknown } | undefined;
+        const workItemId = event.workItemId;
+        const item = workItemId !== undefined ? mission.workItem(workItemId) : undefined;
+        const title = item?.title;
+        const submittedAttemptId =
+          typeof data?.submittedAttemptId === 'string' ? data.submittedAttemptId : undefined;
+        const report =
+          item !== undefined &&
+          submittedAttemptId !== undefined &&
+          submittedAttemptId === item.submittedAttemptId
+            ? validationReports.get(item.id)
+            : undefined;
+        push(
+          `机器验证[${title ?? workItemId ?? '?'}]：${
+            report === undefined ? '（报告不在本次增量里）' : report.passed ? 'passed' : 'failed'
+          }`,
+          report,
+        );
         break;
       }
       case 'final_review.send_back':
@@ -6601,14 +6969,14 @@ function summarizeSinceLastHop(
       case 'final_review.merge_applied': {
         const data = (event.data ?? {}) as Record<string, unknown>;
         const reasons = Array.isArray(data.reasons) ? data.reasons.join('；') : '';
-        summaries.push(`L3 最终决定[${event.kind.replace('final_review.', '')}]${reasons ? '：' + reasons : ''}`);
+        push(`L3 最终决定[${event.kind.replace('final_review.', '')}]${reasons ? '：' + reasons : ''}`);
         break;
       }
       default:
         break;
     }
   }
-  return summaries.map((s) => ({ summary: capString(redactSecrets(s), SINCE_LAST_HOP_SUMMARY_CAP) }));
+  return entries;
 }
 
 /**
@@ -6634,13 +7002,21 @@ function coordinatorStartupSources(
   mission: Mission,
   attemptId: string,
   events: readonly ActivityEvent[],
-): { workItemsIndex: readonly WorkItemIndexEntry[]; sinceLastHop: SinceLastHopEntry } {
-  const index: readonly WorkItemIndexEntry[] = agentWorkItemIndex(mission).map((entry) => ({
+  validationReports: ReadonlyMap<string, ValidationReportView>,
+): {
+  workItemsIndex: readonly CoordinatorWorkItemIndexEntry[];
+  sinceLastHop: CoordinatorSinceLastHopEntry;
+} {
+  const index: readonly CoordinatorWorkItemIndexEntry[] = agentWorkItemIndex(
+    mission,
+    validationReports,
+  ).map((entry) => ({
     id: entry.id,
     title: entry.title,
     status: entry.status,
     attempts: entry.attempts,
     lastReviewVerdict: entry.lastReviewVerdict,
+    ...(entry.validationReport !== undefined ? { validationReport: entry.validationReport } : {}),
   }));
   const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
   if (!prevEnd) {
@@ -6648,7 +7024,7 @@ function coordinatorStartupSources(
   }
   const prevIndex = events.findIndex((e) => e === prevEnd);
   const after = events.slice(prevIndex + 1);
-  return { workItemsIndex: index, sinceLastHop: summarizeSinceLastHop(mission, after) };
+  return { workItemsIndex: index, sinceLastHop: summarizeSinceLastHop(mission, after, validationReports) };
 }
 
 function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
@@ -6666,6 +7042,85 @@ function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkIt
 const MAX_AGENT_WORK_ITEM_BYTES = 20 * 1024;
 
 /**
+ * 机器验证简版里单条命令的结果。
+ *
+ * `outputTail` **只在命令失败时出现**：简版要进协调者索引与启动简报，把每条命令
+ * 最多 4096 字符的尾巴全搬回去，等于换一种方式把测试输出重新灌进上下文；协调者
+ * 要看的是「过没过、慢不慢、哪儿越界」，只有失败的那条需要原文。
+ */
+export interface ValidationReportCommandView {
+  readonly passed: boolean;
+  readonly durationMs: number;
+  /** 失败命令的输出尾：先 redactSecrets 再只留尾 1000 字。 */
+  readonly outputTail?: string;
+}
+
+/**
+ * 机器验证简版：W-321 落盘 ValidationReport 的只读投影。
+ *
+ * 它不是 Evidence（执行者自报的证据），也不是 validator accept——报告来自 platform
+ * 自己跑出来、存在仓储里的事实。只按 workItemId + submittedAttemptId 对应，旧提交的
+ * 报告绝不挂到新交卷头上；没有报告就不带这一格，不臆造。
+ */
+export interface ValidationReportView {
+  readonly reportId: string;
+  readonly passed: boolean;
+  readonly commands: readonly ValidationReportCommandView[];
+  /** changed-paths（allowedScope 越界）检查；报告里没有这条检查时缺省。 */
+  readonly changedPaths?: {
+    readonly passed: boolean;
+    readonly violations: readonly string[];
+  };
+}
+
+/** 失败命令输出保留的尾巴长度；与 MissionView.submittedEvidence 同一口径。 */
+const VALIDATION_REPORT_OUTPUT_TAIL = 1000;
+
+/** 验证简版索引键：workItemId + 提交 attempt。id 里不可能有 NUL，键不会撞。 */
+function validationReportKey(workItemId: string, submittedAttemptId: string): string {
+  return `${workItemId}\u0000${submittedAttemptId}`;
+}
+
+/**
+ * ValidationReport → 只读简版。
+ *
+ * 输出先 redactSecrets 再 slice(-1000)：顺序反了会把截出来的尾巴里的 token
+ * 明文露出去。
+ */
+function validationReportView(report: ValidationReport): ValidationReportView {
+  const commands: ValidationReportCommandView[] = [];
+  for (const check of report.checks) {
+    if (check.kind !== 'command') continue;
+    const command = check.command;
+    const tail = command?.outputTail;
+    const outputTail =
+      check.passed || tail === undefined
+        ? undefined
+        : redactSecrets(tail).slice(-VALIDATION_REPORT_OUTPUT_TAIL);
+    commands.push({
+      passed: check.passed,
+      durationMs: command?.durationMs ?? 0,
+      ...(outputTail !== undefined ? { outputTail } : {}),
+    });
+  }
+  const changed = report.checks.find((check) => check.kind === 'changed-paths');
+  const changedPaths = changed?.changedPaths;
+  return {
+    reportId: report.id,
+    passed: report.passed,
+    commands,
+    ...(changed !== undefined && changedPaths !== undefined
+      ? {
+          changedPaths: {
+            passed: changed.passed,
+            violations: changedPaths.violations.map((path) => redactSecrets(path)),
+          },
+        }
+      : {}),
+  };
+}
+
+/**
  * agent 紧凑视图里的工作项索引：只给「编号/标题/状态/执行次数/最后评审 verdict」，
  * 不含工单正文、执行结果或评审理由——那些按需按 id 取（getAgentWorkItem）。
  * 抽成 module 级只读 helper，协调者简报后续可复用同一份投影。
@@ -6678,18 +7133,27 @@ export interface AgentWorkItemIndexEntry {
   readonly attempts: number;
   readonly attemptIds: readonly string[];
   readonly lastReviewVerdict: 'accept' | 'reject' | undefined;
+  /** 最近一次交卷的机器验证简版；没有报告时整格缺省（不臆造）。 */
+  readonly validationReport?: ValidationReportView;
 }
 
-function agentWorkItemIndex(mission: Mission): readonly AgentWorkItemIndexEntry[] {
-  return mission.workItems.map((item) => ({
-    id: item.id,
-    title: item.title,
-    status: item.status,
-    planRevision: item.planRevision,
-    attempts: item.attempts.length,
-    attemptIds: item.attempts.map((a) => a.id),
-    lastReviewVerdict: item.reviews.at(-1)?.verdict,
-  }));
+function agentWorkItemIndex(
+  mission: Mission,
+  validationReports?: ReadonlyMap<string, ValidationReportView>,
+): readonly AgentWorkItemIndexEntry[] {
+  return mission.workItems.map((item) => {
+    const validationReport = validationReports?.get(item.id);
+    return {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      planRevision: item.planRevision,
+      attempts: item.attempts.length,
+      attemptIds: item.attempts.map((a) => a.id),
+      lastReviewVerdict: item.reviews.at(-1)?.verdict,
+      ...(validationReport !== undefined ? { validationReport } : {}),
+    };
+  });
 }
 
 /**
@@ -6766,6 +7230,12 @@ export interface AgentWorkItemView {
   readonly evidenceSummary: readonly AgentWorkItemEvidenceSummary[];
   /** 历次 execution_result.submitted 的现存元数据；早于最新的标「旧正文未保存」。 */
   readonly submissionSummaries: readonly AgentWorkItemSubmissionSummary[];
+  /**
+   * 最近一次交卷的机器验证简版（W-321 落盘报告）。不是 Evidence，也不是
+   * validator accept；没有报告时不带这一格。受下面 20 KB 上限约束：极端超限时
+   * 只保索引字段与历史提交摘要，它会被丢掉。
+   */
+  readonly validationReport?: ValidationReportView;
   /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
   readonly truncated: boolean;
 }
@@ -6841,6 +7311,7 @@ function buildAgentWorkItemView(
   order: WorkOrder | undefined,
   executionResult: ExecutionResultBody | undefined,
   submissionSummaries: readonly AgentWorkItemSubmissionSummary[],
+  validationReport: ValidationReportView | undefined,
 ): AgentWorkItemView {
   // 外显文本先统一深层脱敏：order / executionResult / reviews / title 都可能含凭据。
   const redactedTitle = redactSecrets(item.title);
@@ -6895,6 +7366,7 @@ function buildAgentWorkItemView(
       reviews: cappedReviews,
       evidenceSummary,
       submissionSummaries: redactedSubmissionSummaries,
+      ...(validationReport !== undefined ? { validationReport } : {}),
       truncated: false,
     };
   };
@@ -6997,7 +7469,10 @@ function buildAgentWorkItemView(
   return tryFallback();
 }
 
-function viewOf(mission: Mission): MissionView {
+function viewOf(
+  mission: Mission,
+  validationReports?: ReadonlyMap<string, ValidationReportView>,
+): MissionView {
   return {
     missionId: mission.id,
     projectId: mission.projectId,
@@ -7020,45 +7495,51 @@ function viewOf(mission: Mission): MissionView {
     contract: mission.contract,
     planRevision: mission.planRevision,
     plan: mission.plan,
-    workItems: mission.workItems.map((item) => ({
-      id: item.id,
-      title: item.title,
-      status: item.status,
-      hasResult: item.hasResult,
-      // 拆它时的规划版本（S05.2）。和 Mission 当前的 planRevision 不同
-      // 就说明规划在它之后改过——检视时这是必须看得见的。
-      planRevision: item.planRevision,
-      attempts: item.attempts.length,
-      attemptIds: item.attempts.map((a) => a.id),
-      lastReview: item.reviews.at(-1),
-      // submitted：只投影最新提交 attempt（item.submittedAttemptId）的证据，脱敏后再截尾。
-      // 先 redactSecrets 再 slice(-1000)——顺序反了会把截出来的尾巴里的 token 明文露出去。
-      ...(item.status === 'submitted' && item.submittedAttemptId !== undefined
-        ? {
-            submittedEvidence: (item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence ?? []).map(
-              (e) => ({
-                command: e.command !== undefined ? redactSecrets(e.command) : undefined,
-                exitCode: e.exitCode,
-                summary: redactSecrets(e.summary),
-                outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-1000),
-              }),
-            ),
-          }
-        : {}),
-      // accepted / rejected：只给证据条数和验收结论，不泄露证据输出。
-      ...((item.status === 'accepted' || item.status === 'rejected')
-        ? {
-            reviewSummary: {
-              evidenceCount: item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence.length ?? 0,
-              verdict: item.status === 'accepted' ? 'accept' : 'reject',
-            },
-          }
-        : {}),
-      // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
-      // 光有 title 和一个 hasResult 布尔量回答不了。
-      order: item.order,
-      executionResult: item.executionResult,
-    })),
+    workItems: mission.workItems.map((item) => {
+      const validationReport = validationReports?.get(item.id);
+      return {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        hasResult: item.hasResult,
+        // 拆它时的规划版本（S05.2）。和 Mission 当前的 planRevision 不同
+        // 就说明规划在它之后改过——检视时这是必须看得见的。
+        planRevision: item.planRevision,
+        attempts: item.attempts.length,
+        attemptIds: item.attempts.map((a) => a.id),
+        lastReview: item.reviews.at(-1),
+        // submitted：只投影最新提交 attempt（item.submittedAttemptId）的证据，脱敏后再截尾。
+        // 先 redactSecrets 再 slice(-1000)——顺序反了会把截出来的尾巴里的 token 明文露出去。
+        ...(item.status === 'submitted' && item.submittedAttemptId !== undefined
+          ? {
+              submittedEvidence: (item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence ?? []).map(
+                (e) => ({
+                  command: e.command !== undefined ? redactSecrets(e.command) : undefined,
+                  exitCode: e.exitCode,
+                  summary: redactSecrets(e.summary),
+                  outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-1000),
+                }),
+              ),
+            }
+          : {}),
+        // accepted / rejected：只给证据条数和验收结论，不泄露证据输出。
+        ...((item.status === 'accepted' || item.status === 'rejected')
+          ? {
+              reviewSummary: {
+                evidenceCount: item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence.length ?? 0,
+                verdict: item.status === 'accepted' ? 'accept' : 'reject',
+              },
+            }
+          : {}),
+        // 机器验证简版：与提交严格按 workItemId + 当前 submittedAttemptId 对应，
+        // 写读同一份只读投影（见 validationReportView）。
+        ...(validationReport !== undefined ? { validationReport } : {}),
+        // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
+        // 光有 title 和一个 hasResult 布尔量回答不了。
+        order: item.order,
+        executionResult: item.executionResult,
+      };
+    }),
     result: mission.result,
     escalations: mission.escalations.length,
     openEscalations: [...mission.openEscalations],
