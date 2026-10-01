@@ -2828,16 +2828,20 @@ export class Platform {
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
     claim?: QueueClaimIdentity,
-  ): Promise<{ workItemId: string }> {
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{ workItemId: string; warnings: readonly WorkOrderStandardWarning[] }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#attemptWrite(missionId, attemptId, claim, () => this.#createWorkItem(missionId, attemptId, input));
+    return this.#attemptWrite(missionId, attemptId, claim, () =>
+      this.#createWorkItem(missionId, attemptId, input, options),
+    );
   }
 
   async #createWorkItem(
     missionId: string,
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
-  ): Promise<{ workItemId: string }> {
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{ workItemId: string; warnings: readonly WorkOrderStandardWarning[] }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     if (mission.planRevision === 0) {
       throw new PlatformRuleError(
@@ -2847,8 +2851,17 @@ export class Platform {
     }
     const workItemId = input.workItemId ?? this.#ids.next('W');
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
-    await this.#event(mission, 'work_item.created', { title: input.title }, workItemId, attemptId);
-    return { workItemId };
+    // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
+    // 只审计、不硬拒——超限的工单照常建出来，由协调者照建议拆单/补引用。
+    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(input.order) : [];
+    await this.#event(
+      mission,
+      'work_item.created',
+      { title: input.title, ...(warnings.length ? { warnings } : {}) },
+      workItemId,
+      attemptId,
+    );
+    return { workItemId, warnings };
   }
 
   /**
@@ -2867,10 +2880,16 @@ export class Platform {
     workItemId: string,
     order: WorkOrder,
     claim?: QueueClaimIdentity,
-  ): Promise<{ workItemId: string; revision: string; changedFields: readonly string[] }> {
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{
+    workItemId: string;
+    revision: string;
+    changedFields: readonly string[];
+    warnings: readonly WorkOrderStandardWarning[];
+  }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#attemptWrite(missionId, attemptId, claim, () =>
-      this.#reviseWorkOrder(missionId, attemptId, workItemId, order),
+      this.#reviseWorkOrder(missionId, attemptId, workItemId, order, options),
     );
   }
 
@@ -2879,7 +2898,13 @@ export class Platform {
     attemptId: string,
     workItemId: string,
     order: WorkOrder,
-  ): Promise<{ workItemId: string; revision: string; changedFields: readonly string[] }> {
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{
+    workItemId: string;
+    revision: string;
+    changedFields: readonly string[];
+    warnings: readonly WorkOrderStandardWarning[];
+  }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     const item = mission.workItem(workItemId);
     if (!item) {
@@ -2897,16 +2922,19 @@ export class Platform {
     const changedFields = orderChangedFields(item.order, order);
     item.reviseOrder(order);
     const revision = item.order?.orderRevision ?? 'r1';
+    // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
+    // 只审计、不硬拒——超限的修订照常生效，由协调者照建议拆单/补引用。
+    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(order) : [];
     // 只记修订号与字段名，不把工单全文写进事件：事件流是给人看的，
-    // 全文会在每条时间线上重复一遍工单。
+    // 全文会在每条时间线上重复一遍工单。超工单标准的警告一并带上，不另造事件种类。
     await this.#event(
       mission,
       'work_item.order_revised',
-      { revision, changedFields },
+      { revision, changedFields, ...(warnings.length ? { warnings } : {}) },
       workItemId,
       attemptId,
     );
-    return { workItemId, revision, changedFields };
+    return { workItemId, revision, changedFields, warnings };
   }
 
   /**
@@ -6099,6 +6127,57 @@ function orderChangedFields(
     if (before !== after) changed.push(field);
   }
   return changed.sort();
+}
+
+/**
+ * 工单违背「工单标准」（用户 2026-10-01）时的软警告项。
+ *
+ * 只审计、不硬拒：协调者工具路径仍照常成功，警告随建单/修订事件一并记录，
+ * 由协调者照建议拆单或补文件引用。直接调用 Platform 不触发此检查。
+ */
+export interface WorkOrderStandardWarning {
+  /** 违规项：允许改动范围过大、验证超过两条、最小上下文缺失。 */
+  readonly rule: 'allowedScope' | 'verification' | 'contextRefs';
+  /** 给协调者的一句能照做的下一步（拆单 / 补文件引用建议）。 */
+  readonly suggestion: string;
+}
+
+/**
+ * 纯校验：工单是否超出「工单标准」又不至于硬拒。
+ *
+ * 规则放在 Platform 而非 HTTP handler：两个 coordinator 工具共用同一份真话。
+ * 仅按末尾扩展名识别文件、把纯目录路径剔除——目录不得冒充文件；
+ * 不发明任何新硬拒，所有命中项都只是软警告。
+ */
+function checkWorkOrderStandard(order: WorkOrder): WorkOrderStandardWarning[] {
+  const warnings: WorkOrderStandardWarning[] = [];
+  const files = (order.allowedScope ?? []).filter((p) => /\.[^/]+$/.test(p));
+  const dirs = (order.allowedScope ?? []).filter((p) => !/\.[^/]+$/.test(p));
+  if (files.length + dirs.length > 2) {
+    warnings.push({
+      rule: 'allowedScope',
+      suggestion:
+        'allowedScope 超过 2 项：一张工单只做一个行为、改 1–2 个文件，请拆成多张工单。',
+    });
+  } else if (dirs.length > 0) {
+    warnings.push({
+      rule: 'allowedScope',
+      suggestion: 'allowedScope 含纯目录路径，不得冒充文件：请列出具体文件（带扩展名）。',
+    });
+  }
+  if ((order.verification ?? []).length > 2) {
+    warnings.push({
+      rule: 'verification',
+      suggestion: 'verification 超过 2 条：每条验收 1–2 条验证即可，请精简或拆单。',
+    });
+  }
+  if ((order.contextRefs ?? []).length === 0) {
+    warnings.push({
+      rule: 'contextRefs',
+      suggestion: 'contextRefs 为空：至少给出最小充分上下文（文件行段或 Living Spec 引用）。',
+    });
+  }
+  return warnings;
 }
 
 /**

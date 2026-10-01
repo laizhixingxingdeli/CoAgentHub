@@ -706,6 +706,8 @@ export function createApi(deps: ApiDeps): Server {
           order: order as never,
         },
         run.claim,
+        // 经协调者 HTTP 工具创建：开启工单标准软警告审计，但不改变行为。
+        { viaCoordinatorTool: true },
       );
     },
 
@@ -737,6 +739,8 @@ export function createApi(deps: ApiDeps): Server {
         workItemId,
         order as never,
         run.claim,
+        // 经协调者 HTTP 工具修订：开启工单标准软警告审计，但不改变行为。
+        { viaCoordinatorTool: true },
       );
     },
 
