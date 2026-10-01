@@ -697,6 +697,20 @@ const EVENT_TABLE = {
     detail: '调度器可以再碰它了',
   }),
 
+  /*
+   * 执行前记下的 diff 比较基线（platform 在派发时写，data.head 是那个版本号）。
+   * 这是「之后验什么」的参照点，不是验证结论：动作只能写成记基线，
+   * 写成「验证通过」/「工作项已接受」会让时间线把还没发生的事说成发生了。
+   */
+  'work_item.validation_baseline_recorded': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '记下验证基线',
+      detail: `执行前基线 ${or(data.head, '（没有基线版本）')}`,
+    };
+  },
+
   'validation.reported': (event) => {
     const data = (event && event.data) || {};
     return {
