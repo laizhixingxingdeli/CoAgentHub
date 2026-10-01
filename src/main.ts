@@ -59,7 +59,7 @@ import {
   PERIODIC_RECONCILE_LOCK_KEY2,
   tryPgAdvisoryLock,
 } from './application/pg-store.ts';
-import { acquireLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
+import { acquireLock, acquireRecoverableLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
 import { attachLoopbackWriterIdentity, listenLoopback } from './application/loopback-listen.ts';
 import {
   parseReconcileIntervalMs,
@@ -258,7 +258,7 @@ export async function buildPersistentPlatform(
       ? { instanceId: options.exclusive.instanceId, apiVersion: options.exclusive.apiVersion }
       : undefined;
   const releaseLock = options.exclusive
-    ? acquireLock(statePath, options.exclusive.what, exclusiveIdentity)
+    ? await acquireRecoverableLock(statePath, options.exclusive.what, exclusiveIdentity)
     : () => {};
   try {
   const clock = new SystemClock();

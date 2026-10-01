@@ -14,7 +14,7 @@
 import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { listPlanRuns } from './plan-run-store.ts';
+import { listPlanRuns, type PlanRunListOk } from './plan-run-store.ts';
 import type { PlanCandidateSelection, PlanSpec } from './plan-spec.ts';
 
 const run = promisify(execFile);
@@ -76,29 +76,33 @@ export function preflightPlanMissionSlots(input: {
   for (const feature of input.selection.candidates) {
     candidateCounts.set(feature.id, (candidateCounts.get(feature.id) ?? 0) + 1);
   }
-  const validRuns = history.filter((item) => !('error' in item) && item.planId === input.plan.planId &&
-    item.projectId === input.plan.projectId && item.stopped?.reason === 'reviewer_stop');
-  const claims = holders.flatMap((holder) => validRuns.flatMap((run) => run.features
-    .filter((feature) => feature.missionIds.includes(holder.missionId))
-    .map((feature) => ({ holder, run, feature }))));
-  const claimCounts = new Map<string, number>();
+  const validRuns = history
+    .filter((item): item is PlanRunListOk => !('error' in item) && item.planId === input.plan.planId &&
+      item.projectId === input.plan.projectId && item.stopped?.reason === 'reviewer_stop')
+    .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  // 同一 Mission 被叫停两次后第三次仍要能续跑：每个 holder 只认 startedAt 最新的那条
+  // 叫停记录作为有效认领，早先的同 Mission 记录是「曾经」占过，不该算成第二个冲突认领。
+  // 一份最新记录里同 Mission 的 feature 多于一个，才是真的分不清，仍按冲突阻断。
+  const claims = holders.map((holder) => {
+    const run = validRuns.find((item) => item.features.some((feature) => feature.missionIds.includes(holder.missionId)));
+    const matched = run?.features.filter((feature) => feature.missionIds.includes(holder.missionId)) ?? [];
+    return { holder, feature: matched.length === 1 ? matched[0] : undefined };
+  });
   const featureHolderCounts = new Map<string, number>();
   for (const claim of claims) {
-    claimCounts.set(claim.holder.missionId, (claimCounts.get(claim.holder.missionId) ?? 0) + 1);
+    if (claim.feature === undefined) continue;
     featureHolderCounts.set(claim.feature.featureId, (featureHolderCounts.get(claim.feature.featureId) ?? 0) + 1);
   }
-  for (const mission of holders) {
-    const matching = claims.filter((claim) => claim.holder.missionId === mission.missionId);
-    const claim = matching[0];
-    const unique = !historyErrors && matching.length === 1 && claim !== undefined &&
-      claimCounts.get(mission.missionId) === 1 && featureHolderCounts.get(claim.feature.featureId) === 1 &&
-      candidateCounts.get(claim.feature.featureId) === 1 &&
-      claim.feature.missionIds.length === 1 && claim.feature.missionIds[0] === mission.missionId &&
-      holders.filter((other) => other.missionId === mission.missionId).length === 1;
-    if (unique && mission.paused && mission.status === 'executing') {
-      resume.push({ featureId: claim.feature.featureId, missionId: mission.missionId });
+  for (const { holder, feature } of claims) {
+    const unique = !historyErrors && feature !== undefined &&
+      feature.missionIds.length === 1 && feature.missionIds[0] === holder.missionId &&
+      featureHolderCounts.get(feature.featureId) === 1 &&
+      candidateCounts.get(feature.featureId) === 1 &&
+      holders.filter((other) => other.missionId === holder.missionId).length === 1;
+    if (unique && holder.paused && holder.status === 'executing') {
+      resume.push({ featureId: feature.featureId, missionId: holder.missionId });
     } else {
-      problems.push(...slotHolders([mission], input.plan.projectId));
+      problems.push(...slotHolders([holder], input.plan.projectId));
     }
   }
   return { problems, resume };

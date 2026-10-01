@@ -16,7 +16,7 @@
  */
 
 import { KernelError } from '../kernel/index.ts';
-import type { ComplexityAssessment, MissionContract, OriginChannel, WorkOrder } from '../kernel/index.ts';
+import type { ComplexityAssessment, MissionContract, OriginChannel, WaitReason, WorkOrder } from '../kernel/index.ts';
 import { ClassifiedMissionInputError } from './classified-mission-intake.ts';
 import type { MissionRunOutcome } from './orchestrator.ts';
 import type { HaReleaseDecision, PlanRun, PlanRunStop } from './plan-run.ts';
@@ -24,6 +24,26 @@ import { decideRoute, type RoutingDecision, type RoutingProposal } from './plan-
 import type { ClassificationResult } from './task-classifier.ts';
 import { featureContract, type PlanFeatureSpec, type PlanSpec } from './plan-spec.ts';
 import { PlatformRuleError } from './platform.ts';
+
+/**
+ * 探针说「这条 waiting 等得到头」的结构化证明。
+ *
+ * **刻意不给「project_busy 就是自己占名额」这种从字样推出来的结论。** 同一个
+ * reason 既可能是本 Mission 自己另一个在途工作项占着名额（该等），也可能是别的
+ * Mission 在改代码（等不到头）。分不出来就会白等一整晚，或者把自己的 Mission
+ * 当成失败开单——所以探针必须自己去队列 / 占位记录里查出属于本 Mission 的证据，
+ * 查不到就返回 undefined。
+ */
+export type WaitEligibility =
+  /** 本 Mission 自己的 Hop 在退避：availableAt 到点重试同一条即可。 */
+  | { readonly kind: 'own_backoff'; readonly availableAt: string }
+  /**
+   * 本 Mission 自己占着改动名额（自己另一个在途工作项）：只能短轮询复核，
+   * 不猜它什么时候完工——猜一个到期就等成了赌。
+   */
+  | { readonly kind: 'capacity'; readonly nextPollAt: string }
+  /** 该角色**全部**候选都在冷却（已证明没有可用的同角色候选）：最早到期即重试时刻。 */
+  | { readonly kind: 'role_cooldown'; readonly earliestUntil: string };
 
 export interface PlanDriverDeps {
   readonly store: {
@@ -126,6 +146,18 @@ export interface PlanDriverDeps {
   readonly projectRoot: string;
   readonly now: () => string;
   readonly sleep: (ms: number) => Promise<void>;
+  /**
+   * 可选：判一条 waiting 是不是「本 Mission 在运行内等得到头」。缺省不等待，
+   * 照旧开升级单——没有证明就等，等于把整晚押在一条猜出来的原因上。
+   * 生产接线（从队列行里取证据）留给后续票，这里只认结构化证明。
+   */
+  readonly waitEligibility?: (input: {
+    readonly missionId: string;
+    readonly reason: WaitReason;
+    readonly detail: string;
+    /** 仅当本次 waiting 确由该角色的候选拿不出人时随附；缺席表示非候选故障。 */
+    readonly candidateRole?: Extract<MissionRunOutcome, { kind: 'waiting' }>['candidateRole'];
+  }) => Promise<WaitEligibility | undefined>;
   readonly log: (line: string) => void;
   /** 等决定时多久看一次记录。缺省 15 秒——检视者 20 分钟才醒一次，看勤了也没用。 */
   readonly pollMs?: number;
@@ -296,6 +328,9 @@ async function runFeature(
   for (;;) {
   const outcome = await deps.runMission(missionId, { wallClockDeadline });
   if (requireRun(deps).stopped) return;
+  const retry = await waitForEligibleRetry(feature, missionId, outcome, deps);
+  if (retry === 'stopped') return;
+  if (retry === 'retry') continue;
   const landing = await land(plan, missionId, outcome, deps);
 
   if (landing.kind === 'ha_pending') {
@@ -669,6 +704,98 @@ async function land(
     };
   }
   return { kind: 'failed', failure: `机器合并失败：${result.reason ?? '（没给原因）'}` };
+}
+
+/** 只有这两类 waiting 值得探一次资格：名额被占、没有可用候选。其余（等 L3 答复、
+ * 基线过期、墙钟）要么等不到头，要么探针也证明不了，照旧走原升级处置。 */
+function isRetryEligibleWaitReason(reason: WaitReason): boolean {
+  return reason === 'project_busy' || reason === 'no_available_agent';
+}
+
+/**
+ * 角色全冷却最多等这一刻钟。再长就不是「马上就好」，而是真缺人；拿整晚去等一个
+ * 可能变不回来的冷却，不如照旧开单让人看。
+ */
+const MAX_ROLE_COOLDOWN_WAIT_MS = 15 * 60_000;
+
+/**
+ * 这条 waiting 是不是本 Mission 在**本次循环内**等得到头的？是就睡到点，续跑同一条；
+ * 否则交回 land 走原升级处置。
+ *
+ * 三种等得到头：本 Mission 自己另一个在途工作项占着改动名额（capacity）、自己的
+ * Hop 在退避（own_backoff）、该角色候选全在短冷却（role_cooldown）。这三种开升级单
+ * 只是自己挡自己（第 32 波 PLAT3 的 E-4）。
+ *
+ * **归属与冷却只认探针给的结构化证据。** `project_busy` 这几个字既可能是自己占着
+ * 名额，也可能是别的 Mission 在改代码，光看字样分不出来；猜错了要么白等一整晚，
+ * 要么把自己的 Mission 当失败开单。所以没有探针 / 探针说不知道，一律走原路。
+ *
+ * 等待期间每轮先读 stopped、再看墙钟：墙钟到点就 checkStop 并停手，**不再调用**
+ * 下一次 runMission——在途的那条交给 checkStop 挂起，第二天人还能看一眼。
+ */
+async function waitForEligibleRetry(
+  feature: PlanFeatureSpec,
+  missionId: string,
+  outcome: MissionRunOutcome,
+  deps: PlanDriverDeps,
+): Promise<'retry' | 'stopped' | 'land'> {
+  if (outcome.kind !== 'waiting') return 'land';
+  if (!isRetryEligibleWaitReason(outcome.reason)) return 'land';
+  const probe = deps.waitEligibility;
+  if (!probe) return 'land';
+  const eligibility = await probe(
+    outcome.candidateRole !== undefined
+      ? { missionId, reason: outcome.reason, detail: outcome.detail, candidateRole: outcome.candidateRole }
+      : { missionId, reason: outcome.reason, detail: outcome.detail },
+  );
+  if (!eligibility) return 'land';
+  const now = deps.now();
+  let dueAt = Number.NaN;
+  switch (eligibility.kind) {
+    case 'own_backoff':
+      dueAt = Date.parse(eligibility.availableAt);
+      break;
+    case 'capacity':
+      dueAt = Date.parse(eligibility.nextPollAt);
+      break;
+    case 'role_cooldown':
+      dueAt = Date.parse(eligibility.earliestUntil);
+      // 超出这一刻钟的冷却不是「马上就好」，不拿运行去等。
+      if (dueAt > Date.parse(now) + MAX_ROLE_COOLDOWN_WAIT_MS) return 'land';
+      break;
+  }
+  // 日期读不懂（废字符串）时当没有证明：宁可开单让人看，也别拿坏数据空等。
+  if (!Number.isFinite(dueAt)) return 'land';
+  deps.log(
+    `${feature.id} ⏳ ${outcome.reason}：${describeWaitEligibility(eligibility)}，续跑 ${missionId}，不开升级单。`,
+  );
+  const pollMs = deps.pollMs ?? 15_000;
+  for (;;) {
+    const current = requireRun(deps);
+    if (current.stopped) return 'stopped';
+    const round = deps.now();
+    if (wallClockReached(current, round)) {
+      await deps.store.update((r) => r.checkStop(round));
+      return 'stopped';
+    }
+    const remaining = dueAt - Date.parse(round);
+    if (remaining <= 0) return 'retry';
+    const untilWallClock =
+      Date.parse(current.startedAt) + current.stopConditions.wallClockMs - Date.parse(round);
+    // 睡到三者最近的：到点复核、轮询太细没意义、墙钟到点前必须醒。
+    await deps.sleep(Math.max(1, Math.min(pollMs, remaining, untilWallClock)));
+  }
+}
+
+function describeWaitEligibility(eligibility: WaitEligibility): string {
+  switch (eligibility.kind) {
+    case 'own_backoff':
+      return `本 Mission 自己的 Hop 退避到 ${eligibility.availableAt}`;
+    case 'capacity':
+      return `本 Mission 自己占着改动名额，${eligibility.nextPollAt} 再复核`;
+    case 'role_cooldown':
+      return `该角色候选全在冷却，最早 ${eligibility.earliestUntil} 到期`;
+  }
 }
 
 /**

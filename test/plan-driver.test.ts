@@ -115,6 +115,8 @@ function harness(options?: {
   maxEscalations?: number;
   maxRerunsPerFeature?: number;
   resumeMissions?: Record<string, string>;
+  /** 等待资格探针：由测试给出证实的自身退避 / 容量短轮询 / 角色全冷却证明。 */
+  waitEligibility?: PlanDriverDeps['waitEligibility'];
   /** 让 harness 改用真实内存 Platform 来落建单与路由事件（HAOFF1 回落端到端验证专用）。 */
   realPlatform?: Platform;
   /** 仅在注入 realPlatform 时调用：建单后插一笔。 */
@@ -165,6 +167,7 @@ function harness(options?: {
 
   const deps: PlanDriverDeps = {
     ...(options?.resumeMissions ? { resumeMissions: options.resumeMissions } : {}),
+    ...(options?.waitEligibility ? { waitEligibility: options.waitEligibility } : {}),
     store: {
       read: () => store.read(),
       update: async (mutate) => {
@@ -1598,6 +1601,156 @@ describe('失败了开升级单等检视者', () => {
     assert.ok(!h.calls.includes('abandon R1-F3 E-3'), '已经终结的不用再放弃');
     assert.ok(!h.calls.some((c) => c.startsWith('answer')), '旧动作不走 answerEscalation');
     assert.ok(!h.calls.some((c) => c.startsWith('finalize')), '没交卷的不走机器 L3');
+  });
+});
+
+describe('等得到头的 waiting 在运行内续跑，不开升级单', () => {
+  test('本 Mission 自己退避 availableAt：睡到点后同 missionId 续跑合入、零升级单；容量等待中墙钟到点不再调用 runMission', async () => {
+    // 场景一：探针证实是自己的 Hop 在退避 → 睡到 availableAt 再跑同一条。
+    const slept: number[] = [];
+    let cursor = Date.parse(T0);
+    let probeAt = T0;
+    const h = harness({
+      features: ['F1'],
+      pollMs: MIN,
+      runs: {
+        'R1-F1': [
+          {
+            outcome: {
+              kind: 'waiting',
+              reason: 'project_busy',
+              detail: '队列 Hop H1 失败后退避中，availableAt=2026-09-23T22:32:00.000Z，count=1/3，不能启动 Agent',
+            },
+            status: 'executing',
+          },
+          { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' },
+        ],
+      },
+      onMissionReturn: async ({ now }) => {
+        probeAt = now;
+        cursor = Date.parse(now);
+      },
+      onSleep: async ({ now }) => {
+        slept.push(Date.parse(now) - cursor);
+        cursor = Date.parse(now);
+      },
+      waitEligibility: async ({ missionId, reason }) => {
+        assert.equal(missionId, 'R1-F1');
+        assert.equal(reason, 'project_busy');
+        return { kind: 'own_backoff', availableAt: new Date(Date.parse(probeAt) + 2 * MIN).toISOString() };
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(h.calls.filter((call) => call.startsWith('run ')), ['run R1-F1', 'run R1-F1']);
+    assert.deepEqual(slept, [MIN, MIN], '睡到 availableAt 为止，不提前也不空转');
+    assert.equal(h.store.read()!.escalations.length, 0, '等得到头就不开升级单');
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+    assert.ok(h.logs.some((line) => line.includes('续跑 R1-F1，不开升级单')));
+
+    // 场景二：本 Mission 自己占着名额（容量只能短轮询，不猜到期），等到头之前墙钟到点
+    // → checkStop 就停手，不再调用 runMission。
+    const wallSlept: number[] = [];
+    let wallCursor = Date.parse(T0);
+    let wallProbeAt = T0;
+    const w = harness({
+      features: ['F1'],
+      pollMs: 5 * MIN,
+      wallClockMs: 40 * MIN,
+      runs: {
+        'R1-F1': [
+          {
+            outcome: {
+              kind: 'waiting',
+              reason: 'project_busy',
+              detail: '同一 Project 有别的 Mission 正占着改动名额。',
+            },
+            status: 'executing',
+          },
+        ],
+      },
+      onMissionReturn: async ({ now }) => {
+        wallProbeAt = now;
+        wallCursor = Date.parse(now);
+      },
+      onSleep: async ({ now }) => {
+        wallSlept.push(Date.parse(now) - wallCursor);
+        wallCursor = Date.parse(now);
+      },
+      waitEligibility: async () => ({
+        kind: 'capacity',
+        nextPollAt: new Date(Date.parse(wallProbeAt) + 60 * MIN).toISOString(),
+      }),
+    });
+    await w.start();
+    const wallStop = await drivePlan(w.plan, w.deps);
+    assert.equal(wallStop.reason, 'wall_clock');
+    assert.deepEqual(w.calls.filter((call) => call.startsWith('run ')), ['run R1-F1'], '墙钟到点不再调用 runMission');
+    assert.deepEqual(wallSlept, [5 * MIN, 5 * MIN]);
+    assert.equal(w.store.read()!.feature('F1')?.status, 'suspended');
+  });
+
+  test('角色全冷却最早 5 分钟到期：等到点续跑同 missionId、零升级单；探针没证明则保留原升级', async () => {
+    const cooldownSlept: number[] = [];
+    let cooldownCursor = Date.parse(T0);
+    let cooldownProbeAt = T0;
+    const h = harness({
+      features: ['F1'],
+      pollMs: MIN,
+      runs: {
+        'R1-F1': [
+          { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '协调者候选池全在冷却', candidateRole: 'coordinator' }, status: 'executing' },
+          { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' },
+        ],
+      },
+      onMissionReturn: async ({ now }) => {
+        cooldownProbeAt = now;
+        cooldownCursor = Date.parse(now);
+      },
+      onSleep: async ({ now }) => {
+        cooldownSlept.push(Date.parse(now) - cooldownCursor);
+        cooldownCursor = Date.parse(now);
+      },
+      waitEligibility: async ({ missionId, reason, candidateRole }) => {
+        assert.equal(missionId, 'R1-F1');
+        assert.equal(reason, 'no_available_agent');
+        assert.equal(candidateRole, 'coordinator');
+        return { kind: 'role_cooldown', earliestUntil: new Date(Date.parse(cooldownProbeAt) + 5 * MIN).toISOString() };
+      },
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+    assert.deepEqual(h.calls.filter((call) => call.startsWith('run ')), ['run R1-F1', 'run R1-F1']);
+    assert.deepEqual(cooldownSlept, [MIN, MIN, MIN, MIN, MIN], '短冷却睡到最早到期，不真实睡五分钟');
+    assert.equal(h.store.read()!.escalations.length, 0, '短冷却等得到头，不开升级单');
+    assert.equal(h.store.read()!.feature('F1')?.status, 'merged');
+
+    // 探针被问到但说不知道 → 不拿 reason 字样当证明，照旧开升级单。
+    let probed = 0;
+    const n = harness({
+      features: ['F1'],
+      runs: {
+        'R1-F1': [
+          { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '候选池没有可用的了' }, status: 'executing' },
+        ],
+      },
+      waitEligibility: async (input) => {
+        assert.equal(input.candidateRole, undefined, '无标记的 waiting 不伪造角色');
+        probed += 1;
+        return undefined;
+      },
+      onSleep: reviewerDecides('skip'),
+    });
+    await n.start();
+    const noProofStop = await drivePlan(n.plan, n.deps);
+    assert.equal(noProofStop.reason, 'finished');
+    assert.equal(probed, 1, '探针被问过，但它没给出证明');
+    assert.deepEqual(n.calls.filter((call) => call.startsWith('run ')), ['run R1-F1']);
+    const run = n.store.read()!;
+    assert.equal(run.escalations.length, 1);
+    assert.match(run.escalations[0].failure, /Mission 停在 no_available_agent：候选池没有可用的了/);
   });
 });
 

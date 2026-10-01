@@ -12,7 +12,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -21,8 +21,10 @@ import { basename, dirname, join } from 'node:path';
 import {
   LockBusyError,
   acquireLock,
+  acquireRecoverableLock,
   probeLocalWriter,
   publishLockPort,
+  readLockAudit,
   stateIdFor,
   type LockInfo,
 } from '../src/application/lock.ts';
@@ -55,6 +57,10 @@ function tempState(): string {
   const dir = mkdtempSync(join(tmpdir(), 'coagent-lock-'));
   dirs.push(dir);
   return join(dir, 'state.json');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function lockDirOf(statePath: string): string {
@@ -226,6 +232,105 @@ describe('单写者锁', () => {
     const before = process.listenerCount('exit');
     for (let i = 0; i < 20; i += 1) acquireLock(statePath, `第 ${i} 次`)();
     assert.equal(process.listenerCount('exit'), before);
+  });
+});
+
+describe('主锁心跳', () => {
+  test('新锁带 heartbeatAt：短间隔前移，释放后定时器不再动锁', async () => {
+    const statePath = tempState();
+    const release = acquireLock(statePath, '心跳', undefined, { heartbeatIntervalMs: 10 });
+    let stoppedAt = '';
+    try {
+      const born = readHolderFile(statePath);
+      assert.equal(typeof born.heartbeatAt, 'string');
+      assert.ok(
+        Number.isFinite(Date.parse(born.heartbeatAt as string)),
+        'heartbeatAt 必须是可解析的时间',
+      );
+      assert.equal(born.pid, process.pid);
+      assert.equal(born.what, '心跳');
+
+      await delay(80);
+      const beating = readHolderFile(statePath);
+      assert.ok(
+        Date.parse(beating.heartbeatAt as string) > Date.parse(born.heartbeatAt as string),
+        `持锁期间心跳应当前移：${born.heartbeatAt} → ${beating.heartbeatAt}`,
+      );
+      // 心跳只改时间：持有者身份与用途不能被刷掉。
+      assert.equal(beating.pid, process.pid);
+      assert.equal(beating.what, '心跳');
+      stoppedAt = beating.heartbeatAt as string;
+    } finally {
+      release();
+    }
+    assert.ok(!existsSync(lockDirOf(statePath)), '释放仍要删掉自己的锁');
+
+    // 放一把「同进程」的假锁回去：若 release 没停掉定时器，旧回调会把它当成
+    // 自己的锁接着刷——这正是「释放后还在动锁」要防的样子。
+    const lockPath = lockDirOf(statePath);
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify(
+        {
+          pid: process.pid,
+          since: new Date().toISOString(),
+          what: '后来的持有者',
+          heartbeatAt: stoppedAt,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    await delay(80);
+    const kept = readHolderFile(statePath);
+    assert.equal(kept.what, '后来的持有者');
+    assert.equal(kept.heartbeatAt, stoppedAt, '释放后不得再刷新任何锁的心跳');
+    rmSync(lockPath, { recursive: true, force: true });
+  });
+
+  test('发布端口与心跳交错：不丢 port / instanceId，也不把心跳倒回去', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const instanceId = 'inst-hb-pub';
+    const apiVersion = 'v-hb-pub';
+    const release = acquireLock(statePath, '常驻心跳', { instanceId, apiVersion }, {
+      heartbeatIntervalMs: 10,
+    });
+    try {
+      const { port } = await listenHealth({
+        instanceId,
+        stateId: stateIdFor(statePath),
+        api: apiVersion,
+      });
+      await delay(40);
+      const beforePublish = readHolderFile(statePath);
+      publishLockPort(statePath, instanceId, port);
+      const afterPublish = readHolderFile(statePath);
+      assert.equal(afterPublish.port, port);
+      assert.equal(afterPublish.instanceId, instanceId);
+      assert.equal(afterPublish.apiVersion, apiVersion);
+      assert.equal(afterPublish.pid, process.pid);
+      assert.ok(
+        Date.parse(afterPublish.heartbeatAt as string) >=
+          Date.parse(beforePublish.heartbeatAt as string),
+        '发布端口不得把 heartbeatAt 倒退回旧值',
+      );
+
+      // 再让心跳跑几轮：端口与身份必须还在（心跳以整份元数据为基刷新）。
+      await delay(40);
+      const beating = readHolderFile(statePath);
+      assert.equal(beating.port, port);
+      assert.equal(beating.instanceId, instanceId);
+      assert.equal(beating.apiVersion, apiVersion);
+      assert.ok(
+        Date.parse(beating.heartbeatAt as string) >= Date.parse(afterPublish.heartbeatAt as string),
+      );
+    } finally {
+      release();
+    }
+    assert.ok(!existsSync(lockDirOf(statePath)), '释放后不留锁');
   });
 });
 
@@ -570,5 +675,268 @@ describe('常驻写者身份与本机探测', () => {
     } finally {
       release();
     }
+  });
+});
+
+describe('残锁安全接管', () => {
+  // 心跳停在 00:00，探测时刻取 00:10：停摆 10 分钟，超过 120 秒阈值。
+  const STALE_HEARTBEAT = new Date(Date.parse('2026-01-01T00:00:00.000Z')).toISOString();
+  const PROBE_NOW = Date.parse('2026-01-01T00:10:00.000Z');
+
+  function plantStaleLock(statePath: string, holder: Partial<LockInfo> & { pid: number }): string {
+    const lockPath = lockDirOf(statePath);
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify({ since: STALE_HEARTBEAT, what: '意外退出前的写者', ...holder }, null, 2),
+      'utf8',
+    );
+    return lockPath;
+  }
+
+  /** 接管期间临时建的门 / 隔离目录都不该留在状态目录里。 */
+  function takeoverTemps(statePath: string): string[] {
+    return readdirSync(dirname(statePath)).filter(
+      (name) => name.includes('takeover') || name.includes('stale-'),
+    );
+  }
+
+  test('死 pid + 停摆心跳 + 端口无人监听：接管并留下可读审计', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const lockPath = plantStaleLock(statePath, {
+      pid: 2147483646,
+      heartbeatAt: STALE_HEARTBEAT,
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-dead',
+      apiVersion: 'v-dead',
+      port: 45678,
+    });
+
+    const release = await acquireRecoverableLock(
+      statePath,
+      '常驻服务重启后接管',
+      { instanceId: 'inst-new', apiVersion: 'v-new' },
+      { now: () => PROBE_NOW, pidAlive: () => false, portListening: async () => false },
+    );
+    try {
+      const held = readHolderFile(statePath);
+      assert.equal(held.pid, process.pid);
+      assert.equal(held.what, '常驻服务重启后接管');
+      assert.equal(held.instanceId, 'inst-new');
+      assert.deepEqual(takeoverTemps(statePath), [], 'guard 与隔离目录都要清干净');
+    } finally {
+      release();
+    }
+    assert.ok(!existsSync(lockPath), '正常释放只删自己的锁');
+
+    const audit = readLockAudit(statePath);
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].oldPid, 2147483646);
+    assert.equal(audit[0].oldInstanceId, 'inst-dead');
+    assert.equal(audit[0].oldHeartbeatAt, STALE_HEARTBEAT);
+    assert.equal(audit[0].newPid, process.pid);
+    assert.equal(audit[0].newInstanceId, 'inst-new');
+    assert.equal(audit[0].at, new Date(PROBE_NOW).toISOString());
+
+    // 并发窗口（仍在同一条用例内）：另一个候选在「重读校验通过」与「移走旧锁」
+    // 之间完成了接管——原路径上已经换成它自己那把新的、活着的锁。
+    // 注入探针把这一瞬间造出来（真实进程里这个窗口窄到复现不了），
+    // 检验接管门把其他写者挡在关键区之外，同时我们的恢复策略不会覆盖/删掉
+    // 别人的锁，也不会把隔离目录当垃圾清掉。
+    plantStaleLock(statePath, {
+      pid: 2147483645,
+      heartbeatAt: STALE_HEARTBEAT,
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-dead-2',
+      apiVersion: 'v-dead-2',
+      port: 45680,
+    });
+    const competing: LockInfo = {
+      pid: 2147483644,
+      since: new Date(PROBE_NOW).toISOString(),
+      what: '另一个候选刚拿到的新锁',
+      heartbeatAt: new Date(PROBE_NOW).toISOString(),
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-competitor',
+      apiVersion: 'v-competitor',
+      port: 45681,
+    };
+
+    let stranded: string | undefined;
+    // 下面这段注入的就是被 review 拒绝的那个窗口：接管关键区里，原路径一度是空的。
+    // 我们要在同一个窗口里验三件事：普通获取者抢不到、第二个接管者碰不动、
+    // 我们自己也不会把另一个活持有者的锁搬走。
+    let plainWriter: (() => void) | undefined;
+    let plainWriterError: unknown;
+    let secondCandidate: Promise<unknown> | undefined;
+    let pathStayedEmpty = false;
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => false,
+          portListening: async () => false,
+          onBeforeQuarantine: () => {
+            // 模拟对方在它自己的关键区里：把残锁移走（它自己的隔离目录不关我们的事），
+            // 原路径此刻是空的。
+            rmSync(lockPath, { recursive: true, force: true });
+
+            // 1) 普通获取者不能趁这个空窗抢到锁：门在我们手里，它必须 fail closed。
+            try {
+              plainWriter = acquireLock(statePath, '普通写者');
+            } catch (error) {
+              plainWriterError = error;
+            }
+            pathStayedEmpty = !existsSync(lockPath);
+
+            // 2) 第二个接管候选也不能越过门去探测条件、搬锁。
+            secondCandidate = acquireRecoverableLock(statePath, '第二个接管者', undefined, {
+              now: () => PROBE_NOW,
+              pidAlive: () => false,
+              portListening: async () => false,
+            }).then(
+              (acquired) => {
+                acquired();
+                return undefined;
+              },
+              (error: unknown) => error,
+            );
+
+            // 3) 原路径上换成对方那把新的、活着的锁：下面的 rename 会把它搬进
+            //    隔离目录，这正是「绝不搬走另一个活持有者的锁」要验证的地方。
+            mkdirSync(lockPath);
+            writeFileSync(join(lockPath, 'holder.json'), JSON.stringify(competing, null, 2), 'utf8');
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        const line = /隔离目录：(.+)/.exec(error.message);
+        assert.ok(line, `错误信息要给出隔离目录路径：${error.message}`);
+        stranded = line[1].trim();
+        // 报告要说清楚：没覆盖原路径，并给出带存在性前置条件的恢复/删除命令。
+        assert.match(error.message, /当前是空的/);
+        assert.match(error.message, /test ! -e/);
+        return true;
+      },
+    );
+
+    // 接管门在关键区里是独占的：普通获取者与第二个接管候选都被挡在门外（fail
+    // closed），谁也没能在原路径空着的时候建出一把锁来。
+    assert.ok(
+      plainWriterError instanceof LockBusyError,
+      `普通获取者必须被接管门挡住：${String(plainWriterError)}`,
+    );
+    const plainError = plainWriterError;
+    assert.match(plainError.message, /互斥门/);
+    assert.equal(plainWriter, undefined, '普通获取者不该拿到锁');
+    plainWriter?.();
+    assert.ok(pathStayedEmpty, '门被占用期间原路径必须保持空着');
+
+    const secondError = await secondCandidate;
+    assert.ok(secondError instanceof LockBusyError, `第二个接管者必须被接管门挡住：${String(secondError)}`);
+    assert.match(secondError.message, /互斥门/);
+
+    // 别人的锁被完整留在隔离目录里等人工核实：没被删、没被搬回、没被覆盖。
+    assert.ok(stranded !== undefined, '错误信息必须指明隔离目录');
+    const strandedHolder = JSON.parse(readFileSync(join(stranded, 'holder.json'), 'utf8')) as LockInfo;
+    assert.equal(strandedHolder.instanceId, 'inst-competitor');
+    assert.equal(strandedHolder.pid, 2147483644);
+    assert.ok(!existsSync(lockPath), '不重建原路径，也不往上面写自己的锁');
+    assert.equal(readLockAudit(statePath).length, 1, '没接管成功就不该多一条审计');
+    assert.deepEqual(
+      takeoverTemps(statePath).filter((name) => name.includes('takeover')),
+      [],
+      '接管门是自己的目录，必须清掉',
+    );
+
+    // 竞争结束：原路径上没有任何持有者（对方的活锁在隔离目录里等人工），门也已
+    // 释放——后来者拿得到，而且同一时刻只有一个持有者、没有漏下的门。
+    const settle = acquireLock(statePath, '善后');
+    assert.equal(readHolderFile(statePath).what, '善后');
+    settle();
+    assert.ok(!existsSync(lockPath), '善后释放后不留锁');
+    assert.deepEqual(
+      takeoverTemps(statePath).filter((name) => name.includes('takeover')),
+      [],
+      '所有路径都要释放自己的门',
+    );
+    rmSync(stranded, { recursive: true, force: true });
+  });
+
+  test('活 pid / 无心跳 / 端口状态未知都不接管，旧锁原样不动', async () => {
+    const statePath = tempState();
+    writeFileSync(statePath, '{}\n', 'utf8');
+    const lockPath = plantStaleLock(statePath, {
+      pid: 2147483647,
+      heartbeatAt: STALE_HEARTBEAT,
+      stateId: stateIdFor(statePath),
+      instanceId: 'inst-live',
+      apiVersion: 'v-live',
+      port: 45679,
+    });
+    const planted = readHolderFile(statePath);
+
+    // 1) 进程还活着：停摆再久也不接管，且把"怎么人工核实端口"一起给出。
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => true,
+          portListening: async () => false,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.match(error.message, /仍然存活/);
+        assert.match(error.message, /lsof -nP -iTCP:45679/);
+        assert.match(error.message, /Get-NetTCPConnection -LocalPort 45679/);
+        assert.match(error.message, /rm -rf --/);
+        return true;
+      },
+    );
+    assert.deepEqual(readHolderFile(statePath), planted, '拒绝时旧锁元数据不动');
+    assert.equal(readLockAudit(statePath).length, 0, '拒绝不写审计');
+
+    // 2) 没有 heartbeatAt 的旧版本锁：说不清停摆多久，拒绝。
+    writeFileSync(
+      join(lockPath, 'holder.json'),
+      JSON.stringify({ pid: 2147483647, since: STALE_HEARTBEAT, what: '旧版本锁' }, null, 2),
+      'utf8',
+    );
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => false,
+          portListening: async () => false,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.match(error.message, /heartbeatAt/);
+        return true;
+      },
+    );
+    assert.equal(readHolderFile(statePath).what, '旧版本锁');
+
+    // 3) 端口探测报的是未知网络错误（不是明确的 ECONNREFUSED）：一律 fail closed。
+    writeFileSync(join(lockPath, 'holder.json'), JSON.stringify(planted, null, 2), 'utf8');
+    await assert.rejects(
+      () =>
+        acquireRecoverableLock(statePath, '抢', undefined, {
+          now: () => PROBE_NOW,
+          pidAlive: () => false,
+          portListening: async () => {
+            throw new Error('EHOSTUNREACH 网络不可达');
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof LockBusyError);
+        assert.match(error.message, /状态未知/);
+        return true;
+      },
+    );
+    assert.deepEqual(readHolderFile(statePath), planted);
+    assert.ok(existsSync(lockPath), '拒绝时旧锁目录仍在');
+    assert.deepEqual(takeoverTemps(statePath), [], '拒绝也要清掉自己的 guard');
   });
 });

@@ -30,7 +30,7 @@ import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
-import { classifyCandidateFailure } from './candidate-circuit.ts';
+import { classifyCandidateFailure, type CandidateCircuit } from './candidate-circuit.ts';
 import {
   acquireQueuedHop,
   compareHopFairness,
@@ -73,6 +73,32 @@ export interface RolePool {
 
 /** 候选的可用性。v1 只有这三种，不做 closed/open/half-open。 */
 export type CandidateAvailability = 'available' | 'cooldown';
+
+/** 三类 agent 各自的候选池名字。与 RolePool 一一对应，不含旁路。 */
+export type RolePoolName = 'coordinator' | 'executor' | 'independent_reviewer';
+
+/**
+ * 冷却快照里的可用性。比 CandidateAvailability 多一档 unknown。
+ *
+ * unknown 的语义是**不可证明可用**——持久熔断处在 half_open（探针在跑）、
+ * 到期值读不出来、或者仓储给了读不懂的行。它**不是**冷却：把 unknown 折算成
+ * 一个等待时长，等于把一个「仓储坏了，要人看」的情况伪装成「等一会就好」。
+ */
+export type RoleCooldownAvailability = 'available' | 'cooldown' | 'unknown';
+
+export interface RoleCooldownCandidate {
+  readonly profileId: string;
+  readonly availability: RoleCooldownAvailability;
+  /** 冷却到期（ISO）。只有 availability === 'cooldown' 时出现。 */
+  readonly until?: string;
+  /**
+   * 从调用方给的 now 起还要等多久（毫秒）。available 是 0。
+   *
+   * 已过期的 open 会给出 0：调度器把这种行当可用（见 #availableCandidates）。
+   * 调用方据此决定等不等，而不是拿 availability 字符串当等待时长。
+   */
+  readonly retryAfterMs?: number;
+}
 
 /**
  * 心跳间隔。
@@ -170,8 +196,20 @@ export type MissionRunOutcome =
   /**
    * 暂时进行不下去，但**不是失败**：候选在冷却、尝试到上限之类。
    * 和 stalled 分开，因为处置不同——这个等一会儿重跑就行。
+   *
+   * `candidateRole` 只在**确由该角色的候选拿不出人**造成 no_available_agent
+   * 时才带。
+   *
+   * 为什么不能拿 reason 自己当判据：`no_available_agent` 这个字符串同时盖着
+   * 几件不同的事故——冻结范围检查点失败也用它。方案驱动（#27 的等待探针）
+   * 若只看 reason 就去等候选冷却，会把「检查点失败、要人来看」写成
+   * 「等一会儿就好」，于是没人来看。
+   *
+   * 为什么带了角色也**不等于**全在冷却：角色只说「这一跳缺的是谁的人」，
+   * 候选可能只是 unknown（探针在跑、仓储读不懂）。到底等不等，得再拿
+   * roleCooldownSnapshot 按这个角色算一遍。
    */
-  | { kind: 'waiting'; reason: WaitReason; detail: string }
+  | { kind: 'waiting'; reason: WaitReason; detail: string; candidateRole?: RolePoolName }
   | { kind: 'stalled'; reason: string };
 
 /**
@@ -593,7 +631,7 @@ export class Orchestrator {
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
             await this.#platform.setWaitReason(missionId, reason, detail);
-            return { kind: 'waiting', reason, detail };
+            return this.#waitingOutcome(reason, detail, hop?.candidateRole);
           }
           if ('persistentUnknown' in hop && hop.persistentUnknown) {
             const detail = '持久候选熔断记录为 unknown；停止本次 runMission，避免后续轮次绕过保守轮换';
@@ -655,7 +693,7 @@ export class Orchestrator {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason);
         await this.#platform.setWaitReason(missionId, reason, detail);
-        return { kind: 'waiting', reason, detail };
+        return this.#waitingOutcome(reason, detail, hop?.candidateRole);
       }
 
       // GATE-POST after coordinator hop.
@@ -1002,7 +1040,10 @@ export class Orchestrator {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
         await this.#platform.setWaitReason(missionId, reason, detail);
-        return { kind: 'outcome', outcome: { kind: 'waiting', reason, detail } };
+        return {
+          kind: 'outcome',
+          outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole),
+        };
       }
       // reportBlocked 把非空提问记成 Mission 升级。不在这里读一次视图的话，
       // 下一轮主循环才会看到 openEscalations——中间那一轮只是空转。
@@ -1148,6 +1189,81 @@ export class Orchestrator {
   }
 
   /**
+   * 某一角色候选池的冷却快照：每个候选现在能不能用、最早什么时候能用。
+   *
+   * 为什么要有：候选全在短冷却时，方案驱动该在**运行内等**，而不是开升级单。
+   * 判据只能来自权威候选池——注入了 candidateCircuits 就按它读，否则读本进程
+   * 的 #cooldown。拿日志文案猜会把「可用」误判成「冷却」，然后把一次本可以
+   * 自愈的等待写成人工单。
+   *
+   * 三条不许违反的口径：
+   *   - **严格按 role 选池**。混进别的角色的候选，会让「协调者全冷却」看起来
+   *     像「执行者也全冷却」，方案驱动就会去等一个根本不用等的角色。
+   *   - **unknown 不是 cooldown**。half_open 的探针在跑、到期值非法、仓储读到
+   *     解释不了的行，都只能说「不可证明可用」，不能编一个冷却时长出来。
+   *   - **没有候选就是空数组**。池没装配（例如没有独立检视）不等于「全在冷却」。
+   */
+  async roleCooldownSnapshot(
+    role: RolePoolName,
+    now: number = Date.now(),
+  ): Promise<RoleCooldownCandidate[]> {
+    const pool =
+      role === 'coordinator'
+        ? this.#coordinator
+        : role === 'executor'
+          ? this.#executor
+          : this.#independentReviewer;
+    if (!pool) return [];
+    const snapshot: RoleCooldownCandidate[] = [];
+    for (const profile of pool.candidates) {
+      snapshot.push(await this.#candidateCooldown(profile.profileId, now));
+    }
+    return snapshot;
+  }
+
+  /**
+   * 单个候选的冷却状态。判据必须与 #availableCandidates 同源：两处各写一套
+   * 的话，「谁在冷却」会同时有两个答案，而排障的人会同时看到两者。
+   */
+  async #candidateCooldown(profileId: string, now: number): Promise<RoleCooldownCandidate> {
+    if (!this.#candidateCircuits) {
+      const until = this.#cooldown.get(profileId) ?? 0;
+      return until > now
+        ? {
+            profileId,
+            availability: 'cooldown' as const,
+            until: new Date(until).toISOString(),
+            retryAfterMs: until - now,
+          }
+        : { profileId, availability: 'available' as const, retryAfterMs: 0 };
+    }
+    let circuit: CandidateCircuit | undefined;
+    try {
+      circuit = await this.#candidateCircuits.get(profileId);
+    } catch {
+      // 读不出来（状态文件损坏、IO 失败）只能说这一个候选不可证明可用。
+      // 既不能编一个冷却时长（等于把「仓储坏了要人看」写成「等一会就好」），
+      // 也不能让整张快照抛出去——别的候选的可用性与它无关。
+      return { profileId, availability: 'unknown' as const };
+    }
+    if (circuit?.state === 'closed') {
+      return { profileId, availability: 'available' as const, retryAfterMs: 0 };
+    }
+    if (circuit?.state === 'open') {
+      const until = Date.parse(circuit.openUntil);
+      if (!Number.isFinite(until)) return { profileId, availability: 'unknown' as const };
+      return {
+        profileId,
+        availability: 'cooldown' as const,
+        until: new Date(until).toISOString(),
+        retryAfterMs: Math.max(0, until - now),
+      };
+    }
+    // half_open（探针已被领取）或读不到/读不懂的行：不可证明可用。
+    return { profileId, availability: 'unknown' as const };
+  }
+
+  /**
    * BUDGET-001-S5 authoritative budget gate (PRE/POST).
    *
    * - no executionBudget → no-op (heuristics unchanged)
@@ -1192,6 +1308,23 @@ export class Orchestrator {
       kind: 'stop',
       outcome: { kind: 'waiting', reason: 'execution_budget_exceeded', detail },
     };
+  }
+
+  /**
+   * 组装 waiting 结果。
+   *
+   * candidateRole 有值才把字段放进去，**不放 `undefined`**：消费方（方案
+   * 驱动的等待探针）判「这次缺不缺候选」用的是 `'candidateRole' in outcome`，
+   * 恒存在的字段会让那个判断永远为真，等于把非候选故障也当成缺候选。
+   */
+  #waitingOutcome(
+    reason: WaitReason,
+    detail: string,
+    candidateRole?: RolePoolName,
+  ): MissionRunOutcome {
+    return candidateRole
+      ? { kind: 'waiting', reason, detail, candidateRole }
+      : { kind: 'waiting', reason, detail };
   }
 
   /** 把停机原因翻译成人能直接照做的一句话。 */
@@ -1241,8 +1374,14 @@ export class Orchestrator {
     resumeRef?: string;
   }): Promise<
     | { endedBy: string; resumeRef?: string; persistentUnknown?: boolean }
-    /** detail 有值时用它，别再拼一句泛泛的盖掉。 */
-    | { exhausted: WaitReason; detail?: string }
+    /**
+     * detail 有值时用它，别再拼一句泛泛的盖掉。
+     *
+     * candidateRole 只在「候选拿不出人」那两条出口上带：进了 usable 就说明
+     * 缺的不是候选，后面所有的失败出口都不是候选不可用（检查点失败最典型，
+     * 它也返回 no_available_agent）。
+     */
+    | { exhausted: WaitReason; detail?: string; candidateRole?: RolePoolName }
     | { alreadyCompleted: true }
     /** 已等到退避；由 runMission 下一轮重新领取，以便 maxRounds 能拦住 Q。 */
     | { retrySameSlot: true }
@@ -1260,7 +1399,9 @@ export class Orchestrator {
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
       // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
-      return { exhausted: 'no_available_agent' };
+      //
+      // 带上角色：这一跳没跑起来的原因**只有**候选不可用一个，调用方不用再猜。
+      return { exhausted: 'no_available_agent', candidateRole: input.role };
     }
 
     // 租约必须钉在即将启动的候选上。先领再选会让 failover 把 B 跑在 A 的 runtime/profile 名额下。
@@ -1765,9 +1906,15 @@ export class Orchestrator {
       };
     }
     if (capacityBlocked && used === 0) {
+      // 队列容量挡住的**不是候选不可用**：人其实是有的，只是名额被占着。
+      // 这层 reason 和候选冷却分得开，绝不能给它贴角色。
       return { exhausted: capacityBlocked.reason, detail: capacityBlocked.detail };
     }
-    return undefined;
+    // 候选在，但一个都没跑成（都失败了、都在 half_open、或者全被身份/容量跳过）：
+    // 结果和"池子里没人"一样——这个角色的候选这一跳用不上，所以同样带上角色。
+    // 之前这里返回 undefined、由调用方兜成 no_available_agent，那条路上没人
+    // 知道缺的是哪个角色，方案驱动只能干等。
+    return { exhausted: 'no_available_agent', candidateRole: input.role };
   }
 
   /**

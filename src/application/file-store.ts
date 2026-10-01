@@ -234,6 +234,25 @@ interface OpenTransaction {
 }
 
 /**
+ * Windows 上杀软 / 索引器 / 同步盘会**短暂**占住刚写完的临时文件或目标文件，
+ * 让 rename 抛 EPERM / EBUSY / EACCES。这不是真失败，隔几毫秒再来就好。
+ * 为什么只认这三个码：其它错误（权限真不对、路径不存在、盘满）重试也没用，
+ * 早抛能让上层事务立刻回滚，而不是被白白拖满两秒。
+ */
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+/** 最多试 10 次（含首次）；退避总等待 < 1s，封顶 2s，绝不让一次落盘卡住常驻服务。 */
+const RENAME_MAX_ATTEMPTS = 10;
+const RENAME_MAX_WAIT_MS = 2_000;
+
+/** 同步退避：#write 是同步路径，不能 await；也不引依赖。 */
+function renameBackoff(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** 原子替换文件的函数签名；默认 renameSync，测试注入假实现。 */
+export type RenameFile = (from: string, to: string) => void;
+
+/**
  * 整份状态的持有者。三个仓储都挂在它上面，任何一个写完都触发一次落盘。
  *
  * **单事务命令（C2）。** `run(fn)` 里的写（活对象、事件、投递、各记录、发号）不单独落盘，
@@ -260,9 +279,12 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
   #txQueue: Promise<void> = Promise.resolve();
   /** 事务开着时别处要落盘：推迟到事务结束一起写。 */
   #deferredFlush = false;
+  /** 原子替换文件的实现；默认 renameSync，测试可注入以模拟 Windows 短暂拒绝。 */
+  #rename: RenameFile;
 
-  constructor(path: string) {
+  constructor(path: string, options: { rename?: RenameFile } = {}) {
     this.#path = resolve(path);
+    this.#rename = options.rename ?? renameSync;
     this.#state = this.#load();
     this.#hydrate();
     this.#stamp = this.#mtime();
@@ -595,10 +617,37 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     mkdirSync(dirname(this.#path), { recursive: true });
     const temp = `${this.#path}.tmp`;
     writeFileSync(temp, `${JSON.stringify(this.#state, null, 2)}\n`, 'utf8');
-    renameSync(temp, this.#path);
+    this.#renameRetryingTransient(temp, this.#path);
     // 自己写的不算外部改动：不更新这个戳，下一次读会把刚写的再读一遍，
     // 白白丢掉内存里的活对象。
     this.#stamp = this.#mtime();
+  }
+
+  /**
+   * 主状态 temp → path 的原子替换：只对短暂错误码作有界退避重试。
+   *
+   * 重试耗尽或遇到非短暂错误都原样抛出——调用方（run 的提交 / flush）据此走
+   * 原有的事务内存回滚，盘上仍是旧文件。所以这里**不能**吞错，也不能自作主张
+   * 换文件名落盘。
+   */
+  #renameRetryingTransient(from: string, to: string): void {
+    let wait = 5;
+    let waited = 0;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        this.#rename(from, to);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? '';
+        const transient = TRANSIENT_RENAME_CODES.has(code);
+        if (!transient || attempt >= RENAME_MAX_ATTEMPTS || waited + wait > RENAME_MAX_WAIT_MS) {
+          throw error;
+        }
+        renameBackoff(wait);
+        waited += wait;
+        wait = Math.min(wait * 2, 200);
+      }
+    }
   }
 
   get path(): string {

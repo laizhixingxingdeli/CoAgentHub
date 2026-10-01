@@ -66,4 +66,26 @@ describe('preflightPlanMissionSlots', () => {
       assert.match(result.problems[0]!, /Mission M1/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  test('同 Mission 两次 reviewer_stop 后按最近一条续跑', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'preflight-'));
+    try {
+      for (const [id, startedAt] of [
+        ['run-old', '2026-09-30T00:00:00.000Z'],
+        ['run-new', '2026-09-30T00:10:00.000Z'],
+      ] as const) {
+        const run = PlanRun.start({
+          id, planId: 'PLAN', projectId: 'P', integrationBranch: 'main', reviewer: 'reviewer',
+          stopConditions: { unresolvedEscalations: 2, wallClockMs: 60_000, escalationTimeoutMs: 10_000 },
+          featureIds: ['F1'], startedAt,
+        });
+        run.startFeature('F1', 'M1');
+        run.halt('reviewer_stop', '叫停', startedAt);
+        writeFileSync(join(dir, `${id}.json`), `${JSON.stringify(run.toSnapshot())}\n`);
+      }
+      const result = preflightPlanMissionSlots({ selection, plan, runDir: dir, missions: [mission] });
+      assert.deepEqual(result.resume, [{ featureId: 'F1', missionId: 'M1' }]);
+      assert.deepEqual(result.problems, []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
