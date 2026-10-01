@@ -18,9 +18,15 @@ import { runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { parsePlanSpec, selectPlanCandidates } from '../src/application/plan-spec.ts';
-import { PlatformRuleError } from '../src/application/platform.ts';
+import { Platform, PlatformRuleError } from '../src/application/platform.ts';
+import type { ClassificationResult } from '../src/application/task-classifier.ts';
+import type { ComplexityAssessment } from '../src/kernel/index.ts';
 import type { MissionRunOutcome } from '../src/application/orchestrator.ts';
 import type { RunQueryResult } from '../src/application/query-run.ts';
+import { FixedClock, InMemoryActivityLog, InMemoryProjectRepository, SequentialIds } from '../src/application/in-memory.ts';
+import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
+import type { MissionContract, OriginChannel } from '../src/kernel/index.ts';
 
 const T0 = '2026-09-23T22:00:00.000Z';
 const MIN = 60_000;
@@ -109,6 +115,12 @@ function harness(options?: {
   maxEscalations?: number;
   maxRerunsPerFeature?: number;
   resumeMissions?: Record<string, string>;
+  /** 让 harness 改用真实内存 Platform 来落建单与路由事件（HAOFF1 回落端到端验证专用）。 */
+  realPlatform?: Platform;
+  /** 仅在注入 realPlatform 时调用：建单后插一笔。 */
+  onCreateMission?: (missionId: string) => Promise<void> | void;
+  /** 仅在注入 realPlatform 时调用：路由事件记录后插一笔。 */
+  onRecordStandardFallbackRoute?: (missionId: string) => Promise<void> | void;
 }) {
   const ids = options?.features ?? ['F1', 'F2'];
   const plan = parsePlanSpec(
@@ -205,6 +217,11 @@ function harness(options?: {
       createMission: async (input) => {
         calls.push(`create ${input.missionId}`);
         status.set(input.missionId, 'investigating');
+        if (options?.realPlatform) {
+          const result = await options.realPlatform.createMission(input);
+          await options.onCreateMission?.(input.missionId);
+          return result;
+        }
         return { missionId: input.missionId };
       },
       createClassifiedMission: async (input) => {
@@ -258,6 +275,18 @@ function harness(options?: {
         status.set(missionId, 'blocked');
         return { status: 'blocked' };
       },
+      ...(options?.realPlatform
+        ? {
+            recordStandardFallbackRoute: async (
+              missionId: string,
+              input: { classification: ClassificationResult; fallbackReason: string; assessment?: ComplexityAssessment },
+            ) => {
+              const result = await options.realPlatform!.recordStandardFallbackRoute(missionId, input);
+              await options.onRecordStandardFallbackRoute?.(missionId);
+              return result;
+            },
+          }
+        : {}),
       answerEscalation: async (missionId, answer) => {
         calls.push(`answer ${missionId} ${answer}`);
         return { question: 'recorded', answer };
@@ -2349,4 +2378,57 @@ describe('注入式方案运行入口', () => {
       assert.ok(h.events.lastIndexOf('persist') > runEnd, 'run 后仍持久化');
       assert.equal(h.runnerIds[0], 'R1-Beta');
     });
+});
+
+describe('HAOFF1 分类回落：路由事件与协调者简报保留', () => {
+  test('HA 分类结论经 HAOFF1 回落普通 Standard Mission，路由事件与简报保留 fallbackReason/事实且不带工单', async () => {
+    // 真实内存 Platform：与现做分类其余场景一样，把 HA 事实交给分类器，仅因 HAOFF1 关闭而回落 Standard。
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const realPlatform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      workspace: new InPlaceWorkspaceManager(),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+
+    const haRoute = { ok: true as const, proposal: { facts: HA_FACTS, assessment: haAssessment } };
+    const h = harness({
+      features: ['F1'],
+      routes: { F1: haRoute },
+      realPlatform,
+      // 钩子仅作观测：真实平台的 createMission / recordStandardFallbackRoute 已由 harness 依次调用。
+      onCreateMission: () => {},
+      onRecordStandardFallbackRoute: () => {},
+    });
+    await h.start();
+    const stop = await drivePlan(h.plan, h.deps);
+    assert.equal(stop.reason, 'finished');
+
+    // 回落创建的是普通 Standard Mission，不带工单（workItems 长度 0）。
+    const view = await realPlatform.getMissionView('R1-F1');
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.workItems.length, 0);
+
+    // mission.routed 事件保留原推荐/事实/理由与 fallbackReason。
+    const events = await realPlatform.getActivity('R1-F1');
+    const routed = events.filter((event) => event.kind === 'mission.routed');
+    assert.equal(routed.length, 1);
+    const data = routed[0]!.data as Record<string, unknown>;
+    assert.deepEqual(data.recommended, { runKind: 'mutation', executionMode: 'high_assurance' });
+    assert.deepEqual(data.facts, HA_FACTS);
+    assert.deepEqual(data.unknowns, []);
+    assert.ok(Array.isArray(data.reasons) && (data.reasons as unknown[]).length > 0);
+    assert.match(data.fallbackReason as string, /HA 路暂时关闭/);
+
+    // 协调者开跑简报带 classification（含 fallbackReason 与事实）。
+    const attempt = await realPlatform.startCoordinatorAttempt('R1-F1');
+    const brief = await realPlatform.getStartupBrief('R1-F1', attempt.attemptId);
+    assert.ok(typeof brief.classification === 'string' && brief.classification.length > 0);
+    assert.match(brief.classification!, /分类阶段已查明/);
+    assert.match(brief.classification!, /fallbackReason/);
+    assert.match(brief.classification!, /credentialsPermissionsSecurity|schemaPublicApiPersistenceCompat/);
+  });
 });
