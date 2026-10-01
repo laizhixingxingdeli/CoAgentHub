@@ -339,6 +339,35 @@ function autoRedispatchEventsFor(
 }
 
 /**
+ * 这一次提交是不是交在 Mission 升级之前（Lightweight 那一跳的卷）。
+ *
+ * Lightweight 验证失败升级时，失败报告在升级**前**就落了盘，提交也发生在升级前。
+ * 升级后恢复循环会拿同一条提交回来问自动续派——它不是「机器能判的还能再试」，
+ * 而是一份正要交给 L2 的失败报告。放行它，两次自动续派会烧在这份交卷上，
+ * 协调者反而永远等不到它该接手的那一票。
+ *
+ * 因此按事件流里的先后比位置，而不是看「Mission 是否升级过」：升级之后由新的
+ * Standard attempt 交的卷排在 promoted 之后，仍该照常自动续派。匹配必须精确到
+ * workItemId + attemptId，认错一条事件就等于把别人那一跳的卷判成升级前的。
+ */
+function submissionPrecedesPromotion(
+  events: readonly ActivityEvent[],
+  workItemId: string,
+  submittedAttemptId: string,
+): boolean {
+  const promotedIndex = events.findIndex((event) => event.kind === 'mission.promoted');
+  if (promotedIndex < 0) return false;
+  const submittedIndex = events.findIndex(
+    (event) =>
+      event.kind === 'execution_result.submitted' &&
+      event.workItemId === workItemId &&
+      event.attemptId === submittedAttemptId,
+  );
+  if (submittedIndex < 0) return false;
+  return submittedIndex < promotedIndex;
+}
+
+/**
  * 交接摘要：**先脱敏、再截尾**。
  *
  * 顺序反了（先截尾）会把截断点切在一个 key 中间，剩下的半截对不上任何凭据形状，
@@ -5551,7 +5580,13 @@ export class Platform {
     if (!submittedAttemptId) {
       return { redispatched: false, reason: 'no_auto_reason' };
     }
-    const prior = autoRedispatchEventsFor(await this.#activity.list(mission.id), item.id);
+    const events = await this.#activity.list(mission.id);
+    // 升级前 Lightweight 那一跳的提交保留给 L2：它不是这一次 Standard 的交付，
+    // 自动续派会把它从协调者手里抢走（见 submissionPrecedesPromotion）。
+    if (submissionPrecedesPromotion(events, item.id, submittedAttemptId)) {
+      return { redispatched: false, reason: 'no_auto_reason' };
+    }
+    const prior = autoRedispatchEventsFor(events, item.id);
     // 同一次提交已经续派过：只可能是重放。再退一次会把刚派出去的工单又打回来。
     if (prior.some((row) => row.attemptId === submittedAttemptId)) {
       return { redispatched: false, reason: 'already_redispatched' };
