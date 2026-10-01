@@ -127,6 +127,14 @@ async function missionReadyForReview(
     title: 'W',
     order: ORDER,
   });
+  if (options?.executionMode !== 'high_assurance') {
+    // W-334：Standard 第一次派发前必须先落一条契约核对结论，否则派发被门禁拒绝；
+    // 不给 HA 补这一条——HA 不经过这个门禁，补了等于改掉被测场景。
+    await platform.submitContractCheck(missionId, coord.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
+    });
+  }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
 
   // 执行者在自己的 worktree 里真的改了东西。

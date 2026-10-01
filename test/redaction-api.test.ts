@@ -97,6 +97,7 @@ describe('凭据脱敏的落点', () => {
     );
     const workItemId = (await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken)).json
       .workItemId as string;
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
 
     const exec = await call(`/api/missions/M-red/work-items/${workItemId}/executor-attempts`, {});

@@ -94,6 +94,7 @@ async function driveToReview(
     updatePlan: (missionId: string, attemptId: string, plan: typeof PLAN) => Promise<unknown>;
     createWorkItem: (missionId: string, attemptId: string, input: { title: string; order: WorkOrder }) => Promise<{ workItemId: string }>;
     dispatchWorkItems: (missionId: string, attemptId: string, ids: string[]) => Promise<unknown>;
+    submitContractCheck: (missionId: string, attemptId: string, input: { verdict: 'ok'; summary: string }) => Promise<unknown>;
     startExecutorAttempt: (missionId: string, workItemId: string) => Promise<{ attemptId: string }>;
     submitEvidence: (missionId: string, attemptId: string, evidence: object) => Promise<unknown>;
     submitExecutionResult: (missionId: string, attemptId: string, result: object) => Promise<unknown>;
@@ -104,6 +105,7 @@ async function driveToReview(
   workspace: GitWorktreeManager,
   repo: string,
   missionId: string,
+  options?: { executionMode?: 'high_assurance' },
 ) {
   const prepared = await workspace.prepare(missionId, repo);
   await platform.recordWorkspace(missionId, {
@@ -118,6 +120,11 @@ async function driveToReview(
     title: 'W',
     order: ORDER,
   });
+  // Standard 的首次派发前必须先落一条当前修订的契约核对，否则派发被门禁拒掉；
+  // 高保障路径不经过这道门禁，夹具保持原样。
+  if (options?.executionMode === undefined) {
+    await platform.submitContractCheck(missionId, coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+  }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
@@ -172,7 +179,7 @@ async function fixtureAwaitingReview(missionId: string, options?: { executionMod
   } else {
     await built.platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
   }
-  await driveToReview(built.platform, workspace, repo, missionId);
+  await driveToReview(built.platform, workspace, repo, missionId, options);
   if (options?.bait) {
     await built.platform.createMission({ projectId: 'P-bait', missionId: 'M-bait', contract: CONTRACT });
     await built.platform.startCoordinatorAttempt('M-bait');

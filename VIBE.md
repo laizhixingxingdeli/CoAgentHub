@@ -125,6 +125,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   平台在 `src/application/platform.ts` 的 `getStartupBrief` 原有读取路径上收集项目红线、环境注记和 Mission/Attempt 所需的现有值，将它们交给 `src/application/
 - **context-replay-baseline** — 离线 Attempt 用量基线
   `scripts/context-replay-report.mjs` 只读显式指定的 version:1 状态 JSON，接受 `--input E1 <path>` / `--input main <path>`（可多次）及可选 `--
+- **contract-check** — Standard Mission 派发前的契约核对
+  协调者在首次派发前核对当前契约的验收涉及文件与允许范围、输入位置、诊断依据及验收之间的一致性。`POST /api/agent/coagent_submit_contract_check` 接受 `{ verdict: "ok" | "is
 - **coordinator-handoff** — 协调者交接包与按需工作项详情
   `featureContract` 生成某条方案功能点的 Mission 契约时，保留原有非目标，只将直接上游依赖、直接下游依赖或 `allowedScope` 路径相同/目录祖先重叠的其他条目加入「方案其他条目」，逐条一行 `id：标题`
 - **credential-redaction** — 凭据脱敏（credential-redaction）

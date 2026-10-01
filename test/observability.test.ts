@@ -80,6 +80,11 @@ async function upToExecutor(platform: Platform, order: WorkOrder) {
     title: 'W',
     order,
   });
+  // Standard 门禁：派发前必须落一条当前契约修订的核对结论（W-334）。
+  await platform.submitContractCheck('M1', coord.attemptId, {
+    verdict: 'ok',
+    summary: '测试契约已核对',
+  });
   await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
   const exec = await platform.startExecutorAttempt('M1', workItemId);
   return { coordId: coord.attemptId, execId: exec.attemptId, workItemId };
@@ -262,6 +267,11 @@ describe('开跑简报（S09.1）', () => {
     const { workItemId } = await platform.createWorkItem('M1', coord.attemptId, {
       title: 'W',
       order: ORDER,
+    });
+    // Standard 门禁：派发前必须落一条当前契约修订的核对结论（W-334）。
+    await platform.submitContractCheck('M1', coord.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
     });
     await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
     const exec = await platform.startExecutorAttempt('M1', workItemId);

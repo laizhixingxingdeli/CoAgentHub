@@ -121,6 +121,7 @@ import {
   buildContextBundle,
   projectStartupBriefFields,
   type BoundWorkItem,
+  type ContractCheck,
   type ContextBundle,
   type WorkItemIndexEntry,
 } from './context-builder.ts';
@@ -2839,6 +2840,8 @@ export class Platform {
     workItem?: BoundWorkItem;
     /** L3 打回的理由。被打回之后重跑时，这是最该先看到的东西。 */
     finalReview?: Readonly<FinalReview>;
+    /** 当前契约修订的核对结论；无当前修订核对时缺省，旧简报形状不变。 */
+    contractCheck?: Readonly<ContractCheck>;
     /** 可追溯的角色视图；旧字段从这里投影，缺省语义保持不变。 */
     contextBundle: ContextBundle;
   }> {
@@ -2913,6 +2916,7 @@ export class Platform {
           sinceLastHop: CoordinatorSinceLastHopEntry;
         }
       | undefined;
+    let contractCheck: Readonly<ContractCheck> | undefined;
     if (attempt.kind === 'coordinator') {
       const events = await this.#activity.list(missionId);
       briefSources = coordinatorStartupSources(
@@ -2921,6 +2925,14 @@ export class Platform {
         events,
         await this.#workItemValidationReportViews(mission, events),
       );
+      // 当前修订最近的核对结论：契约改版后旧修订事件被跳过，未重新核对前保持旧简报形状。
+      const checkEvent = [...events].reverse().find(
+        (event) =>
+          event.kind === 'contract_check.submitted' &&
+          (event.data as { contractRevision?: number } | undefined)?.contractRevision ===
+            mission.contractRevision,
+      );
+      contractCheck = checkEvent?.data as Readonly<ContractCheck> | undefined;
     }
     const contextBundle = buildContextBundle(
       {
@@ -2940,6 +2952,7 @@ export class Platform {
               sinceLastHop: briefSources.sinceLastHop,
             }
           : {}),
+        ...(contractCheck ? { contractCheck } : {}),
       },
       budget,
     );
@@ -3012,6 +3025,79 @@ export class Platform {
   }> {
     const { mission } = await this.#locate(missionId);
     return { contract: mission.contract, contractRevision: mission.contractRevision };
+  }
+
+  /**
+   * 协调者开工前的契约核对（Standard）。
+   *
+   * 为什么要这个口：第 33 波返工的三处源头都在检视者的票上（范围漏文件、
+   * 没写输入位置、诊断错误），协调者本可以开工时就发现，却直接派工，
+   * 执行者卡住后又原样重派。核对结论必须落成事件，会话被压缩或换人接手后
+   * 才恢复得出「核过没有、核出什么」；判为 issues 时不能只记一条——只记不投，
+   * 协调者被唤醒后只会再升级一次，所以走既有的可答复升级通道。
+   */
+  async submitContractCheck(
+    missionId: string,
+    attemptId: string,
+    input: { verdict: 'ok' | 'issues'; summary: string; issues?: readonly string[] },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ contractRevision: number; verdict: 'ok' | 'issues' }> {
+    // 单事务命令（C2）：核对事件、升级、投递一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, async () => {
+      const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
+      if (input.verdict !== 'ok' && input.verdict !== 'issues') {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_VERDICT_INVALID',
+          `verdict 只能是 ok 或 issues，收到 ${String(input.verdict)}。`,
+        );
+      }
+      // 空结论等于没核对：压缩后重读事件只看得到「核对过」三个字。
+      const summary = input.summary?.trim() ?? '';
+      if (summary.length === 0) {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_SUMMARY_REQUIRED',
+          'summary 不能为空：核对结论必须写清查了什么、结论是什么。',
+        );
+      }
+      const issues = (input.issues ?? []).map((issue) => issue.trim());
+      if (input.verdict === 'issues' && (issues.length === 0 || issues.some((issue) => issue.length === 0))) {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_ISSUES_REQUIRED',
+          'verdict=issues 时必须给出非空的 issues，且每项都要写清是哪条验收/输入对不上。',
+        );
+      }
+      const contractRevision = mission.contractRevision;
+      let escalationIndex: number | undefined;
+      if (input.verdict === 'issues') {
+        // 复用既有升级与投递：另写一条路会变成两次升级、两封信。
+        await this.#recordEscalationAndDeliver(mission, {
+          attemptId,
+          question:
+            `契约核对发现问题（r${contractRevision}），需要 L3 裁决：\n` +
+            issues.map((issue) => `- ${issue}`).join('\n'),
+          why: `协调者开工前核对契约发现问题：${summary}`,
+          optionsConsidered: [
+            '按现契约直接派工（对不上的那条执行者必然卡住）',
+            '由协调者自行修订契约（契约只由 L3 修订，越权）',
+            '升级给 L3 修订契约后再派工',
+          ],
+        });
+        escalationIndex = mission.escalations.length - 1;
+      }
+      await this.#event(
+        mission,
+        'contract_check.submitted',
+        {
+          contractRevision,
+          verdict: input.verdict,
+          summary,
+          ...(input.verdict === 'issues' ? { issues, escalationIndex } : {}),
+        },
+        undefined,
+        attemptId,
+      );
+      return { contractRevision, verdict: input.verdict };
+    });
   }
 
   /**
@@ -3748,6 +3834,40 @@ export class Platform {
             '(2) 若这张工单已无意义，用 retire/作废取代重派；' +
             '(3) 若重派不成立，升级给 L3 重新判断。',
         );
+      }
+    }
+    // 契约核对门禁（W-334）：Standard 的第一次派发前必须先落一条核对结论。
+    // 会话被压缩或换人接手后，「核过没有、核出什么」只能从事件里恢复，所以查的是
+    // 事件而不是某个内存标志。只认**当前契约修订**的结论：改过契约之后，旧修订的
+    // ok 或旧升级的答复都给不了新修订的解闸——那正是「拿旧结论派新契约」的漏洞。
+    // 与 W-292 一样必须在抢名额 / PRE_DISPATCH shadow / 状态修改之前，否则被拒的
+    // 调用会留下半套流转。轻量路径不经过协调者派发，不受此门禁影响。
+    if (mission.executionMode === 'standard') {
+      const check = [...history].reverse().find((event) => {
+        if (event.kind !== 'contract_check.submitted') return false;
+        const data = event.data as { contractRevision?: number } | undefined;
+        return data?.contractRevision === mission.contractRevision;
+      });
+      if (!check) {
+        throw new PlatformRuleError(
+          'CONTRACT_CHECK_REQUIRED',
+          `Mission ${mission.id} 当前契约修订是 r${mission.contractRevision}，派发前必须先提交契约核对。` +
+            '先逐条核对：验收涉及的文件是否都在范围内、提到的输入是否存在、诊断与假设是否证实、' +
+            '验收之间是否矛盾。核对通过用 verdict=ok 提交；发现问题用 verdict=issues 提交，平台会升级给 L3。',
+        );
+      }
+      const checkData = check.data as { verdict?: string; escalationIndex?: number } | undefined;
+      if (checkData?.verdict === 'issues') {
+        // 只认这次 issues 自己那条升级的答复：另有一条旧升级被答复过，不能替这次解闸。
+        const index = checkData.escalationIndex;
+        const escalation = index === undefined ? undefined : mission.escalations[index];
+        if (escalation?.answer?.trim() !== '照原契约做') {
+          throw new PlatformRuleError(
+            'CONTRACT_CHECK_ISSUES_PENDING',
+            `契约核对（r${mission.contractRevision}）判为 issues：在 L3 对这次升级明确答复「照原契约做」` +
+              '之前不能派发。请把问题升级给 L3，等答复后再按原契约继续。',
+          );
+        }
       }
     }
     // Standard 调用顺序保持原样：先 startExecuting/处理 PROJECT_BUSY，

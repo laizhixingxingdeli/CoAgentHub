@@ -71,6 +71,9 @@ const COORDINATOR_HAPPY: ScriptTable = {
       { tool: 'coagent_get_mission', body: {} },
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+      // W-334 门禁：Standard 派发前必须先落一条**当前契约修订**的核对结论，
+      // 否则派发被拒会让整条 Mission 停在「候选全在冷却」上。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),
@@ -144,6 +147,7 @@ const COORDINATOR_V1: ScriptTable = {
         body: {},
         expectFailure: true,
       },
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' }, activityClass: 'other' },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),

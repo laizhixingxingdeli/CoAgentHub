@@ -496,6 +496,20 @@ const EVENT_TABLE = {
     };
   },
 
+  // 协调者开工前的契约核对：ok / issues 决定要不要升级给 L3，所以结论必须显眼。
+  'contract_check.submitted': (event) => {
+    const data = (event && event.data) || {};
+    const verdict = text(data.verdict);
+    // verdict 只有 ok / issues；认不出来就把原值端出来，那是唯一还能 grep 的线索。
+    const verdictText = verdict === 'ok' ? '核对通过' : verdict === 'issues' ? '发现问题' : verdict || '（没有写核对结论）';
+    const revision = data.contractRevision === undefined || data.contractRevision === null ? '' : revisionLabel('contract', data.contractRevision);
+    return {
+      badge: 'L2',
+      action: '契约核对',
+      detail: [verdictText, revision, text(data.summary)].filter(Boolean).join(' · '),
+    };
+  },
+
   'final_review.merged': (event) => ({
     badge: 'L3',
     action: '放行并落地',

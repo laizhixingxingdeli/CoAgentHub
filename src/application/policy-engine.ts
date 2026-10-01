@@ -228,6 +228,9 @@ export const AGENT_TOOL_ACTION: Readonly<Record<string, PolicyAction>> = {
   coagent_get_contract: POLICY_ACTION.missionRead,
   coagent_get_project_context: POLICY_ACTION.missionRead,
   coagent_update_findings: POLICY_ACTION.attemptUpdateFindings,
+  // 复用协调者专属的 attemptUpdatePlan：核对契约是开工前的规划动作，
+  // executor 没有这条授权，自然不能替协调者交核对结论。
+  coagent_submit_contract_check: POLICY_ACTION.attemptUpdatePlan,
   coagent_update_plan: POLICY_ACTION.attemptUpdatePlan,
   coagent_create_work_item: POLICY_ACTION.workItemCreate,
   coagent_retire_work_item: POLICY_ACTION.workItemRetire,

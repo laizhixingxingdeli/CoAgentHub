@@ -551,6 +551,12 @@ describe('Orchestrator Lightweight：PROJECT_BUSY', () => {
       title: 'holder',
       order: ORDER,
     });
+    // M-holder 是 Standard：W-334 门禁要求派发前先落一条当前契约修订的核对结论，
+    // 否则它根本占不住 mutation slot，这条用例测的 PROJECT_BUSY 就无从发生。
+    await h.platform.submitContractCheck('M-holder', coord, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
+    });
     await h.platform.dispatchWorkItems('M-holder', coord, [holderW]);
     assert.equal((await h.platform.getMissionView('M-holder')).isMutating, true);
 
@@ -1145,6 +1151,8 @@ const COORD_PLAN_DISPATCH: ScriptTable = {
     steps: [
       { tool: 'coagent_update_plan', body: PLAN },
       { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+      // W-334 门禁：Standard 派发前必须先落一条当前契约修订的核对结论。
+      { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
       {
         tool: 'coagent_dispatch_work_item',
         body: (previous) => ({ workItemIds: [previous.workItemId] }),

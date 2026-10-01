@@ -78,6 +78,8 @@ async function dispatchOne(platform: Platform, missionId: string) {
       title: 'W',
       order: ORDER,
     });
+    // Standard 派发前必须先落一条**当前契约修订**的核对结论（W-334 门禁）。
+    await platform.submitContractCheck(missionId, attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems(missionId, attemptId, [workItemId]);
     return { attemptId, workItemId };
   } catch (error) {
@@ -114,6 +116,8 @@ describe('改动名额：同一 Project 同时只有一个 Mission 在改代码'
       title: 'W',
       order: ORDER,
     });
+    // 也要先过契约核对门禁，否则先撞的是 CONTRACT_CHECK_REQUIRED，测不到 PROJECT_BUSY。
+    await platform.submitContractCheck('M2', attemptId, { verdict: 'ok', summary: '测试契约已核对' });
 
     await assert.rejects(
       () => platform.dispatchWorkItems('M2', attemptId, [workItemId]),

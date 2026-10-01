@@ -112,6 +112,7 @@ function planAndDispatch(workItemId: string) {
       steps: [
         { tool: 'coagent_update_plan', body: PLAN },
         { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
+        { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
         { tool: 'coagent_dispatch_work_item', body: { workItemIds: [workItemId] } },
       ],
     },

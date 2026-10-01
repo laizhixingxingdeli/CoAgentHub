@@ -692,6 +692,19 @@ export function createApi(deps: ApiDeps): Server {
       return platform.getContract(run.missionId);
     },
 
+    async coagent_submit_contract_check(run, body) {
+      // 请求体形状由契约固定（{verdict, summary, issues?}），这是 L3 侧读事件时
+      // 依赖的字段名：改一个名字，核对结论就会在压缩后被读成空。
+      // 领域校验（verdict 取值、summary / issues 非空）全在 Platform，
+      // 这里只透传，重复校验只会让两处规则各自漂移。
+      return platform.submitContractCheck(
+        run.missionId,
+        run.attemptId,
+        body as unknown as { verdict: 'ok' | 'issues'; summary: string; issues?: string[] },
+        run.claim,
+      );
+    },
+
     async coagent_update_findings(run, body) {
       const { findings, rejectedHypotheses } = body as unknown as {
         findings: string;

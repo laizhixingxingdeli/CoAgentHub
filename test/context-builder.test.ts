@@ -155,6 +155,8 @@ async function upTo(platform: Platform, root: string) {
     title: 'W',
     order: ORDER,
   });
+  // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+  await platform.submitContractCheck('M1', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
   await platform.dispatchWorkItems('M1', coord.attemptId, [workItemId]);
   const exec = await platform.startExecutorAttempt('M1', workItemId);
   return { coordId: coord.attemptId, execId: exec.attemptId, workItemId };
@@ -195,6 +197,8 @@ describe('buildContextBundle', () => {
     const { workItemId } = await platform.createWorkItem('M-route', coord.attemptId, {
       title: 'W', order: ORDER,
     });
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await platform.submitContractCheck('M-route', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await platform.dispatchWorkItems('M-route', coord.attemptId, [workItemId]);
     const exec = await platform.startExecutorAttempt('M-route', workItemId);
     const executorBrief = await platform.getStartupBrief('M-route', exec.attemptId);
@@ -633,7 +637,7 @@ describe('getStartupBrief 从 Bundle 投影旧字段', () => {
     assert.equal(coord.contextBundle.role, 'coordinator');
     assert.deepEqual(
       coord.contextBundle.entries.map((e) => e.source),
-      [...COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'), 'work_items_index', 'since_last_hop'],
+      [...COORDINATOR_SOURCE_ORDER.filter((source) => source !== 'classification'), 'work_items_index', 'since_last_hop', 'contract_check'],
     );
 
     const execProjected = projectStartupBriefFields(exec.contextBundle);

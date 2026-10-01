@@ -647,6 +647,7 @@ async function driveToReview(
     startCoordinatorAttempt: (missionId: string) => Promise<{ attemptId: string }>;
     updatePlan: (missionId: string, attemptId: string, plan: typeof WRITE_PLAN) => Promise<unknown>;
     createWorkItem: (missionId: string, attemptId: string, input: { title: string; order: WorkOrder }) => Promise<{ workItemId: string }>;
+    submitContractCheck: (missionId: string, attemptId: string, input: { verdict: 'ok'; summary: string }) => Promise<unknown>;
     dispatchWorkItems: (missionId: string, attemptId: string, ids: string[]) => Promise<unknown>;
     startExecutorAttempt: (missionId: string, workItemId: string) => Promise<{ attemptId: string }>;
     submitEvidence: (missionId: string, attemptId: string, evidence: object) => Promise<unknown>;
@@ -658,6 +659,7 @@ async function driveToReview(
   workspace: GitWorktreeManager,
   repo: string,
   missionId: string,
+  options?: { executionMode?: 'high_assurance' },
 ) {
   const prepared = await workspace.prepare(missionId, repo);
   await platform.recordWorkspace(missionId, {
@@ -671,6 +673,14 @@ async function driveToReview(
     title: 'W',
     order: WRITE_ORDER,
   });
+  if (options?.executionMode !== 'high_assurance') {
+    // W-334：Standard 第一次派发前必须先落一条契约核对结论，否则派发被门禁拒绝；
+    // 不给 HA 补这一条——HA 不经过这个门禁，补了等于改掉被测场景。
+    await platform.submitContractCheck(missionId, coord.attemptId, {
+      verdict: 'ok',
+      summary: '测试契约已核对',
+    });
+  }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
@@ -938,7 +948,7 @@ describe('l3 主写：探测与回环转发', () => {
     const project = await built.projects.ensure('P');
     project.createMission({ id: 'M-HA', contract: WRITE_CONTRACT, executionMode: 'high_assurance' });
     await built.projects.save(project);
-    await driveToReview(built.platform, workspace, repo, 'M-HA');
+    await driveToReview(built.platform, workspace, repo, 'M-HA', { executionMode: 'high_assurance' });
     built.persist();
     built.releaseLock();
     const before = readFileSync(statePath);
@@ -1521,6 +1531,9 @@ function deliverScripts(workItemId = 'W-1'): ScriptTable {
           },
         },
         { tool: 'coagent_create_work_item', body: { title: 'W', ...WRITE_ORDER } },
+        // W-334 门禁：Standard 派发前必须先落一条当前契约修订的核对结论，
+        // 否则 dispatch 被拒，PlanRun 停在「开不了跑」上而不是它要测的合入面。
+        { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
         {
           tool: 'coagent_dispatch_work_item',
           body: (previous: Record<string, unknown>) => ({ workItemIds: [previous.workItemId] }),

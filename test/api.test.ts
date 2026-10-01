@@ -175,6 +175,13 @@ describe('HTTP 面', () => {
     assert.equal(wi.status, 200);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
 
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call(
+      '/api/agent/coagent_submit_contract_check',
+      { verdict: 'ok', summary: '测试契约已核对' },
+      coordToken,
+    );
+
     const dispatched = await call(
       '/api/agent/coagent_dispatch_work_item',
       { workItemIds: [workItemId] },
@@ -271,6 +278,8 @@ describe('HTTP 面', () => {
     );
     const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
     const exec = await call(`/api/missions/M-guard/work-items/${workItemId}/executor-attempts`, {});
     const execToken = (exec.json as { token: string }).token;
@@ -295,6 +304,8 @@ describe('HTTP 面', () => {
     );
     const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
     const exec = await call(`/api/missions/M-spoof/work-items/${workItemId}/executor-attempts`, {});
     const execToken = (exec.json as { token: string }).token;
@@ -360,6 +371,8 @@ describe('HTTP 面', () => {
     ]);
 
     // blocked：执行者报卡住之后仍可修订，修订号 r2 -> r3。
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
     const exec = await call(`/api/missions/M-revise/work-items/${workItemId}/executor-attempts`, {});
     const execToken = (exec.json as { token: string }).token;
@@ -399,6 +412,8 @@ describe('HTTP 面', () => {
       coordToken,
     );
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
     const exec = await call(
       `/api/missions/M-revise-guard/work-items/${workItemId}/executor-attempts`,
@@ -623,6 +638,8 @@ describe('HTTP 面', () => {
     const wi = await call('/api/agent/coagent_create_work_item', { title: 'W-det', ...detOrder }, coordToken);
     assert.equal(wi.status, 200);
     const workItemId = (wi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
 
     const exec1 = await call(`/api/missions/M-det/work-items/${workItemId}/executor-attempts`, {});
@@ -695,6 +712,8 @@ describe('HTTP 面', () => {
     await call('/api/agent/coagent_update_plan', { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] }, coordBToken);
     const bigWi = await call('/api/agent/coagent_create_work_item', { title: 'W-big', ...detOrder }, coordBToken);
     const bigId = (bigWi.json as { workItemId: string }).workItemId;
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await call('/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordBToken);
     await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [bigId] }, coordBToken);
     const execB = await call(`/api/missions/M-big/work-items/${bigId}/executor-attempts`, {});
     const execBToken = (execB.json as { token: string }).token;
@@ -866,6 +885,8 @@ describe('HTTP 队列 Attempt 身份', () => {
         { title: 'W', order: ORDER, workItemId: 'W1' },
         live,
       );
+      // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+      await platform.submitContractCheck('M', queued.attemptId, { verdict: 'ok', summary: '测试契约已核对' }, live);
       await platform.dispatchWorkItems('M', queued.attemptId, [workItemId], live);
       const exec = await platform.startExecutorAttempt('M', workItemId, undefined, live);
       assert.equal(await platform.attemptRequiresQueueClaim('M', exec.attemptId), true);
@@ -1313,6 +1334,14 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(wi.status, 200);
           const workItemId = (wi.json as { workItemId?: string }).workItemId;
           assert.equal(typeof workItemId, 'string');
+
+          // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+          await postJson(
+            base,
+            '/api/agent/coagent_submit_contract_check',
+            { verdict: 'ok', summary: '测试契约已核对' },
+            coordToken,
+          );
 
           const dispatched = await postJson(
             base,
@@ -1782,6 +1811,13 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
         );
         assert.equal(wi.status, 200);
         const workItemId = (wi.json as { workItemId?: string }).workItemId;
+        // 契约已在 startCoordWithPlan 里改到 r2，核对要按当前修订提交。
+        await postJson(
+          base,
+          '/api/agent/coagent_submit_contract_check',
+          { verdict: 'ok', summary: '测试契约已核对' },
+          coordToken,
+        );
         const dispatched = await postJson(
           base,
           '/api/agent/coagent_dispatch_work_item',
@@ -2115,6 +2151,8 @@ async function seedAwaitingReview(base: string, missionId: string, projectId = '
   const wi = await postJson(base, '/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
   assert.equal(wi.status, 200, JSON.stringify(wi.json));
   const workItemId = (wi.json as { workItemId?: string }).workItemId as string;
+  // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+  await postJson(base, '/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
   const dispatched = await postJson(base, '/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
   assert.equal(dispatched.status, 200, JSON.stringify(dispatched.json));
   const exec = await request(base, `/api/missions/${missionId}/work-items/${workItemId}/executor-attempts`, {});
@@ -3062,6 +3100,8 @@ describe('轻量报卡升级、答复重派与执行者问答视图', () => {
       title: 'W',
       order: ORDER,
     });
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await std.platform.submitContractCheck('M-std', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await std.platform.dispatchWorkItems('M-std', coord.attemptId, [workItemId]);
     const exec = await std.platform.startExecutorAttempt('M-std', workItemId);
     await std.platform.reportBlocked('M-std', exec.attemptId, {
@@ -3122,6 +3162,8 @@ describe('轻量报卡升级、答复重派与执行者问答视图', () => {
       title: 'W2',
       order: ORDER,
     });
+    // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+    await std.platform.submitContractCheck('M-std', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
     await std.platform.dispatchWorkItems('M-std', coord.attemptId, [
       first.workItemId,
       second.workItemId,
