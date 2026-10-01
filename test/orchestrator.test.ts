@@ -90,6 +90,7 @@ async function harness(
   candidateCircuits?: CandidateCircuitRepository,
   attemptWallClockMs?: number,
   workspace?: WorkspaceManager,
+  options?: { usageReader?: () => Promise<unknown>; provider?: string },
 ) {
   const workspaceManager = workspace ?? new InPlaceWorkspaceManager();
   const clock = new FixedClock();
@@ -118,7 +119,7 @@ async function harness(
     executor: {
       runtime: runtimes.executor,
       candidates: [
-        { endpoint: 'local' as const, profileId: 'exec-a' },
+        { endpoint: 'local' as const, profileId: 'exec-a', facts: [{ key: 'provider', value: options?.provider ?? 'scripted' }] },
         { endpoint: 'local' as const, profileId: 'exec-b' },
       ],
     },
@@ -140,6 +141,7 @@ async function harness(
         candidateCircuits,
         attemptWallClockMs,
         executor: pools.executor,
+        usageReader: options?.usageReader,
       }),
     makeRunner: () =>
       new MissionRunner({
@@ -571,6 +573,77 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal(view.workItems[0].status, 'accepted', '第一次失败不等于工作项失败');
   });
 
+  test('用量耗尽时持久候选关闸不发请求；到期确认余量后才派发', async () => {
+    const quotaRuns = async (usage: unknown) => {
+      const executor = new ScriptedRuntime({ 'executor:W-1': EXECUTOR_HAPPY['executor:W-1'] });
+      const circuits = candidateCircuitRepository();
+      current = await harness(
+        { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor },
+        circuits,
+        undefined,
+        undefined,
+        { usageReader: async () => usage, provider: 'xai' },
+      );
+      await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-quota', contract: CONTRACT });
+      const orchestrator = current.makeOrchestrator();
+      await orchestrator.runMission('M-usage-quota', { projectRoot: process.cwd() });
+      return { executor, circuits, orchestrator };
+    };
+
+    const resetAt = new Date(Date.now() + 3_600_000).toISOString();
+    const exhausted = await quotaRuns([
+      { provider: 'xai', status: 'ok', remainingPercent: 0, usedPercent: 100, resetAt },
+    ]);
+    assert.equal(
+      exhausted.executor.specs.filter((spec) => spec.profile.profileId === 'exec-a').length,
+      0,
+      '耗尽时不发请求',
+    );
+    const gated = await exhausted.circuits.get('exec-a');
+    assert.equal(gated.state, 'open');
+    if (gated.state === 'open') {
+      assert.equal(gated.failureClass, 'quota');
+      assert.equal(gated.openUntil, resetAt);
+    }
+
+    const fresh = await quotaRuns([
+      { provider: 'xai', status: 'ok', remainingPercent: 42, usedPercent: 58, resetAt },
+    ]);
+    assert.equal(
+      fresh.executor.specs.filter((spec) => spec.profile.profileId === 'exec-a').length,
+      1,
+      '有余量时正常派发',
+    );
+    assert.equal(fresh.orchestrator.hops.some((hop) => hop.role === 'executor' && hop.profile.profileId === 'exec-a'), true);
+  });
+
+  test('到期 quota 候选未确认余量仍不半开不发请求', async () => {
+    const executor = new ScriptedRuntime({ 'executor:W-1': EXECUTOR_HAPPY['executor:W-1'] });
+    const circuits = candidateCircuitRepository();
+    await circuits.open({
+      profileId: 'exec-a',
+      failureClass: 'quota',
+      openUntil: new Date(Date.now() - 60_000).toISOString(),
+    });
+    current = await harness(
+      { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor },
+      circuits,
+      undefined,
+      undefined,
+      { usageReader: async () => ({ available: false }), provider: 'xai' },
+    );
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-unknown', contract: CONTRACT });
+    const orchestrator = current.makeOrchestrator();
+    await orchestrator.runMission('M-usage-unknown', { projectRoot: process.cwd() });
+    assert.equal(
+      executor.specs.filter((spec) => spec.profile.profileId === 'exec-a').length,
+      0,
+      '用量不可用时不得半开发请求',
+    );
+    assert.equal((await circuits.get('exec-a')).state, 'open', '未确认余量不改熔断');
+    assert.equal(orchestrator.hops.some((hop) => hop.profile.profileId === 'exec-a'), false);
+  });
+
   test('持久 Hop 的平台不可达保留原熔断记录且不轮换候选', async () => {
     const scripted = new ScriptedRuntime({ 'executor:W-1': { steps: [] } });
     const platformUnavailable: AgentRuntime = {
@@ -659,7 +732,9 @@ describe('调度器：整条 Mission 自己走完', () => {
       assert.equal(recorded.state, 'open', `${name} opens P circuit`);
       if (recorded.state === 'open') {
         assert.equal(recorded.failureClass, expectedClass);
-        assert.ok(Date.parse(recorded.openUntil) > Date.now());
+        // quota 无重置时间时熔断 openUntil 为 null（等人工复位）；其余类别仍是未来时刻。
+        if (expectedClass === 'quota') assert.equal(recorded.openUntil, null, `${name} 无重置时间`);
+        else assert.ok(Date.parse(recorded.openUntil) > Date.now(), `${name} 有未来截止`);
       }
     }
 
