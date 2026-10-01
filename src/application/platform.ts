@@ -2604,6 +2604,41 @@ export class Platform {
       attempt.kind === 'executor' && attempt.workItemId
         ? mission.workItem(attempt.workItemId)
         : undefined;
+    let classification: string | undefined;
+    if (attempt.kind === 'coordinator') {
+      const routed = (await this.#activity.list(missionId)).find(
+        (event) => event.kind === 'mission.routed',
+      );
+      if (routed) {
+        const data = routed.data && typeof routed.data === 'object'
+          ? (routed.data as Record<string, unknown>)
+          : {};
+        const facts = data.facts && typeof data.facts === 'object'
+          ? Object.fromEntries(
+              Object.entries(data.facts as Record<string, unknown>).filter(
+                ([, value]) => value === true || value === 'unknown',
+              ),
+            )
+          : {};
+        const lines = [
+          '分类阶段已查明',
+          `facts: ${JSON.stringify(facts)}`,
+          `unknowns: ${JSON.stringify(data.unknowns ?? [])}`,
+          `reasons: ${JSON.stringify(data.reasons ?? [])}`,
+        ];
+        const assessmentReasons = mission.complexityAssessment?.reasons ?? data.assessmentReasons;
+        if (assessmentReasons !== undefined) {
+          lines.push(`assessmentReasons: ${JSON.stringify(assessmentReasons)}`);
+        }
+        if (typeof data.fallbackReason === 'string') {
+          lines.push(`fallbackReason: ${data.fallbackReason}`);
+        }
+        const full = lines.join('\n');
+        classification = full.length <= 2000
+          ? full
+          : `${full.slice(0, 2000 - '（已截断）'.length)}（已截断）`;
+      }
+    }
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
     const contextBundle = buildContextBundle(
       {
@@ -2616,6 +2651,7 @@ export class Platform {
         planRevision: mission.planRevision,
         workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
         finalReview: mission.finalReview,
+        classification,
       },
       budget,
     );
