@@ -137,6 +137,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   Mission 可挂 `executionBudget`。用法快照与求值在 application 纯函数层；**调度强制**在 Orchestrator PRE/POST gate，经 Platform 记事件 / 升级 / 等待。
 - **fast-lane-ab-metrics** — Fast Lane A/B 指标（FASTLANE-METRICS）
   `Platform.listRuns(missionId)` 是同一任务多次运行的只读对照出口；`src/l3.ts runs` 直接展示这些事实。
+- **file-state-atomic-write** — 文件状态原子提交短暂改名拒绝重试
+  FileStateStore 的主状态文件先写临时文件再 rename 覆盖。仅遇到 Windows 常见临时拒绝 `EPERM`、`EBUSY`、`EACCES` 时短退避有限重试（最多十次、总等待不超过约两秒）；其他错误立即抛出，重试耗
 - **hosted-run-routing** — 常驻持锁服务编排入口与 CLI 回环转发
   文件存储下，`run-mission` 与 `run-plan` 保留原有命令前缀。正式运行在输入和环境前置校验、方案资格筛选/仓库预检之后探测同一 statePath 写者：经身份验证的 live 服务由回环 HTTP 启动，并在同一服务
 - **http-control-auth** — HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
@@ -155,6 +157,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   协调者的 `coagent_update_findings` 为增量补充：有旧 findings 时旧内容原样保留为前缀，空行及「—— 第 n 次补充」分隔后追加本次 findings。仅显式传入 `rejectedHypotheses` 
 - **mission-round-limit** — Mission 单次运行轮次上限
   `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
+- **plan-run-recovery** — 方案运行等待与叫停后续跑
+  本能力细化 `plan-run` 的运行内等待资格与开跑前续跑资格，不改变原有升级、停止和决定语义。
 - **plan-run-web-observability** — 方案运行只读观测面（HTTP 与 Web）
   本能力只投影已有 PlanRun/Mission 和服务内存输出，不改变 `plan-run` 的记录格式、驱动资格、升级决定、停止或合并语义。Web 是无构建的浏览器原生 ES module，只经 `/api/*` 读，不提供启动方案或作
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
