@@ -3002,6 +3002,17 @@ describe('调度器：按角色读取候选冷却快照', () => {
     const probeAt = new Date(now).toISOString();
     await circuits.open({ profileId: 'exec-b', failureClass: 'rate_limit', openUntil: probeAt });
     assert.equal(await circuits.tryClaimProbe({ profileId: 'exec-b', now: probeAt }), true);
+    // exec-c：仓储读这一行时直接抛。快照不能跟着炸，也不能替它编一个冷却时长——
+    // 一个候选读坏了说明不了别的候选怎么样。
+    const circuitsWithUnreadableRow: CandidateCircuitRepository = {
+      get: (profileId) =>
+        profileId === 'exec-c'
+          ? Promise.reject(new Error('state row unreadable'))
+          : circuits.get(profileId),
+      open: (input) => circuits.open(input),
+      tryClaimProbe: (input) => circuits.tryClaimProbe(input),
+      resolveProbe: (input) => circuits.resolveProbe(input),
+    };
 
     // 直构编排器，不起 server、不碰真实状态目录：这一跳只读候选池与熔断仓储。
     const clock = new FixedClock();
@@ -3021,7 +3032,7 @@ describe('调度器：按角色读取候选冷却快照', () => {
       tokens: makeIssuer(platform, tokens),
       baseUrl: 'http://cooldown-snapshot.invalid',
       workspace: new InPlaceWorkspaceManager(),
-      candidateCircuits: circuits,
+      candidateCircuits: circuitsWithUnreadableRow,
       coordinator: {
         runtime: new ScriptedRuntime({}),
         candidates: [{ endpoint: 'local', profileId: 'coordinator-a' }],
@@ -3031,6 +3042,7 @@ describe('调度器：按角色读取候选冷却快照', () => {
         candidates: [
           { endpoint: 'local', profileId: 'exec-a' },
           { endpoint: 'local', profileId: 'exec-b' },
+          { endpoint: 'local', profileId: 'exec-c' },
         ],
       },
     });
@@ -3038,10 +3050,12 @@ describe('调度器：按角色读取候选冷却快照', () => {
     assert.deepEqual(await runner.roleCooldownSnapshot('coordinator', now), [
       { profileId: 'coordinator-a', availability: 'cooldown', until: openUntil, retryAfterMs: 5 * 60_000 },
     ]);
-    // 执行者这一侧一个都不能沾上协调者的冷却；exec-b 是 unknown，不是 cooldown。
+    // 执行者这一侧一个都不能沾上协调者的冷却；exec-b（half_open）与 exec-c（读坏了）
+    // 都是 unknown，不是 cooldown，也都不影响 exec-a 报 available。
     assert.deepEqual(await runner.roleCooldownSnapshot('executor', now), [
       { profileId: 'exec-a', availability: 'available', retryAfterMs: 0 },
       { profileId: 'exec-b', availability: 'unknown' },
+      { profileId: 'exec-c', availability: 'unknown' },
     ]);
     // 池没装配 = 没有候选，不是「全在冷却」。
     assert.deepEqual(await runner.roleCooldownSnapshot('independent_reviewer', now), []);

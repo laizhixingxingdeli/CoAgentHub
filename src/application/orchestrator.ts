@@ -1222,7 +1222,15 @@ export class Orchestrator {
           }
         : { profileId, availability: 'available' as const, retryAfterMs: 0 };
     }
-    const circuit: CandidateCircuit | undefined = await this.#candidateCircuits.get(profileId);
+    let circuit: CandidateCircuit | undefined;
+    try {
+      circuit = await this.#candidateCircuits.get(profileId);
+    } catch {
+      // 读不出来（状态文件损坏、IO 失败）只能说这一个候选不可证明可用。
+      // 既不能编一个冷却时长（等于把「仓储坏了要人看」写成「等一会就好」），
+      // 也不能让整张快照抛出去——别的候选的可用性与它无关。
+      return { profileId, availability: 'unknown' as const };
+    }
     if (circuit?.state === 'closed') {
       return { profileId, availability: 'available' as const, retryAfterMs: 0 };
     }
