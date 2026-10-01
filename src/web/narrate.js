@@ -418,6 +418,20 @@ const EVENT_TABLE = {
     };
   },
 
+  'work_item.order_revised': (event) => {
+    const data = (event && event.data) || {};
+    const revision = text(data.revision);
+    const fields = list(data.changedFields);
+    // 事件只记修订号与字段名（full order 在工单时间线重复无意义），缺了就直说。
+    const revisionText = revision ? `（${revision}）` : '（没写修订号）';
+    const changedText = fields.length === 0 ? '（没写改了哪些字段）' : fields.join('、');
+    return {
+      badge: 'L2',
+      action: '修订工单',
+      detail: `工作项 ${or(event && event.workItemId, '（没有工作项 ID）')}${revisionText} · 改了：${changedText}`,
+    };
+  },
+
   'work_item.retired': (event) => ({
     badge: 'L2',
     action: '作废工作项',

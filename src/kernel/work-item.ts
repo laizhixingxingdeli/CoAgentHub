@@ -236,6 +236,31 @@ export class WorkItem {
     return this.#order;
   }
 
+  /**
+   * 在允许状态下原子替换完整工单，修订号 +1。
+   *
+   * 只接受 `created` / `rejected` / `blocked`：这些状态下工单“还没定稿”或
+   * “被上游判定需要改”。其余状态（dispatched / submitted / accepted / retired）
+   * 拒绝，抛 ILLEGAL_TRANSITION，由 Platform 给调用者下一步提示（例如先 dispatch）。
+   *
+   * 不走“覆盖 #order 字段绕过 freezeWorkOrder”这条路：新工单同样过 freezeWorkOrder，
+   * 校验失败直接抛错、#order 不被污染（失败不污染原工单）。修订号 = 既有 order 的
+   * 号 +1；若之前根本没有工单（构造时未传 order），视作首版 r1。
+   */
+  reviseOrder(order: WorkOrder): void {
+    if (
+      this.#status !== 'created' &&
+      this.#status !== 'rejected' &&
+      this.#status !== 'blocked'
+    ) {
+      throw new IllegalTransitionError('WorkItem', this.#status, 'reviseOrder');
+    }
+    const hasCurrent = this.#order !== undefined;
+    const nextRev = hasCurrent ? nextOrderRevision(this.#order?.orderRevision) : 'r1';
+    const revised: WorkOrder = { ...order, orderRevision: nextRev };
+    this.#order = freezeWorkOrder(revised, 'strict');
+  }
+
   /** 每次验收留一条；被打回重做的工作项会有多条。 */
   get reviews(): readonly Readonly<ReviewRecord>[] {
     return [...this.#reviews];
@@ -509,7 +534,19 @@ function freezeWorkOrder(
   } else {
     delete copy.validation;
   }
+  // 工单修订号：缺省（旧工单 / 老快照无字段）视作 r1。restore 模式下同样补齐，
+  // 保证「老快照无 revision 恢复视作 r1」且与 toSnapshot 往返一致。
+  if (!Object.prototype.hasOwnProperty.call(copy, 'orderRevision') || copy.orderRevision == null) {
+    copy.orderRevision = 'r1';
+  }
   return freezePayload(copy as unknown as WorkOrder);
+}
+
+function nextOrderRevision(current: string | undefined): string {
+  const m = /^r(\d+)$/.exec(current ?? '');
+  // 缺省 / 格式不符都视作 r1，返回下一个 r<n+1>。
+  const n = m ? Number(m[1]) : 1;
+  return `r${n + 1}`;
 }
 
 function copyAuthority(authority: ReviewAuthority): ReviewAuthority {

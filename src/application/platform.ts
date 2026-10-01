@@ -50,6 +50,7 @@ import type {
   ValidationCheckResult,
   WaitReason,
   WorkItem,
+  WorkItemStatus,
   WorkOrder,
   WorkspaceRef,
 } from '../kernel/index.ts';
@@ -2827,16 +2828,20 @@ export class Platform {
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
     claim?: QueueClaimIdentity,
-  ): Promise<{ workItemId: string }> {
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{ workItemId: string; warnings: readonly WorkOrderStandardWarning[] }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#attemptWrite(missionId, attemptId, claim, () => this.#createWorkItem(missionId, attemptId, input));
+    return this.#attemptWrite(missionId, attemptId, claim, () =>
+      this.#createWorkItem(missionId, attemptId, input, options),
+    );
   }
 
   async #createWorkItem(
     missionId: string,
     attemptId: string,
     input: { title: string; order: WorkOrder; workItemId?: string },
-  ): Promise<{ workItemId: string }> {
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{ workItemId: string; warnings: readonly WorkOrderStandardWarning[] }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     if (mission.planRevision === 0) {
       throw new PlatformRuleError(
@@ -2846,8 +2851,92 @@ export class Platform {
     }
     const workItemId = input.workItemId ?? this.#ids.next('W');
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
-    await this.#event(mission, 'work_item.created', { title: input.title }, workItemId, attemptId);
-    return { workItemId };
+    // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
+    // 只审计、不硬拒——超限的工单照常建出来，由协调者照建议拆单/补引用。
+    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(input.order) : undefined;
+    await this.#event(
+      mission,
+      'work_item.created',
+      { title: input.title, ...(warnings ? { warnings } : {}) },
+      workItemId,
+      attemptId,
+    );
+    return warnings ? { workItemId, warnings } : { workItemId };
+  }
+
+  /**
+   * 修订一张还没定稿的工单。
+   *
+   * 工单冻结后原本只能作废重建（实测 PLAT3 作废 9 个，其中 7 个曾卡住），
+   * 但唤醒说明又要求「把工单改对再重新派发」——两者对不上。这里补上入口：
+   * 只要工单**没在跑**（created / rejected / blocked），协调者可以整份替换。
+   *
+   * 身份只来自 Run Token 的 claim，body 里自述的角色一律不采信（#requireAttempt）。
+   * 修订号在 kernel 里递增（r1 -> r2 …），平台只负责发事件、对比字段差异。
+   */
+  async reviseWorkOrder(
+    missionId: string,
+    attemptId: string,
+    workItemId: string,
+    order: WorkOrder,
+    claim?: QueueClaimIdentity,
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{
+    workItemId: string;
+    revision: string;
+    changedFields: readonly string[];
+    warnings: readonly WorkOrderStandardWarning[];
+  }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#attemptWrite(missionId, attemptId, claim, () =>
+      this.#reviseWorkOrder(missionId, attemptId, workItemId, order, options),
+    );
+  }
+
+  async #reviseWorkOrder(
+    missionId: string,
+    attemptId: string,
+    workItemId: string,
+    order: WorkOrder,
+    options?: { viaCoordinatorTool?: boolean },
+  ): Promise<{
+    workItemId: string;
+    revision: string;
+    changedFields: readonly string[];
+    warnings: readonly WorkOrderStandardWarning[];
+  }> {
+    const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
+    const item = mission.workItem(workItemId);
+    if (!item) {
+      throw new PlatformRuleError('UNKNOWN_WORK_ITEM', `工作项 ${workItemId} 不存在`);
+    }
+    // 运行中 / 已有结果的工单不能就地改：执行者手上那份是冻结的，改了它就会
+    // 出现「按旧工单交的结果对不上新验收标准」。kernel 也挡这些状态（抛
+    // ILLEGAL_TRANSITION），这里先挡一次是为了给协调者一句能照做的下一步。
+    const hint = REVISE_BLOCKED_HINT[item.status];
+    if (hint) {
+      throw new PlatformRuleError('WORK_ITEM_NOT_REVISABLE', `工作项 ${workItemId} ${hint}`);
+    }
+    // 差异取调用方提交的整份工单 vs 修订前的整份工单；orderRevision 是
+    // kernel 机械递增的，不算「协调者改了哪个字段」，单独由 revision 事件字段给出。
+    const changedFields = orderChangedFields(item.order, order);
+    item.reviseOrder(order);
+    const revision = item.order?.orderRevision ?? 'r1';
+    // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
+    // 只审计、不硬拒——超限的修订照常生效，由协调者照建议拆单/补引用。
+    const warnings = options?.viaCoordinatorTool ? checkWorkOrderStandard(order) : undefined;
+    // 只记修订号与字段名，不把工单全文写进事件：事件流是给人看的，
+    // 全文会在每条时间线上重复一遍工单。超工单标准的警告一并带上，不另造事件种类。
+    await this.#event(
+      mission,
+      'work_item.order_revised',
+      { revision, changedFields, ...(warnings ? { warnings } : {}) },
+      workItemId,
+      attemptId,
+    );
+    return warnings
+      ? { workItemId, revision, changedFields, warnings }
+      : { workItemId, revision, changedFields };
   }
 
   /**
@@ -3360,6 +3449,37 @@ export class Platform {
         throw new PlatformRuleError(
           'NOT_DISPATCHABLE',
           `工作项 ${item.id} 当前是 ${item.status}，不能派发`,
+        );
+      }
+    }
+    // 门禁（W-292）：执行者曾报 blocked 或交 partial/blocked 结果的工作项，
+    // 未修订不得原样重派。查「最近一次」相关事件（不是只看当前状态），
+    // 与当前 orderRevision 比较；修订后不相等即可派发，旧快照没记则兼容放行。
+    // 必须在 #acquireMutationSlotForDispatch / PRE_DISPATCH shadow / 状态修改之前判定，
+    // 否则被拒的调用会留下半套流转。
+    const history = await this.#activity.list(mission.id);
+    for (const item of items) {
+      const lastRelevant = [...history].reverse().find((event) => {
+        if (event.workItemId !== item.id) return false;
+        if (event.kind === 'blocked.reported') return true;
+        if (event.kind === 'execution_result.submitted') {
+          const outcome = (event.data as { outcome?: string } | undefined)?.outcome;
+          return outcome === 'blocked' || outcome === 'partial';
+        }
+        return false;
+      });
+      if (!lastRelevant) continue;
+      const recorded = (lastRelevant.data as { orderRevision?: string } | undefined)?.orderRevision;
+      if (recorded === undefined) continue; // 老快照未记，兼容放行
+      const current = item.order?.orderRevision ?? 'r1';
+      if (recorded === current) {
+        throw new PlatformRuleError(
+          'WORK_ORDER_REVISION_REQUIRED',
+          `工作项 ${item.id} 最近一次被报 blocked 或提交 partial/blocked 结果时工单仍是 ${recorded}，` +
+            '未修订的同一张工单不能原样重派。请先做其一：' +
+            '(1) 用 coagent_revise_work_order 修订工单（修订号递增）后重派；' +
+            '(2) 若这张工单已无意义，用 retire/作废取代重派；' +
+            '(3) 若重派不成立，升级给 L3 重新判断。',
         );
       }
     }
@@ -4694,7 +4814,6 @@ export class Platform {
       throw new PlatformRuleError('NO_WORK_ORDER', `工作项 ${workItemId} 没有工单正文。`);
     }
     const contract = mission.contract;
-    const answered = answeredQaForWorkItem(mission, item);
     return {
       workItemId: item.id,
       title: item.title,
@@ -4702,10 +4821,8 @@ export class Platform {
       order: item.order,
       missionIntent: contract?.intent ?? '',
       guardrails: contract?.guardrails ?? [],
-      /** 被打回重做时，上一次的 requiredChanges 必须带下去。 */
-      previousRequiredChanges: item.reviews.at(-1)?.requiredChanges ?? [],
-      // 问答是事后补的，不能写进冻结 order；未答不带键，以免泄漏未决提问。
-      ...(answered ?? {}),
+      // 打回理由与问答都是事后补的，不能写进冻结 order；缺省不带键。
+      ...priorGuidanceForWorkItem(mission, item),
     };
   }
 
@@ -4843,7 +4960,13 @@ export class Platform {
     await this.#event(
       mission,
       'execution_result.submitted',
-      { outcome: body.outcome, changedFiles: body.changedFiles.length },
+      {
+        outcome: body.outcome,
+        changedFiles: body.changedFiles.length,
+        // 记当时工单修订号：重派门禁据此判断「未修订是否原样重派」，
+        // 不另造事件种类、不依赖当前状态（修订后当前会变大）。
+        orderRevision: item.order?.orderRevision ?? 'r1',
+      },
       workItemId,
       attemptId,
     );
@@ -4875,7 +4998,18 @@ export class Platform {
       throw new PlatformRuleError('UNKNOWN_WORK_ITEM', `工作项 ${workItemId} 不存在`);
     }
     item.recordBlocked({ ...body, attemptId });
-    await this.#event(mission, 'blocked.reported', { reason: body.reason }, workItemId, attemptId);
+    await this.#event(
+      mission,
+      'blocked.reported',
+      {
+        reason: body.reason,
+        // 记当时工单修订号：重派门禁据此判断「未修订是否原样重派」，
+        // 不另造事件种类、不依赖当前状态。
+        orderRevision: item.order?.orderRevision ?? 'r1',
+      },
+      workItemId,
+      attemptId,
+    );
     // Lightweight 没有协调者：执行者提问只能走 Mission 升级，否则 L3 看不到。
     // Standard 和空白需求不是提问，保持只记 blocked。
     const needs = typeof body.needsFromUpstream === 'string' ? body.needsFromUpstream : '';
@@ -5756,6 +5890,27 @@ export interface MissionView {
     attemptIds: string[];
     lastReview?: ReviewRecord;
     /**
+     * submitted 工作项：最新提交 attempt 的**每条**证据，脱敏后再截尾，协调者直接拿到可核实的
+     * 产物，不必再自己重跑测试（实测每跳命令输出平均 40 KB）。每条 {command,exitCode,
+     * summary,outputTail}；output 先 redactSecrets 再 slice(-1000)，command/summary 也过脱敏。
+     * 其它状态（含已验收）为 undefined——已验收成果看 executionResult 摘要即可，不返还证据输出。
+     */
+    submittedEvidence?: readonly {
+      readonly command: string | undefined;
+      readonly exitCode: number | undefined;
+      readonly summary: string;
+      readonly outputTail: string;
+    }[];
+    /**
+     * accepted / rejected 工作项：只给证据条数和最后一次评审结论，不泄露证据输出。
+     * evidenceCount 取自最新提交 attempt 的证据条数；verdict 即该工作项当前验收态
+     * （= 最后一次评审的 verdict）。其它状态为 undefined；submitted 走 submittedEvidence，不填这一格。
+     */
+    reviewSummary?: {
+      readonly evidenceCount: number;
+      readonly verdict: 'accept' | 'reject';
+    };
+    /**
      * 工单正文。**这是 L2 交给 L1 的那封信**——目标、范围、怎么验证、
      * 什么算做完。观测面要让人看到 agent 之间到底传了什么，缺了它就只剩
      * 一个标题，而"为什么它做成了这样"全在这份正文里。
@@ -5839,7 +5994,13 @@ export interface WorkOrderView {
   order: WorkOrder;
   missionIntent: string;
   guardrails: readonly string[];
-  previousRequiredChanges: readonly string[];
+  /**
+   * 最近一次 reject 的 requiredChanges。**没有 reject 就不带这个键**——`[]` 会被
+   * 读成「上次要求是空」，而真相是「上次根本没打回过」，比缺字段更误导。
+   */
+  previousRequiredChanges?: readonly string[];
+  /** L3 打回整个 Mission 的理由。和 previousRequiredChanges 各自可缺，互不依赖。 */
+  l3SendBackReasons?: readonly string[];
   question?: string;
   answer?: string;
   answeredAt?: string;
@@ -5985,6 +6146,93 @@ function collectPromotionEvidenceIds(mission: Mission): string[] {
  *   2) activity `validation.reported` 事件 data.reportId
  *      （Lightweight 失败只落 report+事件、不写 ReviewRecord 时仍须计入）
  */
+/**
+ * 工单处于「正在跑 / 已出结果」时不能修订。每条给协调者下一步能照做的事：
+ * 等结果、先验收、或走作废重建。created / rejected / blocked 不在表里，可修订。
+ */
+const REVISE_BLOCKED_HINT: Partial<Record<WorkItemStatus, string>> = {
+  dispatched: '正在执行中，改不了：等执行者交卷（或报告卡住）后再修订，或先作废重建。',
+  submitted: '已有执行结果待验收，先 review_execution_result 收掉这次结果，再决定是否修订。',
+  accepted: '已经验收通过，不能修订；契约若变应由 L3 打回，再重建工单。',
+  retired: '已经作废，不能修订；需要的话请新建一张工单。',
+};
+
+/**
+ * 两份工单的顶层字段差异（字段名，排序）。
+ *
+ * orderRevision 由 kernel 机械递增，不代表协调者改了什么，所以从两侧剔掉；
+ * 修订号单独由事件的 revision 字段给出。用 JSON 值比较能连数组 / 对象的
+ * 内容差异一起认出来，而不是只看引用是否变了。
+ */
+function orderChangedFields(
+  previous: Readonly<WorkOrder> | undefined,
+  next: WorkOrder,
+): string[] {
+  const prev = { ...((previous ?? {}) as Record<string, unknown>) };
+  const curr = { ...(next as unknown as Record<string, unknown>) };
+  delete prev.orderRevision;
+  delete curr.orderRevision;
+  const fields = new Set([...Object.keys(prev), ...Object.keys(curr)]);
+  const changed: string[] = [];
+  for (const field of fields) {
+    const before = JSON.stringify(prev[field] ?? null);
+    const after = JSON.stringify(curr[field] ?? null);
+    if (before !== after) changed.push(field);
+  }
+  return changed.sort();
+}
+
+/**
+ * 工单违背「工单标准」（用户 2026-10-01）时的软警告项。
+ *
+ * 只审计、不硬拒：协调者工具路径仍照常成功，警告随建单/修订事件一并记录，
+ * 由协调者照建议拆单或补文件引用。直接调用 Platform 不触发此检查。
+ */
+export interface WorkOrderStandardWarning {
+  /** 违规项：允许改动范围过大、验证超过两条、最小上下文缺失。 */
+  readonly rule: 'allowedScope' | 'verification' | 'contextRefs';
+  /** 给协调者的一句能照做的下一步（拆单 / 补文件引用建议）。 */
+  readonly suggestion: string;
+}
+
+/**
+ * 纯校验：工单是否超出「工单标准」又不至于硬拒。
+ *
+ * 规则放在 Platform 而非 HTTP handler：两个 coordinator 工具共用同一份真话。
+ * 仅按末尾扩展名识别文件、把纯目录路径剔除——目录不得冒充文件；
+ * 不发明任何新硬拒，所有命中项都只是软警告。
+ */
+function checkWorkOrderStandard(order: WorkOrder): WorkOrderStandardWarning[] {
+  const warnings: WorkOrderStandardWarning[] = [];
+  const files = (order.allowedScope ?? []).filter((p) => /\.[^/]+$/.test(p));
+  const dirs = (order.allowedScope ?? []).filter((p) => !/\.[^/]+$/.test(p));
+  if (files.length + dirs.length > 2) {
+    warnings.push({
+      rule: 'allowedScope',
+      suggestion:
+        'allowedScope 超过 2 项：一张工单只做一个行为、改 1–2 个文件，请拆成多张工单。',
+    });
+  } else if (dirs.length > 0) {
+    warnings.push({
+      rule: 'allowedScope',
+      suggestion: 'allowedScope 含纯目录路径，不得冒充文件：请列出具体文件（带扩展名）。',
+    });
+  }
+  if ((order.verification ?? []).length > 2) {
+    warnings.push({
+      rule: 'verification',
+      suggestion: 'verification 超过 2 条：每条验收 1–2 条验证即可，请精简或拆单。',
+    });
+  }
+  if ((order.contextRefs ?? []).length === 0) {
+    warnings.push({
+      rule: 'contextRefs',
+      suggestion: 'contextRefs 为空：至少给出最小充分上下文（文件行段或 Living Spec 引用）。',
+    });
+  }
+  return warnings;
+}
+
 /**
  * 协调者评审的逐条结果（方案 §11）：工单有验收标准时必须一条对一条、照抄原文。
  *
@@ -6183,13 +6431,49 @@ function answeredQaForWorkItem(
   };
 }
 
-function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
+/**
+ * 派回执行者的可见理由：工单视图与开跑简报共用这一份投影，两处不能各算各的。
+ *
+ * 为什么不能只取 `item.reviews.at(-1)`：工作项被 reject 后重做、又被 accept，最后
+ * 一条评审是 accept，其 requiredChanges 是空的。这时 L3 再打回整个 Mission 重派，
+ * 执行者读到的「上次要改什么」是空——真正该先看的打回理由一条也没到它手上。
+ * 倒着找**最近一次 reject** 既保住旧的「重派带上要改什么」语义，又不会被随后的
+ * accept 抹掉。
+ *
+ * L3 理由只在当前 finalReview 是 send_back 时带（Mission 每次 send_back 都覆盖
+ * finalReview，所以同轮多次打回自然只剩最新一条）。它**不**要求本项有 reject：
+ * 「已验收的工作项被 L3 打回重派」正是本投影要救的场景，那时 reviews 里只有 accept。
+ */
+function priorGuidanceForWorkItem(
+  mission: Mission,
+  item: WorkItem,
+): {
+  previousRequiredChanges?: readonly string[];
+  l3SendBackReasons?: readonly string[];
+  question?: string;
+  answer?: string;
+  answeredAt?: string;
+} {
+  const latestReject = [...item.reviews]
+    .reverse()
+    .find((review) => review.verdict === 'reject');
+  const finalReview = mission.finalReview;
   const answered = answeredQaForWorkItem(mission, item);
+  return {
+    ...(latestReject ? { previousRequiredChanges: latestReject.requiredChanges } : {}),
+    ...(finalReview?.verdict === 'send_back' && finalReview.reasons.length > 0
+      ? { l3SendBackReasons: finalReview.reasons }
+      : {}),
+    ...(answered ?? {}),
+  };
+}
+
+function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
   return {
     id: item.id,
     title: item.title,
     order: item.order,
-    ...(answered ?? {}),
+    ...priorGuidanceForWorkItem(mission, item),
   };
 }
 
@@ -6227,6 +6511,29 @@ function viewOf(mission: Mission): MissionView {
       attempts: item.attempts.length,
       attemptIds: item.attempts.map((a) => a.id),
       lastReview: item.reviews.at(-1),
+      // submitted：只投影最新提交 attempt（item.submittedAttemptId）的证据，脱敏后再截尾。
+      // 先 redactSecrets 再 slice(-1000)——顺序反了会把截出来的尾巴里的 token 明文露出去。
+      ...(item.status === 'submitted' && item.submittedAttemptId !== undefined
+        ? {
+            submittedEvidence: (item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence ?? []).map(
+              (e) => ({
+                command: e.command !== undefined ? redactSecrets(e.command) : undefined,
+                exitCode: e.exitCode,
+                summary: redactSecrets(e.summary),
+                outputTail: (e.output !== undefined ? redactSecrets(e.output) : '').slice(-1000),
+              }),
+            ),
+          }
+        : {}),
+      // accepted / rejected：只给证据条数和验收结论，不泄露证据输出。
+      ...((item.status === 'accepted' || item.status === 'rejected')
+        ? {
+            reviewSummary: {
+              evidenceCount: item.attempts.find((a) => a.id === item.submittedAttemptId)?.evidence.length ?? 0,
+              verdict: item.status === 'accepted' ? 'accept' : 'reject',
+            },
+          }
+        : {}),
       // 两封信的正文。观测面要回答"这两个 agent 之间到底传了什么"，
       // 光有 title 和一个 hasResult 布尔量回答不了。
       order: item.order,

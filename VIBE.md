@@ -173,6 +173,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   机器独立验收与协调者自报权威分立。执行者**不得**给自己签发通过。
 - **web-shell** — 正式 Web 端外壳、项目页与任务详情
   无构建的浏览器原生 ES module，由 `src/api/static.ts` 按扁平文件名吐出（见 ADR-0001）。
+- **work-order-handoff** — 工单修订、交接与证据视图
+  协调者 `coagent_get_mission` 的 submitted 工作项展示最新提交 attempt 的逐条证据命令、退出码、摘要及输出末尾 1,000 字；命令、摘要和输出均先按 `src/application/redact.
 
 ## 架构决策
 

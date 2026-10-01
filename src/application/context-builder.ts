@@ -45,6 +45,13 @@ export interface BoundWorkItem {
   readonly question?: string;
   readonly answer?: string;
   readonly answeredAt?: string;
+  /**
+   * 最近一次 reject 的 requiredChanges。**没有 reject 就没有这个键**——空数组会被
+   * 执行者读成「上次要求是空」。与 WorkOrderView 的同名字段逐字一致，两处投影同源。
+   */
+  readonly previousRequiredChanges?: readonly string[];
+  /** L3 打回整个 Mission 的理由；只在 finalReview 是 send_back 时出现。 */
+  readonly l3SendBackReasons?: readonly string[];
 }
 
 /**

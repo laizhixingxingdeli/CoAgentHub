@@ -319,6 +319,233 @@ describe('HTTP 面', () => {
     assert.equal(echoed.includes(execToken), false);
     assert.equal(echoed.includes(coordToken), false);
   });
+
+  test('协调者可原子修订 created / blocked 的工单，修订号递增且事件记录 changedFields', async () => {
+    await call('/api/missions', {
+      projectId: 'P-revise',
+      missionId: 'M-revise',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-revise/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call('/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+
+    // created：整份替换，修订号 r1 -> r2。
+    const firstRevise = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '改 bar', allowedScope: ['src/bar.ts'] },
+      coordToken,
+    );
+    assert.equal(firstRevise.status, 200);
+    assert.equal((firstRevise.json as { revision: string }).revision, 'r2');
+    assert.deepEqual(
+      [...(firstRevise.json as { changedFields: string[] }).changedFields].sort(),
+      ['allowedScope', 'objective'],
+    );
+
+    const events = (await call('/api/missions/M-revise/activity')).json as unknown as ActivityRow[];
+    const revised = events.filter((row) => row.kind === 'work_item.order_revised');
+    assert.equal(revised.length, 1);
+    assert.equal(revised[0]?.workItemId, workItemId);
+    assert.equal((revised[0]?.data as { revision: string }).revision, 'r2');
+    assert.deepEqual((revised[0]?.data as { changedFields: string[] }).changedFields, [
+      'allowedScope',
+      'objective',
+    ]);
+
+    // blocked：执行者报卡住之后仍可修订，修订号 r2 -> r3。
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(`/api/missions/M-revise/work-items/${workItemId}/executor-attempts`, {});
+    const execToken = (exec.json as { token: string }).token;
+    const blocked = await call(
+      '/api/agent/coagent_report_blocked',
+      { reason: '工单前提不成立', whatWasTried: [], needsFromUpstream: '补上下文' },
+      execToken,
+    );
+    assert.equal(blocked.status, 200);
+
+    const secondRevise = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '改 baz', allowedScope: ['src/bar.ts'] },
+      coordToken,
+    );
+    assert.equal(secondRevise.status, 200);
+    assert.equal((secondRevise.json as { revision: string }).revision, 'r3');
+    assert.deepEqual((secondRevise.json as { changedFields: string[] }).changedFields, ['objective']);
+  });
+
+  test('运行中的工单拒绝修订并指出下一步，原工单不变；非协调者不能借路由修订', async () => {
+    await call('/api/missions', {
+      projectId: 'P-revise-guard',
+      missionId: 'M-revise-guard',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-revise-guard/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    const wi = await call(
+      '/api/agent/coagent_create_work_item',
+      { title: 'W', ...ORDER },
+      coordToken,
+    );
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    await call('/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+    const exec = await call(
+      `/api/missions/M-revise-guard/work-items/${workItemId}/executor-attempts`,
+      {},
+    );
+    const execToken = (exec.json as { token: string }).token;
+
+    const rejected = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '不该生效' },
+      coordToken,
+    );
+    assert.equal(rejected.status, 409);
+    assert.equal((rejected.json as { error: string }).error, 'WORK_ITEM_NOT_REVISABLE');
+    // 错误里要有下一步，而不是一句 invalid state。
+    assert.match((rejected.json as { message: string }).message, /执行/);
+
+    // 原工单没被动过：修订号仍是 r1，objective 未变，也没有修订事件。
+    const order = await call('/api/agent/coagent_get_work_order', {}, execToken);
+    assert.equal(order.status, 200);
+    const view = order.json as unknown as { order: { objective: string; orderRevision: string } };
+    assert.equal(view.order.objective, ORDER.objective);
+    assert.equal(view.order.orderRevision, 'r1');
+    const events = (await call('/api/missions/M-revise-guard/activity')).json as unknown as ActivityRow[];
+    assert.equal(events.filter((row) => row.kind === 'work_item.order_revised').length, 0);
+
+    // 执行者拿着自己的 token 调修订路由：角色闸直接挡在入口。
+    const stolen = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...ORDER, objective: '越权' },
+      execToken,
+    );
+    assert.equal(stolen.status, 409);
+    assert.equal((stolen.json as { error: string }).error, 'WRONG_ROLE');
+  });
+  test('协调者经 HTTP 工具建/修超标工单：软警告审计同步、直接调用无警告字段', async () => {
+    // --- HTTP 路径：超标工单照常成功，响应与事件同步含软警告 ---
+    await call('/api/missions', {
+      projectId: 'P-warn',
+      missionId: 'M-warn',
+      contract: CONTRACT,
+    });
+    const coord = await call('/api/missions/M-warn/coordinator-attempts', {});
+    const coordToken = (coord.json as { token: string }).token;
+    await call(
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+
+    // 触发三类软警告：allowedScope 超 2 项（含一目录冒充文件）、verification 超 2 条、contextRefs 为空。
+    const violatingOrder = {
+      objective: '改多个文件',
+      allowedScope: ['src/a.ts', 'src/b.ts', 'src/c/dir'],
+      requiredBehaviour: '做点事',
+      constraints: [],
+      acceptance: ['a() === 1', 'b() === 1'],
+      verification: ['v1', 'v2', 'v3'],
+      doNot: [],
+      contextRefs: [],
+    };
+
+    const created = await call(
+      '/api/agent/coagent_create_work_item',
+      { title: 'W-warn', ...violatingOrder },
+      coordToken,
+    );
+    assert.ok(created.status >= 200 && created.status < 300);
+    const workItemId = (created.json as { workItemId: string }).workItemId;
+    assert.ok(workItemId);
+    const createWarnings = (created.json as { warnings?: { rule: string; suggestion: string }[] })
+      .warnings;
+    assert.ok(Array.isArray(createWarnings) && createWarnings.length >= 1);
+    // 标出违规项，且每条都有可照做的下一步建议。
+    for (const w of createWarnings!) {
+      assert.ok(['allowedScope', 'verification', 'contextRefs'].includes(w.rule));
+      assert.ok(typeof w.suggestion === 'string' && w.suggestion.length > 0);
+    }
+
+    // 原事件 work_item.created 同步含 warnings。
+    const events = (await call('/api/missions/M-warn/activity')).json as unknown as ActivityRow[];
+    const createdEvt = events.find((row) => row.kind === 'work_item.created');
+    assert.ok(createdEvt);
+    assert.deepEqual(
+      (createdEvt?.data as { warnings?: unknown[] }).warnings,
+      createWarnings,
+    );
+
+    // 经协调者工具修订成另一份超标工单：成功、revision/changedFields、warnings 与事件同步。
+    const revisedOrder = {
+      ...violatingOrder,
+      objective: '改更多文件',
+      allowedScope: ['src/x.ts', 'src/y.ts', 'src/z/another'],
+    };
+    const revised = await call(
+      '/api/agent/coagent_revise_work_order',
+      { workItemId, ...revisedOrder },
+      coordToken,
+    );
+    assert.equal(revised.status, 200);
+    assert.equal((revised.json as { revision: string }).revision, 'r2');
+    assert.ok(Array.isArray((revised.json as { changedFields: string[] }).changedFields));
+    assert.ok((revised.json as { changedFields: string[] }).changedFields.length >= 1);
+    const revWarnings = (revised.json as { warnings?: { rule: string }[] }).warnings;
+    assert.ok(Array.isArray(revWarnings) && revWarnings.length >= 1);
+
+    const events2 = (await call('/api/missions/M-warn/activity')).json as unknown as ActivityRow[];
+    const revisedEvt = events2.find((row) => row.kind === 'work_item.order_revised');
+    assert.ok(revisedEvt);
+    assert.deepEqual((revisedEvt?.data as { warnings?: unknown[] }).warnings, revWarnings);
+    assert.equal((revisedEvt?.data as { revision: string }).revision, 'r2');
+
+    // --- 直接调用路径：独立内存 Platform，不传 viaCoordinatorTool -> 无 warnings 字段、不硬拒 ---
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const directPlatform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries: new InMemoryDeliveryRepository(clock, ids),
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    await directPlatform.createMission({
+      projectId: 'P-warn-direct',
+      missionId: 'M-warn-direct',
+      contract: CONTRACT,
+    });
+    const directAttempt = await directPlatform.startCoordinatorAttempt('M-warn-direct');
+    await directPlatform.updatePlan('M-warn-direct', directAttempt.attemptId, {
+      findings: 'f',
+      rejectedHypotheses: [],
+      decisions: [],
+      direction: 'd',
+      risks: [],
+    });
+    // 同样的超标工单，但直接调用（不带 viaCoordinatorTool）：应照常建出、不返回 warnings。
+    const directRes = await directPlatform.createWorkItem('M-warn-direct', directAttempt.attemptId, {
+      title: 'W-direct',
+      order: violatingOrder,
+    });
+    assert.ok(directRes.workItemId);
+    assert.equal(
+      (directRes as Record<string, unknown>).warnings,
+      undefined,
+      '直接调用不应带软警告字段',
+    );
+  });
 });
 
 const QUEUE_NOW = '2025-01-01T00:00:00Z';
@@ -961,7 +1188,7 @@ describe('HTTP 简报与按需引用权限',
             contractRevision?: number;
             plan?: { direction?: string; findings?: string };
             planRevision?: number;
-            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown } };
+            workItem?: { id?: string; title?: string; order?: { contextRefs?: unknown }; l3SendBackReasons?: string[] };
             finalReview?: { verdict?: string; reasons?: string[] };
             contextBundle?: { role?: string; entries?: BundleEntry[] };
           };
@@ -998,6 +1225,9 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(execBrief.workItem?.id, workItemId);
           assert.equal(execBrief.workItem?.title, 'W1');
           assert.deepEqual(execBrief.workItem?.order?.contextRefs, BRIEF_REFS);
+          assert.deepEqual(execBrief.workItem?.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
           assert.equal(execBrief.contract, undefined);
           assert.equal(execBrief.plan, undefined);
           assert.equal(execBrief.finalReview, undefined);
@@ -1025,13 +1255,13 @@ describe('HTTP 简报与按需引用权限',
             order?: { contextRefs?: unknown; objective?: string };
             missionIntent?: string;
             guardrails?: unknown;
-            previousRequiredChanges?: unknown;
+            l3SendBackReasons?: unknown;
           };
           assert.deepEqual(Object.keys(order.json).sort(), [
             'guardrails',
+            'l3SendBackReasons',
             'missionIntent',
             'order',
-            'previousRequiredChanges',
             'status',
             'title',
             'workItemId',
@@ -1042,7 +1272,11 @@ describe('HTTP 简报与按需引用权限',
           assert.deepEqual(orderJson.order?.contextRefs, BRIEF_REFS);
           assert.equal(orderJson.missionIntent, BRIEF_CONTRACT_R2.intent);
           assert.deepEqual(orderJson.guardrails, BRIEF_CONTRACT_R2.guardrails);
-          assert.deepEqual(orderJson.previousRequiredChanges, []);
+          // 此 fixture 是 contract r2 触发的 send_back，从未 reject：只带 L3 理由，
+          // 不带空的 previousRequiredChanges（空数组会被读成「上次要求是空」）。
+          assert.deepEqual(orderJson.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
           assert.equal(JSON.stringify(orderJson.order).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
 
           const coordOrder = await postJson(base, '/api/agent/coagent_get_work_order', {}, coordToken);
