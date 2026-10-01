@@ -1700,7 +1700,7 @@ describe('等得到头的 waiting 在运行内续跑，不开升级单', () => {
       pollMs: MIN,
       runs: {
         'R1-F1': [
-          { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '协调者候选池全在冷却' }, status: 'executing' },
+          { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '协调者候选池全在冷却', candidateRole: 'coordinator' }, status: 'executing' },
           { outcome: { kind: 'awaiting_l3_review' }, status: 'awaiting_review' },
         ],
       },
@@ -1712,9 +1712,10 @@ describe('等得到头的 waiting 在运行内续跑，不开升级单', () => {
         cooldownSlept.push(Date.parse(now) - cooldownCursor);
         cooldownCursor = Date.parse(now);
       },
-      waitEligibility: async ({ missionId, reason }) => {
+      waitEligibility: async ({ missionId, reason, candidateRole }) => {
         assert.equal(missionId, 'R1-F1');
         assert.equal(reason, 'no_available_agent');
+        assert.equal(candidateRole, 'coordinator');
         return { kind: 'role_cooldown', earliestUntil: new Date(Date.parse(cooldownProbeAt) + 5 * MIN).toISOString() };
       },
     });
@@ -1735,7 +1736,8 @@ describe('等得到头的 waiting 在运行内续跑，不开升级单', () => {
           { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '候选池没有可用的了' }, status: 'executing' },
         ],
       },
-      waitEligibility: async () => {
+      waitEligibility: async (input) => {
+        assert.equal(input.candidateRole, undefined, '无标记的 waiting 不伪造角色');
         probed += 1;
         return undefined;
       },

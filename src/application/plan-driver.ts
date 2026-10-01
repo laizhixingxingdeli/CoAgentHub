@@ -155,6 +155,8 @@ export interface PlanDriverDeps {
     readonly missionId: string;
     readonly reason: WaitReason;
     readonly detail: string;
+    /** 仅当本次 waiting 确由该角色的候选拿不出人时随附；缺席表示非候选故障。 */
+    readonly candidateRole?: Extract<MissionRunOutcome, { kind: 'waiting' }>['candidateRole'];
   }) => Promise<WaitEligibility | undefined>;
   readonly log: (line: string) => void;
   /** 等决定时多久看一次记录。缺省 15 秒——检视者 20 分钟才醒一次，看勤了也没用。 */
@@ -741,7 +743,11 @@ async function waitForEligibleRetry(
   if (!isRetryEligibleWaitReason(outcome.reason)) return 'land';
   const probe = deps.waitEligibility;
   if (!probe) return 'land';
-  const eligibility = await probe({ missionId, reason: outcome.reason, detail: outcome.detail });
+  const eligibility = await probe(
+    outcome.candidateRole !== undefined
+      ? { missionId, reason: outcome.reason, detail: outcome.detail, candidateRole: outcome.candidateRole }
+      : { missionId, reason: outcome.reason, detail: outcome.detail },
+  );
   if (!eligibility) return 'land';
   const now = deps.now();
   let dueAt = Number.NaN;
