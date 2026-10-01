@@ -205,10 +205,12 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
 
   if (command === 'candidate' && target === 'reset') {
     const profileId = process.argv[4]!;
+    // 服务端返回 `{ profileId, circuit }`：state 在 circuit 里，取错层会把 undefined 当成「未 closed」。
     const result = (await post(`/api/pools/${encodeURIComponent(profileId)}/circuit/reset`, {
       reason: arg('--reason'),
-    })) as { state: string };
-    if (result.state !== 'closed') throw new Error(`候选 ${profileId} 复位失败：状态 ${result.state}`);
+    })) as { circuit: { state: string } };
+    const state = result.circuit.state;
+    if (state !== 'closed') throw new Error(`候选 ${profileId} 复位失败：状态 ${state}`);
     console.log(`候选 ${profileId} 已复位（closed）`);
     return;
   }
@@ -776,8 +778,13 @@ async function main() {
 
   if (command === 'candidate' && target === 'reset') {
     const profileId = process.argv[4]!;
+    // list() 给的是按 role 分桶的快照，不是扁平数组：漏掉任一角色会把在册候选判成不存在。
     const pool = await built.agentPool.list();
-    const exists = pool.some((entry) => entry.profileId === profileId);
+    const exists = [
+      ...pool.coordinator,
+      ...pool.executor,
+      ...pool.independent_reviewer,
+    ].some((entry) => entry.profileId === profileId);
     if (!exists) throw new Error(`不存在候选 profileId：${profileId}`);
     const circuit = await built.candidateCircuits.get(profileId);
     if (circuit.state === 'closed') throw new Error(`候选 ${profileId} 的熔断已 closed，不能复位`);
