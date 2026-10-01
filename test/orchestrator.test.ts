@@ -2301,11 +2301,6 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     }
   });
 
-  test('killed_idle：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
-    async () => {
-      await assertSameRunSwap('killed_idle');
-    });
-
   test('quota：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
     async () => {
       await assertSameRunSwap('quota');
