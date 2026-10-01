@@ -1376,7 +1376,7 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(coordBrief.contextBundle?.role, 'coordinator');
           assert.deepEqual(
             coordBrief.contextBundle?.entries?.map((e) => e.source),
-            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+            ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review', 'work_items_index', 'since_last_hop'],
           );
           const coordContract = coordBrief.contextBundle?.entries?.find((e) => e.source === 'contract');
           const coordPlan = coordBrief.contextBundle?.entries?.find((e) => e.source === 'plan');
@@ -1724,7 +1724,7 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
         assert.equal(none.contextBundle?.budgetReport, undefined);
         assert.deepEqual(
           none.contextBundle?.entries?.map((e) => e.source),
-          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review'],
+          ['project_rules', 'environment_notes', 'contract', 'plan', 'final_review', 'work_items_index', 'since_last_hop'],
         );
         assert.equal(none.contract?.intent, BRIEF_CONTRACT_R2.intent);
         assert.equal(none.plan?.direction, BRIEF_PLAN.direction);
@@ -1757,6 +1757,8 @@ describe('HTTP 简报显式预算与事务化裁剪审计', () => {
           'environment_notes',
           'contract',
           'final_review',
+          'work_items_index',
+          'since_last_hop',
         ]);
         assert.deepEqual(cut.contextBundle?.budgetReport?.omittedSources, ['plan']);
         assert.equal(cut.contextBundle?.budgetReport?.estimatedBefore, N);
