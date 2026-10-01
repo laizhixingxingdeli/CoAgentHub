@@ -3202,6 +3202,8 @@ export class Platform {
         '还没有 Plan：先把调查结论写回平台（update_plan），再创建工作项。',
       );
     }
+    // 先校验再生成 id / 落状态：不合法就整份拒绝，不留下一半变更（C4）。
+    checkWorkOrderCriteria(input.order, mission);
     const workItemId = input.workItemId ?? this.#ids.next('W');
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
     // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
@@ -3270,6 +3272,8 @@ export class Platform {
     if (hint) {
       throw new PlatformRuleError('WORK_ITEM_NOT_REVISABLE', `工作项 ${workItemId} ${hint}`);
     }
+    // 同上：校验先行，不合法时工单与修订号都不动。
+    checkWorkOrderCriteria(order, mission);
     // 差异取调用方提交的整份工单 vs 修订前的整份工单；orderRevision 是
     // kernel 机械递增的，不算「协调者改了哪个字段」，单独由 revision 事件字段给出。
     const changedFields = orderChangedFields(item.order, order);
@@ -7038,6 +7042,35 @@ function orderChangedFields(
 }
 
 /**
+ * 工单 `criteria`（覆盖的 Mission acceptance 序号，1-based）合法性校验。
+ *
+ * 省略 / 空数组合法：存量工单与快照里根本没有这一格，判错等于把所有旧工单作废。
+ * 有值就必须每项都是 1..acceptance.length 的整数——越界的序号会让后续「同一条标准
+ * 连续失败」统计对着一条不存在的标准计数。重复序号先留着，去重交给统计侧。
+ *
+ * 抛错的调用方必须在此之前没动过任何状态（见 #createWorkItem / #reviseWorkOrder）。
+ */
+function checkWorkOrderCriteria(order: WorkOrder, mission: Mission): void {
+  const raw = order.criteria;
+  if (raw === undefined) return;
+  if (!Array.isArray(raw)) {
+    throw new PlatformRuleError(
+      'BAD_WORK_ITEM_CRITERIA',
+      '工单 criteria 必须是数组（或不填）：填覆盖的验收标准序号，例如 [1, 2]。',
+    );
+  }
+  const limit = mission.contract?.acceptance.length ?? 0;
+  for (const n of raw as readonly unknown[]) {
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > limit) {
+      throw new PlatformRuleError(
+        'BAD_WORK_ITEM_CRITERIA',
+        `工单 criteria 只能是 1 到 ${limit} 的整数（当前契约 acceptance 条数），实际：${JSON.stringify(raw)}。`,
+      );
+    }
+  }
+}
+
+/**
  * 工单违背「工单标准」（用户 2026-10-01）时的软警告项。
  *
  * 只审计、不硬拒：协调者工具路径仍照常成功，警告随建单/修订事件一并记录，
@@ -7482,6 +7515,7 @@ function coordinatorStartupSources(
     status: entry.status,
     attempts: entry.attempts,
     lastReviewVerdict: entry.lastReviewVerdict,
+    criteria: entry.criteria,
     ...(entry.validationReport !== undefined ? { validationReport: entry.validationReport } : {}),
   }));
   const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
@@ -7601,6 +7635,21 @@ export interface AgentWorkItemIndexEntry {
   readonly lastReviewVerdict: 'accept' | 'reject' | undefined;
   /** 最近一次交卷的机器验证简版；没有报告时整格缺省（不臆造）。 */
   readonly validationReport?: ValidationReportView;
+  /**
+   * 该工作项覆盖的 Mission acceptance 序号（1-based）副本；无关联显式 `'—'`。
+   * 空数组不能顶替 `'—'`：「还没投影」和「明确不覆盖任何一条」是两件事。
+   */
+  readonly criteria: readonly number[] | '—';
+}
+
+/**
+ * 工单 criteria 的投影：有序号就给副本（不把工单数组本体递出去，调用方改不动仓储里的对象），
+ * 缺省或空数组给 `'—'`。
+ */
+function projectCriteria(order: WorkOrder | undefined): readonly number[] | '—' {
+  return order !== undefined && order.criteria !== undefined && order.criteria.length > 0
+    ? [...order.criteria]
+    : '—';
 }
 
 function agentWorkItemIndex(
@@ -7617,6 +7666,7 @@ function agentWorkItemIndex(
       attempts: item.attempts.length,
       attemptIds: item.attempts.map((a) => a.id),
       lastReviewVerdict: item.reviews.at(-1)?.verdict,
+      criteria: projectCriteria(item.order),
       ...(validationReport !== undefined ? { validationReport } : {}),
     };
   });
@@ -7702,6 +7752,12 @@ export interface AgentWorkItemView {
    * 只保索引字段与历史提交摘要，它会被丢掉。
    */
   readonly validationReport?: ValidationReportView;
+  /**
+   * 覆盖的 Mission acceptance 序号（1-based），无关联 `'—'`。
+   * 顶层字段：20KB 收紧时 order 会被裁掉甚至置 undefined，这一格必须还在——
+   * 它回答「这项服务哪条验收标准」，正是「连续失败要停」要看的那一列。
+   */
+  readonly criteria: readonly number[] | '—';
   /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
   readonly truncated: boolean;
 }
@@ -7832,6 +7888,7 @@ function buildAgentWorkItemView(
       reviews: cappedReviews,
       evidenceSummary,
       submissionSummaries: redactedSubmissionSummaries,
+      criteria: projectCriteria(order),
       ...(validationReport !== undefined ? { validationReport } : {}),
       truncated: false,
     };
@@ -7870,6 +7927,7 @@ function buildAgentWorkItemView(
     title,
     status: item.status,
     orderRevision,
+    criteria: projectCriteria(order),
     order: undefined,
     executionResult: undefined,
     reviews: [],

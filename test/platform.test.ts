@@ -1203,6 +1203,7 @@ describe('W-317 协调者简报：工作项索引 + 上一跳增量（生产接�
     assert.equal(coordBrief.workItemsIndex!.length, 1);
     assert.deepEqual(coordBrief.workItemsIndex![0], {
       id: workItemId, title: 'W', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept',
+      criteria: '—',
     });
     assert.deepEqual(coordBrief.sinceLastHop, [], '首次 coordinator 无上一跳，增量为空');
 
@@ -1225,7 +1226,7 @@ describe('W-317 协调者简报：工作项索引 + 上一跳增量（生产接�
     assert.deepEqual(coord2Brief.plan, PLAN, '第二跳 plan 仍不变');
     assert.equal(coord2Brief.workItemsIndex!.length, 2, '第二跳索引含两项工作项');
     const w2Index = coord2Brief.workItemsIndex!.find((e) => e.id === w2);
-    assert.deepEqual(w2Index, { id: w2, title: 'W2', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept' });
+    assert.deepEqual(w2Index, { id: w2, title: 'W2', status: 'accepted', attempts: 1, lastReviewVerdict: 'accept', criteria: '—' });
     assert.ok(coord2Brief.sinceLastHop!.length >= 1, '第二跳应有上一跳增量');
     const summaries = coord2Brief.sinceLastHop!.map((e) => e.summary);
     assert.ok(
