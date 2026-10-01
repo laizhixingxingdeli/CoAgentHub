@@ -120,12 +120,6 @@ async function call(
 }
 
 describe('HTTP 面', () => {
-  test('健康检查', async () => {
-    const { status, json } = await call('/api/health');
-    assert.equal(status, 200);
-    assert.equal((json as { ok: boolean }).ok, true);
-  });
-
   test('没有 run token 的工具调用一律 401', async () => {
     const { status, json } = await call('/api/agent/coagent_get_mission', {});
     assert.equal(status, 401);
@@ -2467,6 +2461,7 @@ describe('L3 写路由与落盘后应答', () => {
     try {
       const health = await request(base, '/api/health');
       assert.equal(health.status, 200);
+      assert.equal(health.json.ok, true);
       assert.equal(health.headers.get('x-coagent-api'), API_VERSION);
       assert.equal(health.headers.get('x-coagent-instance'), identity.instanceId);
       assert.equal(health.headers.get('x-coagent-state-id'), identity.stateId);

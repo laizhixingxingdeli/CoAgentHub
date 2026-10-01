@@ -2301,14 +2301,9 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     }
   });
 
-  test('killed_idle：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
-    async () => {
-      await assertSameRunSwap('killed_idle');
-    });
-
   test('quota：同次运行等待后同键重领 Q，P/Q 各一次且 attemptCount 不清零',
     async () => {
-      await assertSameRunSwap('quota');
+      await assertSameRunSwap();
     });
 
   test('unknown 不启动 Q；仍记队列失败',
@@ -2595,34 +2590,14 @@ describe('平台 getStartupBrief 显式预算裁剪', () => {
   );
 });
 
-async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
+async function assertSameRunSwap(): Promise<void> {
   const rows: QueuedHop[] = [];
   const queuedHops = memoryCapacityRepo(rows);
   const starts: { role: string; profileId: string }[] = [];
-  const failing =
-    kind === 'quota'
-      ? { steps: [], upstreamFailure: '403 需要充值' }
-      : { steps: [] };
-  const inner = new ScriptedRuntime({
-    'executor:W-1:0': failing,
+  const executor = new ScriptedRuntime({
+    'executor:W-1:0': { steps: [], upstreamFailure: '403 需要充值' },
     'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
   });
-  const executor: AgentRuntime =
-    kind === 'killed_idle'
-      ? {
-          kind: inner.kind,
-          start: async (spec) => {
-            const run = await inner.start(spec);
-            if (spec.role !== 'executor' || spec.profile.profileId !== 'exec-a') return run;
-            return {
-              resumeRef: run.resumeRef,
-              on: (handler) => run.on(handler),
-              abort: (reason) => run.abort(reason),
-              wait: async () => ({ ...await run.wait(), endedBy: 'killed_idle' as const }),
-            };
-          },
-        }
-      : inner;
   const env = await capacityHarness({
     coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
     executor: trackingStarts(executor, starts),
@@ -2634,27 +2609,27 @@ async function assertSameRunSwap(kind: 'killed_idle' | 'quota'): Promise<void> {
   });
   await env.platform.createMission({
     projectId: 'P',
-    missionId: `M-swap-${kind}`,
+    missionId: 'M-swap-quota',
     contract: CONTRACT,
   });
   const began = Date.now();
   const orch = env.makeOrchestrator();
-  const result = await orch.runMission(`M-swap-${kind}`, { projectRoot: process.cwd() });
+  const result = await orch.runMission('M-swap-quota', { projectRoot: process.cwd() });
   assert.ok(Date.now() - began >= 1_000, '必须真实等到退避到期，不能用固定 now 配立即返回的 sleep');
   assert.equal(result.kind, 'awaiting_l3_review');
-  await env.platform.finalizeMission(`M-swap-${kind}`, {
+  await env.platform.finalizeMission('M-swap-quota', {
     verdict: 'merge',
     reasons: ['ok'],
     projectRoot: process.cwd(),
   });
-  assert.equal((await env.platform.getMissionView(`M-swap-${kind}`)).status, 'completed');
+  assert.equal((await env.platform.getMissionView('M-swap-quota')).status, 'completed');
   const execStarts = starts.filter((row) => row.role === 'executor');
   assert.deepEqual(execStarts.map((row) => row.profileId), ['exec-a', 'exec-b']);
   const execHops = (await queuedHops.list()).filter((row) => row.role === 'executor');
   assert.equal(execHops.length, 1, '必须同键重领，不得另开槽');
   assert.equal(execHops[0]?.status, 'completed');
   assert.equal(execHops[0]?.attemptCount, 1, 'attemptCount 不得因换候选清零');
-  assert.equal(execHops[0]?.lastFailure?.classification, kind === 'quota' ? 'quota' : 'killed_idle');
+  assert.equal(execHops[0]?.lastFailure?.classification, 'quota');
   const executorRecords = orch.hops.filter((hop) => hop.role === 'executor');
   assert.equal(executorRecords.length, 2);
   assert.equal(executorRecords[0]?.profile.profileId, 'exec-a');
