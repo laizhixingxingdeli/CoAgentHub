@@ -4814,7 +4814,6 @@ export class Platform {
       throw new PlatformRuleError('NO_WORK_ORDER', `工作项 ${workItemId} 没有工单正文。`);
     }
     const contract = mission.contract;
-    const answered = answeredQaForWorkItem(mission, item);
     return {
       workItemId: item.id,
       title: item.title,
@@ -4822,10 +4821,8 @@ export class Platform {
       order: item.order,
       missionIntent: contract?.intent ?? '',
       guardrails: contract?.guardrails ?? [],
-      /** 被打回重做时，上一次的 requiredChanges 必须带下去。 */
-      previousRequiredChanges: item.reviews.at(-1)?.requiredChanges ?? [],
-      // 问答是事后补的，不能写进冻结 order；未答不带键，以免泄漏未决提问。
-      ...(answered ?? {}),
+      // 打回理由与问答都是事后补的，不能写进冻结 order；缺省不带键。
+      ...priorGuidanceForWorkItem(mission, item),
     };
   }
 
@@ -5997,7 +5994,13 @@ export interface WorkOrderView {
   order: WorkOrder;
   missionIntent: string;
   guardrails: readonly string[];
-  previousRequiredChanges: readonly string[];
+  /**
+   * 最近一次 reject 的 requiredChanges。**没有 reject 就不带这个键**——`[]` 会被
+   * 读成「上次要求是空」，而真相是「上次根本没打回过」，比缺字段更误导。
+   */
+  previousRequiredChanges?: readonly string[];
+  /** L3 打回整个 Mission 的理由。和 previousRequiredChanges 各自可缺，互不依赖。 */
+  l3SendBackReasons?: readonly string[];
   question?: string;
   answer?: string;
   answeredAt?: string;
@@ -6428,13 +6431,49 @@ function answeredQaForWorkItem(
   };
 }
 
-function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
+/**
+ * 派回执行者的可见理由：工单视图与开跑简报共用这一份投影，两处不能各算各的。
+ *
+ * 为什么不能只取 `item.reviews.at(-1)`：工作项被 reject 后重做、又被 accept，最后
+ * 一条评审是 accept，其 requiredChanges 是空的。这时 L3 再打回整个 Mission 重派，
+ * 执行者读到的「上次要改什么」是空——真正该先看的打回理由一条也没到它手上。
+ * 倒着找**最近一次 reject** 既保住旧的「重派带上要改什么」语义，又不会被随后的
+ * accept 抹掉。
+ *
+ * L3 理由只在当前 finalReview 是 send_back 时带（Mission 每次 send_back 都覆盖
+ * finalReview，所以同轮多次打回自然只剩最新一条）。它**不**要求本项有 reject：
+ * 「已验收的工作项被 L3 打回重派」正是本投影要救的场景，那时 reviews 里只有 accept。
+ */
+function priorGuidanceForWorkItem(
+  mission: Mission,
+  item: WorkItem,
+): {
+  previousRequiredChanges?: readonly string[];
+  l3SendBackReasons?: readonly string[];
+  question?: string;
+  answer?: string;
+  answeredAt?: string;
+} {
+  const latestReject = [...item.reviews]
+    .reverse()
+    .find((review) => review.verdict === 'reject');
+  const finalReview = mission.finalReview;
   const answered = answeredQaForWorkItem(mission, item);
+  return {
+    ...(latestReject ? { previousRequiredChanges: latestReject.requiredChanges } : {}),
+    ...(finalReview?.verdict === 'send_back' && finalReview.reasons.length > 0
+      ? { l3SendBackReasons: finalReview.reasons }
+      : {}),
+    ...(answered ?? {}),
+  };
+}
+
+function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkItem {
   return {
     id: item.id,
     title: item.title,
     order: item.order,
-    ...(answered ?? {}),
+    ...priorGuidanceForWorkItem(mission, item),
   };
 }
 
