@@ -16,11 +16,12 @@
  */
 
 import { KernelError } from '../kernel/index.ts';
-import type { MissionContract, OriginChannel, WorkOrder } from '../kernel/index.ts';
+import type { ComplexityAssessment, MissionContract, OriginChannel, WorkOrder } from '../kernel/index.ts';
 import { ClassifiedMissionInputError } from './classified-mission-intake.ts';
 import type { MissionRunOutcome } from './orchestrator.ts';
 import type { HaReleaseDecision, PlanRun, PlanRunStop } from './plan-run.ts';
 import { decideRoute, type RoutingDecision, type RoutingProposal } from './plan-routing.ts';
+import type { ClassificationResult } from './task-classifier.ts';
 import { featureContract, type PlanFeatureSpec, type PlanSpec } from './plan-spec.ts';
 import { PlatformRuleError } from './platform.ts';
 
@@ -34,6 +35,10 @@ export interface PlanDriverDeps {
   readonly platform: {
     /** 恢复已有 Mission；普通票无需提供此能力。 */
     resumeMission?(missionId: string): Promise<{ paused: boolean }>;
+    recordStandardFallbackRoute?(
+      missionId: string,
+      input: { classification: ClassificationResult; fallbackReason: string; assessment?: ComplexityAssessment },
+    ): Promise<void>;
     createMission(input: {
       projectId: string;
       missionId: string;
@@ -572,6 +577,13 @@ async function createMission(
     deps.log(`${feature.id} 回落 Standard：${route.reason}`);
   }
   await deps.platform.createMission({ projectId: plan.projectId, missionId, contract, origin });
+  if (route.kind === 'standard_fallback' && route.classification) {
+    await deps.platform.recordStandardFallbackRoute?.(missionId, {
+      classification: route.classification,
+      fallbackReason: route.reason,
+      ...(route.assessment ? { assessment: route.assessment } : {}),
+    });
+  }
   return { kind: 'created' };
 }
 
