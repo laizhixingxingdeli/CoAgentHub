@@ -60,6 +60,7 @@ import {
   CONTEXT_METRICS_TOOL_KINDS,
 } from './ports.ts';
 import type {
+  ActivityEvent,
   ActivityLog,
   Clock,
   CommandTransaction,
@@ -4857,8 +4858,35 @@ export class Platform {
    * 单项序列化 UTF-8 不超过 20 KB，超长显式标记 truncated。只读投影，不写状态。
    */
   async getAgentWorkItem(missionId: string, workItemId: string): Promise<AgentWorkItemView> {
-    const { item } = await this.#locateItem(missionId, workItemId);
-    return buildAgentWorkItemView(item, item.order?.orderRevision, item.order, item.executionResult ?? undefined);
+    const { mission, item } = await this.#locateItem(missionId, workItemId);
+    // 取该工作项全部 execution_result.submitted 事件，保留原时间顺序，
+    // 仅提取事件里实际存的 outcome / changedFiles(数量) / orderRevision / at。
+    // 旧提交正文未被持久化、不可恢复，只留元数据并标「旧正文未保存」；
+    // 最新一次正文经 item.executionResult 仍可取，不臆造。
+    const submittedEvents = (await this.#activity.list(missionId))
+      .filter((e) => e.workItemId === workItemId && e.kind === 'execution_result.submitted')
+      .map((e) => e as ActivityEvent);
+    const lastIndex = submittedEvents.length - 1;
+    const submissionSummaries: AgentWorkItemSubmissionSummary[] = submittedEvents.map((e, i) => {
+      const data = e.data as { outcome?: string; changedFiles?: number; orderRevision?: string } | undefined;
+      const isLatest = i === lastIndex;
+      return {
+        at: e.at,
+        outcome: data?.outcome,
+        changedFiles: data?.changedFiles,
+        orderRevision: data?.orderRevision,
+        isLatest,
+        // 只有最新一次有完整全文（经 executionResult 取），旧正文未保存、不可恢复。
+        note: isLatest ? undefined : '旧正文未保存',
+      };
+    });
+    return buildAgentWorkItemView(
+      item,
+      item.order?.orderRevision,
+      item.order,
+      item.executionResult ?? undefined,
+      submissionSummaries,
+    );
   }
 
 /**
@@ -6589,6 +6617,24 @@ export interface AgentWorkItemEvidenceSummary {
   readonly outputTail: string;
 }
 
+/**
+ * 单次 execution_result.submitted 的现存元数据摘要。
+ * 只记事件里实际存下的 outcome / changedFiles(数量) / orderRevision / 时间；
+ * 非最新的提交正文（执行结果全文）未被持久化、不可恢复，显式标注「旧正文未保存」。
+ * 绝不臆造旧正文——旧记录只给上述元数据，最新一次正文仍经 executionResult 取。
+ */
+export interface AgentWorkItemSubmissionSummary {
+  /** 事件发生时间（ISO 字符串），保留原时间顺序。 */
+  readonly at: string;
+  readonly outcome: string | undefined;
+  readonly changedFiles: number | undefined;
+  readonly orderRevision: string | undefined;
+  /** 是否最新一次提交：只有它对应的全文经 executionResult 可取。 */
+  readonly isLatest: boolean;
+  /** 非最新提交：正文未保存、仅存元数据，不可恢复。 */
+  readonly note: string | undefined;
+}
+
 export interface AgentWorkItemView {
   readonly workItemId: string;
   readonly title: string;
@@ -6598,6 +6644,8 @@ export interface AgentWorkItemView {
   readonly executionResult: ExecutionResultBody | undefined;
   readonly reviews: readonly { readonly verdict: 'accept' | 'reject'; readonly reasons: readonly string[]; readonly requiredChanges: readonly string[] }[];
   readonly evidenceSummary: readonly AgentWorkItemEvidenceSummary[];
+  /** 历次 execution_result.submitted 的现存元数据；早于最新的标「旧正文未保存」。 */
+  readonly submissionSummaries: readonly AgentWorkItemSubmissionSummary[];
   /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
   readonly truncated: boolean;
 }
@@ -6663,18 +6711,25 @@ function capResultText(result: ExecutionResultBody, n: number): ExecutionResultB
 /**
  * 构造单项视图并按 20 KB 上限收紧：所有外显文本先深层脱敏（redactSecretsDeep），
  * 之后按 UTF-8 实测大小逐级收紧——先裁证据 output 尾巴，再裁证据 summary/command，
- * 再裁工单 / 执行结果 / 评审的长文本，始终保留 id/status/orderRevision 与有用结构；
- * 仍超大时返回仅含索引字段的紧凑 truncated 摘要。每条 return 前都复核 <=20KB。
+ * 再裁工单 / 执行结果 / 评审 / 历史提交摘要的长文本，始终保留 id/status/orderRevision
+ * 与有用结构；仍超大时返回仅含索引字段与历史提交摘要的紧凑 truncated 摘要。
+ * 每条 return 前都复核 <=20KB。
  */
 function buildAgentWorkItemView(
   item: WorkItem,
   orderRevision: string | undefined,
   order: WorkOrder | undefined,
   executionResult: ExecutionResultBody | undefined,
+  submissionSummaries: readonly AgentWorkItemSubmissionSummary[],
 ): AgentWorkItemView {
   // 外显文本先统一深层脱敏：order / executionResult / reviews / title 都可能含凭据。
   const redactedTitle = redactSecrets(item.title);
   const redactedOrder = order !== undefined ? redactSecretsDeep(order) : undefined;
+  const redactedSubmissionSummaries = submissionSummaries.map((s) => ({
+    ...s,
+    orderRevision: s.orderRevision !== undefined ? redactSecrets(s.orderRevision) : undefined,
+    note: s.note !== undefined ? redactSecrets(s.note) : undefined,
+  }));
   const redactedResult = executionResult !== undefined ? redactSecretsDeep(executionResult) : undefined;
   const reviews = item.reviews.map((r) => ({
     verdict: r.verdict,
@@ -6719,6 +6774,7 @@ function buildAgentWorkItemView(
       executionResult: cappedResult,
       reviews: cappedReviews,
       evidenceSummary,
+      submissionSummaries: redactedSubmissionSummaries,
       truncated: false,
     };
   };
@@ -6742,10 +6798,10 @@ function buildAgentWorkItemView(
     }
   }
 
-  // 仍超大：只保留索引字段的紧凑摘要，明确标 truncated。标题本身也可能极长，
-  // 必须按 UTF-8 实测复核并逐级截断到上限内——否则极长标题会撑爆 20KB，
-  // 违背「任何情况下 JSON UTF-8 <=20KB 并标 truncated」的硬约束。
-  const buildFallback = (title: string): AgentWorkItemView => ({
+  // 仍超大：只保留索引字段与历史提交摘要的紧凑摘要，明确标 truncated。
+  // 标题与历史摘要都可能极长，必须按 UTF-8 实测复核并逐级截断到上限内——
+  // 否则极长标题/海量提交会撑爆 20KB，违背「任何情况下 JSON UTF-8 <=20KB」的硬约束。
+  const buildFallback = (title: string, summaries: readonly AgentWorkItemSubmissionSummary[]): AgentWorkItemView => ({
     workItemId: item.id,
     title,
     status: item.status,
@@ -6754,16 +6810,39 @@ function buildAgentWorkItemView(
     executionResult: undefined,
     reviews: [],
     evidenceSummary: [],
+    submissionSummaries: summaries,
     truncated: true,
   });
   let fallbackTitleCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 4));
+  let fallbackSummaryCap = Math.max(0, Math.floor(MAX_AGENT_WORK_ITEM_BYTES / 8));
   while (
-    fallbackTitleCap > 1 &&
-    byteSize(buildFallback(capString(redactedTitle, fallbackTitleCap))) > MAX_AGENT_WORK_ITEM_BYTES
+    (fallbackTitleCap > 1 || fallbackSummaryCap > 1) &&
+    byteSize(
+      buildFallback(
+        capString(redactedTitle, fallbackTitleCap),
+        redactedSubmissionSummaries.map((s) => ({
+          ...s,
+          at: capString(s.at, fallbackSummaryCap),
+          outcome: s.outcome !== undefined ? capString(s.outcome, fallbackSummaryCap) : undefined,
+          orderRevision: s.orderRevision !== undefined ? capString(s.orderRevision, fallbackSummaryCap) : undefined,
+          note: s.note !== undefined ? capString(s.note, fallbackSummaryCap) : undefined,
+        })),
+      ),
+    ) > MAX_AGENT_WORK_ITEM_BYTES
   ) {
     fallbackTitleCap = Math.floor(fallbackTitleCap / 2);
+    fallbackSummaryCap = Math.floor(fallbackSummaryCap / 2);
   }
-  return buildFallback(capString(redactedTitle, fallbackTitleCap));
+  return buildFallback(
+    capString(redactedTitle, fallbackTitleCap),
+    redactedSubmissionSummaries.map((s) => ({
+      ...s,
+      at: capString(s.at, fallbackSummaryCap),
+      outcome: s.outcome !== undefined ? capString(s.outcome, fallbackSummaryCap) : undefined,
+      orderRevision: s.orderRevision !== undefined ? capString(s.orderRevision, fallbackSummaryCap) : undefined,
+      note: s.note !== undefined ? capString(s.note, fallbackSummaryCap) : undefined,
+    })),
+  );
 }
 
 function viewOf(mission: Mission): MissionView {
