@@ -725,6 +725,21 @@ export function createApi(deps: ApiDeps): Server {
       return platform.dispatchWorkItems(run.missionId, run.attemptId, workItemIds ?? [], run.claim);
     },
 
+    async coagent_revise_work_order(run, body) {
+      // 只有协调者能修订工单：S14.6 说 cancel-replace 是 L2 的判断。
+      // 角色闸在入口 PolicyEngine（与 retire 同理由 WRONG_ROLE 文案一致）。
+      // 身份只来自 Run Token 的 claim，body 里自述的工作项 / 角色一律不采信。
+      // 这里只做透传，规则（PLAN 校验、WRONG_ROLE）都在 Platform.reviseWorkOrder。
+      const { workItemId, ...order } = body as unknown as { workItemId: string };
+      return platform.reviseWorkOrder(
+        run.missionId,
+        run.attemptId,
+        workItemId,
+        order as never,
+        run.claim,
+      );
+    },
+
     async coagent_review_execution_result(run, body) {
       return platform.reviewExecutionResult(run.missionId, run.attemptId, body as never, run.claim);
     },
