@@ -640,25 +640,34 @@ export function createApi(deps: ApiDeps): Server {
   let cachedRuntimeUsage: { readonly at: number; readonly usage: RuntimeUsage } | undefined;
 
   /**
-   * 这一次请求要用的适配层用量行。
+   * 这一次请求要用的适配层用量。
    *
    * 与 GET /api/runtime/usage **共用同一份缓存**：两个页面都在问适配层同一个
    * 问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只
    * 降级不进缓存 —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。
    *
-   * 拿不到（适配层不在 / 返回不可用）就是空数组：资源池照原样返回，用量那几
-   * 个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
+   * 成功（UsageRow[]）和适配器自己给出的 unavailable 都原样交出去，由调用方
+   * 决定怎么显示；只有**抛异常**才往上传，让端点把它翻成 unavailable。
+   */
+  const readUsage = async (): Promise<RuntimeUsage> => {
+    const hit = cachedRuntimeUsage;
+    if (hit && nowMs() - hit.at < RUNTIME_MODELS_CACHE_MS) return hit.usage;
+    const usage = await (deps.getRuntimeUsage ?? getRuntimeUsage)();
+    if (Array.isArray(usage) || usage.available === true) {
+      cachedRuntimeUsage = { at: nowMs(), usage };
+    }
+    return usage;
+  };
+
+  /**
+   * 资源池那一列要用的用量行。
+   *
+   * 拿不到（适配层不在 / 返回不可用 / 抛异常）就是空数组：资源池照原样返回，
+   * 用量那几个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
    */
   const readUsageRows = async (): Promise<readonly UsageRow[]> => {
-    const hit = cachedRuntimeUsage;
-    if (hit && nowMs() - hit.at < RUNTIME_MODELS_CACHE_MS) {
-      return Array.isArray(hit.usage) ? hit.usage : [];
-    }
     try {
-      const usage = await (deps.getRuntimeUsage ?? getRuntimeUsage)();
-      if (Array.isArray(usage) || usage.available === true) {
-        cachedRuntimeUsage = { at: nowMs(), usage };
-      }
+      const usage = await readUsage();
       return Array.isArray(usage) ? usage : [];
     } catch {
       return [];
@@ -1160,10 +1169,15 @@ export function createApi(deps: ApiDeps): Server {
 
     if (method === 'GET' && path === '/api/runtime/usage') {
       await requireControl(req, POLICY_ACTION.missionRead);
-      if (cachedRuntimeUsage && nowMs() - cachedRuntimeUsage.at < RUNTIME_MODELS_CACHE_MS) return send(res, 200, cachedRuntimeUsage.usage);
-      const usage = await (deps.getRuntimeUsage ?? getRuntimeUsage)();
-      if (Array.isArray(usage) || usage.available === true) cachedRuntimeUsage = { at: nowMs(), usage };
-      return send(res, 200, usage);
+      // 用量页要的是「有没有额度」，不是「适配层好不好」。适配器抛错时这里只能
+      // 降级成 unavailable 并说明原因：500 会让整页空白，人也分不清是平台挂了还是
+      // 没额度。note 只用固定文案 —— 错误原文里可能带命令、路径、凭据片段。
+      try {
+        const usage = await readUsage();
+        return send(res, 200, usage);
+      } catch {
+        return send(res, 200, { available: false, note: '读取用量失败' });
+      }
     }
 
     if (method === 'GET' && path === '/api/projects') {

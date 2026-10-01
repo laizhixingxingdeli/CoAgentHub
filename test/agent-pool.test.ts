@@ -36,6 +36,7 @@ import type {
   AgentPoolSnapshot,
 } from '../src/application/agent-pool.ts';
 import { FileAgentPoolRepository, FileStateStore } from '../src/application/file-store.ts';
+import type { RuntimeUsage } from '../src/application/runtime-catalog.ts';
 import { PgAgentPoolRepository, PgStateStore } from '../src/application/pg-store.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { createApi } from '../src/api/server.ts';
@@ -595,13 +596,14 @@ describe('run-mission.ts 改用候选池', () => {
 /* --------------------------------- HTTP --------------------------------- */
 
 describe('候选池 API', () => {
-  async function withApi(agentPool?: AgentPoolRepository) {
+  async function withApi(agentPool?: AgentPoolRepository, getRuntimeUsage?: () => Promise<RuntimeUsage>) {
     const built = buildPlatform();
     const server = createApi({
       platform: built.platform,
       tokens: built.tokens,
       deliveries: built.deliveries,
       ...(agentPool ? { agentPool } : {}),
+      ...(getRuntimeUsage ? { getRuntimeUsage } : {}),
     });
     await listenLoopback(server, 0);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -802,6 +804,30 @@ describe('候选池 API', () => {
         (after.json as unknown as AgentPoolSnapshot).executor.map((row) => row.profileId),
         ['keep'],
       );
+    } finally {
+      close();
+    }
+  });
+
+  test('用量读取抛错时 GET /api/runtime/usage 降级为 200 unavailable，资源池不受影响', async () => {
+    // 适配层不在或抛错是常态（没装、命令超时、网络抖）。整页 500 会让人以为平台
+    // 挂了，也分不清「没额度」和「读不到」。note 只给固定文案，错误原文可能带命令与凭据。
+    const { base, close } = await withApi(
+      new InMemoryAgentPoolRepository(),
+      () => Promise.reject(new Error('npx 失败，token=SECRET-LEAKED')),
+    );
+    try {
+      const usage = await get(base, '/api/runtime/usage');
+      assert.equal(usage.status, 200);
+      const body = usage.json as unknown as { available: boolean; note: string };
+      assert.equal(body.available, false);
+      assert.equal(typeof body.note, 'string');
+      assert.ok(body.note.length > 0, '界面要显示这句话，空串等于没说');
+      assert.ok(!JSON.stringify(body).includes('SECRET-LEAKED'), '错误原文不能回给前端');
+
+      const pools = await get(base, '/api/pools');
+      assert.equal(pools.status, 200);
+      assert.deepEqual(pools.json, { coordinator: [], executor: [], independent_reviewer: [] });
     } finally {
       close();
     }
