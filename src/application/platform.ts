@@ -209,6 +209,14 @@ export interface QueueClaimIdentity {
 
 const ATTEMPT_STARTED_KIND = 'attempt.started';
 
+/**
+ * Standard 工作项验证基线事件。
+ *
+ * 事件流是台账，之后还要翻译给用户看（时间线文案），名字只在本文件写一次，
+ * 不散着拼字符串。
+ */
+const VALIDATION_BASELINE_EVENT_KIND = 'work_item.validation_baseline_recorded';
+
 function queuedAttemptStartedData<T extends { readonly kind: string }>(
   base: T,
   claim?: QueueClaimIdentity,
@@ -5096,6 +5104,244 @@ export class Platform {
         optionsConsidered: [...(body.whatWasTried ?? [])],
       });
     }
+  }
+
+  /* ================== Standard 机器验收（进程内，不动 L2 评审权） ================== */
+
+  /**
+   * Standard：把 trusted workspace HEAD 记成该 WorkItem 的验证基线。
+   *
+   * 基线必须由 orchestrator 从 trusted workspace 读出来，**不是执行者自报**，也
+   * **不是 Mission 的初始 baseRevision**：Standard 一个 Mission 里有多条工作项各自
+   * 开工，拿 Mission base 算 diff 会把别的工单、甚至同一条工单前面几跳的改动一起
+   * 算进这一条，allowedScope / diffSize 的判断于是全错——而它看起来和判对了一模一样。
+   *
+   * 同一条工作项多次尝试时以最近一次为准（读取方从事件流倒序取）。
+   * 仅进程内 Orchestrator 调用；不进 HTTP/tools——执行者能写基线等于自己给自己划线。
+   */
+  async recordStandardValidationBaseline(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly head: string;
+  }): Promise<{ recorded: true }> {
+    const head = input.head.trim();
+    if (head.length === 0) {
+      throw new PlatformRuleError(
+        'VALIDATION_BASELINE_REQUIRED',
+        '验证基线必须是 trusted workspace HEAD，不接受空值。',
+      );
+    }
+    await this.#tx(async () => {
+      const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
+      await this.#event(mission, VALIDATION_BASELINE_EVENT_KIND, { head }, item.id);
+    });
+    return { recorded: true };
+  }
+
+  /**
+   * 读该 WorkItem 最近一次记下的验证基线。没有就是没有——不回退到 Mission base，
+   * 调用方据此 fail-closed，而不是拿累计 diff 凑一份看起来正常的报告。
+   */
+  async #workItemValidationBaseline(
+    missionId: string,
+    workItemId: string,
+  ): Promise<string | undefined> {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== VALIDATION_BASELINE_EVENT_KIND) continue;
+      if (event.workItemId !== workItemId) continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const head = (data as { head?: unknown }).head;
+      if (typeof head !== 'string' || head.trim().length === 0) continue;
+      return head.trim();
+    }
+    return undefined;
+  }
+
+  /** 同一次 submitted attempt 已经存过报告就返回它的 reportId（事件流倒序取最近一条）。 */
+  async #submittedAttemptReportId(
+    missionId: string,
+    workItemId: string,
+    submittedAttemptId: string,
+  ): Promise<string | undefined> {
+    const events = await this.#activity.list(missionId);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (event.kind !== 'validation.reported') continue;
+      if (event.workItemId !== workItemId) continue;
+      const data = event.data;
+      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
+      const row = data as { reportId?: unknown; submittedAttemptId?: unknown };
+      if (row.submittedAttemptId !== submittedAttemptId) continue;
+      if (typeof row.reportId !== 'string' || row.reportId.length === 0) continue;
+      return row.reportId;
+    }
+    return undefined;
+  }
+
+  /**
+   * Standard：对 submitted WorkItem 跑冻结 validation.commands，并存 ValidationReport。
+   *
+   * 与 Lightweight 的 validateAndAccept 只差一处，但那处是关键：**这里不 review**。
+   * 机器报告在 Standard 只是证据，accept/reject 仍归 L2——机器跑绿了不等于工单
+   * 可以放行，所以工单保持 submitted。
+   *
+   * cwd 由 trusted WorkspaceManager 注入并强制覆盖每个命令；allowedScope /
+   * forbiddenPaths / diffSize 只从 frozen order 拷贝，绝不在这里补默认值。
+   * `order.validation.commands` 缺失或为空 = 什么都不做（不存报告、不记事件），
+   * 免得调用方以为跑过验收。
+   */
+  async validateStandardWorkItem(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly cwd: string;
+  }): Promise<{ reportId: string; passed: boolean; status: string } | undefined> {
+    const { mission, item } = await this.#locateItem(input.missionId, input.workItemId);
+    const order = item.order;
+    const commands = order?.validation?.commands ?? [];
+    if (!order || commands.length === 0) {
+      // 缺 validation.commands：不改变行为。不存空报告、不记 validation.reported。
+      return undefined;
+    }
+
+    const validation = this.#validation;
+    if (!validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        'Standard 机器验收需要注入 PlatformDeps.validation（engine + reports）。',
+      );
+    }
+    if (item.status !== 'submitted') {
+      throw new PlatformRuleError(
+        'VALIDATION_NOT_SUBMITTED',
+        `工作项 ${item.id} 当前是 ${item.status}，只能对 submitted 跑机器验收。`,
+      );
+    }
+    const submittedAttemptId = item.submittedAttemptId;
+    if (!submittedAttemptId) {
+      throw new PlatformRuleError(
+        'VALIDATION_SUBMITTED_ATTEMPT_REQUIRED',
+        `工作项 ${item.id} 缺少 submittedAttemptId，拒绝机器验收。`,
+      );
+    }
+
+    // 同一次提交已有落盘报告：原样返回，不重跑。重跑会换一个 reportId，
+    // 而 L2 手上、时间线上引用的还是旧那份——一次重试就能把有效证据从
+    // 「查得到」变成「查不到」。
+    const existingReportId = await this.#submittedAttemptReportId(
+      mission.id,
+      item.id,
+      submittedAttemptId,
+    );
+    if (existingReportId) {
+      const existing = await validation.reports.get(existingReportId);
+      if (existing && existing.missionId === mission.id) {
+        return { reportId: existing.id, passed: existing.passed, status: item.status };
+      }
+    }
+
+    const projectRoot = mission.workspaceRef?.projectRoot;
+    if (!projectRoot) {
+      throw new PlatformRuleError(
+        'VALIDATION_WORKSPACE_REQUIRED',
+        `Mission ${mission.id} 缺少 workspaceRef.projectRoot，不跑 engine。`,
+      );
+    }
+    if (typeof input.cwd !== 'string' || input.cwd.trim().length === 0) {
+      throw new PlatformRuleError(
+        'VALIDATION_CWD_REQUIRED',
+        'Standard 机器验收要求非空 cwd（trusted WorkspaceManager.prepare().cwd）。',
+      );
+    }
+    const trustedCwd = input.cwd.trim();
+
+    // 用本工作项自己的基线。没有就 fail-closed：拿 Mission base 顶上等于把别人的
+    // 改动算进这条工单，正是这个入口存在要避免的事。
+    const baseRevision = await this.#workItemValidationBaseline(mission.id, item.id);
+    if (!baseRevision) {
+      throw new PlatformRuleError(
+        'VALIDATION_BASELINE_MISSING',
+        `工作项 ${item.id} 没有记过验证基线，拒绝用 Mission base 代替。`,
+      );
+    }
+
+    // VAL-002：forbiddenPaths / diffSize 仅从 frozen order 拷贝；缺省 = 不在 force。
+    const forbiddenPaths = order.validation?.forbiddenPaths;
+    const diffSize = order.validation?.diffSize;
+
+    const result = await validation.engine.validate({
+      missionId: mission.id,
+      workItemId: item.id,
+      attemptId: submittedAttemptId,
+      projectRoot,
+      baseRevision,
+      allowedScope: [...order.allowedScope],
+      commands: commands.map((command) => ({
+        argv: [...command.argv],
+        timeoutMs: command.timeoutMs,
+        cwd: trustedCwd,
+      })),
+      ...(forbiddenPaths !== undefined ? { forbiddenPaths: [...forbiddenPaths] } : {}),
+      ...(diffSize !== undefined
+        ? {
+            diffSize: {
+              ...(diffSize.maxChangedFiles !== undefined
+                ? { maxChangedFiles: diffSize.maxChangedFiles }
+                : {}),
+              ...(diffSize.maxChangedLines !== undefined
+                ? { maxChangedLines: diffSize.maxChangedLines }
+                : {}),
+            },
+          }
+        : {}),
+    });
+
+    // 跑命令可能要几分钟，不能占着事务（与 Lightweight 同理）：跑完再开事务存报告 + 记事件。
+    return this.#tx(async () => {
+      // 事务里重取：跑命令那几分钟里活对象可能已经被别处换过。
+      const { mission: live, item: liveItem } = await this.#locateItem(
+        input.missionId,
+        input.workItemId,
+      );
+      // append-only 事实先落盘，再记引用它的事件。
+      await validation.reports.save(result.report);
+      await this.#event(
+        live,
+        'validation.reported',
+        {
+          reportId: result.report.id,
+          passed: result.report.passed,
+          submittedAttemptId,
+        },
+        liveItem.id,
+        // attemptId 留空：写这条的是平台，不是执行者，也不是 reviewer。
+      );
+      // 不 review：passed 与否 item 都留在 submitted，等 L2 裁定。
+      return { reportId: result.report.id, passed: result.report.passed, status: liveItem.status };
+    });
+  }
+
+  /**
+   * Standard 只读取报告：报告必须确实属于该 Mission 才返回。
+   * 不校验归属就返回，等于让任何一个 Mission 拿别人的机器证据去放行——
+   * 报告是 append-only 的，串了一份就永远串着。
+   */
+  async getValidationReport(
+    missionId: string,
+    reportId: string,
+  ): Promise<ValidationReport | undefined> {
+    await this.#locate(missionId);
+    if (!this.#validation) {
+      throw new PlatformRuleError(
+        'VALIDATION_DEPS_REQUIRED',
+        '读 ValidationReport 需要注入 PlatformDeps.validation.reports。',
+      );
+    }
+    const report = await this.#validation.reports.get(reportId);
+    if (!report || report.missionId !== missionId) return undefined;
+    return report;
   }
 
   /* ================================ 内部 ================================ */
