@@ -461,7 +461,7 @@ test('file platform fenced writes reject stale or expired claims after takeover;
     );
     assert.equal(spy.fenced, 1);
     assert.deepEqual(await snapshotOf(projects, activity, deliveries), before);
-    assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'clock-now');
+    assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'live\n\n—— 第 2 次补充\nclock-now');
     assert.equal((await hops.get(live.id))?.claimGeneration, 2);
 
     clock.advance(Date.parse(LEASE) - Date.parse(NOW));

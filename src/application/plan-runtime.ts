@@ -131,6 +131,8 @@ export async function runPlanOnPlatform(
       resumeMission: (missionId) =>
         persistAfter(deps.persist, deps.platform.resumeMission!(missionId)),
       createMission: (input) => persistAfter(deps.persist, deps.platform.createMission(input)),
+      recordStandardFallbackRoute: (missionId, input) =>
+        persistAfter(deps.persist, deps.platform.recordStandardFallbackRoute(missionId, input)),
       createClassifiedMission: (input) =>
         persistAfter(deps.persist, deps.platform.createClassifiedMission(input)),
       getMissionView: (missionId) => deps.platform.getMissionView(missionId),

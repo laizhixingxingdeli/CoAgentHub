@@ -13,6 +13,7 @@ import {
 } from '../kernel/index.ts';
 import type {
   AcceptanceResult,
+  ComplexityAssessment,
   Attempt,
   AttemptEndReason,
   AttemptKind,
@@ -262,6 +263,25 @@ function objectKeysAre(value: Record<string, unknown>, allowed: ReadonlySet<stri
     if (!allowed.has(key)) return false;
   }
   return true;
+}
+
+/**
+ * 分类事实投影：只保留 true / 'unknown' 叶子，丢弃 false 叶子；
+ * 嵌套对象递归处理并保留父级标签（否则 false 占满的子树会被当成一整块丢掉，
+ * 而同级的 true 父标签失去上下文）。非对象、非布尔/unknown 的值原样丢弃。
+ */
+function keepTrueOrUnknownLeaves(value: unknown): unknown {
+  if (value === true || value === 'unknown') return value;
+  if (value === false) return undefined;
+  if (isPlainObject(value)) {
+    const nested = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, child]) => [key, keepTrueOrUnknownLeaves(child)])
+        .filter(([, child]) => child !== undefined),
+    );
+    return Object.keys(nested).length > 0 ? nested : undefined;
+  }
+  return undefined;
 }
 
 function boundedNonNegativeInt(value: unknown): number | undefined {
@@ -550,6 +570,48 @@ export class Platform {
   async createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
     return this.#tx(() => this.#createMission(input));
+  }
+
+  async recordStandardFallbackRoute(
+    missionId: string,
+    input: {
+      classification: ClassificationResult;
+      fallbackReason: string;
+      assessment?: ComplexityAssessment;
+    },
+  ): Promise<void> {
+    return this.#tx(async () => {
+      const { mission } = await this.#locate(missionId);
+      if (mission.executionMode !== 'standard' || mission.runKind !== 'mutation') {
+        throw new PlatformRuleError(
+          'STANDARD_FALLBACK_ROUTE_FORBIDDEN',
+          '分类回落路由事件仅适用于普通 Standard mutation Mission。',
+        );
+      }
+      if (typeof input.fallbackReason !== 'string' || input.fallbackReason.trim().length === 0) {
+        throw new PlatformRuleError('EMPTY_FALLBACK_REASON', 'fallbackReason 不能为空。');
+      }
+      if ((await this.#activity.list(missionId)).some((event) => event.kind === 'mission.routed')) {
+        throw new PlatformRuleError('DUPLICATE_MISSION_ROUTE', 'Mission 已有 mission.routed 事件。');
+      }
+      const { classification } = input;
+      const routedData: Record<string, unknown> = {
+        recommended: classification.recommended,
+        confidence: classification.confidence,
+        facts: classification.facts,
+        unknowns: classification.unknowns,
+        criticalUnknowns: classification.criticalUnknowns,
+        reasons: classification.reasons,
+        fallbackReason: input.fallbackReason,
+      };
+      if (classification.assessmentRef !== undefined) {
+        routedData.assessmentRef = classification.assessmentRef;
+      }
+      if (input.assessment !== undefined) {
+        routedData.assessmentReasons = input.assessment.reasons;
+      }
+      await this.#event(mission, 'mission.routed', routedData);
+    });
   }
 
   async #createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
@@ -2561,6 +2623,42 @@ export class Platform {
       attempt.kind === 'executor' && attempt.workItemId
         ? mission.workItem(attempt.workItemId)
         : undefined;
+    let classification: string | undefined;
+    if (attempt.kind === 'coordinator') {
+      const routed = (await this.#activity.list(missionId)).find(
+        (event) => event.kind === 'mission.routed',
+      );
+      if (routed) {
+        const data = routed.data && typeof routed.data === 'object'
+          ? (routed.data as Record<string, unknown>)
+          : {};
+        const factsRaw = data.facts && typeof data.facts === 'object'
+          ? (data.facts as Record<string, unknown>)
+          : {};
+        const facts = Object.fromEntries(
+          Object.entries(factsRaw)
+            .map(([key, value]) => [key, keepTrueOrUnknownLeaves(value)])
+            .filter(([, value]) => value !== undefined),
+        );
+        const lines = [
+          '分类阶段已查明',
+          `facts: ${JSON.stringify(facts)}`,
+          `unknowns: ${JSON.stringify(data.unknowns ?? [])}`,
+          `reasons: ${JSON.stringify(data.reasons ?? [])}`,
+        ];
+        const assessmentReasons = mission.complexityAssessment?.reasons ?? data.assessmentReasons;
+        if (assessmentReasons !== undefined) {
+          lines.push(`assessmentReasons: ${JSON.stringify(assessmentReasons)}`);
+        }
+        if (typeof data.fallbackReason === 'string') {
+          lines.push(`fallbackReason: ${data.fallbackReason}`);
+        }
+        const full = lines.join('\n');
+        classification = full.length <= 2000
+          ? full
+          : `${full.slice(0, 2000 - '（已截断）'.length)}（已截断）`;
+      }
+    }
     // 读路径仍在这里：构造器只吃显式值，不自己找 Mission。
     const contextBundle = buildContextBundle(
       {
@@ -2573,6 +2671,7 @@ export class Platform {
         planRevision: mission.planRevision,
         workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
         finalReview: mission.finalReview,
+        classification,
       },
       budget,
     );
@@ -2673,10 +2772,17 @@ export class Platform {
   ): Promise<{ planRevision: number }> {
     const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
     const previous = mission.plan;
+    const accumulatedFindings = previous?.findings
+      ? `${previous.findings}\n\n—— 第 ${mission.planRevision + 1} 次补充\n${findings}`
+      : findings;
+    const accumulatedHypotheses = rejectedHypotheses === undefined
+      ? [...(previous?.rejectedHypotheses ?? [])]
+      : [...new Set([...(previous?.rejectedHypotheses ?? []), ...rejectedHypotheses])];
     const planRevision = mission.updatePlan({
-      findings,
+      findings: accumulatedFindings,
       // 其余字段沿用上一版：这个口的语义是"只补发现"，不是"把没填的清空"。
-      rejectedHypotheses: [...(rejectedHypotheses ?? previous?.rejectedHypotheses ?? [])],
+      rootCause: previous?.rootCause,
+      rejectedHypotheses: accumulatedHypotheses,
       decisions: [...(previous?.decisions ?? [])],
       direction: previous?.direction ?? '',
       risks: [...(previous?.risks ?? [])],

@@ -825,3 +825,29 @@ describe('L3 作废工作项（S14.6 的 cancel-replace）', () => {
     assert.equal(view.result?.outcome, 'delivered');
   });
 });
+
+describe('调查发现追加（S09.2）', () => {
+  test('连续补充保留既有规划信息，完整更新仍整体替换', async () => {
+    const { platform } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'F1', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('F1');
+    const initial = {
+      rootCause: '根因', findings: '原始发现', rejectedHypotheses: ['假设A'],
+      decisions: ['决策'], direction: '方向', risks: ['风险'],
+    };
+    await platform.updatePlan('F1', coord.attemptId, initial);
+    await platform.updateFindings('F1', coord.attemptId, '第一次发现', ['假设A', '假设B']);
+    await platform.updateFindings('F1', coord.attemptId, '第二次发现');
+
+    const view = await platform.getMissionView('F1');
+    assert.equal(view.plan?.findings, '原始发现\n\n—— 第 2 次补充\n第一次发现\n\n—— 第 3 次补充\n第二次发现');
+    assert.equal(view.plan?.rootCause, '根因');
+    assert.deepEqual(view.plan?.rejectedHypotheses, ['假设A', '假设B']);
+    assert.deepEqual(view.plan?.decisions, ['决策']);
+    assert.equal(view.plan?.direction, '方向');
+    assert.deepEqual(view.plan?.risks, ['风险']);
+
+    await platform.updatePlan('F1', coord.attemptId, { ...initial, findings: '整体替换' });
+    assert.equal((await platform.getMissionView('F1')).plan?.findings, '整体替换');
+  });
+});

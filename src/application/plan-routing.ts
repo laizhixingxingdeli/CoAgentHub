@@ -36,7 +36,12 @@ export type RoutingDecision =
       readonly classification: ClassificationResult;
     }
   /** 不分类，按老路建 Standard Mission，协调者从头调查规划。 */
-  | { readonly kind: 'standard_fallback'; readonly reason: string }
+  | {
+      readonly kind: 'standard_fallback';
+      readonly reason: string;
+      readonly classification?: ClassificationResult;
+      readonly assessment?: ComplexityAssessment;
+    }
   /** 禁止副作用未证明安全，或其它必须停下来问人的路由；不建 Mission。 */
   | { readonly kind: 'needs_human'; readonly reason: string; readonly needsDecision: string };
 
@@ -198,11 +203,18 @@ export function decideRoute(
     return {
       kind: 'standard_fallback',
       reason: '只读协调者判它不用改代码。方案里的功能点不该是只读的，交给协调者完整核实。',
+      classification,
+      ...(proposal.assessment ? { assessment: proposal.assessment } : {}),
     };
   }
   // HAOFF1：2026-09-28 用户决定先跑通功能、鉴权以后再加。恢复时删除此分支，并放回下方条件中的 HA 判断。
   if (recommended.executionMode === 'high_assurance') {
-    return { kind: 'standard_fallback', reason: 'HA 路暂时关闭（先把功能跑通，鉴权以后再加）：按普通 Standard 建单。' };
+    return {
+      kind: 'standard_fallback',
+      reason: 'HA 路暂时关闭（先把功能跑通，鉴权以后再加）：按普通 Standard 建单。',
+      classification,
+      ...(proposal.assessment ? { assessment: proposal.assessment } : {}),
+    };
   }
   if (/* recommended.executionMode === 'high_assurance' || */ recommended.executionMode === 'standard') {
     // HA / Standard 都禁止带 Lightweight 工单；恢复 HA 路由后，合格 HA 把原始 facts 交给 createClassifiedMission。
