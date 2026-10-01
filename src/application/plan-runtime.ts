@@ -26,6 +26,7 @@ import { renderPlanHandoff } from './plan-handoff.ts';
 import { preflightPlanMissionSlots, preflightPlanRepo, slotHolders } from './plan-preflight.ts';
 // slotHolders formatting remains owned by shared preflight for rejected missions.
 import { drivePlan, runWithDeadline, type PlanDriverDeps } from './plan-driver.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 import { PlanRun, type PlanRunStop } from './plan-run.ts';
 import { FilePlanRunStore } from './plan-run-store.ts';
 import { buildRoutingPrompt, parseRoutingProposal } from './plan-routing.ts';
@@ -83,12 +84,79 @@ export interface PlanRuntimeDeps {
   readonly startedAt?: string;
   readonly checkRepo?: () => Promise<readonly string[]>;
   readonly pollMs?: number;
+  /**
+   * 见 plan-driver 的 WaitEligibility：判一条 waiting 是不是本 Mission 在运行内等得到头。
+   * 缺省不等待，照旧开升级单——没有结构性证明就等，等于把整晚押在一条猜出来的原因上。
+   */
+  readonly waitEligibility?: PlanDriverDeps['waitEligibility'];
 }
 
 async function persistAfter<T>(persist: () => Promise<void>, work: Promise<T>): Promise<T> {
   const result = await work;
   await persist();
   return result;
+}
+
+export interface QueuedHopWaitEligibilityDeps {
+  /** 读持久队列行。读不到（抛错）时探针返回 undefined，不猜。 */
+  readonly list: () => Promise<readonly QueuedHop[]>;
+  /** 当前时刻；capacity 的短轮询与 availableAt / leaseUntil 的比较都按它算。 */
+  readonly now: () => string;
+  /** 自己占着名额时多久复核一次。缺省 5 秒——占位只能短轮询，猜不出完工时刻。 */
+  readonly capacityPollMs?: number;
+}
+
+/**
+ * 生产用等待资格探针：只从持久 Hop 记录里认**本 Mission 自己**的退避 / 占位。
+ *
+ * 驱动的 WaitEligibility 刻意不接受「project_busy 就是自己占名额」这种从字样推出来的
+ * 结论——同一个 reason 既可能是自己另一个在途工作项占着名额（该等），也可能是别的
+ * Mission 在改代码（等不到头）。所以这里按 missionId 过滤队列行：
+ *   - 本 Mission 有 retry_wait 且 availableAt 还没到 → own_backoff，睡到最早那刻重试；
+ *   - 否则本 Mission 有 claimed 且租约还没到期 → capacity，短轮询复核；
+ *   - 其余一律 undefined，交回驱动走原升级处置。
+ *
+ * detail 文案一个字都不看——它只分得出「发生了什么」，分不出归属。读库出错也返回
+ * undefined：读不到就猜，等于没证据地空等一整晚。
+ */
+export function createQueuedHopWaitEligibility(
+  deps: QueuedHopWaitEligibilityDeps,
+): NonNullable<PlanDriverDeps['waitEligibility']> {
+  return async ({ missionId, reason }) => {
+    // 只有「名额被占」值得探一次；其余 reason 探队列也证明不了本 Mission 等得到头。
+    if (reason !== 'project_busy') return undefined;
+    let rows: readonly QueuedHop[];
+    try {
+      rows = await deps.list();
+    } catch {
+      return undefined;
+    }
+    const nowMs = Date.parse(deps.now());
+    if (!Number.isFinite(nowMs)) return undefined;
+    const mine = rows.filter((row) => row.missionId === missionId);
+
+    // 自己的退避优先：最早到期的那个有效 availableAt 就是重试时刻。
+    const backoffs = mine
+      .filter((row) => row.status === 'retry_wait')
+      .map((row) => Date.parse(row.availableAt))
+      .filter((at) => Number.isFinite(at) && at > nowMs);
+    if (backoffs.length > 0) {
+      return { kind: 'own_backoff', availableAt: new Date(Math.min(...backoffs)).toISOString() };
+    }
+
+    // 自己另一个在途工作项占着名额：租约还没到期，只能短轮询复核。
+    const holdsLease = mine.some((row) => {
+      if (row.status !== 'claimed') return false;
+      const until = Date.parse(row.leaseUntil ?? '');
+      return Number.isFinite(until) && until > nowMs;
+    });
+    if (holdsLease) {
+      const pollMs = deps.capacityPollMs ?? 5_000;
+      return { kind: 'capacity', nextPollAt: new Date(nowMs + pollMs).toISOString() };
+    }
+
+    return undefined;
+  };
 }
 
 /**
@@ -127,6 +195,7 @@ export async function runPlanOnPlatform(
     log: deps.log,
     ...(deps.checkRepo ? { checkRepo: deps.checkRepo } : {}),
     ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
+    ...(deps.waitEligibility ? { waitEligibility: deps.waitEligibility } : {}),
     platform: {
       resumeMission: (missionId) =>
         persistAfter(deps.persist, deps.platform.resumeMission!(missionId)),
@@ -596,10 +665,20 @@ export async function runHostedPlan(
 
   ctx.onStarted?.({ runId, runPath: store.path, reviewer: parsed.plan.reviewer });
 
+  // 自己的退避 / 占位只从持久 Hop 行里认；没装队列（或读不到）就不给探针，
+  // 驱动照旧走原升级处置——宁可开单让人看一眼，也不拿没证据的等待赌一整晚。
+  const waitEligibility = queuedHops
+    ? createQueuedHopWaitEligibility({
+        list: () => queuedHops.list(),
+        now: () => new Date().toISOString(),
+      })
+    : undefined;
+
   const stop = await runPlanOnPlatform(parsed.plan, parsed.selection, {
     store,
     projectRoot: parsed.cwd,
     platform,
+    ...(waitEligibility ? { waitEligibility } : {}),
     runMission: (missionId, options) => runner.run(missionId, hostedPlanRunOptions(options, parsed.maxRounds)),
     ...(runQuery ? { runQuery } : {}),
     ...(Object.keys(resumeMissions).length > 0 ? { resumeMissions } : {}),
