@@ -265,6 +265,25 @@ function objectKeysAre(value: Record<string, unknown>, allowed: ReadonlySet<stri
   return true;
 }
 
+/**
+ * 分类事实投影：只保留 true / 'unknown' 叶子，丢弃 false 叶子；
+ * 嵌套对象递归处理并保留父级标签（否则 false 占满的子树会被当成一整块丢掉，
+ * 而同级的 true 父标签失去上下文）。非对象、非布尔/unknown 的值原样丢弃。
+ */
+function keepTrueOrUnknownLeaves(value: unknown): unknown {
+  if (value === true || value === 'unknown') return value;
+  if (value === false) return undefined;
+  if (isPlainObject(value)) {
+    const nested = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, child]) => [key, keepTrueOrUnknownLeaves(child)])
+        .filter(([, child]) => child !== undefined),
+    );
+    return Object.keys(nested).length > 0 ? nested : undefined;
+  }
+  return undefined;
+}
+
 function boundedNonNegativeInt(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > CONTEXT_METRICS_MAX_INT) {
     return undefined;
@@ -2613,13 +2632,14 @@ export class Platform {
         const data = routed.data && typeof routed.data === 'object'
           ? (routed.data as Record<string, unknown>)
           : {};
-        const facts = data.facts && typeof data.facts === 'object'
-          ? Object.fromEntries(
-              Object.entries(data.facts as Record<string, unknown>).filter(
-                ([, value]) => value === true || value === 'unknown',
-              ),
-            )
+        const factsRaw = data.facts && typeof data.facts === 'object'
+          ? (data.facts as Record<string, unknown>)
           : {};
+        const facts = Object.fromEntries(
+          Object.entries(factsRaw)
+            .map(([key, value]) => [key, keepTrueOrUnknownLeaves(value)])
+            .filter(([, value]) => value !== undefined),
+        );
         const lines = [
           '分类阶段已查明',
           `facts: ${JSON.stringify(facts)}`,

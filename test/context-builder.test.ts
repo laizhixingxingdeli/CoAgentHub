@@ -157,7 +157,7 @@ describe('buildContextBundle', () => {
       facts: {
         mutationSideEffect: true, readOnlyProven: 'unknown',
         highAssurance: { productionDeployRelease: false, externalPaidOp: false, destructiveData: false, credentialsPermissionsSecurity: false, schemaPublicApiPersistenceCompat: false, unrecoverableExternalSideEffect: false },
-        standardFloor: { publicInterface: false, buildSystemOrDependency: false, multipleDomainModules: false, acceptanceNotCheckableUpfront: false, rootCauseOrCompetingDesigns: false },
+        standardFloor: { publicInterface: true, buildSystemOrDependency: false, multipleDomainModules: false, acceptanceNotCheckableUpfront: false, rootCauseOrCompetingDesigns: false },
       } as never,
       assessment: {
         goalUncertainty: 1, changeScope: 1, operationalRisk: 1,
@@ -174,6 +174,8 @@ describe('buildContextBundle', () => {
     assert.match(content, /mutationSideEffect/);
     assert.match(content, /unknown/);
     assert.doesNotMatch(content, /productionDeployRelease/);
+    assert.match(content, /publicInterface/);
+    assert.doesNotMatch(content, /multipleDomainModules/);
     assert.match(content, /unknowns:/);
     assert.match(content, /reasons:/);
     assert.match(content, /评估说明/);
