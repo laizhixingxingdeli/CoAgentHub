@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createQueuedHopWaitEligibility, runPlanOnPlatform } from '../src/application/plan-runtime.ts';
+import { createPlanWaitEligibility, createQueuedHopWaitEligibility, runPlanOnPlatform } from '../src/application/plan-runtime.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import type { QueuedHop } from '../src/application/durable-scheduler.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import type { PlanRuntimeStore } from '../src/application/plan-runtime.ts';
 import type { PlanSpec, PlanCandidateSelection } from '../src/application/plan-spec.ts';
+import type { RoleCooldownCandidate, RolePoolName } from '../src/application/orchestrator.ts';
 
 test('runPlanOnPlatform resumes the authenticated prior Mission and persists it without creating one', async () => {
   const plan = {
@@ -156,6 +157,120 @@ test('生产队列探针只认本 Mission 的 retry_wait / 占位：同 missionI
     assert.equal(run.escalations.length, 0, '自己的退避等得到头，不开升级单');
     assert.equal(run.feature('F1')?.status, 'merged');
     assert.ok(logs.some((line) => line.includes('续跑 R-probe-F1，不开升级单')), logs.join('\n'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('生产共享资格工厂：唯一协调者五分钟冷却经同款工厂续跑同 Mission 完成，并覆盖对照与队列原探针', async () => {
+  const T0 = '2026-09-23T22:00:00.000Z';
+  let clock = Date.parse(T0);
+  const now = () => clock;
+  const plusMs = (ms: number) => new Date(clock + ms).toISOString();
+
+  // 注入的 runner 快照：同角色唯一候选 until=now+5min。生产用 runner.roleCooldownSnapshot，
+  // 这里用注入值避免凭空推断本地冷却、也不必起真 MissionRunner。
+  const candidate = (availability: RoleCooldownCandidate['availability'], until?: string): RoleCooldownCandidate =>
+    ({ profileId: 'coordinator-1', availability, ...(until !== undefined ? { until } : {}) });
+  const ask = async (
+    probe: ReturnType<typeof createPlanWaitEligibility>,
+    reason: string,
+    candidateRole?: RolePoolName,
+  ) => probe({ missionId: 'R-rc-F1', reason: reason as never, detail: '协调者候选全部短冷却', ...(candidateRole !== undefined ? { candidateRole } : {}) });
+
+  // factory 用注入快照：no_available_agent + 明确 candidateRole + 全 cooling + 5min
+  const cooling5min = () => Promise.resolve([candidate('cooldown', plusMs(5 * 60_000))] as const);
+  const factory = createPlanWaitEligibility({ roleCooldownSnapshot: cooling5min, now });
+
+  // 资格成立：返回最早 until，且在 15 分钟内。
+  assert.deepEqual(await ask(factory, 'no_available_agent', 'coordinator'), { kind: 'role_cooldown', earliestUntil: plusMs(5 * 60_000) });
+
+  // 对照：缺 candidateRole → undefined（绝不按 reason/detail 猜角色）。
+  assert.equal(await ask(factory, 'no_available_agent'), undefined);
+  // 对照：空池 → undefined（没装配不等于全冷却）。
+  const emptyPool = () => Promise.resolve([] as const);
+  assert.equal(await ask(createPlanWaitEligibility({ roleCooldownSnapshot: emptyPool, now }), 'no_available_agent', 'coordinator'), undefined);
+  // 对照：unknown 不是 cooldown → undefined。
+  const withUnknown = () => Promise.resolve([candidate('unknown')] as const);
+  assert.equal(await ask(createPlanWaitEligibility({ roleCooldownSnapshot: withUnknown, now }), 'no_available_agent', 'coordinator'), undefined);
+  // 对照：有 available → undefined。
+  const withAvailable = () => Promise.resolve([candidate('available')] as const);
+  assert.equal(await ask(createPlanWaitEligibility({ roleCooldownSnapshot: withAvailable, now }), 'no_available_agent', 'coordinator'), undefined);
+  // 对照：超过 15 分钟 → undefined（不是马上就好，不拿运行去等）。
+  const cooling30min = () => Promise.resolve([candidate('cooldown', plusMs(30 * 60_000))] as const);
+  assert.equal(await ask(createPlanWaitEligibility({ roleCooldownSnapshot: cooling30min, now }), 'no_available_agent', 'coordinator'), undefined);
+  // 对照：读异常 fail closed → undefined。
+  const throws = () => Promise.reject(new Error('snapshot unreadable')) as Promise<readonly RoleCooldownCandidate[]>;
+  assert.equal(await ask(createPlanWaitEligibility({ roleCooldownSnapshot: throws, now }), 'no_available_agent', 'coordinator'), undefined);
+  // 对照：project_busy 且未装队列 → undefined（队列探针未挂载）。
+  assert.equal(await ask(factory, 'project_busy', 'coordinator'), undefined);
+
+  // 队列原探针仍可用：装了 queuedHops 后 project_busy 走队列逻辑。
+  const row = (input: Partial<QueuedHop> & Pick<QueuedHop, 'missionId' | 'status'>): QueuedHop =>
+    ({ id: 'H', projectId: 'project', availableAt: T0, ...input } as QueuedHop);
+  const ownBackoff = [row({ missionId: 'R-rc-F1', status: 'retry_wait', availableAt: plusMs(2_000) })];
+  const factoryWithQueue = createPlanWaitEligibility({
+    queuedHops: { list: async () => ownBackoff },
+    roleCooldownSnapshot: cooling5min,
+    now,
+  });
+  assert.deepEqual(
+    await ask(factoryWithQueue, 'project_busy', 'coordinator'),
+    { kind: 'own_backoff', availableAt: plusMs(2_000) },
+  );
+
+  // 端到端：用同款工厂接 runPlanOnPlatform；首次 no_available_agent + coordinator 冷却，
+  // 第二次 delivered；断言 sleep 推进、同 missionId 两次调用、无升级单且完成。
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-resume-rc-'));
+  try {
+    const store = new FilePlanRunStore(join(dir, 'R-rc.json'));
+    const feature = { id: 'F1', title: 'rc', why: 'continue', allowedScope: ['a.ts'], acceptance: ['done'] };
+    const plan = {
+      planId: 'P-rc', projectId: 'project', integrationBranch: 'main', reviewer: 'reviewer',
+      stopConditions: { unresolvedEscalations: 1, wallClockMs: 60 * 60_000, escalationTimeoutMs: 1_000 },
+      features: [feature],
+    } as PlanSpec;
+    const selection = { candidates: [feature], exclusions: [], warnings: [] } as PlanCandidateSelection;
+
+    const events: string[] = [];
+    const runs: string[] = [];
+    const logs: string[] = [];
+    const platform = {
+      async resumeMission() { throw new Error('unexpected resume'); },
+      async createMission(input: { missionId: string }) { events.push(`create:${input.missionId}`); },
+      async createClassifiedMission() { throw new Error('unexpected classified create'); },
+      async getMissionView() { return { status: 'blocked' }; },
+      async effectiveIndependentReviewPass() { return undefined; },
+      async finalizeMissionByHaAuthority() { throw new Error('unexpected'); },
+      async finalizeMissionByMachine() { throw new Error('unexpected'); },
+      async abandonMissionForPlan() { throw new Error('unexpected'); },
+      async answerEscalation() { throw new Error('unexpected'); },
+    };
+    const runMission = async (missionId: string) => {
+      runs.push(missionId);
+      // 首次：协调者候选全冷却；冷却由假钟的 sleep 推进 5 分钟（until=now+5min）后，
+      // 第二次真的交卷。runMission 不自行推进时钟，证明等待走的是驱动的 sleep。
+      return runs.length === 1
+        ? { outcome: { kind: 'waiting', reason: 'no_available_agent', detail: '协调者候选全部短冷却', candidateRole: 'coordinator' as const } }
+        : { outcome: { kind: 'delivered' } };
+    };
+
+    await runPlanOnPlatform(plan, selection, {
+      store, projectRoot: dir, platform: platform as never,
+      runMission: runMission as never,
+      waitEligibility: createPlanWaitEligibility({ roleCooldownSnapshot: cooling5min, now }),
+      persist: async () => {}, pauseInFlight: async () => {},
+      now: () => new Date(clock).toISOString(), sleep: async (ms) => { clock += ms; },
+      log: (line) => logs.push(line), runId: 'R-rc', startedAt: T0, pollMs: 1_000,
+    });
+
+    const run = store.read()!;
+    assert.deepEqual(runs, ['R-rc-F1', 'R-rc-F1'], '同 missionId 续跑，不另开 Mission');
+    assert.deepEqual(events, ['create:R-rc-F1']);
+    assert.equal(run.escalations.length, 0, '协调者冷却等得到头，不开升级单');
+    assert.equal(run.feature('F1')?.status, 'merged');
+    assert.equal(clock, Date.parse(T0) + 5 * 60_000, '假钟随 sleep 推进五分钟冷却窗口');
+    assert.ok(logs.some((line) => line.includes('续跑 R-rc-F1，不开升级单')), logs.join('\n'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -45,6 +45,10 @@ import type {
   IdGenerator,
   QueuedHopRepository,
 } from './ports.ts';
+import {
+  type RoleCooldownCandidate,
+  type RolePoolName,
+} from './orchestrator.ts';
 import { QueryRunner, type QueryRunRepository, type RunQueryInput, type RunQueryResult } from './query-run.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import type { WorkspaceManager } from './workspace.ts';
@@ -160,9 +164,73 @@ export function createQueuedHopWaitEligibility(
 }
 
 /**
- * 建与 run-plan 相同字段的 PlanRun，再按筛选结果的源顺序驱动。
- * 分类失败 / 没装 query 的回落语义保持原样，好让 CLI 只换装配不换规则。
+ * 共享资格工厂：把「本 Mission 在运行内等得到头」的两种证明并到一个探针里。
+ *
+ * 为什么合并：hosted 入口要在 runner 构造后同时启用「自己的退避/占位」和
+ * 「指定角色候选全冷却」两类等待，而不是各装各的探针导致逻辑分叉。这里把
+ * project_busy 委托给 createQueuedHopWaitEligibility（那条已验收的队列探针），
+ * 把 no_available_agent 接上 runner.roleCooldownSnapshot 的权威快照。
+ *
+ * 冷却资格的三条不许违反的口径（与 orchestrator.roleCooldownSnapshot 同源）：
+ *   - 只有 reason==='no_available_agent' 且本次 waiting 确由该角色候选拿不出人
+ *     （candidateRole 明确存在）才去查那个角色的冷却快照；绝不按 reason/detail
+ *     字样猜角色。
+ *   - 快照非空、每位 availability==='cooldown' 且 until 都是有效未来时间，才取
+ *     最早 until 且距当前不超过 15 分钟——否则（空池、有 unknown、有 available、
+ *     超长冷却、读异常）一律 undefined。读异常 fail closed，绝不解析 detail。
+ *   - unknown 不是 cooldown：探针在跑或到期值非法时只能说「不可证明可用」，
+ *     不能编一个冷却时长出来。
  */
+export interface PlanWaitEligibilityDeps {
+  /** 可选：持久 Hop 队列，project_busy 委托给它认本 Mission 的退避/占位。无则 undefined。 */
+  readonly queuedHops?: { readonly list: () => Promise<readonly QueuedHop[]> };
+  /** 必需：MissionRunner 的角色冷却快照桥，只读读出某角色候选池的权威冷却状态。 */
+  readonly roleCooldownSnapshot: (
+    role: RolePoolName,
+    now?: number,
+  ) => Promise<readonly RoleCooldownCandidate[]>;
+  /** 当前时刻（数值毫秒），冷却到期的比较与 15 分钟上限都按它算。 */
+  readonly now: () => number;
+}
+
+/** 冷却资格的上限：超出这一刻钟的冷却不是「马上就好」，不拿运行去等。 */
+const MAX_ROLE_COOLDOWN_WAIT_MS = 15 * 60_000;
+
+export function createPlanWaitEligibility(
+  deps: PlanWaitEligibilityDeps,
+): NonNullable<PlanDriverDeps['waitEligibility']> {
+  const queued = deps.queuedHops
+    ? createQueuedHopWaitEligibility({ list: () => deps.queuedHops!.list(), now: () => new Date(deps.now()).toISOString() })
+    : undefined;
+  return async ({ missionId, reason, detail, candidateRole }) => {
+    // project_busy 交给队列探针：只认本 Mission 自己的退避/占位。
+    if (reason === 'project_busy') {
+      return queued ? queued({ missionId, reason, detail }) : undefined;
+    }
+    // 只有「指定角色候选全冷却」才值得探：缺角色或别的 reason 查快照也证明不了。
+    if (reason !== 'no_available_agent' || candidateRole === undefined) return undefined;
+    const now = deps.now();
+    let snapshot: readonly RoleCooldownCandidate[];
+    try {
+      snapshot = await deps.roleCooldownSnapshot(candidateRole, now);
+    } catch {
+      // 读异常 fail closed：读不到就猜等于空等一整晚，交回驱动走原升级处置。
+      return undefined;
+    }
+    if (snapshot.length === 0) return undefined;
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const candidate of snapshot) {
+      if (candidate.availability !== 'cooldown') return undefined;
+      const until = Date.parse(candidate.until ?? '');
+      // 到期值非法或不是有效未来时间：不可证明，不编冷却时长。
+      if (!Number.isFinite(until) || until <= now) return undefined;
+      earliest = Math.min(earliest, until);
+    }
+    // 距当前超过 15 分钟的不是「马上就好」，不拿运行去等。
+    if (earliest - now > MAX_ROLE_COOLDOWN_WAIT_MS) return undefined;
+    return { kind: 'role_cooldown', earliestUntil: new Date(earliest).toISOString() };
+  };
+}
 export async function runPlanOnPlatform(
   plan: PlanSpec,
   selection: PlanCandidateSelection,
@@ -665,14 +733,15 @@ export async function runHostedPlan(
 
   ctx.onStarted?.({ runId, runPath: store.path, reviewer: parsed.plan.reviewer });
 
-  // 自己的退避 / 占位只从持久 Hop 行里认；没装队列（或读不到）就不给探针，
-  // 驱动照旧走原升级处置——宁可开单让人看一眼，也不拿没证据的等待赌一整晚。
-  const waitEligibility = queuedHops
-    ? createQueuedHopWaitEligibility({
-        list: () => queuedHops.list(),
-        now: () => new Date().toISOString(),
-      })
-    : undefined;
+  // 共享资格工厂：project_busy 委托队列探针认本 Mission 的退避/占位，
+  // no_available_agent 接上 runner 的同池角色快照认全部候选短冷却。
+  // 即使没装队列也启用冷却判断——指定角色候选全在 15 分钟内冷却时就在运行内等待续跑，
+  // 不把未知或非候选失败误当冷却、也不开升级单。
+  const waitEligibility = createPlanWaitEligibility({
+    ...(queuedHops ? { queuedHops } : {}),
+    roleCooldownSnapshot: (role, now) => runner.roleCooldownSnapshot(role, now),
+    now: () => Date.now(),
+  });
 
   const stop = await runPlanOnPlatform(parsed.plan, parsed.selection, {
     store,
