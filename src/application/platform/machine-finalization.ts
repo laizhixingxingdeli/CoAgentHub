@@ -1,7 +1,52 @@
 import { PlatformRuleError, type PlatformContext } from './context.ts';
+import { recordEscalationAndDeliver } from './escalations.ts';
 import { assertFinalizePolicy, landMemory } from './final-review.ts';
 import { runIntegrationMergeVerify } from './integration-verification.ts';
+import { missionResultCriteriaIssues } from './mission-result-criteria.ts';
 import { POLICY_ACTION } from '../policy-engine.ts';
+import type { Mission } from '../../kernel/index.ts';
+
+/**
+ * 逐条验收标准的合入闸门：只有每条都达成才允许机器继续往下走。
+ *
+ * 为什么在合并之前问：合并和集成验证都是**副作用**，一旦跑过，集成分支上就
+ * 多了一个没人授权过的提交；判定不通过时要把它们退回去，退回本身又是一次改
+ * 动历史的机会。先问再做，不通过就什么都没发生过。
+ *
+ * 不通过时不停在沉默里：写成一张普通的可答复升级，把哪些标准没达成逐条列给
+ * L3——机器替人决定了「先不合」，但决定不合之后该怎么走是人说了算。
+ *
+ * 返回 true 表示已拦住（调用方应当原样返回当前状态）。
+ */
+async function holdForUnmetCriteria(
+  ctx: PlatformContext,
+  mission: Mission,
+): Promise<boolean> {
+  const acceptanceCount = mission.contract?.acceptance.length ?? 0;
+  const issues = missionResultCriteriaIssues(mission.result?.criteria, acceptanceCount);
+  if (issues.length === 0) return false;
+
+  const question =
+    `机器终审不放行：${acceptanceCount} 条验收标准里有 ${issues.length} 条没达成，需要 L3 裁决：\n` +
+    issues.map((issue) => `- ${issue}`).join('\n');
+  // 同一张卡没答复就不再开一张：第二张只会让人不知道该答哪张。
+  if (!mission.openEscalations.some((item) => item.question === question)) {
+    await recordEscalationAndDeliver(ctx, mission, {
+      attemptId: mission.coordinatorAttempts.at(-1)?.id ?? 'machine:finalization',
+      question,
+      why: '机器终审不代判定：验收标准没逐条达成就不自动合入集成分支，这条要人来决定怎么走。',
+      optionsConsidered: [
+        '检视者部分接受：合已达成的部分，未达成的另开票',
+        '退回协调者补齐未达成的验收标准后再交卷',
+        '需求有变化，先问用户再定去留',
+      ],
+    });
+  }
+  // 答复了这张卡不等于 criteria 变成 pass：放行仍然只看 criteria 本身。
+  mission.setWaitReason('waiting_l3', `验收标准未逐条达成，机器不自动合入：${issues.join('；')}`);
+  await ctx.event(mission, 'mission.waiting', { reason: 'waiting_l3', criterionIssues: issues });
+  return true;
+}
 
 export async function finalizeMissionByMachine(ctx: PlatformContext, 
     missionId: string,
@@ -54,6 +99,16 @@ export async function finalizeMissionByMachine(ctx: PlatformContext,
         '没注入 commandRunner / reports，机器放行不可用。不退化成不验直接合。',
       );
     }
+    // 逐条标准的闸门：任何 workspace / 分支 / 合并 / 验证 / 落地记忆之前。
+    // acceptanceEvidence **完全不参与**——自由文本没法逐条判定，拿它放行等于
+    // 把「写了点东西」当成「验收过了」。
+    if (await holdForUnmetCriteria(ctx, mission)) {
+      return {
+        status: mission.status,
+        reason: '验收标准未逐条达成，机器不自动合入',
+      };
+    }
+
     const projectRoot = input.projectRoot ?? mission.workspaceRef?.projectRoot;
     if (!ctx.workspace || !projectRoot) {
       throw new PlatformRuleError('NO_WORKSPACE_MANAGER', '机器放行要知道项目仓库在哪。');
