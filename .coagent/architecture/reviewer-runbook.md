@@ -5,7 +5,9 @@
 ## 1. 冻结票
 
 1. 照 to-spec 的结构过一遍：要解决什么、方案、实现决定（改动落在哪一层、接口和数据形状怎么变）、测试接缝（在哪一层验证、参照哪个已有测试）、会碰到哪些既有测试与不变量、不做什么。
-2. 核实票里的事实：要改的文件在哪；提到的输入（文件、接口、别的仓库的代码、规格）确实存在；新增事件要在 `src/web/narrate.js` 补翻译；新增协调者工具要由适配器（coagent-pi）先注册。
+2. 核实票里的事实：要改的文件在哪；提到的输入（文件、接口、别的仓库的代码、规格）确实存在；新增事件要在 `src/web/narrate.js` 补翻译，新增等待原因还要补 `src/api/web.ts` 的 WAIT_REASON 表（`test/wait-reason-coverage.test.ts` 钉死，AC3 漏过）；新增协调者工具要由适配器（coagent-pi）先注册。
+   - 对照架构决定与规格（`.coagent/architecture/decisions/`、`.coagent/specs/`）：票的做法不能和 ADR 冲突（AC3 先写了「复用 ExecutionBudget 硬停」，与 ADR-0005 冲突，r2 改成独立门禁）。
+   - 验收要改接口时先核它现在的返回形状（RS1 要给列表加计数，可列表是裸数组）。
    - 纯搬家 / 重构票：先找出所有读源码文本的测试（`grep -rln "readFileSync" test/`，看哪些读 `src/`），分两类在票里写明怎么适配——钉死文件路径的、钉死调用写法的（如只认 `this.#event(`）。REF1 因这两类各返工一次（契约 r2、r4）。
    - 票里或升级答复里规定具体做法之前，先核平台允不允许。例：已验收的工作项不能修订，只能新建工单补做（REF1 的 E-2）。
    - 新代码守工程规范（`engineering-standards.md`）；数值目标写成建议值，写明「什么情况下算收尾」。
@@ -19,7 +21,7 @@
 3. 开跑：`node C:/program1/coagent-experiments/run-plan-platform.mjs <标签> [--project coagent-pi] --max-rounds <n>`。
    - 轮次：按「预计工作项数 × 2.5」给，最多 100。多组搬家这类大票每个工作项约耗 2.4 轮，REF1 先后撞了 30、60 两次上限。撞上限而仍在推进时：升级单选「停」→ `l3 pause` → 重开，平台续跑同一 Mission。
    - 一次只放一张 pending：方案运行开跑时读一次方案、把所有 pending 都选进来，而平台代码合入后要在票与票之间重启服务。其余票用 `C:/program1/coagent-experiments/roles/hold-queue.mjs hold <id,…>` 暂改 planned，下一张开跑前 `release <id>`。
-   - 协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。执行者用 pi 的 workbuddy 提供方（用户 2026-10-02）：白天 cn:hy3 → cn:deepseek-v4.1-flash（exec-wb-hy3、exec-wb-ds-flash），23:00–08:00 在两者之间加 cn:hy4-preview（exec-wb-hy4）；启动脚本按开跑时的本地时间自动选，跨过边界的运行在票与票之间重开。
+   - 协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。执行者用 pi 的 workbuddy 提供方（用户 2026-10-02）：白天 cn:hy3 → cn:deepseek-v4.1-flash（exec-wb-hy3、exec-wb-ds-flash）；23:00–08:00 cn:hy4-preview 排第一（exec-wb-hy4，用户 10-02 23:0x「改hy4执行者」），hy3、ds-flash 顶替；启动脚本按开跑时的本地时间自动选，跨过边界的运行在票与票之间重开。
 4. coagent-pi 的票要 `--worktrees`，常驻服务托管不支持（#26）：用 coagent-pi 自己的独立状态 `C:/program1/coagent-experiments/roles/state-pi/.coagent-state.json` 独立运行，可与主线并行。独立运行不发布端口，值守用只看日志的 `C:/program1/coagent-experiments/roles/log-watch.mjs --log <运行日志> --max-minutes 25`。适配器按每次派发现读，合入 coagent-pi 集成分支后下一次派发就生效：改协调者 / 执行者提示词或简报的票放到 Mission 之间跑。
 
 ## 3. 值守
