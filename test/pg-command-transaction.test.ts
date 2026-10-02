@@ -479,7 +479,22 @@ const scenarios: Scenario[] = [
       });
       await platform.finishAttempt('M-lw', attemptId, { endedBy: 'structured_submit' });
       const validated = await platform.validateAndAcceptLightweightWorkItem({ missionId: 'M-lw', workItemId, cwd: '/proj' });
-      assert.equal(validated.status, 'accepted');
+      // 机器过了也留在 submitted：验收结论归协调者（W-442 之后），交卷前必须先有这一跳的 L2 accept。
+      assert.equal(validated.status, 'submitted');
+      // 真实 L2：起协调者 attempt，凭这份报告逐条判 pass，再收尾这一跳。
+      const { attemptId: l2 } = await platform.startCoordinatorAttempt('M-lw');
+      await platform.reviewExecutionResult('M-lw', l2, {
+        workItemId,
+        verdict: 'accept',
+        reasons: ['机器验收通过，逐条核过'],
+        requiredChanges: [],
+        acceptanceResults: order.acceptance.map((criterion) => ({
+          criterion,
+          status: 'pass' as const,
+          evidence: `机器验收报告 ${validated.reportId}：node --test 退出 0`,
+        })),
+      });
+      await platform.finishAttempt('M-lw', l2, { endedBy: 'structured_submit' });
       await projects.persist();
       return (p) => p.submitLightweightMissionForReview('M-lw');
     },
