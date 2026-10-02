@@ -1,3 +1,4 @@
+import * as planning from './platform/planning.ts';
 import * as escalations from './platform/escalations.ts';
 import * as lightweightSubmission from './platform/lightweight-submission.ts';
 import * as lightweightValidation from './platform/lightweight-validation.ts';
@@ -1194,31 +1195,7 @@ export class Platform {
     findings: string,
     rejectedHypotheses?: readonly string[],
   ): Promise<{ planRevision: number }> {
-    const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
-    const previous = mission.plan;
-    const accumulatedFindings = previous?.findings
-      ? `${previous.findings}\n\n—— 第 ${mission.planRevision + 1} 次补充\n${findings}`
-      : findings;
-    const accumulatedHypotheses = rejectedHypotheses === undefined
-      ? [...(previous?.rejectedHypotheses ?? [])]
-      : [...new Set([...(previous?.rejectedHypotheses ?? []), ...rejectedHypotheses])];
-    const planRevision = mission.updatePlan({
-      findings: accumulatedFindings,
-      // 其余字段沿用上一版：这个口的语义是"只补发现"，不是"把没填的清空"。
-      rootCause: previous?.rootCause,
-      rejectedHypotheses: accumulatedHypotheses,
-      decisions: [...(previous?.decisions ?? [])],
-      direction: previous?.direction ?? '',
-      risks: [...(previous?.risks ?? [])],
-    });
-    await this.#event(
-      mission,
-      'plan.updated',
-      { planRevision, findingsOnly: true },
-      undefined,
-      attemptId,
-    );
-    return { planRevision };
+    return planning.updateFindings(this.#context, missionId, attemptId, findings, rejectedHypotheses);
   }
 
   async updatePlan(
@@ -1236,10 +1213,7 @@ export class Platform {
     attemptId: string,
     plan: PlanBody,
   ): Promise<{ planRevision: number }> {
-    const { mission } = await this.#requireAttempt(missionId, attemptId, 'coordinator');
-    const planRevision = mission.updatePlan(plan);
-    await this.#event(mission, 'plan.updated', { planRevision }, undefined, attemptId);
-    return { planRevision };
+    return planning.updatePlan(this.#context, missionId, attemptId, plan);
   }
 
   /**
