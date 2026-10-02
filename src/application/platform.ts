@@ -1,3 +1,4 @@
+import * as lightweightDispatch from './platform/lightweight-dispatch.ts';
 import * as executorSubmissions from './platform/executor-submissions.ts';
 import * as workItemDispatch from './platform/work-item-dispatch.ts';
 import * as workItemReview from './platform/work-item-review.ts';
@@ -1381,40 +1382,7 @@ export class Platform {
     missionId: string,
     input: { readonly order: WorkOrder; readonly title?: string; readonly workItemId?: string },
   ): Promise<{ workItemId: string }> {
-    const { mission } = await this.#locate(missionId);
-    this.#requireLightweightMutationLane(mission);
-
-    if (mission.status !== 'investigating' && mission.status !== 'planning') {
-      throw new PlatformRuleError(
-        'LIGHTWEIGHT_BAD_STATUS',
-        `Lightweight create 要求 mission.status=investigating|planning，当前是 ${mission.status}。`,
-      );
-    }
-    if (mission.coordinatorAttempts.length !== 0) {
-      throw new PlatformRuleError(
-        'LIGHTWEIGHT_COORDINATOR_FORBIDDEN',
-        'Lightweight create 要求 coordinatorAttempts 为空（零 Coordinator）。',
-      );
-    }
-    if (mission.workItems.length !== 0) {
-      throw new PlatformRuleError(
-        'LIGHTWEIGHT_SINGLE_WORK_ITEM',
-        'Lightweight Mission 恰好只能有一个 WorkItem；已有 WorkItem，拒绝再建。',
-      );
-    }
-
-    const title = input.title ?? input.order.objective;
-    const workItemId = input.workItemId ?? this.#ids.next('W');
-    // WorkItem 构造器 strict normalize/freeze validation；create 不另验 commands 非空。
-    mission.createWorkItem({ id: workItemId, title, order: input.order });
-    await this.#event(
-      mission,
-      'work_item.created',
-      { title, executionMode: 'lightweight' },
-      workItemId,
-      // attemptId 留空：无 Coordinator reviewer。
-    );
-    return { workItemId };
+    return lightweightDispatch.createLightweightWorkItem(this.#context, (mission) => this.#requireLightweightMutationLane(mission), (mission) => this.#requireNoOpenDiagnosticEscalation(mission), (mission, project) => this.#acquireMutationSlotForDispatch(mission, project), missionId, input);
   }
 
   /**
@@ -1434,64 +1402,7 @@ export class Platform {
     missionId: string,
     workItemId: string,
   ): Promise<{ dispatched: string }> {
-    const { mission, project } = await this.#locate(missionId);
-    this.#requireLightweightMutationLane(mission);
-
-    if (mission.coordinatorAttempts.length !== 0) {
-      throw new PlatformRuleError(
-        'LIGHTWEIGHT_COORDINATOR_FORBIDDEN',
-        'Lightweight dispatch 要求 coordinatorAttempts 仍为空。',
-      );
-    }
-
-    const item = mission.workItem(workItemId);
-    if (!item) {
-      throw new PlatformRuleError('UNKNOWN_WORK_ITEM', `工作项 ${workItemId} 不存在`);
-    }
-    if (mission.workItems.length !== 1 || mission.workItems[0]?.id !== workItemId) {
-      throw new PlatformRuleError(
-        'LIGHTWEIGHT_SINGLE_WORK_ITEM',
-        'Lightweight dispatch 要求该 WorkItem 是 mission 唯一 WorkItem。',
-      );
-    }
-    if (item.status !== 'created') {
-      throw new PlatformRuleError(
-        'LIGHTWEIGHT_NOT_DISPATCHABLE',
-        `工作项 ${workItemId} 当前是 ${item.status}，Lightweight 只能从 created 派发。`,
-      );
-    }
-    // 同上：未答复的诊断卡期间不派，且必须早于抢名额（无副作用）。
-    await this.#requireNoOpenDiagnosticEscalation(mission);
-
-    // 与 Standard 相同顺序：mutation-slot → shadow → item.dispatch。
-    await this.#acquireMutationSlotForDispatch(mission, project);
-
-    // PRE_DISPATCH shadow：observational；provider/activity 失败不阻断 dispatch。
-    // attemptId 省略——绝不伪造 Coordinator attempt。
-    if (this.#decisionProvider && this.#decisionHooks.has('PRE_DISPATCH')) {
-      await runDecisionShadow({
-        provider: this.#decisionProvider,
-        activity: this.#activity,
-        clock: this.#clock,
-        stateInput: {
-          hook: 'PRE_DISPATCH',
-          projectId: mission.projectId,
-          missionId: mission.id,
-          workItemId,
-        },
-        workItemIds: [workItemId],
-      });
-    }
-
-    item.dispatch();
-    await this.#event(
-      mission,
-      'work_item.dispatched',
-      { ids: [workItemId], executionMode: 'lightweight' },
-      workItemId,
-      // attemptId 留空
-    );
-    return { dispatched: workItemId };
+    return lightweightDispatch.dispatchLightweightWorkItem(this.#context, (mission) => this.#requireLightweightMutationLane(mission), (mission) => this.#requireNoOpenDiagnosticEscalation(mission), (mission, project) => this.#acquireMutationSlotForDispatch(mission, project), missionId, workItemId);
   }
 
   /**
