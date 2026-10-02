@@ -220,11 +220,23 @@ export async function submitLightweightMissionForReview(
   }
 
 /**
- * L2 逐条结论 → 契约 1-based 序号的逐条 criteria。
+ * L2 验收结论 → 契约 1-based 序号的逐条 criteria。
  *
- * 快车道就一个工单，工单也没有 criteria 投影，所以序号按整份契约展开。
- * 一条契约标准过了才算 pass：这一跳是快车道唯一一次执行，没验到就是没验到，
- * 写成 pass 等于替 L3 拍板。
+ * 快车道就一个工单，工单自身也没有 criteria 投影，所以序号按整份契约展开——
+ * 覆盖的契约标准一条都不能漏。
+ *
+ * 为什么不做「第 i 条工单结果 → 第 i 条契约标准」的位置映射：工单的
+ * acceptanceResults 只保证与**工单自己**的 acceptance 一条对一条（见
+ * checkAcceptanceResults），与契约 acceptance 既不保证条数相同、也不保证语义
+ * 按位置对应。按位置投影会把「工单第三条」当成「契约第三条」，L3 看到的就是
+ * 一份看似逐条核对、实则张冠李戴的结论。所以这里改成整份工单结论的聚合：
+ * 全部 pass 才把覆盖到的契约标准全判 pass，否则全判 unverified——宁可都写
+ * 未验证，也不替 L3 拍板某一条过了。
+ *
+ * 全 pass 时即使条数与契约不同也照样全契约 pass：快车道只有这一跳，L2 把整
+ * 份工单都判过了，覆盖的契约就是都验过了；反过来，只要有一条 unverified /
+ * not_applicable / fail，或者干脆没给结论（undefined 或空数组），整份契约就
+ * 没有任何一条能算验过。
  */
 function criteriaFromL2Acceptance(
   mission: Mission,
@@ -233,22 +245,33 @@ function criteriaFromL2Acceptance(
   l2AttemptId: string,
 ): readonly MissionResultCriterion[] {
   const total = mission.contract?.acceptance.length ?? 0;
+  const results = acceptanceResults ?? [];
+  // 空数组 / undefined 不得伪装成「全部通过」：没有结论等于没验。
+  const allPassed = results.length > 0 && results.every((r) => r.status === 'pass');
+  const notPassed = results.filter((r) => r.status !== 'pass').map((r) => r.status);
+  const wholeOrderVerdict = allPassed
+    ? `整份工单 ${results.length} 条验收全部 pass`
+    : results.length === 0
+      ? '工单验收结果缺失（undefined 或空数组），整份工单没有任何一条判 pass'
+      : `整份工单 ${results.length} 条里有 ${notPassed.length} 条不是 pass（${notPassed.join('、')}）`;
+
   return Array.from({ length: total }, (_, i) => {
     const index = i + 1;
-    const status = acceptanceResults?.[i]?.status;
-    if (status === 'pass') {
+    if (allPassed) {
       return {
         index,
         status: 'pass' as const,
-        evidence: `工单验收标准 ${index}：L2 attempt ${l2AttemptId} 判 pass；机器报告 ${reportId} 对当前提交通过。`,
+        evidence:
+          `契约验收标准 ${index}：${wholeOrderVerdict}，L2 attempt ${l2AttemptId} 对整份工单判过；` +
+          `机器报告 ${reportId} 对当前提交通过。工单结果与契约不按位置对应，结论取自整份工单。`,
       };
     }
     return {
       index,
       status: 'unverified' as const,
       evidence:
-        `工单验收标准 ${index}：L2 attempt ${l2AttemptId} 的结论是 ${status ?? '缺失'}，未判 pass；机器报告 ${reportId}。` +
-        '快车道只有这一跳，未验证 / 不适用不得按通过交卷。',
+        `契约验收标准 ${index}：${wholeOrderVerdict}，L2 attempt ${l2AttemptId} 未把整份工单判过；` +
+        `机器报告 ${reportId}。不按工单结果的位置映射这一条，快车道只有这一跳，未验证 / 不适用不得按通过交卷。`,
     };
   });
 }
