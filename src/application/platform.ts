@@ -1,3 +1,5 @@
+import * as attempts from './platform/attempts.ts';
+import { queuedAttemptStartedData } from './platform/attempts.ts';
 import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
 import { STANDARD_AUTO_REDISPATCH_EVENT_KIND, STANDARD_AUTO_REDISPATCH_LIMIT, autoRedispatchEventsFor, submissionPrecedesPromotion, autoRedispatchSummary, failedValidationSummary, standardAutoRedispatchHandoff } from './platform/redispatch-helpers.ts';
@@ -158,12 +160,7 @@ export { PlatformRuleError } from './platform/context.ts';
  */
 const VALIDATION_BASELINE_EVENT_KIND = 'work_item.validation_baseline_recorded';
 
-function queuedAttemptStartedData<T extends { readonly kind: string }>(
-  base: T,
-  claim?: QueueClaimIdentity,
-): T | (T & { readonly queue: true }) {
-  return claim ? { ...base, queue: true } : base;
-}
+
 
 
 
@@ -448,17 +445,7 @@ export class Platform {
     profile?: UsedProfile,
     claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
-    const { mission } = await this.#locate(missionId);
-    const attempt = mission.startCoordinatorAttempt();
-    if (profile) attempt.recordProfile(profile);
-    await this.#event(
-      mission,
-      ATTEMPT_STARTED_KIND,
-      queuedAttemptStartedData({ kind: 'coordinator', profile }, claim),
-      undefined,
-      attempt.id,
-    );
-    return { attemptId: attempt.id };
+    return attempts.startCoordinatorAttempt(this.#context, missionId, profile, claim);
   }
 
   async startExecutorAttempt(
@@ -477,28 +464,7 @@ export class Platform {
     profile?: UsedProfile,
     claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string }> {
-    const { mission, item } = await this.#locateItem(missionId, workItemId);
-    // 提交结果 ≠ 尝试结束。调度器必须在 finally 里 finishAttempt，否则运行时
-    // 进程一崩，这个工作项就永远开不了下一次尝试。把这种卡死报成看得懂的话，
-    // 而不是一句泛泛的不变量冲突。
-    const stuck = item.attempts.find((a) => a.status === 'in_progress');
-    if (stuck) {
-      throw new PlatformRuleError(
-        'ATTEMPT_STILL_RUNNING',
-        `工作项 ${workItemId} 上的 attempt ${stuck.id} 还是 in_progress：` +
-          '上一次尝试没有被收尾。先 finishAttempt 再开新的。',
-      );
-    }
-    const attempt = item.startAttempt();
-    if (profile) attempt.recordProfile(profile);
-    await this.#event(
-      mission,
-      ATTEMPT_STARTED_KIND,
-      queuedAttemptStartedData({ kind: 'executor', profile }, claim),
-      workItemId,
-      attempt.id,
-    );
-    return { attemptId: attempt.id };
+    return attempts.startExecutorAttempt(this.#context, missionId, workItemId, profile, claim);
   }
 
   /**
@@ -1238,85 +1204,7 @@ export class Platform {
       contextMetrics?: unknown;
     },
   ): Promise<void> {
-    // 失败原文与输出尾部都会落盘、进界面：agent 打过 `env` 的话，本机的 key 就在里面。
-    const failureMessage =
-      outcome.failureMessage !== undefined ? redactSecrets(outcome.failureMessage) : undefined;
-    const { mission } = await this.#locate(missionId);
-    const attempt = mission.attempt(attemptId);
-    if (!attempt) {
-      throw new PlatformRuleError('UNKNOWN_ATTEMPT', `attempt ${attemptId} 不存在`);
-    }
-    // 已终态再收尾仍走旧副作用（用量/输出），但不得再写一份采集成功事实。
-    const alreadyTerminal = attempt.status !== 'in_progress';
-    // 必须在 live.finish 之前取（编排器先 finishAttempt 再裁剪缓冲）。
-    // 已终态不再取尾：否则重复收尾会把同一段 appendOutput 无限接上。
-    let liveTail: string | undefined;
-    if (this.#live && !alreadyTerminal) {
-      try {
-        liveTail = await collectAttemptLiveTail(this.#live, missionId, attemptId);
-      } catch {
-        // 实时通道读失败不能挡收尾，否则 attempt 卡在 in_progress。
-      }
-    }
-    const merged = mergeAttemptOutput(outcome.output, liveTail);
-    const output = merged !== undefined ? redactSecrets(merged) : undefined;
-    if (outcome.usage) attempt.recordUsage(outcome.usage);
-    if (outcome.resumeRef) attempt.recordResumeRef(outcome.resumeRef);
-    // 把运行时报回来的实际身份并进开跑时记的那份（S13.3）。
-    // 开跑时只知道 profileId —— 它指向什么，只有跑完了适配层才说得出来。
-    if (outcome.resolvedProfile && attempt.profile) {
-      attempt.recordProfile({
-        ...attempt.profile,
-        revision: outcome.resolvedProfile.revision,
-        resolved: outcome.resolvedProfile.resolved,
-      });
-    }
-    if (output) {
-      // 大输出外置：状态是一次整份写出去的，把几十万字符塞进去会让
-      // **每一次工具调用**都变慢。
-      const blob = this.#artifacts.put(output);
-      attempt.appendOutput(blob.inline ?? `${blob.preview ?? ''}
-…（共 ${blob.bytes} 字节，完整内容见 artifact:${blob.ref}）`);
-      if (blob.ref) attempt.recordOutputRef(blob.ref);
-    }
-    for (const name of outcome.toolCalls ?? []) {
-      attempt.recordToolCall(name, new Date().toISOString());
-    }
-    attempt.recordEndReason(outcome.endedBy);
-    if (attempt.status === 'in_progress') {
-      if (outcome.endedBy === 'structured_submit') attempt.succeed();
-      else attempt.fail(failureMessage ?? outcome.endedBy);
-    }
-    let contextMetrics: ContextMetricsV1 | undefined;
-    if (!alreadyTerminal) {
-      contextMetrics = sanitizeAttemptContextMetrics(outcome.contextMetrics);
-      if (contextMetrics !== undefined) {
-        const prior = await this.#activity.list(missionId);
-        if (
-          prior.some(
-            (event) =>
-              event.kind === 'attempt.ended' &&
-              event.attemptId === attemptId &&
-              activityDataHasContextMetrics(event.data),
-          )
-        ) {
-          contextMetrics = undefined;
-        }
-      }
-    }
-    await this.#event(
-      mission,
-      'attempt.ended',
-      {
-        endedBy: outcome.endedBy,
-        failureMessage,
-        usage: attempt.usage,
-        retriable: outcome.endedBy === 'upstream_failure',
-        ...(contextMetrics !== undefined ? { contextMetrics } : {}),
-      },
-      attempt.workItemId,
-      attemptId,
-    );
+    return attempts.finishAttempt(this.#context, missionId, attemptId, outcome);
   }
 
   /**
@@ -1334,13 +1222,7 @@ export class Platform {
   }
 
   async #beatAttempt(missionId: string, attemptId: string, owner?: string): Promise<void> {
-    const { mission, project } = await this.#locate(missionId);
-    const attempt = mission.attempt(attemptId);
-    if (!attempt || attempt.status !== 'in_progress') return;
-    attempt.beat(this.#clock.now().toISOString(), owner);
-    // **必须落盘。** 心跳的全部作用就是让*别的进程*看见它；只改内存对象的话，
-    // 别的进程读到的仍然是"从没心跳过"，于是照样把它判死。
-    await this.#projects.save(project);
+    return attempts.beatAttempt(this.#context, missionId, attemptId, owner);
   }
 
   /**
