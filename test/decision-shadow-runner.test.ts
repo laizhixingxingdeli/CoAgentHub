@@ -4,7 +4,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -674,12 +674,16 @@ describe('HOPT-04-A shadow runner 源码边界', () => {
     }
   });
 
-  test('除 platform.ts 外其它生产路径仍不接线 shadow runner', () => {
-    // HOPT-04-B：platform.dispatchWorkItems 是唯一允许的生产接线。
-    const allowed = new Set([
+  test('除 platform 入口与 platform/ 模块外其它生产路径仍不接线 shadow runner', () => {
+    // HOPT-04-B：platform 边界（入口 platform.ts + platform/ 下模块）是唯一允许的生产接线。
+    const allowed = new Set<string>([
       'src/application/decision-shadow-runner.ts',
       'src/application/platform.ts',
     ]);
+    const platformDir = join(root, 'src', 'application', 'platform');
+    if (existsSync(platformDir)) {
+      for (const f of walkTs(platformDir)) allowed.add(relPosix(f));
+    }
     for (const file of walkTs(join(root, 'src'))) {
       const rel = relPosix(file);
       if (allowed.has(rel)) continue;
