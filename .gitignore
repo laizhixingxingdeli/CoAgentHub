@@ -7,6 +7,8 @@ node_modules/
 .coagent-state*.json
 # 单写者锁目录，名字是 `.lock-<状态文件名>`（见 application/lock.ts）。
 .lock-*/
+# 残锁接管的审计日志（PLAT5，见 application/lock.ts）。
+.lock-audit-*.jsonl
 # 方案运行记录（run-plan / l3 plan 握手用）。
 .coagent-plans/
 # 已归档 Mission 的旁路包。
