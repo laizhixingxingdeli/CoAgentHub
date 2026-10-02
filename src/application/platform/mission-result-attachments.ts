@@ -262,12 +262,12 @@ async function untrackedLines(cwd: string): Promise<{ readonly lines: number; re
   }
   let files = 0;
   let lines = 0;
+  // `-z` 给出的是原始路径，trim 会把含前后空白的文件名改成另一个不存在的路径。
   for (const rel of listed.split('\0')) {
-    const cleaned = rel.trim();
-    if (cleaned === '') continue;
+    if (rel === '') continue;
     let buf: Buffer;
     try {
-      buf = await readFile(resolve(cwd, cleaned));
+      buf = await readFile(resolve(cwd, rel));
     } catch {
       return undefined;
     }
