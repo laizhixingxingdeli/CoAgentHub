@@ -71,6 +71,10 @@ import type { ClassificationResult } from '../task-classifier.ts';
 import type { BoundWorkItem, ContractCheck, ContextBundle, WorkItemIndexEntry } from '../context-builder.ts';
 import type { StandardAutoRedispatchReason, StandardAutoRedispatchSkipReason } from '../platform.ts';
 
+/**
+ * Lightweight 机器验收依赖（结构类型，避免 platform 直接耦合 validation 模块路径）。
+ * engine / reports 由装配层注入；Standard 路径不读这组。
+ */
 export interface PlatformValidationDeps {
   readonly engine: {
     readonly validate: (input: {
@@ -111,12 +115,26 @@ export interface PlatformValidationDeps {
   readonly commandRunner?: CommandRunner;
 }
 
+/**
+ * 生产 API / Orchestrator 传入的可信队列领取身份。
+ *
+ * 只含存储层能对上的 id/owner/代次；**不含 now**——调用方填 now 等于把租约时钟交给客户端，
+ * 过期 Runner 可以把时间拨回去继续写。now 由平台 clock 在写事务启动时填进 ClaimFence。
+ * 不要从 request body 构造这份身份。
+ */
 export interface QueueClaimIdentity {
   readonly id: string;
   readonly owner: string;
   readonly claimGeneration: number;
 }
 
+/**
+ * 自动续派交给下一跳的交接信息。
+ *
+ * 它同时是**持久化**的（事件里 + 提交 Attempt 上），所以进程被杀之后编排器还能读回
+ * 「上一轮为什么退回、上轮说明是什么」——只存在内存里的交接，恰好会在最需要它的
+ * 那一刻（重启后）消失。
+ */
 export interface StandardAutoRedispatchHandoff {
   readonly workItemId: string;
   readonly reason: StandardAutoRedispatchReason;
@@ -197,6 +215,11 @@ export interface CreateMissionInput {
   origin?: OriginChannel;
 }
 
+/**
+ * Classified Mission 入口：facts/assessment + Contract + 可选 explicit WorkOrder。
+ * caller **不得**传 executionMode / runKind / ClassificationResult 等 route override。
+ * 平台内部 strict parse + classifyTask 决定路由。
+ */
 export interface CreateClassifiedMissionInput {
   projectId: string;
   missionId?: string;
@@ -356,6 +379,12 @@ export interface WorkOrderView {
   answeredAt?: string;
 }
 
+/**
+ * 同一个任务的一次运行。listRuns 的行。
+ *
+ * 刻意**不含**"哪个模型跑的"：那是候选池的事，一条 Mission 里不同跳可能
+ * 用了不同候选。要按配置归因，看各 attempt 上冻住的 resolvedProfile。
+ */
 export interface RunSummary {
   missionId: string;
   /** 是不是最初那一条（其余都是它的重跑）。 */
@@ -393,6 +422,12 @@ export interface RunSummary {
   endedBy: Record<string, number>;
 }
 
+/**
+ * 工单违背「工单标准」（用户 2026-10-01）时的软警告项。
+ *
+ * 只审计、不硬拒：协调者工具路径仍照常成功，警告随建单/修订事件一并记录，
+ * 由协调者照建议拆单或补文件引用。直接调用 Platform 不触发此检查。
+ */
 export interface WorkOrderStandardWarning {
   /** 违规项：允许改动范围过大、验证超过两条、最小上下文缺失。 */
   readonly rule: 'allowedScope' | 'verification' | 'contextRefs';
@@ -400,6 +435,13 @@ export interface WorkOrderStandardWarning {
   readonly suggestion: string;
 }
 
+/**
+ * 机器验证简版里单条命令的结果。
+ *
+ * `outputTail` **只在命令失败时出现**：简版要进协调者索引与启动简报，把每条命令
+ * 最多 4096 字符的尾巴全搬回去，等于换一种方式把测试输出重新灌进上下文；协调者
+ * 要看的是「过没过、慢不慢、哪儿越界」，只有失败的那条需要原文。
+ */
 export interface ValidationReportCommandView {
   readonly passed: boolean;
   readonly durationMs: number;
@@ -407,6 +449,13 @@ export interface ValidationReportCommandView {
   readonly outputTail?: string;
 }
 
+/**
+ * 机器验证简版：W-321 落盘 ValidationReport 的只读投影。
+ *
+ * 它不是 Evidence（执行者自报的证据），也不是 validator accept——报告来自 platform
+ * 自己跑出来、存在仓储里的事实。只按 workItemId + submittedAttemptId 对应，旧提交的
+ * 报告绝不挂到新交卷头上；没有报告就不带这一格，不臆造。
+ */
 export interface ValidationReportView {
   readonly reportId: string;
   readonly passed: boolean;
@@ -418,6 +467,11 @@ export interface ValidationReportView {
   };
 }
 
+/**
+ * agent 紧凑视图里的工作项索引：只给「编号/标题/状态/执行次数/最后评审 verdict」，
+ * 不含工单正文、执行结果或评审理由——那些按需按 id 取（getAgentWorkItem）。
+ * 抽成 module 级只读 helper，协调者简报后续可复用同一份投影。
+ */
 export interface AgentWorkItemIndexEntry {
   readonly id: string;
   readonly title: string;
@@ -432,6 +486,7 @@ export interface AgentWorkItemIndexEntry {
   readonly criteria: readonly number[] | '—';
 }
 
+/** 一条验收标准上的连续失败链：三个不同工作项先后没过它（AC1）。 */
 export interface CriteriaFailureDiagnostic {
   /** 触发停派的那条标准序号（1-based）。 */
   readonly criterion: number;
@@ -441,6 +496,10 @@ export interface CriteriaFailureDiagnostic {
   readonly reasons: readonly string[];
 }
 
+/**
+ * 升级问答摘要：只取已被 L3 答复的升级，给「问了什么、答了什么、何时答」三件套。
+ * 不带未答复升级的草稿，也不带 why / optionsConsidered 等内部字段。
+ */
 export interface AgentEscalationAnswer {
   readonly question: string;
   readonly answer: string;
@@ -476,6 +535,12 @@ export interface AgentWorkItemEvidenceSummary {
   readonly outputTail: string;
 }
 
+/**
+ * 单次 execution_result.submitted 的现存元数据摘要。
+ * 只记事件里实际存下的 outcome / changedFiles(数量) / orderRevision / 时间；
+ * 非最新的提交正文（执行结果全文）未被持久化、不可恢复，显式标注「旧正文未保存」。
+ * 绝不臆造旧正文——旧记录只给上述元数据，最新一次正文仍经 executionResult 取。
+ */
 export interface AgentWorkItemSubmissionSummary {
   /** 事件发生时间（ISO 字符串），保留原时间顺序。 */
   readonly at: string;
@@ -514,12 +579,14 @@ export interface AgentWorkItemView {
   readonly truncated: boolean;
 }
 
+/** 一个分组维度上的一行。 */
 export interface UsageBucket {
   key: string;
   attempts: number;
   usage: TokenUsage;
 }
 
+/** 用量报表（S11.5）。 */
 export interface UsageReport {
   total: TokenUsage;
   attempts: number;

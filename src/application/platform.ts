@@ -140,22 +140,13 @@ import {
   type BudgetUsageSnapshot,
 } from './budget-usage.ts';
 
-/**
- * Lightweight 机器验收依赖（结构类型，避免 platform 直接耦合 validation 模块路径）。
- * engine / reports 由装配层注入；Standard 路径不读这组。
- */
+
 
 
 /** 平台规则被违反（区别于领域流转错误）。 */
 export { PlatformRuleError } from './platform/context.ts';
 
-/**
- * 生产 API / Orchestrator 传入的可信队列领取身份。
- *
- * 只含存储层能对上的 id/owner/代次；**不含 now**——调用方填 now 等于把租约时钟交给客户端，
- * 过期 Runner 可以把时间拨回去继续写。now 由平台 clock 在写事务启动时填进 ClaimFence。
- * 不要从 request body 构造这份身份。
- */
+
 
 
 
@@ -209,13 +200,7 @@ export type StandardAutoRedispatchSkipReason =
   /** 已有未答复的诊断卡：停派中，不绕过。 */
   | 'criteria_failure_stopped';
 
-/**
- * 自动续派交给下一跳的交接信息。
- *
- * 它同时是**持久化**的（事件里 + 提交 Attempt 上），所以进程被杀之后编排器还能读回
- * 「上一轮为什么退回、上轮说明是什么」——只存在内存里的交接，恰好会在最需要它的
- * 那一刻（重启后）消失。
- */
+
 
 
 
@@ -585,11 +570,7 @@ function assertFinalizePolicy(
 
 
 
-/**
- * Classified Mission 入口：facts/assessment + Contract + 可选 explicit WorkOrder。
- * caller **不得**传 executionMode / runKind / ClassificationResult 等 route override。
- * 平台内部 strict parse + classifyTask 决定路由。
- */
+
 
 
 
@@ -6614,12 +6595,7 @@ function environmentNotes(): string[] {
   ];
 }
 
-/**
- * 同一个任务的一次运行。listRuns 的行。
- *
- * 刻意**不含**"哪个模型跑的"：那是候选池的事，一条 Mission 里不同跳可能
- * 用了不同候选。要按配置归因，看各 attempt 上冻住的 resolvedProfile。
- */
+
 
 
 /** 两个 ISO 时间的非负差；缺失、非法、倒序都保持 unknown，不 clamp 成 0。 */
@@ -6759,12 +6735,7 @@ function checkWorkOrderCriteria(order: WorkOrder, mission: Mission): void {
   }
 }
 
-/**
- * 工单违背「工单标准」（用户 2026-10-01）时的软警告项。
- *
- * 只审计、不硬拒：协调者工具路径仍照常成功，警告随建单/修订事件一并记录，
- * 由协调者照建议拆单或补文件引用。直接调用 Platform 不触发此检查。
- */
+
 
 
 /**
@@ -7225,22 +7196,10 @@ function boundWorkItemForExecutor(mission: Mission, item: WorkItem): BoundWorkIt
 /** 单项序列化后允许的最大 UTF-8 字节数；超长显式标记 truncated。 */
 const MAX_AGENT_WORK_ITEM_BYTES = 20 * 1024;
 
-/**
- * 机器验证简版里单条命令的结果。
- *
- * `outputTail` **只在命令失败时出现**：简版要进协调者索引与启动简报，把每条命令
- * 最多 4096 字符的尾巴全搬回去，等于换一种方式把测试输出重新灌进上下文；协调者
- * 要看的是「过没过、慢不慢、哪儿越界」，只有失败的那条需要原文。
- */
 
 
-/**
- * 机器验证简版：W-321 落盘 ValidationReport 的只读投影。
- *
- * 它不是 Evidence（执行者自报的证据），也不是 validator accept——报告来自 platform
- * 自己跑出来、存在仓储里的事实。只按 workItemId + submittedAttemptId 对应，旧提交的
- * 报告绝不挂到新交卷头上；没有报告就不带这一格，不臆造。
- */
+
+
 
 
 /** 失败命令输出保留的尾巴长度；与 MissionView.submittedEvidence 同一口径。 */
@@ -7290,11 +7249,7 @@ function validationReportView(report: ValidationReport): ValidationReportView {
   };
 }
 
-/**
- * agent 紧凑视图里的工作项索引：只给「编号/标题/状态/执行次数/最后评审 verdict」，
- * 不含工单正文、执行结果或评审理由——那些按需按 id 取（getAgentWorkItem）。
- * 抽成 module 级只读 helper，协调者简报后续可复用同一份投影。
- */
+
 
 
 /** 工单 criteria 的投影：有序号给副本，缺省或空数组给 `'—'`。 */
@@ -7311,7 +7266,7 @@ function criteriaList(order: WorkOrder | undefined): readonly number[] {
   return [...new Set(raw.filter((n) => Number.isInteger(n)))];
 }
 
-/** 一条验收标准上的连续失败链：三个不同工作项先后没过它（AC1）。 */
+
 
 
 /**
@@ -7499,10 +7454,7 @@ function agentWorkItemIndex(
   });
 }
 
-/**
- * 升级问答摘要：只取已被 L3 答复的升级，给「问了什么、答了什么、何时答」三件套。
- * 不带未答复升级的草稿，也不带 why / optionsConsidered 等内部字段。
- */
+
 
 
 function agentEscalationAnswers(mission: Mission): readonly AgentEscalationAnswer[] {
@@ -7515,12 +7467,7 @@ function agentEscalationAnswers(mission: Mission): readonly AgentEscalationAnswe
 
 
 
-/**
- * 单次 execution_result.submitted 的现存元数据摘要。
- * 只记事件里实际存下的 outcome / changedFiles(数量) / orderRevision / 时间；
- * 非最新的提交正文（执行结果全文）未被持久化、不可恢复，显式标注「旧正文未保存」。
- * 绝不臆造旧正文——旧记录只给上述元数据，最新一次正文仍经 executionResult 取。
- */
+
 
 
 
@@ -7891,10 +7838,10 @@ function combine(list: readonly TokenUsage[]): TokenUsage {
   };
 }
 
-/** 一个分组维度上的一行。 */
 
 
-/** 用量报表（S11.5）。 */
+
+
 
 
 /** decision.post_execution 事件问的是哪一次提交；读不出来就当不是（宁可多问一次，不漏问）。 */
