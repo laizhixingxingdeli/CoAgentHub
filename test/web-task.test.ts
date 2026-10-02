@@ -425,12 +425,12 @@ describe('任务页的文件形状', () => {
     assert.equal(skeleton.includes('id="task-tabs"'), false, 'tab 条已经去掉，别为凑数留一个不用的锚点');
   });
 
-  test('这一页只读：不发 POST，也不碰写操作', () => {
+  test('任务页只有显式取消这一条写操作，其余数据仍走只读接口', () => {
     const src = read('task.js');
-    assert.equal(/method:\s*'POST'/.test(src), false, '不许发写请求');
+    assert.equal((src.match(/method:\s*'POST'/g) || []).length, 1, '任务页只允许取消任务这一条 POST');
+    assert.match(src, /\/cancel'/, '取消按钮必须走后端现有 cancel 接口');
     assert.match(src, /cache: 'no-store'/, '读接口不该被缓存住');
-    // cursor 是实时输出的全部要点：不带 cursor 就是每次从头拉。
-    assert.match(src, /\/live\?cursor=/);
+    assert.match(src, /\/live\?cursor=/, '实时输出必须带 cursor 增量拉取');
   });
 
   test('tab 那一套已经从呈现层拿掉了', () => {
@@ -532,8 +532,9 @@ describe('环节分组', () => {
 
     // 线要接上：纯函数对了而调用方不喂展开集，页面上仍是每次重画全收起。
     const src = read('task.js');
-    const at = src.indexOf('innerHTML = stageListHtml(');
-    assert.ok(at > 0, '找不到重画环节列表的地方');
+    const paintAt = src.indexOf('function paintStages');
+    const at = src.indexOf('stageListHtml(', paintAt);
+    assert.ok(paintAt > 0 && at > paintAt, '找不到重画环节列表的地方');
     assert.match(src.slice(at, src.indexOf(');', at)), /expanded/, '重画必须把展开集喂给 stageListHtml');
     assert.match(src, /node\.open/, '重画之前要先从 DOM 收原生展开状态');
   });
@@ -771,9 +772,9 @@ describe('用量卡', () => {
     assert.ok(html.includes(localStamp('2026-03-04T05:00:00.000Z')));
     assert.equal(html.includes('Token'), false, '页头不该再有 Token 那一格');
     assert.equal(html.includes('新增'), false, '用量拆项该在独立卡里，不在 task-stats');
-    assert.match(html, /disabled title="API 尚无鉴权，写操作暂不开放"/);
-    assert.ok(html.includes('停止任务'));
-    assert.equal(html.includes('onclick'), false, '不绑定点击：不发 POST');
+    assert.ok(html.includes('data-task-cancel'), '非终态应显示真实取消按钮');
+    assert.ok(html.includes('取消任务'));
+    assert.equal(html.includes('onclick'), false, '仍用 addEventListener，不写内联事件');
   });
 
   test('页头：等待时停机原因看得见，runaway_suspected 是人话', async () => {

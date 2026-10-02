@@ -11,7 +11,12 @@
  */
 
 import { renderProjectsPage } from './projects.js';
+import { renderProjectCatalogPage } from './project-catalog.js';
+import { renderProjectSpecPage } from './project-spec.js';
+import { renderInboxPage } from './inbox.js';
 import { renderTaskPage } from './task.js';
+import { renderAgentsPage } from './agents.js';
+import { renderSettingsPage } from './settings.js';
 import { renderPoolPage } from './pool.js';
 import { renderPlanRunListPage, renderPlanRunPage } from './plan-run.js';
 import { renderPlatformPage } from './platform.js';
@@ -42,6 +47,20 @@ darkScheme.addEventListener('change', applyTheme);
 function parseRoute(hash) {
   const raw = String(hash ?? '').replace(/^#/, '');
   if (raw === '' || raw === '/') return { name: 'home' };
+  if (raw === '/inbox') return { name: 'inbox' };
+  if (raw === '/settings') return { name: 'settings' };
+  const agentHit = /^\/agents(?:\/(.+))?$/.exec(raw);
+  if (agentHit) {
+    let agentId = agentHit[1] || '';
+    try { agentId = decodeURIComponent(agentId); } catch { /* 保留原样 */ }
+    return { name: 'agents', agentId };
+  }
+  const specHit = /^\/projects\/([^/]+)\/spec$/.exec(raw);
+  if (specHit) {
+    let projectId = specHit[1];
+    try { projectId = decodeURIComponent(projectId); } catch { /* 保留原样 */ }
+    return { name: 'project-spec', projectId };
+  }
   const hit = /^\/projects(?:\/(.+))?$/.exec(raw);
   if (hit) {
     let projectId = hit[1] || '';
@@ -107,7 +126,10 @@ const link = (text, href) => {
 
 function renderChrome(route) {
   // 任务页归在「项目」下：它是从项目页的任务表点进去的，没有自己的入口。
-  const active = route.name === 'pool' ? 'pool'
+  const active = route.name === 'inbox' || route.name === 'mission' ? 'inbox'
+    : route.name === 'agents' ? 'agents'
+    : route.name === 'settings' ? 'settings'
+    : route.name === 'pool' ? 'pool'
     : route.name === 'platform' ? 'platform'
     : (route.name === 'plan-runs' || route.name === 'plan-run') ? 'plan-runs'
     : 'projects';
@@ -117,6 +139,19 @@ function renderChrome(route) {
   }
 
   crumbs.replaceChildren();
+  if (route.name === 'inbox') {
+    crumbs.appendChild(node('任务收件箱', 'here'));
+    return;
+  }
+  if (route.name === 'agents') {
+    if (route.agentId) crumbs.append(link('智能体', '#/agents'), node('/', 'sep'), node(route.agentId, 'here'));
+    else crumbs.appendChild(node('智能体', 'here'));
+    return;
+  }
+  if (route.name === 'settings') {
+    crumbs.appendChild(node('设置', 'here'));
+    return;
+  }
   if (route.name === 'pool') {
     crumbs.appendChild(node('资源池', 'here'));
     return;
@@ -162,15 +197,31 @@ function renderChrome(route) {
 function render() {
   const route = parseRoute(location.hash);
 
-  if (route.name === 'home' || route.name === 'unknown') {
-    // 改地址而不是直接渲染项目页：让"地址=视图"这一条是唯一通路。
-    // 绕过去就会出现地址写着 #/abc 而屏幕上是一条别的东西，
-    // 那时链接没法发给别人，刷新也不落在原地。
+  if (route.name === 'home') {
+    location.hash = '#/inbox';
+    return;
+  }
+  if (route.name === 'unknown') {
     location.hash = '#/projects';
     return;
   }
 
   renderChrome(route);
+
+  if (route.name === 'inbox') {
+    void renderInboxPage(view);
+    return;
+  }
+
+  if (route.name === 'agents') {
+    void renderAgentsPage(view, route.agentId);
+    return;
+  }
+
+  if (route.name === 'settings') {
+    void renderSettingsPage(view);
+    return;
+  }
 
   if (route.name === 'pool') {
     void renderPoolPage(view);
@@ -194,6 +245,16 @@ function render() {
 
   if (route.name === 'mission') {
     void renderTaskPage(view, route.missionId);
+    return;
+  }
+
+  if (route.name === 'project-spec') {
+    void renderProjectSpecPage(view, route.projectId);
+    return;
+  }
+
+  if (route.name === 'projects' && !route.projectId) {
+    void renderProjectCatalogPage(view);
     return;
   }
 

@@ -152,7 +152,9 @@ export function headerHtml(view, activity, nowIso) {
   // 停机原因是第二根轴上的具体情形。等待时它必须看得见——只写「等待中」
   // 等于把「在等什么」留给人自己去猜（或者去翻事件流）。
   const waiting = Boolean(v.paused || v.waitReason || v.waitDetail);
-  return '<h1 class="task-title">' + esc(intent) + '</h1>'
+  return '<div class="task-eyebrow"><span class="mono">#' + esc(v.missionId || '') + '</span>'
+    + '<span>' + esc(v.projectId || '') + '</span></div>'
+    + '<h1 class="task-title">' + esc(intent) + '</h1>'
     + '<div class="task-chips">'
     +   stageChip(v.status)
     +   stateChip(v)
@@ -168,10 +170,9 @@ export function headerHtml(view, activity, nowIso) {
     +   '<div class="stat"><dt>创建时间</dt><dd class="mono">'
     +     esc(formatTime(created)) + '</dd></div>'
     + '</dl>'
-    // disabled + 不绑事件：界面上那颗"能点"的按钮是一个会让人按的谎。
-    + '<button class="stop-btn" type="button" disabled title="' + esc(STOP_TITLE) + '">'
-    +   '停止任务'
-    + '</button>';
+    + (isTerminal(v.status)
+      ? '<button class="stop-btn" type="button" disabled>任务已结束</button>'
+      : '<button class="stop-btn danger" type="button" data-task-cancel>取消任务</button>');
 }
 
 /* ===================== 环节分组 ===================== */
@@ -383,7 +384,7 @@ export function usageByRole(activity) {
       bucket.costReported = true;
     }
   }
-  const total = acc.coordinator.tokens + acc.executor.tokens;
+  const total = acc.coordinator.tokens + acc.executor.tokens + acc.reviewer.tokens;
   const withPct = (bucket) => Object.assign({}, bucket, {
     pct: total > 0 ? (bucket.tokens / total) * 100 : 0,
     costText: bucket.costReported ? '$' + bucket.cost.toFixed(4) : '',
@@ -397,7 +398,7 @@ export function usageByRole(activity) {
 }
 
 const roleLine = (role, bucket) =>
-  '<li class="usage-role tone-' + esc(roleTone(role)) + '">'
+  '<li class="usage-role tone-' + esc(roleTone(role)) + ' role-' + esc(role) + '">'
   +   esc(roleUsageLine(role, bucket.tokens, bucket.pct, bucket.costText))
   + '</li>';
 
@@ -422,7 +423,7 @@ export function usageCardHtml(view, activity) {
     + '</div>'
     + '<ul class="usage-roles">'
     +   (known
-      ? roleLine('coordinator', byRole.coordinator) + roleLine('executor', byRole.executor)
+      ? roleLine('reviewer', byRole.reviewer) + roleLine('coordinator', byRole.coordinator) + roleLine('executor', byRole.executor)
       : '<li class="usage-pending">还没有结束的一跳，暂时算不出按角色的占比。</li>')
     + '</ul>'
     + '<div class="usage-type">' + esc(usageTypeLine(v.usage)) + '</div>';
@@ -504,7 +505,7 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
       const selected = selectedAttemptId !== null && key === selectedAttemptId;
       // 只有**用户真的展开过**的那几组才写 open：默认收起是硬要求，
       // 一上来就给所有环节加 open 等于没折叠。
-      return '<details class="stage tone-' + esc(tone) + '"'
+      return '<details class="stage tone-' + esc(tone) + ' role-' + esc(shown.role || 'other') + '"'
         + ' data-attempt-id="' + esc(key) + '"'
         + (selected ? ' data-active="1"' : '')
         + (expanded.has(key) ? ' open' : '') + '>'
@@ -796,6 +797,8 @@ export function stageDetailHtml(group, ctx, attempt) {
     if (e && e.workItemId && !workItemIds.includes(e.workItemId)) workItemIds.push(e.workItemId);
   }
   const causation = (events.find((e) => e && e.causationId) || {}).causationId;
+  const endedUsageEvent = [...events].reverse().find((e) => e && e.kind === 'attempt.ended' && e.data && e.data.usage);
+  const stepTokens = endedUsageEvent ? formatUsage(endedUsageEvent.data.usage).total : null;
   // 非 L3 的无 attemptId 不能套 L3 那句「自己动手」——那是谎。
   // 不新写叙事：就用 formatAttemptId 对空 id 的已有说明。
   const attemptShown = group.attemptId
@@ -816,6 +819,7 @@ export function stageDetailHtml(group, ctx, attempt) {
     +   (workItemIds.length ? ' · ' + esc(fieldLabel('WorkItem')) + ' ' + esc(workItemIds.join('、')) : '')
     +   (causation ? ' · ' + esc(fieldLabel('causationId')) + ' ' + esc(causation) : '')
     + '</div>'
+    + '<div class="detail-step-token"><span>本步骤 Token</span><strong class="mono">' + (stepTokens === null ? (isTerminal(context.status) ? '未上报' : '进行中') : esc(num(stepTokens))) + '</strong></div>'
     + contextMetricsBlockHtml(events)
     + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>');
 }
@@ -1196,19 +1200,19 @@ let epoch = 0;
  */
 export function skeletonHtml() {
   return '<div class="task">'
-    + '<section class="card usage-card" id="task-usage"><div class="note">用量读取中…</div></section>'
     + '<header class="card task-head" id="task-head"><div class="note">加载中…</div></header>'
-    + '<section class="card" id="task-changes"><div class="note">' + esc(changesLoadingText()) + '</div></section>'
+    + '<section class="card usage-card" id="task-usage"><div class="note">用量读取中…</div></section>'
     + '<div class="task-cols">'
     +   '<section class="task-left">'
-    +     '<div class="pane-title">执行环节</div>'
+    +     '<div class="tabs task-main-tabs"><span class="tab" data-active="1">任务时间线</span><span class="tab">任务概览</span><span class="tab">相关文件</span><span class="tab">子任务</span></div>'
     +     '<div class="stage-list" id="task-stages"><div class="empty">加载中…</div></div>'
     +   '</section>'
     +   '<section class="task-right">'
-    +     '<div class="card" id="task-detail"><div class="note">加载中…</div></div>'
-    +     '<div class="card live-card">'
-    +       '<div class="pane-title">实时输出</div>'
-    +       '<div id="task-live"><div class="note">输出读取中…</div></div>'
+    +     '<div class="card task-side-card">'
+    +       '<div class="task-panel-tabs"><button type="button" class="task-panel-tab active" data-task-panel-tab="detail">当前详情</button><button type="button" class="task-panel-tab" data-task-panel-tab="events">执行事件</button><button type="button" class="task-panel-tab" data-task-panel-tab="files">修改的文件</button></div>'
+    +       '<div data-task-panel="detail" id="task-detail"><div class="note">加载中…</div></div>'
+    +       '<div data-task-panel="events" hidden><div class="pane-title">实时输出</div><div id="task-live"><div class="note">输出读取中…</div></div></div>'
+    +       '<div data-task-panel="files" hidden id="task-changes"><div class="note">' + esc(changesLoadingText()) + '</div></div>'
     +     '</div>'
     +   '</section>'
     + '</div>'
@@ -1342,9 +1346,39 @@ function collectExpanded(st) {
  * 落到 DOM 上（点击的默认行为在事件派发之后才跑），此刻从 DOM 收会收到
  * 「还没展开」，重画反而把刚点开的那一组折回去。
  */
+function timelineLeadHtml(st) {
+  const v = st.view || {};
+  const intent = v.contract && v.contract.intent ? String(v.contract.intent) : '（没有契约）';
+  const workItems = Array.isArray(v.workItems) ? v.workItems : [];
+  const statusText = (status) => status === 'accepted' ? '已完成'
+    : status === 'submitted' ? '待验收'
+    : status === 'dispatched' || status === 'in_progress' ? '执行中'
+    : status === 'rejected' ? '需重做'
+    : status === 'retired' ? '已作废' : '等待中';
+  const tone = (status) => status === 'accepted' ? 'done'
+    : status === 'rejected' ? 'failed'
+    : status === 'submitted' ? 'unconfirmed'
+    : status === 'dispatched' || status === 'in_progress' ? 'running' : 'queued';
+  const requirement = '<div class="timeline-requirement">'
+    + '<div class="row-sub">用户需求</div><div class="row-title">' + esc(intent) + '</div>'
+    + '<div class="row-sub">任务进入 CoAgentHub 后，由检视 / 协调 / 执行链路继续处理。</div></div>';
+  if (workItems.length === 0) return requirement;
+  const rows = workItems.map((item, index) => {
+    const tokens = (st.activity || []).reduce((sum, event) => {
+      if (!event || event.kind !== 'attempt.ended' || event.workItemId !== item.id || !event.data?.usage) return sum;
+      return sum + formatUsage(event.data.usage).total;
+    }, 0);
+    return '<div class="timeline-subtask"><span class="subtask-index">' + (index + 1) + '</span>'
+      + '<span class="subtask-name">' + esc(item.title || item.id) + '</span>'
+      + '<span class="chip ' + tone(item.status) + '">' + statusText(item.status) + '</span>'
+      + '<span class="mono muted">' + (tokens ? esc(num(tokens)) + ' tokens' : '') + '</span></div>';
+  }).join('');
+  return requirement + '<div class="timeline-subtasks"><div class="pane-title">子任务 · ' + workItems.length + '</div>' + rows + '</div>';
+}
+
 function paintStages(st, expanded) {
   st.expanded = expanded === undefined ? collectExpanded(st) : expanded;
-  st.els.stages.innerHTML = stageListHtml(
+  st.els.stages.innerHTML = timelineLeadHtml(st) + stageListHtml(
     st.activity, st.selectedAttemptId, st.selectedKey, detailCtx(st), st.expanded,
   );
 }
@@ -1616,12 +1650,18 @@ function pullView(st) {
     const unchanged = !first && sameJson(st.view, view) && sameJson(st.activity, rows);
     st.view = view;
     st.activity = rows;
+    if (first && st.selectedAttemptId === null) {
+      const groups = groupActivity(rows);
+      const latest = groups.length ? groups[groups.length - 1] : null;
+      if (latest) st.selectedAttemptId = stageKey(latest);
+    }
     if (first) {
       setCrumbs(st);
       paintHead(st);
       paintUsage(st);
       paintStages(st);
       paintDetail(st);
+      if (st.selectedAttemptId) void loadAttempt(st, st.selectedAttemptId);
       paintLive(st);
       paintChanges(st);
       void pullMissionChanges(st);
@@ -1666,6 +1706,36 @@ function selectStage(st, attemptId, expanded) {
 }
 
 function bind(st) {
+  const side = st.container.querySelector('.task-side-card');
+  if (side) {
+    side.addEventListener('click', (ev) => {
+      const tab = ev.target && ev.target.closest && ev.target.closest('[data-task-panel-tab]');
+      if (!tab) return;
+      const key = tab.dataset.taskPanelTab;
+      for (const btn of side.querySelectorAll('[data-task-panel-tab]')) btn.classList.toggle('active', btn === tab);
+      for (const panel of side.querySelectorAll('[data-task-panel]')) panel.hidden = panel.dataset.taskPanel !== key;
+    });
+  }
+
+  st.els.head.addEventListener('click', async (ev) => {
+    const cancel = ev.target && ev.target.closest && ev.target.closest('[data-task-cancel]');
+    if (!cancel) return;
+    if (!window.confirm('确认取消这条任务？')) return;
+    cancel.disabled = true;
+    try {
+      const res = await fetch('/api/missions/' + encodeURIComponent(st.missionId) + '/cancel', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: '用户从 Web 界面取消' }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message || ('HTTP ' + res.status));
+      await pullView(st);
+    } catch (err) {
+      window.alert('取消失败：' + (err && err.message ? err.message : String(err)));
+      cancel.disabled = false;
+    }
+  });
+
   // 监听挂在常驻容器上：环节列表每次选中都整块重写 innerHTML，
   // 绑在里面某个元素上的话，重画一次就丢一次监听（然后页面"点了没反应"）。
   st.els.stages.addEventListener('click', (ev) => {
