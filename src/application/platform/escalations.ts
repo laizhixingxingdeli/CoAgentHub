@@ -144,15 +144,35 @@ export async function criteriaFailureStop(
     );
   }
 
+/**
+ * 答复队首票级门禁的回调。结构类型而不是 import：ticket-budget 已经 import 本模块，
+ * 反向引一条就成环了。
+ */
+export interface TicketGateCallbacks {
+  parse(
+    body: Readonly<EscalationBody>,
+    answer: string,
+  ): { decision: 'continue' | 'reject' | 'unknown'; by: number };
+  apply(
+    mission: Mission,
+    answered: Readonly<EscalationBody>,
+    decision: { decision: 'continue' | 'reject' | 'unknown'; by: number },
+  ): Promise<unknown>;
+}
+
 export async function answerEscalation(
   ctx: PlatformContext,
     missionId: string,
     answer: string,
+    gate?: TicketGateCallbacks,
   ): Promise<{ question: string; answer: string }> {
     const { mission } = await ctx.locate(missionId);
     if (mission.openEscalations.length === 0) {
       throw new PlatformRuleError('NO_OPEN_ESCALATION', `Mission ${missionId} 没有待答复的升级。`);
     }
+    const head = mission.openEscalations[0];
+    // 先解析再落答复：用户写错的显式增量必须在写之前失败，写进去就回滚不掉了。
+    const decision = gate === undefined ? undefined : gate.parse(head, answer);
     const answered = mission.answerEscalation(answer, new Date().toISOString());
     // 诊断卡被答复就把连续失败清零：L3 已看过并给了方向。清零元数据落在事件里——
     // 回放时认它，不能靠读内存或猜文本。
@@ -165,8 +185,12 @@ export async function answerEscalation(
         ? {}
         : { criteriaFailureReset: true, criteria: [...diagnostic], contractRevision: mission.contractRevision }),
     });
+    // 票级门禁在同一事务里增额/批准：分两次写会留下「已答复却还在等」的中间态。
+    if (gate !== undefined && decision !== undefined && answered.platformGate !== undefined) {
+      await gate.apply(mission, answered, decision);
+    }
     // 停派期间不重派：否则编排器会把 L3 刚停下的工单再送出去。
-    if (diagnostic === undefined) {
+    if (diagnostic === undefined && answered.platformGate === undefined) {
       await redispatchLightweightBlockedAfterAnswer(ctx, mission, answered);
     }
     return { question: answered.question, answer };
