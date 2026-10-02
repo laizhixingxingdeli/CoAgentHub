@@ -7,7 +7,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -32,6 +32,27 @@ import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+
+function readPlatformSrc(): string {
+  const entry = readFileSync(join(root, 'src', 'application', 'platform.ts'), 'utf8');
+  const dir = join(root, 'src', 'application', 'platform');
+  if (!existsSync(dir)) return entry;
+  const parts = [entry];
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) {
+        walk(p);
+      } else if (e.name.endsWith('.ts')) {
+        parts.push(readFileSync(p, 'utf8'));
+      }
+    }
+  };
+  walk(dir);
+  return parts.join('\n');
+}
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -356,7 +377,7 @@ describe('BUDGET-001-S2 no public write surface', () => {
   test('no HTTP route, agent tool, or caller-authored ActivityEvent input for round-start', () => {
     const serverSrc = readFileSync(join(root, 'src', 'api', 'server.ts'), 'utf8');
     const webSrc = readFileSync(join(root, 'src', 'api', 'web.ts'), 'utf8');
-    const platformSrc = readFileSync(join(root, 'src', 'application', 'platform.ts'), 'utf8');
+    const platformSrc = readPlatformSrc();
     const orchSrc = readFileSync(join(root, 'src', 'application', 'orchestrator.ts'), 'utf8');
 
     assert.doesNotMatch(serverSrc, /recordOrchestrationRoundStarted|orchestration\.round\.started/);

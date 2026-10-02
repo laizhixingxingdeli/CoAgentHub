@@ -10,8 +10,9 @@
 
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { IncomingMessage } from 'node:http';
 
@@ -762,10 +763,28 @@ describe('run-mission routing opt-in + source guards', () => {
     fileURLToPath(new URL('../src/api/server.ts', import.meta.url)),
     'utf8',
   );
-  const platformSrc = readFileSync(
-    fileURLToPath(new URL('../src/application/platform.ts', import.meta.url)),
-    'utf8',
-  );
+  const collectPlatformSrc = (): string => {
+    const parts: string[] = [];
+    parts.push(
+      readFileSync(
+        fileURLToPath(new URL('../src/application/platform.ts', import.meta.url)),
+        'utf8',
+      ),
+    );
+    const dir = join(fileURLToPath(new URL('../src/application/platform', import.meta.url)));
+    if (existsSync(dir)) {
+      const walk = (d: string): void => {
+        for (const ent of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, ent.name);
+          if (ent.isDirectory()) walk(full);
+          else if (ent.isFile() && ent.name.endsWith('.ts')) parts.push(readFileSync(full, 'utf8'));
+        }
+      };
+      walk(dir);
+    }
+    return parts.join('\n');
+  };
+  const platformSrc = collectPlatformSrc();
 
   test('13. routing 缺省仍走 legacy createMission', () => {
     assert.match(runMissionSrc, /platform\.createMission\(/);

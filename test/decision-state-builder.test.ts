@@ -5,7 +5,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -322,8 +322,24 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
       // HOPT-08-B：composition root 注入 optional decisionProvider。
       'src/main.ts',
     ]);
-    // platform 可调用 runDecisionShadow，但不得直接 .decide / 装配 Noop / 手建 State。
-    const platformShadowOnly = 'src/application/platform.ts';
+    // platform 边界 = 入口 platform.ts + platform/ 下所有实际 .ts 模块（同一平台边界）。
+    // 全部文件可调用 runDecisionShadow，但不得直接 .decide / 装配 Noop / 手建 State。
+    const platformSet = new Set<string>(['src/application/platform.ts']);
+    const platformDir = join(root, 'src', 'application', 'platform');
+    if (existsSync(platformDir)) {
+      for (const f of walkTs(platformDir)) {
+        platformSet.add(relPosix(f));
+      }
+    }
+    // 平台集合整体必须经 runDecisionShadow 做 PRE_DISPATCH shadow（一次，不在逐文件循环中）。
+    {
+      const platformSource = [...platformSet].map((rel) => readFileSync(join(root, rel), 'utf8')).join('\n');
+      assert.match(
+        platformSource,
+        /runDecisionShadow/,
+        `platformSet: 整体必须经 runDecisionShadow 做 PRE_DISPATCH shadow`,
+      );
+    }
     const srcDir = join(root, 'src');
     for (const file of walkTs(srcDir)) {
       const rel = relPosix(file);
@@ -338,7 +354,7 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
         );
         continue;
       }
-      if (rel === platformShadowOnly) {
+      if (platformSet.has(rel)) {
         assert.doesNotMatch(
           source,
           /\.decide\s*\(/,
@@ -353,11 +369,6 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
           source,
           /buildDecisionState|toDecisionRequest/,
           `${rel}: 不得直接接线 StateBuilder`,
-        );
-        assert.match(
-          source,
-          /runDecisionShadow/,
-          `${rel}: 必须经 runDecisionShadow 做 PRE_DISPATCH shadow`,
         );
         continue;
       }

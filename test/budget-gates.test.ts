@@ -7,7 +7,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -45,6 +45,27 @@ import type { ChangedPathReader, CommandRunner } from '../src/application/valida
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+
+function readPlatformSrc(): string {
+  const entry = readFileSync(join(root, 'src', 'application', 'platform.ts'), 'utf8');
+  const dir = join(root, 'src', 'application', 'platform');
+  if (!existsSync(dir)) return entry;
+  const parts = [entry];
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) {
+        walk(p);
+      } else if (e.name.endsWith('.ts')) {
+        parts.push(readFileSync(p, 'utf8'));
+      }
+    }
+  };
+  walk(dir);
+  return parts.join('\n');
+}
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -829,7 +850,7 @@ describe('BUDGET-001-S5 gates', () => {
 
 describe('BUDGET-001-S5 source boundaries', () => {
   test('public surfaces reject caller budget_exceeded; no HTTP budget promote', () => {
-    const platformSrc = readFileSync(join(root, 'src/application/platform.ts'), 'utf8');
+    const platformSrc = readPlatformSrc();
     assert.match(platformSrc, /promoteLightweightForBudgetExceeded/);
     assert.match(platformSrc, /BUDGET_PROMOTION_NOT_READY/);
     assert.match(platformSrc, /BUDGET_NOT_AUTHORITATIVELY_EXCEEDED/);
