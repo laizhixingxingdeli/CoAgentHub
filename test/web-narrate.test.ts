@@ -724,12 +724,14 @@ describe('阶段与状态是两根轴', () => {
       'cancelled_by_user',
       'escalated',
       'execution_budget_exceeded',
+      'mission_cost_cap_reached',
       'no_available_agent',
       'platform_unreachable',
       'project_busy',
       'runaway_suspected',
       'target_changed',
       'waiting_l3',
+      'work_item_checkpoint',
     ]);
     assert.equal(reasonText({ waitDetail: '卡在 exec-a', waitReason: 'no_available_agent' }), '卡在 exec-a');
     assert.equal(reasonText({ waitReason: 'project_busy' }), WAIT_REASON.project_busy);

@@ -688,8 +688,7 @@ async function buildPoolsHealth(
       lastFailure: resolveCandidateLastFailure(circuit, hints),
       window7d,
       runtime,
-      // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，
-      // 平台摘几个出来重命名等于又抄一份会过期的表。
+      // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，摘几个重命名等于又抄一份会过期的表。
       ...(usage ? { usage } : {}),
       ...quotaExtras(circuit),
     };
@@ -720,14 +719,10 @@ export function createApi(deps: ApiDeps): Server {
   let cachedRuntimeUsage: { readonly at: number; readonly usage: RuntimeUsage } | undefined;
 
   /**
-   * 这一次请求要用的适配层用量。
-   *
-   * 与 GET /api/runtime/usage **共用同一份缓存**：两个页面都在问适配层同一个
-   * 问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只
-   * 降级不进缓存 —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。
-   *
-   * 成功（UsageRow[]）和适配器自己给出的 unavailable 都原样交出去，由调用方
-   * 决定怎么显示；只有**抛异常**才往上传，让端点把它翻成 unavailable。
+   * 这一次请求要用的适配层用量。与 GET /api/runtime/usage **共用同一份缓存**：两个页面问的是
+   * 同一个问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只降级不进缓存
+   * —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。成功（UsageRow[]）和适配器自己给出
+   * 的 unavailable 都原样交出去，由调用方决定怎么显示；只有**抛异常**才往上传。
    */
   const readUsage = async (): Promise<RuntimeUsage> => {
     const hit = cachedRuntimeUsage;
@@ -740,10 +735,8 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
-   * 资源池那一列要用的用量行。
-   *
-   * 拿不到（适配层不在 / 返回不可用 / 抛异常）就是空数组：资源池照原样返回，
-   * 用量那几个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
+   * 资源池那一列要用的用量行。拿不到（适配层不在 / 不可用 / 抛异常）就是空数组：资源池
+   * 照原样返回，用量那几个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
    */
   const readUsageRows = async (): Promise<readonly UsageRow[]> => {
     try {
@@ -842,9 +835,8 @@ export function createApi(deps: ApiDeps): Server {
       if (typeof workItemId !== 'string' || workItemId.length === 0) {
         throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
       }
-      // 只有协调者能取精简详情。enforceAgentPolicy 对非 coordinator 的 ACTION_DENIED
-      // 保留「让 Platform 抛 WRONG_ROLE」的旧工具兼容回退（不在此改动），executor
-      // 会落到放行，故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
+      // 只有协调者能取精简详情：executor 在 enforceAgentPolicy 的旧兼容回退下会落到放行，
+      // 故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
       if (run.role !== 'coordinator') {
         throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取工作项详情。');
       }
@@ -1162,8 +1154,7 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, { ok: true, api: API_VERSION });
     }
 
-    // S12.1：客户端 API 带版本。所有客户端（Web / L3 CLI / 别的 Host）
-    // 走同一套，没有谁是特权客户端。
+    // S12.1：客户端 API 带版本，所有客户端（Web / L3 CLI / 别的 Host）走同一套，没有谁是特权客户端。
     if (method === 'GET' && path === '/api/version') {
       return send(res, 200, { api: API_VERSION });
     }
@@ -1489,12 +1480,10 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.getMissionView(missionMatch[1]));
     }
 
-    // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks
-    // 可能很长，列表页不该为了显示一行状态把它整个拉过来。
-    // 取报告与取 Mission 同级只读，共用 missionRead；报告的不可变性与归属判断都在
-    // Platform.getValidationReport 里，这里只透传，不直连任何存储适配器。
-    // 归属不符与不存在同样回 404：报告是 append-only 机器证据，若告诉调用方
-    // 「这份报告属于别的 Mission」，等于给了跨 Mission 探测报告 id 的接口。
+    // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks 可能很长，
+    // 列表页不该为了显示一行状态把它整个拉过来。取报告与取 Mission 同级只读，共用 missionRead；
+    // 归属不符与不存在同样回 404：报告是 append-only 机器证据，说「这份属于别的 Mission」
+    // 等于给了跨 Mission 探测报告 id 的接口。
     const validationReportMatch = /^\/api\/missions\/([^/]+)\/validation-reports\/([^/]+)$/.exec(path);
     if (method === 'GET' && validationReportMatch) {
       await requireControl(req, POLICY_ACTION.missionRead);
@@ -1516,6 +1505,16 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.getMissionDiff(diffMatch[1]));
     }
 
+    // 费用增额：权限沿用答复升级那一格（控制面 operator），不新增 policy 动作、也不给 agent 工具开口；
+    // 增额规则（基数、溢出、解除门禁）只有 Platform 一份，这里只验输入形状。
+    const budgetRaiseMatch = /^\/api\/missions\/([^/]+)\/budget\/raise$/.exec(path);
+    if (method === 'POST' && budgetRaiseMatch) {
+      await requireControl(req, POLICY_ACTION.missionAnswerEscalation);
+      const body = await readJson(req);
+      const by = body.by === undefined ? 10 : body.by;
+      if (typeof by !== 'number' || !Number.isFinite(by) || by <= 0) throw new HttpError(400, 'INVALID_COST_CAP', 'by 必须是有限正数（美元）');
+      return send(res, 200, await platform.raiseMissionCostCap(budgetRaiseMatch[1], by));
+    }
 
     const answerMatch = /^\/api\/missions\/([^/]+)\/escalations\/answer$/.exec(path);
     if (method === 'POST' && answerMatch) {

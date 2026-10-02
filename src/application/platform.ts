@@ -17,6 +17,7 @@ import * as budgetUsage from './platform/budget-usage.ts';
 import * as missionControl from './platform/mission-control.ts';
 import * as planning from './platform/planning.ts';
 import * as escalations from './platform/escalations.ts';
+import * as ticketBudget from './platform/ticket-budget.ts';
 import * as lightweightSubmission from './platform/lightweight-submission.ts';
 import * as lightweightValidation from './platform/lightweight-validation.ts';
 import * as lightweightDispatch from './platform/lightweight-dispatch.ts';
@@ -1370,10 +1371,10 @@ export class Platform {
   }
 
   /**
-   * L3 答复一条升级。
-   *
-   * 升级之后调度器是停着的（再叫协调者只会让它再升级一次）。答复落库之后
-   * 协调者下一轮就能在 coagent_get_mission 里看到它，据此继续。
+   * L3 答复一条升级：答复落库后协调者下一轮在 coagent_get_mission 里看到它据此继续
+   * （升级后调度器是停着的，再叫协调者只会让它再升级一次）。
+   * 队首若是票级门禁，同事务里解析答复并增额/批准：分两次写会留下「已答复却还在等」
+   * 的中间态；解析在落库之前，用户写错的显式增量必须当场失败而不是被写进去。
    */
   async answerEscalation(
     missionId: string,
@@ -1387,7 +1388,28 @@ export class Platform {
     missionId: string,
     answer: string,
   ): Promise<{ question: string; answer: string }> {
-    return escalations.answerEscalation(this.#context, missionId, answer);
+    return escalations.answerEscalation(this.#context, missionId, answer, {
+      parse: ticketBudget.parseTicketGateAnswer,
+      apply: (mission, answered, decision) =>
+        ticketBudget.applyTicketGateAnswer(this.#context, mission, answered, decision),
+    });
+  }
+
+  /**
+   * 票级门禁与费用上限提升：业务实现落在 platform/ticket-budget.ts，本事务里一并提交。
+   */
+  async enforceMissionTicketGates(
+    missionId: string,
+    attemptId?: string,
+  ): Promise<{ stopped: boolean; reason?: WaitReason; detail?: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => ticketBudget.enforceMissionTicketGates(this.#context, missionId, attemptId));
+  }
+
+  /** 同上：提升票级费用上限，默认 +$10。 */
+  async raiseMissionCostCap(missionId: string, by: number = 10): Promise<{ costCap: number }> {
+    // 单事务命令（C4）
+    return this.#tx(() => ticketBudget.raiseMissionCostCap(this.#context, missionId, by));
   }
 
   /**

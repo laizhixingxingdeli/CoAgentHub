@@ -294,6 +294,8 @@ const WAIT_REASON = {
   cancelled_by_user: '被叫停了',
   runaway_suspected: '一跳跑太久，已停下来等人看',
   execution_budget_exceeded: '执行预算硬上限已耗尽',
+  mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
+  work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
 };
 
 const STATUS_CN = {

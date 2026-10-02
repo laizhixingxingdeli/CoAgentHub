@@ -296,6 +296,10 @@ export const WAIT_REASON = {
   cancelled_by_user: '被叫停了',
   runaway_suspected: '一跳跑太久，已停下来等人看',
   execution_budget_exceeded: '执行预算硬上限已耗尽',
+  // 票级费用独立门禁：单 Mission 累计花费到上限，不是内核 ExecutionBudget 硬维度。
+  mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
+  // 工作项开到检查点（默认第 15 个），等检视者判断是否拆票。
+  work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
 };
 
 /**
@@ -777,6 +781,30 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '预算过线',
       detail: data.threshold === undefined || data.threshold === null ? dim : `${dim} · 阈值 ${data.threshold}`,
+    };
+  },
+
+  // 票级费用上限被提高：data.by 这次追加了多少美元，data.costCap 是新的上限。
+  // 缺字段不抛——界面回显空位比崩了好。
+  'mission.cost_cap.raised': (event) => {
+    const data = (event && event.data) || {};
+    const by = data.by === undefined || data.by === null ? '' : ` +$${data.by}`;
+    const cap = data.costCap === undefined || data.costCap === null ? '' : ` · 新上限 $${data.costCap}`;
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '票级费用上限提高',
+      detail: `${or(data.missionId, '本票')}${by}${cap}` || '票级费用已达上限',
+    };
+  },
+
+  // 工作项检查点被批准继续：data.threshold 是批准的第几个检查点。
+  'mission.work_item_checkpoint.approved': (event) => {
+    const data = (event && event.data) || {};
+    const at = data.threshold === undefined || data.threshold === null ? '' : `（第 ${num(data.threshold)} 个检查点）`;
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '检查点放行',
+      detail: `检视者已批准继续${at}`,
     };
   },
 
