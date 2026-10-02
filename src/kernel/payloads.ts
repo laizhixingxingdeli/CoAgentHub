@@ -614,7 +614,11 @@ export type WaitReason =
    * 与 pool `attempt_limit_reached` / 启发式轮次上限分开：这是 Mission 上
    * persist 的 budget 经可信用量求值后的硬闸，不是候选池或 for 循环默认。
    */
-  | 'execution_budget_exceeded';
+  | 'execution_budget_exceeded'
+  /** 票级费用上限（独立门禁）已触及；与 ExecutionBudget 硬维度分开。 */
+  | 'mission_cost_cap_reached'
+  /** 工作项已到达待人工/平台确认的检查点。 */
+  | 'work_item_checkpoint';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。
@@ -702,6 +706,14 @@ export interface EscalationBody {
    */
   readonly answer?: string;
   readonly answeredAt?: string;
+  /**
+   * 平台可信门禁载荷：供平台侧做票级/检查点门禁，不进入 L3 人工决策。
+   * `threshold` 是该门禁触发的阈值（如费用上限金额或检查点序号）。
+   */
+  readonly platformGate?: {
+    readonly kind: 'cost_cap' | 'work_item_checkpoint';
+    readonly threshold: number;
+  };
 }
 
 /**
