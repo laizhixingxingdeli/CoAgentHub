@@ -471,15 +471,14 @@ export class Orchestrator {
     // 用 hopClock：队列 availableAt 也按它算。混用 Date.now 会让固定时钟测试误睡、或把已到期当成未到期。
     this.#missionDeadlineAt = this.#hopClock.now().getTime() + this.#wallClockMs;
 
-    // 一 Mission 一个隔离工作区。所有 agent 的 cwd 都指到这里，
-    // 用户自己的 checkout 从头到尾没被碰过。
-    // 平台上已经记着分叉基线，就照它来 —— 重跑靠这个和第一次从同一个版本
-    // 起步。没有的话（正常的第一次）才用目标分支当前的 HEAD。
-    const pinnedBase = (await this.#platform.getMissionView(missionId)).workspaceRef?.baseRevision;
+    // 一 Mission 一个隔离工作区，用户自己的 checkout 从头到尾没被碰过。已记着分叉基线就照它来 ——
+    // 重跑靠这个和第一次同版起步；这份视图还回答“进来时停在哪”，下面清等待要用。
+    const initialView = await this.#platform.getMissionView(missionId);
+    const pinnedBase = initialView.workspaceRef?.baseRevision;
     const prepared = await this.#workspace.prepare(missionId, options.projectRoot, pinnedBase);
     this.workspace = prepared;
     const cwd = prepared.cwd;
-    // 落地时要拿分叉基线核对目标有没有动过，所以这里就记回平台。
+    // 落地时要拿分叉基线核对目标有没有动过，所以记回平台。
     await this.#platform.recordWorkspace(missionId, {
       projectRoot: options.projectRoot,
       branch: prepared.branch,
@@ -487,16 +486,21 @@ export class Orchestrator {
       baseRevision: prepared.baseRevision,
     });
 
-    // 又动起来了：先把上一轮的停机原因清掉。不清的话界面上会一直挂着
-    // 旧原因，看起来像还卡在那儿。
-    await this.#platform.setWaitReason(missionId, undefined);
+    // 又动起来了：清掉上一轮停机原因，不然界面上一直挂着旧原因。票级那两条例外 —— 只能由增额 / 批准
+    // 检查点解除，重跑不构成批准，清掉就是把门禁原因丢了。
+    if (
+      initialView.waitReason !== 'mission_cost_cap_reached' &&
+      initialView.waitReason !== 'work_item_checkpoint'
+    ) {
+      await this.#platform.setWaitReason(missionId, undefined);
+    }
 
     for (let round = 0; round < maxRounds; round += 1) {
       const view = await this.#platform.getMissionView(missionId);
 
-      // 名额被别人占着时**不在这里停**：调查与规划的产出都写回平台了（plan、工作项都在），
-      // 重跑时协调者读得到，钱没白花；且**名额只有派发才需要**，A 改代码时 B 照样能往前推。
-      // 缺的只是"谁挡着我"看不见，那一格补在 MissionView 的 blockedByMission。
+      // 名额被别人占着时**不在这里停**：调查与规划的产出都写回平台了，重跑读得到，钱没白花；且**名额
+      // 只有派发才需要**，A 改代码时 B 照样能往前推。缺的只是"谁挡着我"看不见，那一格补在
+      // MissionView 的 blockedByMission。
 
       // 被暂停就不碰。放在循环开头而不是入口：跑到一半被暂停也要停下来。
       if (view.paused) {
@@ -505,8 +509,8 @@ export class Orchestrator {
         return { kind: 'waiting', reason: 'cancelled_by_user', detail };
       }
 
-      // 协调者交卷了 —— 改动还没落地。HA 在这里接确定性验证与独立检视，
-      // 仍停在 awaiting_review；不得当成 completed，也不得改用协调者自审。
+      // 协调者交卷了 —— 改动还没落地。HA 在这里接确定性验证与独立检视，仍停在 awaiting_review；不得当成
+      // completed，也不得改用协调者自审。
       if (view.status === 'awaiting_review') {
         if (
           view.executionMode === 'high_assurance' &&
@@ -525,20 +529,23 @@ export class Orchestrator {
         return { kind: 'blocked', reason: detail };
       }
 
-      // 有未答复的升级 —— 停。协调者已经说过它没权限决定，再叫一次
-      // 只会让它再升级一次。等 L3 答复（answerEscalation）之后再跑。
+      // 票级门禁（费用到 cap / 工作项到未批准检查点）：**任何 agent hop 之前**都要过，且必须在 openEscalations
+      // 之前 —— 升级可答复时同样要求值，否则重跑一进来就 awaiting_l3 返回，门禁白写、等待原因也丢。模块已写好
+      // waitReason 并投好升级，这里只决定回什么。
+      const ticketGate = await this.#enforceMissionTicketGate(missionId);
+      if (ticketGate) return ticketGate;
+
+      // 有未答复的升级 —— 停。协调者已经说过它没权限决定，再叫一次只会让它再升级一次；等 L3
+      // 答复（answerEscalation）之后再跑。
       if (view.openEscalations.length > 0) {
-        return {
-          kind: 'awaiting_l3',
-          question: view.openEscalations[0].question,
-        };
+        return { kind: 'awaiting_l3', question: view.openEscalations[0].question };
       }
 
-      // 真要开始改代码之前，先看分叉基线还是不是目标分支的当前位置（S05.3 / S14.7）：
-      // Mission 排队期间别的改动落到了目标分支上，照旧基线干出来的东西合不回去（落地闸
-      // 会拦），而**那时候已经花完钱了**。v1 不做语义 staleness 判定——只比版本号。
-      // 重跑不适用：它按定义就处在"基线不等于目标分支当前位置"，拿这条闸去拦等于一钉
-      // 基线就永远跑不起来（实测 P1-single 派发后当场被停）。落地闸照常核基线，不受影响。
+      // 真要开始改代码之前，先看分叉基线还是不是目标分支的当前位置（S05.3 / S14.7）：排队期间别
+      // 的改动落到目标分支上，照旧基线干出来的东西合不回去（落地闸会拦），而**那时候已经花完钱
+      // 了**。v1 不做语义 staleness 判定——只比版本号。重跑不适用：它按定义就处在"基线不等于目标
+      // 分支当前位置"，拿这条闸去拦等于一钉基线就跑不起来（实测 P1-single 派发后当场被停）。落地
+      // 闸照常核基线，不受影响。
       const isRerun = Boolean(view.origin?.rerunOf);
       if (
         !isRerun &&
@@ -567,11 +574,6 @@ export class Orchestrator {
 
       // HA 走 Standard 式 Contract→协调者→执行者→L2；独立检视在 awaiting_review 分支。
 
-      // 票级门禁：钱到 cap、或工作项到未批准检查点，本轮就不再启动任何 hop（含下面的
-      // round.started）。模块已写好 waitReason 并投好升级，这里只决定回什么。
-      const ticketGate = await this.#enforceMissionTicketGate(missionId);
-      if (ticketGate) return ticketGate;
-
       // ---- Authoritative budget GATE-PRE (BUDGET-001-S5) ----
       // After HA, before orchestration.round.started / any hop.
       // Hard exceeded: LW promote+continue, Standard wait. Soft: events only.
@@ -582,16 +584,14 @@ export class Orchestrator {
         if (gate.kind === 'continue') continue;
       }
 
-      // Durable authoritative round-start fact (BUDGET-001-S2).
-      // After preflight gates + budget PRE; before Lightweight / pending / Coordinator hop.
-      // A successful append counts even if the subsequent hop crashes.
-      // Append failure must not proceed with this round (error propagates).
+      // Durable authoritative round-start fact (BUDGET-001-S2): 在 preflight 诸闸与 budget PRE 之后、
+      // Lightweight / pending / Coordinator hop 之前。记上就计入一轮（后续 hop 崩了也算），记不上就
+      // 不许往下走（错误直接抛出）。
       await this.#platform.recordOrchestrationRoundStarted(missionId);
 
       // ---- Lightweight Fast Lane ----
-      // 公共 pause / awaiting_review / completed / blocked / escalation / stale-base / HA
-      // 检查之后、Standard pending/coordinator 逻辑之前分流。
-      // 绝不进入下面的「没有 pending → coordinator」路径。
+      // 在公共 pause / awaiting_review / completed / blocked / escalation / stale-base / HA 检查之后、
+      // Standard pending/coordinator 之前分流，绝不落到「没有 pending → coordinator」。
       if (view.executionMode === 'lightweight') {
         const lightweight = await this.#runLightweightRound(missionId, view, cwd);
         if (lightweight.kind === 'continue') {
@@ -603,8 +603,8 @@ export class Orchestrator {
         return lightweight.outcome;
       }
 
-      // 每轮都读取 Git index 当前事实；事件可能已过期，不能作为冲突是否仍存在的依据。
-      // 查询失败直接向上抛出，避免把未知状态误当作无冲突而启动执行者。
+      // 每轮都读 Git index 当前事实；事件可能已过期，不能作为冲突是否仍存在的依据。查询失败直接
+      // 抛出，避免把未知状态误当作无冲突而启动执行者。
       const conflictFiles = await this.#workspace.getMissionConflictFiles?.(
         missionId,
         options.projectRoot,
@@ -615,8 +615,8 @@ export class Orchestrator {
         conflictFiles ?? [],
       );
 
-      // 有已派发但还没交回结果的工作项，就先把它们跑完——**但只在 executing 阶段跑**：
-      // 退回 planning 意味着这批工单要重新审视，这时候还跑就是明知要重做还先花一遍钱。
+      // 有已派发但还没交回结果的工作项，就先把它们跑完 —— **只在 executing 阶段**：退回 planning
+      // 意味着这批工单要重新审视，这时候还跑就是明知要重做还先花一遍钱。
       const pending =
         view.status === 'executing'
           ? view.workItems.filter(
@@ -1386,17 +1386,15 @@ export class Orchestrator {
 
   /**
    * 票级门禁（费用到 cap / 工作项到未批准检查点）：**任何 agent hop 之前**都要过。
-   *
-   * undefined = 没被拦住。被拦住时平台侧已写好 waitReason 并投好升级：这里**不再写
-   * waitReason**（会把模块的原因覆盖掉），也**不重投升级**（L3 会收到两条一样的提问）。
-   * 重新取一次视图是因为升级可能这一趟刚投、也可能早就在等答复：有未答复的升级就回
-   * awaiting_l3（可答复，重跑之前先答），否则才是纯等待。
+   * undefined = 没被拦住。被拦住时平台侧已写好 waitReason 并投好升级：这里**不再写 waitReason**
+   * （会把模块的原因覆盖掉），也**不重投升级**（L3 会收到两条一样的提问）。重新取视图是因为升级
+   * 可能这趟刚投、也可能早就在等答复：有未答复的升级就回 awaiting_l3（可答复，重跑前先答），否则
+   * 才是纯等待。
    */
   async #enforceMissionTicketGate(missionId: string): Promise<MissionRunOutcome | undefined> {
     const gate = await this.#platform.enforceMissionTicketGates(missionId);
     if (!gate.stopped) return undefined;
-    // reason 由模块按门禁类型保证存在；没有就回 blocked，不拿说不清原因的 waiting
-    // 让方案驱动继续等。
+    // reason 由模块按门禁类型保证存在；没有就回 blocked，不拿说不清原因的 waiting 让方案驱动继续等。
     if (!gate.reason) return { kind: 'blocked', reason: gate.detail ?? '票级门禁阻止了本次执行' };
     const after = await this.#platform.getMissionView(missionId);
     const open = after.openEscalations[0];
