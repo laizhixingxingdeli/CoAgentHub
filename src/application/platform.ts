@@ -1,3 +1,4 @@
+import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
 import { STANDARD_AUTO_REDISPATCH_EVENT_KIND, STANDARD_AUTO_REDISPATCH_LIMIT, autoRedispatchEventsFor, submissionPrecedesPromotion, autoRedispatchSummary, failedValidationSummary, standardAutoRedispatchHandoff } from './platform/redispatch-helpers.ts';
 export { STANDARD_AUTO_REDISPATCH_EVENT_KIND, STANDARD_AUTO_REDISPATCH_LIMIT } from './platform/redispatch-helpers.ts';
@@ -231,51 +232,11 @@ export class Platform {
       assessment?: ComplexityAssessment;
     },
   ): Promise<void> {
-    return this.#tx(async () => {
-      const { mission } = await this.#locate(missionId);
-      if (mission.executionMode !== 'standard' || mission.runKind !== 'mutation') {
-        throw new PlatformRuleError(
-          'STANDARD_FALLBACK_ROUTE_FORBIDDEN',
-          '分类回落路由事件仅适用于普通 Standard mutation Mission。',
-        );
-      }
-      if (typeof input.fallbackReason !== 'string' || input.fallbackReason.trim().length === 0) {
-        throw new PlatformRuleError('EMPTY_FALLBACK_REASON', 'fallbackReason 不能为空。');
-      }
-      if ((await this.#activity.list(missionId)).some((event) => event.kind === 'mission.routed')) {
-        throw new PlatformRuleError('DUPLICATE_MISSION_ROUTE', 'Mission 已有 mission.routed 事件。');
-      }
-      const { classification } = input;
-      const routedData: Record<string, unknown> = {
-        recommended: classification.recommended,
-        confidence: classification.confidence,
-        facts: classification.facts,
-        unknowns: classification.unknowns,
-        criticalUnknowns: classification.criticalUnknowns,
-        reasons: classification.reasons,
-        fallbackReason: input.fallbackReason,
-      };
-      if (classification.assessmentRef !== undefined) {
-        routedData.assessmentRef = classification.assessmentRef;
-      }
-      if (input.assessment !== undefined) {
-        routedData.assessmentReasons = input.assessment.reasons;
-      }
-      await this.#event(mission, 'mission.routed', routedData);
-    });
+    return missionIntake.recordStandardFallbackRoute(this.#context, { createMission: (input) => this.createMission(input), recordWorkspace: (id, ref) => this.recordWorkspace(id, ref) }, missionId, input);
   }
 
   async #createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
-    const project = await this.#ensureProject(input.projectId);
-    const missionId = input.missionId ?? this.#ids.next('M');
-    const mission = project.createMission({
-      id: missionId,
-      contract: input.contract,
-      origin: input.origin,
-    });
-    await this.#projects.save(project);
-    await this.#event(mission, 'mission.created', { contractRevision: mission.contractRevision });
-    return { missionId };
+    return missionIntake.createMission(this.#context, { createMission: (input) => this.createMission(input), recordWorkspace: (id, ref) => this.recordWorkspace(id, ref) }, input);
   }
 
   /**
@@ -295,140 +256,7 @@ export class Platform {
   async #createClassifiedMission(
     input: CreateClassifiedMissionInput,
   ): Promise<CreateClassifiedMissionResult> {
-    assertNoCallerRouteOverride(input as unknown);
-
-    const facts = parseTaskFactsStrict(input.facts);
-    const assessment = parseComplexityAssessmentStrict(input.assessment);
-    const classification = classifyTask({
-      facts,
-      ...(assessment !== undefined ? { assessment } : {}),
-    });
-
-    const { recommended } = classification;
-    const hasWorkOrder = input.workOrder !== undefined && input.workOrder !== null;
-
-    // ---- route guards（不建 Mission / 不 ensure Project）----
-    if (recommended.runKind === 'query') {
-      throw new PlatformRuleError(
-        'QUERY_ROUTE_REQUIRED',
-        '分类结果为 query：本入口不创建 Mission；请走 Query 路径（M3D-3）。',
-      );
-    }
-
-    const mode = recommended.executionMode;
-    if (mode === 'high_assurance') {
-      const flagged = haForbiddenSideEffects(facts.highAssurance);
-      if (flagged.length > 0) {
-        throw new PlatformRuleError(
-          'HA_SIDE_EFFECT_DENIED',
-          `带外部副作用的 HA（${flagged.join(', ')}）首版一律拒绝，不创建 Mission。`,
-        );
-      }
-      if (hasWorkOrder) {
-        throw new PlatformRuleError(
-          'HIGH_ASSURANCE_WORK_ORDER_FORBIDDEN',
-          'high_assurance 路由禁止携带 Lightweight workOrder。',
-        );
-      }
-    }
-
-    if (mode === 'standard') {
-      if (hasWorkOrder) {
-        throw new PlatformRuleError(
-          'STANDARD_WORK_ORDER_FORBIDDEN',
-          'standard 路由禁止携带 workOrder（避免 Fast Lane 单混入 Standard）。',
-        );
-      }
-    } else if (mode === 'lightweight') {
-      if (!hasWorkOrder) {
-        throw new PlatformRuleError(
-          'LIGHTWEIGHT_WORK_ORDER_REQUIRED',
-          'lightweight 路由必须提供 explicit workOrder。',
-        );
-      }
-    } else if (mode !== 'high_assurance') {
-      // HA 的副作用/workOrder 已在上面守卫过；这里不能再当未知 mode 拒掉。
-      throw new PlatformRuleError(
-        'UNSUPPORTED_ROUTE',
-        `不支持的 executionMode：${String(mode)}`,
-      );
-    }
-
-    // ---- 通过 guards 后才 ensure / 分配 id / 创建 ----
-    const project = await this.#ensureProject(input.projectId);
-    const missionId = input.missionId ?? this.#ids.next('M');
-
-    let mission: Mission;
-    let workItemId: string | undefined;
-
-    if (mode === 'standard' || mode === 'high_assurance') {
-      mission = project.createMission({
-        id: missionId,
-        contract: input.contract,
-        origin: input.origin,
-        executionMode: mode,
-        runKind: 'mutation',
-        ...(assessment !== undefined ? { complexityAssessment: assessment } : {}),
-      });
-    } else {
-      // lightweight：原子 Mission + 唯一 Frozen WorkItem
-      const workOrder = input.workOrder!;
-      const initialId = this.#ids.next('W');
-      const { mission: created, workItem } = project.createMissionWithInitialWorkItem({
-        id: missionId,
-        contract: input.contract,
-        origin: input.origin,
-        executionMode: 'lightweight',
-        runKind: 'mutation',
-        ...(assessment !== undefined ? { complexityAssessment: assessment } : {}),
-        initialWorkItem: {
-          id: initialId,
-          title: workOrder.objective,
-          order: workOrder,
-        },
-      });
-      mission = created;
-      workItemId = workItem.id;
-    }
-
-    await this.#projects.save(project);
-
-    await this.#event(mission, 'mission.created', {
-      contractRevision: mission.contractRevision,
-      executionMode: mission.executionMode,
-      runKind: mission.runKind,
-      classified: true,
-    });
-
-    const routedData: Record<string, unknown> = {
-      recommended: classification.recommended,
-      confidence: classification.confidence,
-      facts: classification.facts,
-      unknowns: classification.unknowns,
-      criticalUnknowns: classification.criticalUnknowns,
-      reasons: classification.reasons,
-    };
-    if (classification.assessmentRef !== undefined) {
-      routedData.assessmentRef = classification.assessmentRef;
-    }
-    await this.#event(mission, 'mission.routed', routedData);
-
-    if (workItemId !== undefined) {
-      const item = mission.workItem(workItemId);
-      await this.#event(
-        mission,
-        'work_item.created',
-        { title: item?.title ?? input.workOrder!.objective, executionMode: 'lightweight' },
-        workItemId,
-        // 无 Coordinator attemptId
-      );
-    }
-
-    return {
-      missionId,
-      ...(workItemId !== undefined ? { workItemId } : {}),
-      classification,
-    };
+    return missionIntake.createClassifiedMission(this.#context, { createMission: (input) => this.createMission(input), recordWorkspace: (id, ref) => this.recordWorkspace(id, ref) }, input);
   }
 
   /**
@@ -494,50 +322,7 @@ export class Platform {
      */
     sourceAlreadyLanded: boolean;
   }> {
-    const { mission, project } = await this.#locate(missionId);
-    if (!mission.contract) {
-      throw new PlatformRuleError('NO_CONTRACT', `Mission ${missionId} 没有契约，没法重跑。`);
-    }
-    // 源头永远指向**最初那条**，不形成链：#3 是 #1 的重跑，不是 #2 的重跑。
-    // 挂成链的话，"这个任务一共跑过几遍"就得顺着指针爬，而且断一环就散了。
-    const root = mission.origin?.rerunOf ?? missionId;
-    const runs = project.missions.filter(
-      (m) => m.id === root || m.origin?.rerunOf === root,
-    ).length;
-    const newId = options?.newMissionId ?? `${root}#${runs + 1}`;
-    const created = await this.createMission({
-      projectId: mission.projectId,
-      missionId: newId,
-      contract: mission.contract,
-      origin: { ...(mission.origin ?? { clientType: 'cli' }), rerunOf: root },
-    });
-
-    // **把起点钉死在源头那次的分叉基线上。**
-    //
-    // 不钉的话，worktree 会从"跑这一次时目标分支的 HEAD"分叉——而源头那次的
-    // 产出多半已经合进去了，第二次一开始活儿就是干完的状态。两次运行起点
-    // 不同，比出来的成本、耗时、跳数全都没有意义，而且**看不出来哪里不对**：
-    // 两条记录都完整、都自洽，只是不可比。
-    const base = options?.baseRevision ?? mission.workspaceRef?.baseRevision;
-    if (base) {
-      await this.recordWorkspace(created.missionId, {
-        projectRoot: mission.workspaceRef?.projectRoot,
-        branch: `mission/${created.missionId}`,
-        baseRevision: base,
-      });
-    }
-    // 字段都自己填齐，别直接把 createMission 的 { missionId } 透传出去：
-    // 返回类型写了几个而实际只回一个，类型剥离不检查，调用方拿到的是 undefined。
-    // 源头的产出落地过没有。看的是**最初那条**，不是链上任意一条：
-    // 答案进没进项目只由它决定。
-    const source = project.missions.find((m) => m.id === root) ?? mission;
-    return {
-      ...created,
-      rerunOf: root,
-      contractRevision: mission.contractRevision,
-      baseRevision: base,
-      sourceAlreadyLanded: source.finalReview?.verdict === 'merge',
-    };
+    return missionIntake.rerunMission(this.#context, { createMission: (input) => this.createMission(input), recordWorkspace: (id, ref) => this.recordWorkspace(id, ref) }, missionId, options);
   }
 
   /**
@@ -6128,22 +5913,6 @@ function collectPromotionEvidenceIds(mission: Mission): string[] {
  *   2) activity `validation.reported` 事件 data.reportId
  *      （Lightweight 失败只落 report+事件、不写 ReviewRecord 时仍须计入）
  */
-const HA_FORBIDDEN_SIDE_EFFECTS = [
-  'productionDeployRelease',
-  'externalPaidOp',
-  'unrecoverableExternalSideEffect',
-  'destructiveData',
-] as const;
-
-/** 无法证明为 false 的禁止副作用：true 与 unknown 都算未证明安全。 */
-function haForbiddenSideEffects(ha: {
-  readonly productionDeployRelease: unknown;
-  readonly externalPaidOp: unknown;
-  readonly unrecoverableExternalSideEffect: unknown;
-  readonly destructiveData: unknown;
-}): string[] {
-  return HA_FORBIDDEN_SIDE_EFFECTS.filter((key) => ha[key] !== false);
-}
 
 function tallyAcceptance(results: readonly AcceptanceResult[]): Record<AcceptanceResult['status'], number> {
   const tally = { pass: 0, fail: 0, unverified: 0, not_applicable: 0 };
