@@ -1,3 +1,4 @@
+import * as conflictDispatch from './platform/conflict-dispatch.ts';
 import * as haValidation from './platform/ha-validation.ts';
 import * as promotion from './platform/promotion.ts';
 import * as postExecution from './platform/post-execution.ts';
@@ -785,30 +786,7 @@ export class Platform {
     missionId: string,
     conflictFiles: readonly string[],
   ): Promise<readonly string[]> {
-    return this.#tx(async () => {
-      const { mission } = await this.#locate(missionId);
-      const events = await this.#activity.list(missionId);
-      let barrier: readonly string[] | undefined;
-      for (const event of events) {
-        if (event.kind === 'mission.conflict_dispatch_barrier') {
-          const data = event.data as { workItemIds?: unknown };
-          barrier = Array.isArray(data.workItemIds) ? data.workItemIds as string[] : [];
-        } else if (event.kind === 'mission.conflict_dispatch_cleared') {
-          barrier = undefined;
-        }
-      }
-      if (conflictFiles.length === 0) {
-        if (barrier !== undefined) await this.#event(mission, 'mission.conflict_dispatch_cleared', {});
-        return [];
-      }
-      if (barrier !== undefined) return [...barrier];
-      const workItemIds = mission.workItems.filter((item) => item.status === 'dispatched').map((item) => item.id);
-      await this.#event(mission, 'mission.conflict_dispatch_barrier', {
-        conflictFiles: [...conflictFiles],
-        workItemIds,
-      });
-      return workItemIds;
-    });
+    return conflictDispatch.recordConflictDispatchBarrier(this.#context, missionId, conflictFiles);
   }
 
   /* ============================ L2 协调者面 ============================ */
