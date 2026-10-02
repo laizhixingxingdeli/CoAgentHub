@@ -498,8 +498,8 @@ let epoch = 0;
 let pollTimer = null;
 let onVisibility = null;
 
-function skeleton() {
-  return '<div class="page">'
+function skeleton(projectId) {
+  return '<div class="page' + (projectId ? ' project-detail-page' : '') + '">'
     + '<div><div class="pane-title">项目</div><ul class="proj-list" id="proj-list"></ul></div>'
     + '<div id="proj-detail"><div class="empty">加载中…</div></div>'
     + '</div>';
@@ -574,7 +574,14 @@ async function renderDetail() {
   // 这一代导航上的那个，否则先发出的请求后回来，会把新画面盖成旧项目的。
   if (started !== epoch || selected !== projectId) return;
   if (!mounted || !mounted.list.isConnected) return;
-  box.innerHTML = detailCardHtml(project, workspace) + '<div id="proj-workbench"></div>';
+  const encProject = encodeURIComponent(projectId);
+  box.innerHTML = '<div class="project-detail-tabs">'
+    + '<a class="active" href="#/projects/' + encProject + '">概览</a>'
+    + '<a href="#/projects/' + encProject + '">任务</a>'
+    + '<a href="#/projects/' + encProject + '/spec">项目规范</a>'
+    + '<a href="#/projects/' + encProject + '">活动</a>'
+    + '</div>'
+    + detailCardHtml(project, workspace) + '<div id="proj-workbench"></div>';
   paintWorkbench();
   void loadPlanRuns(projectId);
 }
@@ -803,7 +810,7 @@ export async function renderProjectsPage(container, projectId) {
   if (!mounted || mounted.container !== container || !mounted.list.isConnected) {
     epoch += 1;
     stopPolling();
-    container.innerHTML = skeleton();
+    container.innerHTML = skeleton(projectId);
     mounted = {
       container,
       list: container.querySelector('#proj-list'),

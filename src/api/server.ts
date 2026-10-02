@@ -1439,6 +1439,14 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 201, await platform.createClassifiedMission(body as never));
     }
 
+    // Web 项目规范只读入口：复用 Platform.getProjectContext，不给浏览器直读文件系统。
+    const projectContextMatch = /^\/api\/missions\/([^/]+)\/project-context$/.exec(path);
+    if (method === 'GET' && projectContextMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const slug = url.searchParams.get('slug') ?? undefined;
+      return send(res, 200, await platform.getProjectContext(projectContextMatch[1], slug));
+    }
+
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
     if (method === 'GET' && missionMatch) {
       await requireControl(req, POLICY_ACTION.missionRead);
