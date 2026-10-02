@@ -784,7 +784,7 @@ const EVENT_TABLE = {
     };
   },
 
-  // 票级费用门禁被触发：data.by 这次加了多少美元，data.costCap 是新的上限。
+  // 票级费用上限被提高：data.by 这次追加了多少美元，data.costCap 是新的上限。
   // 缺字段不抛——界面回显空位比崩了好。
   'mission.cost_cap.raised': (event) => {
     const data = (event && event.data) || {};
@@ -792,7 +792,7 @@ const EVENT_TABLE = {
     const cap = data.costCap === undefined || data.costCap === null ? '' : ` · 新上限 $${data.costCap}`;
     return {
       badge: PLATFORM_ROLE_LABEL,
-      action: '票级费用到顶',
+      action: '票级费用上限提高',
       detail: `${or(data.missionId, '本票')}${by}${cap}` || '票级费用已达上限',
     };
   },
