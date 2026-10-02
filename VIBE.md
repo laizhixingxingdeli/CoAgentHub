@@ -36,7 +36,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 4. 测试最多 1–2 条，写明测什么、断言什么。
 5. 验证命令一两条，可以直接复制运行。
 6. 执行者交半成品或报卡住，说明工单太大或不清楚：拆小或写清楚再派，不原样重派；同一个行为拆了 3 次还没过，升级给检视者。
-7. 新代码守工程规范的预警线（`architecture/engineering-standards.md`，用户 2026-10-02）：新函数不超过 40 行、嵌套不超过 3 层、参数不超过 4 个；要改的大文件不让它更大。协调者验收按那份规范的审查五维（设计、功能、复杂度、测试、命名与注释）逐项看，超线的要么让执行者拆，要么在验收理由里写明为什么可以。
+7. 新代码守工程规范的预警线（`architecture/engineering-standards.md`，用户 2026-10-02）：新函数不超过 40 行、嵌套不超过 3 层、参数不超过 4 个。这些数都是建议、不是硬约束（用户：「只是建议…没必要硬性要求」）：要改的大文件不让它明显变大——接线需要的少量新增可以，要加的多就抽成新模块；不许为了凑行数删注释、压缩写法；协调者不得把行数写成工单的硬约束（AC3 的 W-432 写了「orchestrator.ts 不增长」，执行者为此删注释、反复数行数）。协调者验收按那份规范的审查五维（设计、功能、复杂度、测试、命名与注释）逐项看，超线的要么让执行者拆，要么在验收理由里写明为什么可以。
+8. 打回时修改要求有好几条，就拆成几张各管一条的小单再派，不要合成一张原样重派（AC3 的 W-429 一张单塞了四条修改，cn:hy3 连续三次把输出上限全用在思考上、交不出结果）。
 
 ## Architecture
 
@@ -161,6 +162,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   检视者决定等待用户时使用 Mission 级命令 `node src/l3.ts park <missionId> --reason "…" --as <检视者>`；用户答复后使用 `node src/l3.ts resume <missi
 - **mission-planning** — Mission 协调者规划补充
   协调者的 `coagent_update_findings` 为增量补充：有旧 findings 时旧内容原样保留为前缀，空行及「—— 第 n 次补充」分隔后追加本次 findings。仅显式传入 `rejectedHypotheses` 
+- **mission-results** — Mission 结构化交卷与平台附件
+  协调者交卷的 `criteria` 对应契约每条验收标准，字段固定为 `{ index: number, status: 'pass' | 'fail' | 'unverified' | 'not_applicable', evidence
 - **mission-round-limit** — Mission 单次运行轮次上限
   `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
 - **mission-ticket-gates** — Mission 票级费用与工作项数量门禁
