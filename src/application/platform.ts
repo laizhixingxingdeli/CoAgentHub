@@ -1,3 +1,4 @@
+import * as haFinalizationHelpers from './platform/ha-finalization-helpers.ts';
 import * as haFinalization from './platform/ha-finalization.ts';
 import * as integrationVerification from './platform/integration-verification.ts';
 import * as conflictDispatch from './platform/conflict-dispatch.ts';
@@ -2338,15 +2339,7 @@ export class Platform {
     repoRoot: string,
     worktreePaths: readonly string[],
   ): Promise<HaAuthorityConfig> {
-    try {
-      return await loadHaAuthorityConfig({
-        filePath: this.#haAuthorityFile ?? process.env[HA_AUTHORITY_ENV],
-        repoRoot,
-        worktreePaths,
-      });
-    } catch (error) {
-      throw this.#wrapHaAuthorityError(error);
-    }
+    return haFinalizationHelpers.loadHaAuthority(this.#context, repoRoot, worktreePaths);
   }
 
   /**
@@ -2360,65 +2353,24 @@ export class Platform {
     baseRevision: string,
     headNow: string,
   ): Promise<boolean> {
-    if (typeof workspace.revisionIsAncestor !== 'function') return false;
-    const isAncestor = workspace.revisionIsAncestor.bind(workspace);
-    const contained = await isAncestor(projectRoot, missionBranch, headNow);
-    if (!contained) return false;
-    const stillAtBaseline =
-      (await isAncestor(projectRoot, missionBranch, baseRevision)) &&
-      (await isAncestor(projectRoot, baseRevision, missionBranch));
-    return !stillAtBaseline;
+    return haFinalizationHelpers.haMissionAlreadyInHead(this.#context, workspace, projectRoot, missionBranch, baseRevision, headNow);
   }
 
   async #haWorktreePaths(
     workspace: WorkspaceManager,
     projectRoot: string,
   ): Promise<readonly string[]> {
-    if (typeof workspace.listWorktreePaths !== 'function') {
-      throw new PlatformRuleError(
-        HA_AUTHORITY_CODE.WORKTREE_UNRESOLVABLE,
-        'HA 放行拒绝（HA_AUTHORITY_WORKTREE_UNRESOLVABLE）：无法枚举 worktree。',
-      );
-    }
-    try {
-      const listed = await workspace.listWorktreePaths(projectRoot);
-      if (!listed || listed.length === 0) {
-        throw new Error('empty');
-      }
-      return listed;
-    } catch {
-      throw new PlatformRuleError(
-        HA_AUTHORITY_CODE.WORKTREE_UNRESOLVABLE,
-        'HA 放行拒绝（HA_AUTHORITY_WORKTREE_UNRESOLVABLE）：无法可靠枚举 worktree。',
-      );
-    }
+    return haFinalizationHelpers.haWorktreePaths(this.#context, workspace, projectRoot);
   }
 
   #wrapHaAuthorityError(error: unknown): PlatformRuleError {
-    if (error instanceof HaAuthorityError) {
-      return new PlatformRuleError(error.code, error.message);
-    }
-    if (error instanceof PlatformRuleError) return error;
-    return new PlatformRuleError(
-      HA_AUTHORITY_CODE.INVALID_FIELDS,
-      'HA 放行拒绝（HA_AUTHORITY_INVALID_FIELDS）：授权配置不可用。',
-    );
+    return haFinalizationHelpers.wrapHaAuthorityError(this.#context, error);
   }
 
   async #haUnsafe(
     missionId: string,
   ): Promise<{ reason: string } | undefined> {
-    const events = await this.#activity.list(missionId);
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-      const event = events[i]!;
-      if (event.kind !== 'final_review.ha_unsafe') continue;
-      const data = event.data;
-      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
-      const reason = (data as { reason?: unknown }).reason;
-      if (typeof reason === 'string' && reason.trim() !== '') return { reason };
-      return { reason: 'unsafe' };
-    }
-    return undefined;
+    return haFinalizationHelpers.haUnsafe(this.#context, missionId);
   }
 
   async #markHaUnsafe(
@@ -2426,98 +2378,26 @@ export class Platform {
     reason: 'merged_unrecorded' | 'rollback_failed' | 'third_party_advanced' | 'advanced_during_verify',
     extra: { head?: string; anchor?: string; reportId?: string },
   ): Promise<void> {
-    await this.#event(mission, 'final_review.ha_unsafe', {
-      reason,
-      ...extra,
-      hint: this.#haUnsafeHint(reason),
-    });
+    return haFinalizationHelpers.markHaUnsafe(this.#context, mission, reason, extra);
   }
 
   #haUnsafeHint(reason: string): string {
-    if (reason === 'merged_unrecorded') {
-      return (
-        'HA 合并已落到目标分支但 Mission 未记完成。' +
-        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
-      );
-    }
-    if (reason === 'third_party_advanced') {
-      return (
-        '集成分支在验证期间被第三方推进，未回滚。' +
-        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
-      );
-    }
-    if (reason === 'advanced_during_verify') {
-      return (
-        '集成验证期间目标分支被推进或 checkout 被切换，未签字。' +
-        '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
-      );
-    }
-    return (
-      'HA 验证未通过且回滚失败，集成分支可能不安全。' +
-      '请人工核对锚点、当前 HEAD 与集成报告后再处置；禁止自动重合。'
-    );
+    return haFinalizationHelpers.haUnsafeHint(this.#context, reason);
   }
 
   #explicitHaCommands(
     missionId: string,
     commands: readonly { readonly argv: readonly string[]; readonly timeoutMs: number }[],
   ): { argv: string[]; timeoutMs: number }[] {
-    const invalid = (): never => {
-      throw new PlatformRuleError(
-        'HA_VERIFICATION_REQUIRED',
-        `Mission ${missionId} 的显式验证命令非法，拒绝合并。`,
-      );
-    };
-    if (!Array.isArray(commands) || commands.length === 0) invalid();
-    return commands.map((command) => {
-      if (!command || !Array.isArray(command.argv) || command.argv.length === 0 ||
-          command.argv.some((part) => typeof part !== 'string' || part.trim() === '') ||
-          !Number.isInteger(command.timeoutMs) || command.timeoutMs <= 0) invalid();
-      return { argv: [...command.argv], timeoutMs: command.timeoutMs };
-    });
+    return haFinalizationHelpers.explicitHaCommands(this.#context, missionId, commands);
   }
 
   #planLevelCommands(mission: Mission): { argv: string[]; timeoutMs: number }[] {
-    const out: { argv: string[]; timeoutMs: number }[] = [];
-    const seen = new Set<string>();
-    for (const item of mission.workItems) {
-      if (item.status === 'retired') continue;
-      for (const command of item.order?.validation?.commands ?? []) {
-        if (
-          !Array.isArray(command.argv) ||
-          command.argv.length === 0 ||
-          command.argv.some((part) => typeof part !== 'string' || part.trim() === '')
-        ) {
-          throw new PlatformRuleError(
-            'HA_VERIFICATION_REQUIRED',
-            `Mission ${mission.id} 的冻结验证命令非法，拒绝合并。`,
-          );
-        }
-        if (typeof command.timeoutMs !== 'number' || !Number.isFinite(command.timeoutMs) || command.timeoutMs <= 0) {
-          throw new PlatformRuleError(
-            'HA_VERIFICATION_REQUIRED',
-            `Mission ${mission.id} 的冻结验证命令 timeoutMs 非法，拒绝合并。`,
-          );
-        }
-        const argv = [...command.argv];
-        const key = JSON.stringify([argv, command.timeoutMs]);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ argv, timeoutMs: command.timeoutMs });
-      }
-    }
-    if (out.length === 0) {
-      throw new PlatformRuleError(
-        'HA_VERIFICATION_REQUIRED',
-        `Mission ${mission.id} 没有非空方案级验证命令，拒绝合并。`,
-      );
-    }
-    return out;
+    return haFinalizationHelpers.planLevelCommands(this.#context, mission);
   }
 
   #isForbiddenMaster(branch: string): boolean {
-    const trimmed = branch.trim();
-    return trimmed === 'master' || trimmed === 'refs/heads/master';
+    return haFinalizationHelpers.isForbiddenMaster(this.#context, branch);
   }
 
   /**
