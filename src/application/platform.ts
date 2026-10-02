@@ -1,3 +1,4 @@
+import * as validationReportViews from './platform/validation-report-views.ts';
 import * as standardRedispatch from './platform/standard-redispatch.ts';
 import * as standardValidation from './platform/standard-validation.ts';
 import * as budgetUsage from './platform/budget-usage.ts';
@@ -2557,16 +2558,7 @@ export class Platform {
     missionId: string,
     reportId: string,
   ): Promise<ValidationReport | undefined> {
-    await this.#locate(missionId);
-    if (!this.#validation) {
-      throw new PlatformRuleError(
-        'VALIDATION_DEPS_REQUIRED',
-        '读 ValidationReport 需要注入 PlatformDeps.validation.reports。',
-      );
-    }
-    const report = await this.#validation.reports.get(reportId);
-    if (!report || report.missionId !== missionId) return undefined;
-    return report;
+    return validationReportViews.getValidationReport(this.#context, missionId, reportId);
   }
 
   /**
@@ -2584,34 +2576,7 @@ export class Platform {
     mission: Mission,
     events?: readonly ActivityEvent[],
   ): Promise<Map<string, ValidationReportView>> {
-    const out = new Map<string, ValidationReportView>();
-    const reports = this.#validation?.reports;
-    if (!reports) return out;
-    if (!mission.workItems.some((item) => item.submittedAttemptId !== undefined)) return out;
-    const reportIdByKey = new Map<string, string>();
-    for (const event of events ?? (await this.#activity.list(mission.id))) {
-      if (event.kind !== 'validation.reported' || event.workItemId === undefined) continue;
-      const data = event.data;
-      if (data == null || typeof data !== 'object' || Array.isArray(data)) continue;
-      const row = data as { reportId?: unknown; submittedAttemptId?: unknown };
-      if (typeof row.reportId !== 'string' || row.reportId.length === 0) continue;
-      // HA 的整 Mission 验证没有 submittedAttemptId（也不是某一条工作项的提交），跳过。
-      if (typeof row.submittedAttemptId !== 'string' || row.submittedAttemptId.length === 0) continue;
-      // 正序扫、后写盖前写：留下的是同一组键里最后（最新）那条。
-      reportIdByKey.set(validationReportKey(event.workItemId, row.submittedAttemptId), row.reportId);
-    }
-    for (const item of mission.workItems) {
-      const submittedAttemptId = item.submittedAttemptId;
-      if (submittedAttemptId === undefined) continue;
-      const reportId = reportIdByKey.get(validationReportKey(item.id, submittedAttemptId));
-      if (reportId === undefined) continue;
-      const report = await reports.get(reportId);
-      if (!report || report.missionId !== mission.id) continue;
-      if (report.workItemId !== undefined && report.workItemId !== item.id) continue;
-      if (report.attemptId !== undefined && report.attemptId !== submittedAttemptId) continue;
-      out.set(item.id, validationReportView(report));
-    }
-    return out;
+    return validationReportViews.workItemValidationReportViews(this.#context, mission, events);
   }
 
   /* ================================ 内部 ================================ */
