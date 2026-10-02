@@ -202,13 +202,23 @@ function extractKindsFromEventCalls(file: string, src: string): Extracted {
   const kinds: string[] = [];
   const unresolved: string[] = [];
   let callCount = 0;
-  const needle = 'this.#event(';
+  const isPlatformBoundary =
+    file === 'src/application/platform.ts' || file.startsWith('src/application/platform/');
+  const needles = isPlatformBoundary ? ['this.#event(', 'ctx.event('] : ['this.#event('];
   let from = 0;
   while (from < src.length) {
-    const at = src.indexOf(needle, from);
+    let at = -1;
+    let needleLen = 0;
+    for (const needle of needles) {
+      const pos = src.indexOf(needle, from);
+      if (pos >= 0 && (at < 0 || pos < at)) {
+        at = pos;
+        needleLen = needle.length;
+      }
+    }
     if (at < 0) break;
     callCount += 1;
-    const open = at + needle.length - 1;
+    const open = at + needleLen - 1;
     const inside = extractBalanced(src, open);
     const args = splitTopLevel(inside, ',');
     if (args.length < 2) {
@@ -372,7 +382,10 @@ describe('活动写入入口：从源码抠 kind，未翻译即红', () => {
     for (const abs of walkTs(join(ROOT, 'src'))) {
       const file = rel(abs);
       const src = readFileSync(abs, 'utf8');
-      const hasEvent = src.includes('this.#event(');
+      const hasEvent =
+        src.includes('this.#event(') ||
+        ((file === 'src/application/platform.ts' || file.startsWith('src/application/platform/')) &&
+          src.includes('ctx.event('));
       const hasAppend =
         /(?:#activity|activity\?|deps\.activity)\.append\s*\(|\bactivity\.append\s*\(/.test(src);
       if (!hasEvent && !hasAppend) continue;
