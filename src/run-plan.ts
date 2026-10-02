@@ -550,7 +550,26 @@ async function main() {
     const runId = `${plan.planId}-${stamp(started)}`;
     const store = new FilePlanRunStore(join(runDir, `${runId}.json`));
 
-    const server = createApi({ platform, tokens, deliveries, onMutation: persist, live, agentPool });
+    const server = createApi({
+      platform,
+      tokens,
+      deliveries,
+      onMutation: persist,
+      live,
+      agentPool,
+      // 独立 CLI 只观测自己这次显式创建的运行目录，不扫任意 CLI 目录。
+      planRunDirs: () => [runDir],
+      // 文件模式：本进程是这条 runDir 的唯一写者，以自己 runId 登记成 running，
+      // 读取时把无 stopped 的记录判 interrupted。PG 不注入，维持 unknown 判定。
+      ...(!usePg
+        ? {
+            planRunRuntime: {
+              activeRunIds: () => [runId],
+              isStateFileWriter: true,
+            },
+          }
+        : {}),
+    });
     // 派出去的 agent 用 fetch 连回这个口：分到 fetch 屏蔽的端口，它们会以 bad port 连不上平台。
     await listenLoopback(server, 0);
     const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

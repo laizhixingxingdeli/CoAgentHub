@@ -1026,6 +1026,18 @@ export async function startServer(
       live: 'live' in built ? built.live : undefined,
       beforeRead: 'refresh' in built ? built.refresh : undefined,
       planRunDirs: () => [...knownPlanRunDirs],
+      // 文件模式由本进程持有状态文件锁，是确定性状态文件写者：读取时把本进程
+      // 托管的 kind=plan 运行投影成 running，其余无 stopped 的记录判 interrupted。
+      // PG 不注入，避免臆断文件写者资格——PG 的运行态维持既有 unknown 判定。
+      ...(!usePg
+        ? {
+            planRunRuntime: {
+              activeRunIds: () =>
+                hostedRuns.snapshot().filter((r) => r.kind === 'plan').map((r) => r.id),
+              isStateFileWriter: true,
+            },
+          }
+        : {}),
       planLive,
       runMission: async (body, emit) => {
         rememberHostedAdapter(body);
