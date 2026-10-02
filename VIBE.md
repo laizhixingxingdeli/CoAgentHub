@@ -163,6 +163,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   协调者的 `coagent_update_findings` 为增量补充：有旧 findings 时旧内容原样保留为前缀，空行及「—— 第 n 次补充」分隔后追加本次 findings。仅显式传入 `rejectedHypotheses` 
 - **mission-round-limit** — Mission 单次运行轮次上限
   `run-mission` 与 `run-plan` 均接受可选 `--max-rounds <1-100>`。不提供时，编排器沿用 12 轮缺省；提供时只允许十进制数字组成的 1–100 整数，缺值（包括紧跟另一 `--` 旗）、0、负数
+- **mission-ticket-gates** — Mission 票级费用与工作项数量门禁
+  独立于 ExecutionBudget；其 cost 维继续为 soft，不改变 hard/soft 求值与既有晋升规则。仅统计 agent 已上报的真实花费，不请求外部计费服务、不调整候选池。
 - **plan-run-recovery** — 方案运行等待与叫停后续跑
   本能力细化 `plan-run` 的运行内等待资格与开跑前续跑资格，不改变原有升级、停止和决定语义。
 - **plan-run-web-observability** — 方案运行只读观测面（HTTP 与 Web）
