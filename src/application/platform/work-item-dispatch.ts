@@ -1,6 +1,7 @@
 import type { Mission, Project } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { runDecisionShadow } from '../decision-shadow-runner.ts';
+import { enforceMissionTicketGates } from './ticket-budget.ts';
 
 export async function dispatchWorkItems(
   ctx: PlatformContext,
@@ -14,6 +15,11 @@ export async function dispatchWorkItems(
     if (workItemIds.length === 0) {
       throw new PlatformRuleError('EMPTY_DISPATCH', '没有指定任何工作项。');
     }
+    // 票级检查点（W-430）：工作项达未批准的 15 倍数检查点、或费用已到上限时不派发。
+    // 必须在诊断门禁 / 抢名额 / PRE_DISPATCH shadow / item.dispatch 之前判，
+    // 否则「停等 + 升级」会被后面的 throw 回滚掉。
+    const gate = await enforceMissionTicketGates(ctx, missionId, attemptId);
+    if (gate.stopped) return { dispatched: [] };
     // 必须挡在任何状态改动之前：半套流转会把「已经停了」变成「停了一半」。
     await requireNoOpenDiagnosticEscalation(mission);
     const items = workItemIds.map((id) => {

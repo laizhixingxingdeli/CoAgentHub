@@ -2,6 +2,7 @@ import type { WorkOrder } from '../../kernel/index.ts';
 import type { WorkOrderStandardWarning } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { REVISE_BLOCKED_HINT, orderChangedFields, checkWorkOrderCriteria, checkWorkOrderStandard } from './work-order-helpers.ts';
+import { enforceMissionTicketGates } from './ticket-budget.ts';
 
 export async function createWorkItem(
   ctx: PlatformContext,
@@ -31,6 +32,10 @@ export async function createWorkItem(
       workItemId,
       attemptId,
     );
+    // 票级检查点（W-430）：第 15 个工作项照常建出来，同时停等升级等批准，
+    // 所以这里不抛错、不改变返回值——它跟进来的是外层 attemptWrite 的事务，
+    // 抛出去会把刚落的 created 事件和这次停等一起回滚。
+    await enforceMissionTicketGates(ctx, missionId, attemptId);
     return warnings ? { workItemId, warnings } : { workItemId };
   }
 
