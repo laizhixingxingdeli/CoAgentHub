@@ -252,8 +252,43 @@ const REJECT_ANSWER = /(不|不要|不能|别|勿|无需)\s*(要?继续|continue
 /** 明确继续：只认说清楚要继续的话，含糊的一律当拒绝，不放行。 */
 const CONTINUE_ANSWER = /(继续|continue|proceed|go\s*ahead|同意|批准)/i;
 
-/** 显式增量：'继续，加20美元' / 'continue --by 20'。取紧跟的完整数字 token 再交给 Number。 */
-const EXPLICIT_DELTA = /(?:加|增加|追加|by|add|\+)\s*\$?\s*([+-]?(?:\d+\.?\d*|\.\d+)|[+-]?infinity|nan)/i;
+/**
+ * 显式增量标记：'加20美元' / '--by 20' / '+5'。拉丁标记的左右都在单词边界上，
+ * 否则 'additional' / 'byproduct' 会被当成要加钱。
+ */
+const EXPLICIT_DELTA_MARK = /(?:加|增加|追加|\+|(?<![a-z])(?:by|add)(?![a-z]))/i;
+
+/** 值 token 尾部的货币单位与终止标点：'20美元。' → '20'。 */
+const VALUE_DECOR = /(?:[,，。;；:：!！?？]+|(?:美元|美金|元|dollars?|usd)+)$/iu;
+
+/** 把「标记之后的第一个完整 token」还原成裸数字串：去前导 $ 与尾部装饰。 */
+function stripValueDecor(raw: string): string {
+  let token = raw.replace(/^\$+/, '');
+  while (VALUE_DECOR.test(token)) token = token.replace(VALUE_DECOR, '');
+  return token;
+}
+
+/**
+ * 显式说要加多少时的求值：无标记返回 null（由调用方走默认 10）。
+ *
+ * 取完整 token 再整体 Number，而不是用正则抠「看起来合法的数字前缀」——
+ * 抠前缀会把 '20oops' 读成 20、把 '1e2' 读成 1，用户以为加的是自己说的数。
+ * 有标记却没有值、或值不是有限正数：必须在答复落库之前抛错，不能退化成默认值。
+ */
+function explicitCostDelta(text: string): number | null {
+  const mark = EXPLICIT_DELTA_MARK.exec(text);
+  if (mark === null) return null;
+  const rest = text.slice(mark.index + mark[0].length).trim();
+  const token = stripValueDecor(rest.split(/[\s,，。;；]+/)[0] ?? '');
+  if (token === '') {
+    throw new PlatformRuleError('INVALID_COST_CAP_DELTA', `显式费用增量没有值: ${text}`);
+  }
+  const by = Number(token);
+  if (!Number.isFinite(by) || by <= 0) {
+    throw new PlatformRuleError('INVALID_COST_CAP_DELTA', `非法费用增量: ${token}`);
+  }
+  return by;
+}
 
 /** 纯解析答复：仅 platformGate 才处理；否定优先，明确继续/continue 才放行。 */
 export function parseTicketGateAnswer(
@@ -265,14 +300,8 @@ export function parseTicketGateAnswer(
   // 说了拒绝就拒绝（同一句里也可能有「继续」）；两种都没提到的同样不放行——
   // 放行了就等于替用户决定加钱，这个代价不可逆。
   if (REJECT_ANSWER.test(text) || !CONTINUE_ANSWER.test(text)) return { decision: 'reject', by: 10 };
-  const matched = text.match(EXPLICIT_DELTA);
-  const by = matched === null ? 10 : Number(matched[1]);
-  // 显式写了却不是有限正数（0 / 负数 / Infinity / NaN）：在答复落库之前就报错，
-  // 否则它会悄悄退化成默认 10，用户以为加的是自己说的数。
-  if (matched !== null && (!Number.isFinite(by) || by <= 0)) {
-    throw new PlatformRuleError('INVALID_COST_CAP_DELTA', `非法费用增量: ${matched[1]}`);
-  }
-  return { decision: 'continue', by };
+  // 没写"加多少"才默认 +10；写了就必须按用户写的数走，写错就地失败。
+  return { decision: 'continue', by: explicitCostDelta(text) ?? 10 };
 }
 
 /** apply 在普通 mission.answerEscalation 之后调用：费用继续只增额；检查点继续只写批准。 */
