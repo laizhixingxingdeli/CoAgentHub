@@ -18,8 +18,8 @@ import { isRuntimeCommand, narrateEvent } from '../src/web/narrate.js';
 const ROOT = process.cwd();
 
 /** 工单点名的写入入口：平台 #event + 几处直接 ActivityLog.append。 */
-const ACTIVITY_ENTRIES: ReadonlyArray<{ file: string; how: '#event' | 'append' }> = [
-  { file: 'src/application/platform.ts', how: '#event' },
+const ACTIVITY_ENTRIES: ReadonlyArray<{ file: string; how: '#event' | 'append'; platformFiles?: string[] }> = [
+  { file: 'src/application/platform.ts', how: '#event', platformFiles: platformFilesFor('src/application/platform.ts') },
   { file: 'src/application/query-promotion.ts', how: 'append' },
   { file: 'src/application/reconcile.ts', how: 'append' },
   { file: 'src/application/decision-shadow-runner.ts', how: 'append' },
@@ -30,11 +30,11 @@ const ACTIVITY_ENTRIES: ReadonlyArray<{ file: string; how: '#event' | 'append' }
  * 其它 .append 不是活动事件：实时输出。记在这里，以免扫到时被当成漏网写入。
  * platform.ts 的 #activity.append 是 #event 的落盘实现，kind 是参数，不在这儿解。
  */
-const RECORDED_NON_ACTIVITY: ReadonlyArray<{ file: string; why: string }> = [
+const RECORDED_NON_ACTIVITY: ReadonlyArray<{ file: string; why: string; platformFiles?: string[] }> = [
   { file: 'src/application/live.ts', why: 'LiveOutput 实时输出（note/text），不是 ActivityLog' },
   { file: 'src/application/pg-store.ts', why: 'LiveOutput.finish 补裁剪 note' },
   { file: 'src/application/orchestrator.ts', why: '#live.append 实时输出' },
-  { file: 'src/application/platform.ts', why: '#activity.append 是 #event 写入器本身' },
+  { file: 'src/application/platform.ts', why: '#activity.append 是 #event 写入器本身', platformFiles: platformFilesFor('src/application/platform.ts') },
 ];
 
 const CONTRACT_KINDS = [
@@ -55,6 +55,28 @@ function walkTs(dir: string): string[] {
     else if (ent.name.endsWith('.ts')) out.push(p);
   }
   return out;
+}
+
+/**
+ * 平台逻辑入口可能已拆成 src/application/platform/ 下的多个实际文件。
+ * 这里把逻辑入口 platform.ts 映射到它实际覆盖的 .ts 文件集合，顺序稳定。
+ * 目录不存在时退化为逻辑入口本身（仍是单一文件）；目录存在时列出其下全部 .ts。
+ * 目录存在但读取失败不能静默吞掉——readdirSync 直接抛错，让测试红，而不是假装扫过。
+ */
+function platformFilesFor(logicalEntry: string): string[] {
+  const dir = logicalEntry.replace(/\.ts$/, '');
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    // 目录尚不存在：逻辑入口仍是单一文件。其它读取异常（权限等）不能吞，直接抛。
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [logicalEntry];
+    throw e;
+  }
+  return entries
+    .filter((e) => e.isFile() && e.name.endsWith('.ts'))
+    .map((e) => join(dir, e.name).replace(/\\/g, '/'))
+    .sort();
 }
 
 function collectConstStrings(src: string): Map<string, string> {
@@ -300,11 +322,29 @@ function load(file: string): string {
 }
 
 describe('活动写入入口：从源码抠 kind，未翻译即红', () => {
-  const extracted: Extracted[] = ACTIVITY_ENTRIES.map((entry) => {
+  const extracted: Extracted[] = ACTIVITY_ENTRIES.flatMap((entry) => {
+    if (entry.platformFiles && entry.platformFiles.length > 0) {
+      const kinds: string[] = [];
+      const unresolved: string[] = [];
+      let callCount = 0;
+      for (const actual of entry.platformFiles) {
+        const src = load(actual);
+        const sub =
+          entry.how === '#event'
+            ? extractKindsFromEventCalls(actual, src)
+            : extractKindsFromAppend(actual, src);
+        kinds.push(...sub.kinds);
+        unresolved.push(...sub.unresolved);
+        callCount += sub.callCount;
+      }
+      return [{ file: entry.file, kinds, unresolved, callCount }];
+    }
     const src = load(entry.file);
-    return entry.how === '#event'
-      ? extractKindsFromEventCalls(entry.file, src)
-      : extractKindsFromAppend(entry.file, src);
+    return [
+      entry.how === '#event'
+        ? extractKindsFromEventCalls(entry.file, src)
+        : extractKindsFromAppend(entry.file, src),
+    ];
   });
 
   test('记录检查过的入口，每个入口都真正扫到了写入', () => {
@@ -335,8 +375,8 @@ describe('活动写入入口：从源码抠 kind，未翻译即红', () => {
 
   test('其它 src 写入点必须被记录，不能当没看见', () => {
     const known = new Set([
-      ...ACTIVITY_ENTRIES.map((e) => e.file),
-      ...RECORDED_NON_ACTIVITY.map((e) => e.file),
+      ...ACTIVITY_ENTRIES.flatMap((e) => [e.file, ...(e.platformFiles ?? [])]),
+      ...RECORDED_NON_ACTIVITY.flatMap((e) => [e.file, ...(e.platformFiles ?? [])]),
     ]);
     const surprises: string[] = [];
     for (const abs of walkTs(join(ROOT, 'src'))) {
