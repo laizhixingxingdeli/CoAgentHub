@@ -12,8 +12,8 @@
 ## 2. 开跑
 
 1. 只读检查：`node src/run-plan.ts … --check`。**只在常驻服务停着时跑**——它整份读状态文件。
-2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。
-3. 开跑：`node C:/program1/coagent-experiments/run-plan-platform.mjs <标签> [--project coagent-pi] --max-rounds 30`。协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。
+2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。**要脱离检视者会话单独起**——会话的后台任务约 30 分钟会被收、会话重启也会把它们一起结束（10-01、10-02 服务都这样退出过，退出码 4）：`powershell -NoProfile -Command "Start-Process -FilePath 'node' -ArgumentList 'src/main.ts' -WorkingDirectory 'C:\program1\coagenthub-v5' -WindowStyle Hidden -RedirectStandardOutput '<日志>' -RedirectStandardError '<日志>'"`。守候脚本用 `--max-minutes 25`，赶在后台时限前自己醒。
+3. 开跑：`node C:/program1/coagent-experiments/run-plan-platform.mjs <标签> [--project coagent-pi] --max-rounds 30`。协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。执行者按时段选（启动脚本自动按开跑时的本地时间选）：23:00–08:00 用 hy4（exec-cb-hy4），其余时间用 hy3（exec-cb-hy3-low）——用户 2026-10-02 定；跨过边界的运行在票与票之间重开。
 4. coagent-pi 的票要 `--worktrees`，常驻服务托管不支持（#26）：用 coagent-pi 自己的独立状态 `C:/program1/coagent-experiments/roles/state-pi/.coagent-state.json` 独立运行，可与主线并行。
 
 ## 3. 值守
