@@ -46,7 +46,7 @@ export async function reviewExecutionResult(
       );
     }
     // 晋升会把 executionMode 改成 standard，所以先把「这一跳是从快车道进来的」存下来：
-    // 返回值要说 planning，而判据只能是进来时的车道。
+    // 打回时的返回值要取自 Mission，而判据只能是进来时的车道。
     const fromLightweight = mission.executionMode === 'lightweight';
     // 快车道下 accept 之前先确认：这次提交确有一份机器通过的报告，且没有被规模闸按住。
     // 不查的话，协调者可以凭一句“看了没问题”把一次没跑过验收、或改动已经超规模的提交
@@ -96,9 +96,15 @@ export async function reviewExecutionResult(
       }
       await criteriaFailureStop(mission, item);
     }
-    // 快车道打回之后整条 Mission 回到 planning：工作项自己的状态（rejected）不代表
-    // 这一跳的去处——协调者还能在同一 attempt 里接着规划。
-    return { status: fromLightweight ? 'planning' : item.status };
+    // 快车道打回之后，去处由整条 Mission 说了算，不由工作项说了算：
+    // 正常晋升会把 Mission 摆回 planning（协调者还能在同一 attempt 里接着规划），
+    // 但若 AC1 已经判停，Mission 停在那个停态上——写死 planning 会把「已停」谎报成
+    // 「还在规划」，协调者会继续在同一 attempt 里发工单。
+    // accept 不走这条路：它没动 Mission，返回工作项自己的 accepted 才是这一跳的真相。
+    if (fromLightweight && input.verdict === 'reject') {
+      return { status: mission.status };
+    }
+    return { status: item.status };
   }
 
 function tallyAcceptance(results: readonly AcceptanceResult[]): Record<AcceptanceResult['status'], number> {
