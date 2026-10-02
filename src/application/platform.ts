@@ -1,3 +1,4 @@
+import * as haValidation from './platform/ha-validation.ts';
 import * as promotion from './platform/promotion.ts';
 import * as postExecution from './platform/post-execution.ts';
 import * as commandTracking from './platform/command-tracking.ts';
@@ -823,28 +824,7 @@ export class Platform {
   async #haReviewHold(
     mission: Mission,
   ): Promise<'pending_dispatch' | 'in_review' | 'pending_release' | 'fault'> {
-    // 结论一旦记下，这条 Attempt 不再算在审。生产 hop 的 finally 仍负责收尾吊销。
-    const reviewing = mission.independentReviewerAttempts.some(
-      (row) =>
-        row.status === 'in_progress' &&
-        !mission.independentReviews.some((rec) => rec.reviewerAttemptId === row.id),
-    );
-    if (reviewing) return 'in_review';
-    if (mission.independentReviewBlockReason) return 'fault';
-    if (
-      mission.waitReason === 'no_available_agent' ||
-      mission.waitReason === 'platform_unreachable' ||
-      mission.waitReason === 'attempt_limit_reached'
-    ) {
-      return 'fault';
-    }
-    const detail = mission.waitDetail ?? '';
-    if (detail.startsWith('HA 确定性验证') || detail.startsWith('HA 独立检视故障')) {
-      return 'fault';
-    }
-    const pass = await this.effectiveIndependentReviewPass(mission.id);
-    if (pass) return 'pending_release';
-    return 'pending_dispatch';
+    return haValidation.haReviewHold(this.#context, mission);
   }
 
   /**
@@ -855,137 +835,7 @@ export class Platform {
     missionId: string,
     _cwd: string,
   ): Promise<{ reportId: string; passed: boolean; reviewedCommit: string }> {
-    const { mission } = await this.#locate(missionId);
-    if (mission.executionMode !== 'high_assurance') {
-      throw new PlatformRuleError(
-        'HA_VALIDATION_MODE_REQUIRED',
-        '确定性验证只跑 high_assurance Mission。',
-      );
-    }
-    if (mission.status !== 'awaiting_review' || mission.result?.outcome !== 'delivered') {
-      throw new PlatformRuleError(
-        'HA_VALIDATION_NOT_READY',
-        '须在 delivered 且 awaiting_review 之后跑确定性验证。',
-      );
-    }
-    const validation = this.#validation;
-    if (!validation) {
-      throw new PlatformRuleError(
-        'VALIDATION_DEPS_REQUIRED',
-        'HA 确定性验证需要注入 validation.engine 与 reports。',
-      );
-    }
-    // 不信调用方 cwd：命令必须跑在从 workspaceRef / worktree 解析出的 Mission 工作区。
-    const trustedCwd = this.#missionWorkspaceCwd(mission);
-    const projectRoot = mission.workspaceRef?.projectRoot;
-    const baseRevision = mission.workspaceRef?.baseRevision;
-    if (!trustedCwd || !projectRoot || !baseRevision) {
-      throw new PlatformRuleError(
-        'VALIDATION_WORKSPACE_REQUIRED',
-        `Mission ${mission.id} 缺少可核实的工作区（workspaceRef/worktree），不跑 engine。`,
-      );
-    }
-    const reviewedCommit = await this.#missionReviewedCommit(mission);
-    const l2 = this.#l2ReviewSnapshot(mission);
-    const active = mission.workItems.filter((item) => item.status !== 'retired');
-    const frozenCommands = this.#frozenHaCommands(mission);
-    const existingMeta = await this.#currentHaValidationReport(
-      mission.id,
-      reviewedCommit,
-      l2.fingerprint,
-      mission.contractRevision,
-    );
-    if (existingMeta) {
-      const existing = await validation.reports.get(existingMeta.id);
-      if (existing && existing.missionId === mission.id) {
-        if (
-          !this.#haReuseMatches(
-            existingMeta,
-            existing,
-            active.map((item) => item.id),
-            frozenCommands,
-          )
-        ) {
-          throw new PlatformRuleError(
-            'HA_VALIDATION_STALE',
-            '已有 HA 报告的工作项覆盖或冻结命令与当前不符，拒绝复用。',
-          );
-        }
-        return { reportId: existing.id, passed: existing.passed, reviewedCommit };
-      }
-    }
-    const allowedScope = [...new Set(active.flatMap((item) => [...(item.order?.allowedScope ?? [])]))];
-    const commands = active.flatMap((item) =>
-      (item.order?.validation?.commands ?? []).map((command) => ({
-        argv: [...command.argv],
-        timeoutMs: command.timeoutMs,
-        cwd: trustedCwd,
-      })),
-    );
-    const hasForbidden = active.some((item) => item.order?.validation?.forbiddenPaths !== undefined);
-    const forbiddenPaths = hasForbidden
-      ? [...new Set(active.flatMap((item) => [...(item.order?.validation?.forbiddenPaths ?? [])]))]
-      : undefined;
-    let diffSize: { maxChangedFiles?: number; maxChangedLines?: number } | undefined;
-    for (const item of active) {
-      const size = item.order?.validation?.diffSize;
-      if (!size) continue;
-      diffSize ??= {};
-      if (size.maxChangedFiles !== undefined) {
-        diffSize.maxChangedFiles =
-          diffSize.maxChangedFiles === undefined
-            ? size.maxChangedFiles
-            : Math.min(diffSize.maxChangedFiles, size.maxChangedFiles);
-      }
-      if (size.maxChangedLines !== undefined) {
-        diffSize.maxChangedLines =
-          diffSize.maxChangedLines === undefined
-            ? size.maxChangedLines
-            : Math.min(diffSize.maxChangedLines, size.maxChangedLines);
-      }
-    }
-    const result = await validation.engine.validate({
-      missionId: mission.id,
-      projectRoot,
-      baseRevision,
-      allowedScope,
-      commands,
-      ...(forbiddenPaths !== undefined ? { forbiddenPaths } : {}),
-      ...(diffSize !== undefined ? { diffSize } : {}),
-    });
-    const headAfter = await this.#missionReviewedCommit(mission);
-    if (headAfter !== reviewedCommit) {
-      throw new PlatformRuleError(
-        'HA_VALIDATION_HEAD_CHANGED',
-        '确定性验证运行期间工作区 HEAD 已变化，不产出有效报告。',
-      );
-    }
-    await this.#tx(async () => {
-      const { mission: live } = await this.#locate(missionId);
-      await validation.reports.save(result.report);
-      await this.#event(
-        live,
-        'validation.reported',
-        {
-          reportId: result.report.id,
-          passed: result.report.passed,
-          purpose: 'ha_deterministic',
-          reviewedCommit,
-          l2Fingerprint: l2.fingerprint,
-          contractRevision: live.contractRevision,
-          workItemIds: active.map((item) => item.id),
-          commands: frozenCommands,
-        },
-      );
-    });
-    if (!result.report.passed) {
-      await this.setWaitReason(
-        missionId,
-        'waiting_l3',
-        `HA 确定性验证未通过（报告 ${result.report.id}），不能开独立检视。`,
-      );
-    }
-    return { reportId: result.report.id, passed: result.report.passed, reviewedCommit };
+    return haValidation.runHaDeterministicValidation(this.#context, (id, reason, detail) => this.setWaitReason(id, reason, detail), missionId, _cwd);
   }
 
   /**
