@@ -99,7 +99,8 @@ export type PromotionTriggerCode =
   | 'validator_failure_unrepairable'
   | 'permission_expansion'
   | 'budget_exceeded'
-  | 'diff_intent_unprovable';
+  | 'diff_intent_unprovable'
+  | 'coordinator_rejected';
 
 /** 权威触发码表；kernel / platform 共用，禁止各写一份。 */
 export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
@@ -115,6 +116,7 @@ export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
   'permission_expansion',
   'budget_exceeded',
   'diff_intent_unprovable',
+  'coordinator_rejected',
 ] as const;
 
 export function isPromotionTriggerCode(value: unknown): value is PromotionTriggerCode {

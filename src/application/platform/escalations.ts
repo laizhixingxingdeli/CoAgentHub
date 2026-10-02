@@ -123,7 +123,7 @@ export async function requireNoOpenDiagnosticEscalation(
 
 export async function criteriaFailureStop(
   ctx: PlatformContext,mission: Mission, item: WorkItem): Promise<void> {
-    const criteria = criteriaList(item.order);
+    const criteria = criteriaList(item.order, mission);
     if (criteria.length === 0) return; // 没有关联标准，不参与统计
     const events = await ctx.activity.list(mission.id);
     const stopped = criteriaFailureStopFor(events, mission.contractRevision, criteria);
