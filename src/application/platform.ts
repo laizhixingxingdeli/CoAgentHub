@@ -255,7 +255,7 @@ export type StandardAutoRedispatchSkipReason =
   | 'already_redispatched'
   /** 该原因已经用满两次，留给 L2。 */
   | 'limit_reached'
-  /** 已有未答复的「同一条标准连续三个工作项没过」诊断卡：停派中，不绕过。 */
+  /** 已有未答复的诊断卡：停派中，不绕过。 */
   | 'criteria_failure_stopped';
 
 /**
@@ -2195,8 +2195,7 @@ export class Platform {
       'work_item.retired',
       {
         reason,
-        // 关联的验收标准序号（去重）+ 当时契约修订：连续失败统计只认这两个都在的事件，
-        // 不靠「后补关联」去追溯历史事件。
+        // 关联标准序号（去重）+ 当时契约修订：统计只认这两个都在的事件。
         criteria: criteriaList(item.order),
         contractRevision: mission.contractRevision,
       },
@@ -3216,7 +3215,7 @@ export class Platform {
         '还没有 Plan：先把调查结论写回平台（update_plan），再创建工作项。',
       );
     }
-    // 先校验再生成 id / 落状态：不合法就整份拒绝，不留下一半变更（C4）。
+    // 先校验再生成 id / 落状态：不合法就整份拒绝，不留下一半变更。
     checkWorkOrderCriteria(input.order, mission);
     const workItemId = input.workItemId ?? this.#ids.next('W');
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
@@ -3810,8 +3809,7 @@ export class Platform {
     if (workItemIds.length === 0) {
       throw new PlatformRuleError('EMPTY_DISPATCH', '没有指定任何工作项。');
     }
-    // 停派门禁：还有未答复的诊断卡时一个都不派。必须挡在任何状态改动之前——
-    // 半套流转会把「已经停了」变成「停了一半」。（只读，无一等副作用）
+    // 必须挡在任何状态改动之前：半套流转会把「已经停了」变成「停了一半」。
     await this.#requireNoOpenDiagnosticEscalation(mission);
     const items = workItemIds.map((id) => {
       const item = mission.workItem(id);
@@ -4002,8 +4000,7 @@ export class Platform {
       input.workItemId,
       attemptId,
     );
-    // 只统计 L2 的 reject：机器自动回退（partial / 验证没过）不发 review.recorded，
-    // 也就不进这条标准的连续失败计数——那是「还能再试」，不是「这条标准有问题」。
+    // 只统计 L2 的 reject：机器自动回退不发 review.recorded，也就不进连续失败计数。
     if (input.verdict === 'reject') await this.#criteriaFailureStop(mission, item);
     return { status: item.status };
   }
@@ -4031,11 +4028,24 @@ export class Platform {
    * 记一条 Mission 升级并投递一次。协调者 escalateToL3 与轻量 reportBlocked 共用：
    * 分开写会变成两次升级/两封信，L3 对同一提问会看到两张单。
    */
-  async #recordEscalationAndDeliver(mission: Mission, body: EscalationBody): Promise<void> {
+  async #recordEscalationAndDeliver(
+    mission: Mission,
+    body: EscalationBody,
+    diagnostic?: CriteriaFailureDiagnostic,
+  ): Promise<void> {
     mission.recordEscalation(body);
     // 第几次升级：每一次都要进收件箱，重建同一次的投递不会多一条。
     const escalationIndex = mission.escalations.length - 1;
-    await this.#event(mission, 'escalated', { question: body.question }, undefined, body.attemptId);
+    await this.#event(
+      mission,
+      'escalated',
+      // 诊断卡多带两格：身份 + 它管哪条标准。普通升级不该被迫知道自己不是诊断卡。
+      diagnostic === undefined
+        ? { question: body.question }
+        : { question: body.question, criteriaFailure: true, criteria: [diagnostic.criterion] },
+      undefined,
+      body.attemptId,
+    );
     // 升级只写进平台是不够的：L3 不盯着数据库看。进收件箱才叫升级。
     const delivery = await this.#deliveries.create({
       missionId: mission.id,
@@ -4050,44 +4060,7 @@ export class Platform {
     await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, body.attemptId);
   }
 
-  /**
-   * 「同一条验收标准连续三个工作项没过」的诊断升级。
-   *
-   * 与 #recordEscalationAndDeliver 唯一的区别是 escalated 事件上多带一格元数据。
-   * 分开写而不是给它加参数：普通升级不该被迫知道自己不是诊断卡；投递走同一条路径
-   * 则是刻意的——L3 只该看见一张卡、一封信。
-   */
-  async #recordDiagnosticEscalationAndDeliver(
-    mission: Mission,
-    body: EscalationBody,
-    diagnostic: CriteriaFailureDiagnostic,
-  ): Promise<void> {
-    mission.recordEscalation(body);
-    const escalationIndex = mission.escalations.length - 1;
-    await this.#event(
-      mission,
-      'escalated',
-      // criteriaFailure 是卡的身份，criteria 是它管哪条标准：答复时靠后者决定清哪条
-      // 标准的账——必须是数据，不能靠回去读问题文本。
-      { question: body.question, criteriaFailure: true, criteria: [diagnostic.criterion] },
-      undefined,
-      body.attemptId,
-    );
-    const delivery = await this.#deliveries.create({
-      missionId: mission.id,
-      projectId: mission.projectId,
-      recipient: mission.origin?.conversationRef ?? mission.origin?.clientType ?? 'unknown',
-      outcome: 'escalated',
-      idempotencyKey: escalationDeliveryKey(escalationIndex),
-      summary: `${body.question}\n\n为什么需要 L3：${body.why}`,
-    });
-    await this.#event(mission, 'delivery.created', { deliveryId: delivery.id }, undefined, body.attemptId);
-  }
-
-  /**
-   * 停派门禁：还有未答复的诊断卡就拒绝派发。只读、无副作用，因此调用方可以把它放在
-   * 抢名额之前——放在之后的话，一次被拒的派发会先把 slot 占掉，「停了」变成「停了一半」。
-   */
+  /** 停派门禁。只读无副作用，故可放在抢名额之前——否则「停了」变成「停了一半」。 */
   async #requireNoOpenDiagnosticEscalation(mission: Mission): Promise<void> {
     if (!hasOpenDiagnosticEscalation(mission, await this.#activity.list(mission.id))) return;
     throw new PlatformRuleError(
@@ -4096,10 +4069,8 @@ export class Platform {
     );
   }
   /**
-   * 一次失败之后：这条工作项关联的验收标准上，是不是已经连续三个不同工作项没过？
-   * 是就开一张可答复的诊断卡（同一个事务里，与状态改动一起提交）。
-   *
-   * 必须由失败入口在**自己那条事件之后**调——回放靠事件流，先算再记会漏掉「这一次」。
+   * 一次失败之后：这条工作项关联的标准上是不是已连续三个不同工作项没过？是就开一张
+   * 可答复的诊断卡（同一事务里提交）。失败入口必须在**自己那条事件之后**调。
    */
   async #criteriaFailureStop(mission: Mission, item: WorkItem): Promise<void> {
     const criteria = criteriaList(item.order);
@@ -4107,22 +4078,19 @@ export class Platform {
     const events = await this.#activity.list(mission.id);
     const stopped = criteriaFailureStopFor(events, mission.contractRevision, criteria);
     if (!stopped) return;
-    // 标准原文从当前契约取：卡是给人读的，只写序号等于让他去翻契约。
-    const diagnostic: CriteriaFailureDiagnostic = { ...stopped, text: criteriaText(mission, stopped.criterion) };
-    // 已经有未答复的卡就别再开第二张：诊断卡是「他不知道该答哪张」，普通升级是
-    // 「再多一张只会让停派的原因变模糊」。
-    if (mission.openEscalations.length > 0 || hasOpenDiagnosticEscalation(mission, events)) return;
-    await this.#recordDiagnosticEscalationAndDeliver(
+    // 已有未答复诊断卡就不再开（第二张只会让人不知道该答哪张）。普通升级不抑制：
+    // 不能让一张提问卡抵掉停派。
+    if (hasOpenDiagnosticEscalation(mission, events)) return;
+    await this.#recordEscalationAndDeliver(
       mission,
       {
-        // Mission 级诊断卡：它谈的是这条标准，不是某个执行者的一跳。attemptId 是内核
-        // 要求的字段，但卡不依赖它恢复（放行与否只看事件元数据）。
+        // Mission 级诊断卡：它谈的是这条标准，不是某个执行者的一跳。
         attemptId: stopped.workItemIds[0] ?? '',
-        question: criteriaFailureQuestion(mission, diagnostic),
-        why: criteriaFailureWhy(mission, diagnostic, events),
+        question: criteriaFailureQuestion(mission, stopped),
+        why: criteriaFailureWhy(stopped, events),
         optionsConsidered: [],
       },
-      diagnostic,
+      stopped,
     );
   }
 
@@ -4485,9 +4453,8 @@ export class Platform {
       throw new PlatformRuleError('NO_OPEN_ESCALATION', `Mission ${missionId} 没有待答复的升级。`);
     }
     const answered = mission.answerEscalation(answer, new Date().toISOString());
-    // 诊断卡被答复就把整条连续失败序列清零：L3 已经看过并给了方向，再拦着
-    // 等于让他把同一句话再说一遍。清零元数据落在事件里——回放时认它，
-    // 不能靠读内存（进程一重启就没了），更不能靠猜问题文本。
+    // 诊断卡被答复就把连续失败清零：L3 已看过并给了方向。清零元数据落在事件里——
+    // 回放时认它，不能靠读内存或猜文本。
     const history = await this.#activity.list(mission.id);
     const diagnostic = readDiagnosticCriteria(history, answered.question);
     await this.#event(mission, 'escalation.answered', {
@@ -4497,7 +4464,7 @@ export class Platform {
         ? {}
         : { criteriaFailureReset: true, criteria: [...diagnostic], contractRevision: mission.contractRevision }),
     });
-    // 停派期间不重派：内部自动恢复路径必须绕开，否则编排器会把 L3 刚停下的工单再送出去。
+    // 停派期间不重派：否则编排器会把 L3 刚停下的工单再送出去。
     if (diagnostic === undefined) {
       await this.#redispatchLightweightBlockedAfterAnswer(mission, answered);
     }
@@ -4514,11 +4481,11 @@ export class Platform {
     answered: Readonly<EscalationBody>,
   ): Promise<void> {
     if (mission.executionMode !== 'lightweight') return;
-    // 停派期间不动：这条升级是「同一条标准连续三个工作项没过」的诊断卡时，
-    // 答复只解闸，重派由协调者修订工单后走正式入口。这里自动派出去的话，
-    // L3 刚按下停的东西又被送回同一条标准上。
     const events = await this.#activity.list(mission.id);
+    // 不派：所答的是诊断卡（答复只解闸，重派得由协调者修订工单后走正式入口），或还有
+    // 别的未答复诊断卡——停派对所有派发入口生效。 
     if (readDiagnosticCriteria(events, answered.question) !== undefined) return;
+    if (hasOpenDiagnosticEscalation(mission, events)) return;
     const attempt = mission.attempt(answered.attemptId);
     const workItemId = attempt?.workItemId;
     if (!workItemId) return;
@@ -5506,9 +5473,7 @@ export class Platform {
     // 提交只到 submitted。执行者没有任何通向 accepted 的路（不变量 A）。
     // 把 executionResult 绑到**实际提交它的** executor attempt（只读 provenance，
     // 供后续平台内验收报告绑定；本变更不接线、不改 review 面）。
-    // blocked 才取理由原文：partial 是「还能再试」，不算这条标准上的一次失败，
-    // 而且机器回退会把它退回执行者——计进连续失败等于同一次提交数两遍。
-    // 理由照事务前的状态拼（submit 之后 item 已经是 submitted）。
+    // blocked 才取理由原文：partial 会被机器回退退回执行者，计进连续失败等于数两遍。
     const blockedReason =
       body.outcome === 'blocked' ? `${body.summary}\n${body.notes}` : undefined;
     item.submit(body, attemptId);
@@ -5521,7 +5486,7 @@ export class Platform {
         // 记当时工单修订号：重派门禁据此判断「未修订是否原样重派」，
         // 不另造事件种类、不依赖当前状态（修订后当前会变大）。
         orderRevision: item.order?.orderRevision ?? 'r1',
-        // 关联的验收标准与当时契约修订：连续失败统计只回放带这两个的事件。
+        // 关联标准与当时契约修订：统计只回放带这两个的事件。
         criteria: criteriaList(item.order),
         contractRevision: mission.contractRevision,
         ...(blockedReason !== undefined ? { blockedReason } : {}),
@@ -5566,15 +5531,14 @@ export class Platform {
         // 记当时工单修订号：重派门禁据此判断「未修订是否原样重派」，
         // 不另造事件种类、不依赖当前状态。
         orderRevision: item.order?.orderRevision ?? 'r1',
-        // 关联的验收标准与当时契约修订：连续失败统计只回放带这两个的事件。
+        // 同上：关联标准与当时契约修订。
         criteria: criteriaList(item.order),
         contractRevision: mission.contractRevision,
       },
       workItemId,
       attemptId,
     );
-    // 先判「这条标准是不是已经连续三个工作项没过」：轻量提问升级照旧（那是一张
-    // 提问卡，不是诊断卡），两者互不吞掉。
+    // 先判「这条标准是不是已连续三个工作项没过」：轻量提问升级照旧，两者互不吞掉。
     await this.#criteriaFailureStop(mission, item);
     // Lightweight 没有协调者：执行者提问只能走 Mission 升级，否则 L3 看不到。
     // Standard 和空白需求不是提问，保持只记 blocked。
@@ -5836,8 +5800,8 @@ export class Platform {
     if (item.status !== 'submitted') {
       return { redispatched: false, reason: 'not_submitted' };
     }
-    // 停派期间不自动续派。返回「没续派」而不是抛错：这是编排器的内部路径，
-    // 让它崩掉会把一次本该交给 L2 的交付变成一跳失败。
+    // 停派期间不自动续派，且返回「没续派」而非抛错：编排器内部路径崩掉会把一次本该
+    // 交给 L2 的交付变成一跳失败。
     const events0 = await this.#activity.list(mission.id);
     if (hasOpenDiagnosticEscalation(mission, events0)) {
       return { redispatched: false, reason: 'criteria_failure_stopped' };
@@ -7184,13 +7148,8 @@ function orderChangedFields(
 }
 
 /**
- * 工单 `criteria`（覆盖的 Mission acceptance 序号，1-based）合法性校验。
- *
- * 省略 / 空数组合法：存量工单与快照里根本没有这一格，判错等于把所有旧工单作废。
- * 有值就必须每项都是 1..acceptance.length 的整数——越界的序号会让后续「同一条标准
- * 连续失败」统计对着一条不存在的标准计数。重复序号先留着，去重交给统计侧。
- *
- * 抛错的调用方必须在此之前没动过任何状态（见 #createWorkItem / #reviseWorkOrder）。
+ * 工单 `criteria` 合法性校验。省略合法：存量工单根本没有这一格。有值就必须每项都是
+ * 1..acceptance.length 的整数——越界序号会让统计对着一条不存在的标准计数。
  */
 function checkWorkOrderCriteria(order: WorkOrder, mission: Mission): void {
   const raw = order.criteria;
@@ -7777,29 +7736,18 @@ export interface AgentWorkItemIndexEntry {
   readonly lastReviewVerdict: 'accept' | 'reject' | undefined;
   /** 最近一次交卷的机器验证简版；没有报告时整格缺省（不臆造）。 */
   readonly validationReport?: ValidationReportView;
-  /**
-   * 该工作项覆盖的 Mission acceptance 序号（1-based）副本；无关联显式 `'—'`。
-   * 空数组不能顶替 `'—'`：「还没投影」和「明确不覆盖任何一条」是两件事。
-   */
+  /** 覆盖的 acceptance 序号副本；无关联显式 `'—'`（空数组是另一回事）。 */
   readonly criteria: readonly number[] | '—';
 }
 
-/**
- * 工单 criteria 的投影：有序号就给副本（不把工单数组本体递出去，调用方改不动仓储里的对象），
- * 缺省或空数组给 `'—'`。
- */
+/** 工单 criteria 的投影：有序号给副本，缺省或空数组给 `'—'`。 */
 function projectCriteria(order: WorkOrder | undefined): readonly number[] | '—' {
   return order !== undefined && order.criteria !== undefined && order.criteria.length > 0
     ? [...order.criteria]
     : '—';
 }
 
-/**
- * 工单 criteria 的**统计**视图：去重后的整数序号数组，`'—'`（无关联）给空数组——
- * 于是「没有关联标准」就等价于「不参与任何标准的计数」。
- *
- * 与 projectCriteria 分开：那个是给人看的投影，必须区分空数组与 `'—'`。
- */
+/** 统计视图：去重后的序号数组，`'—'` 给空数组。与给人看的 projectCriteria 分开。 */
 function criteriaList(order: WorkOrder | undefined): readonly number[] {
   const raw = order?.criteria;
   if (raw === undefined) return [];
@@ -7810,8 +7758,6 @@ function criteriaList(order: WorkOrder | undefined): readonly number[] {
 export interface CriteriaFailureDiagnostic {
   /** 触发停派的那条标准序号（1-based）。 */
   readonly criterion: number;
-  /** 该标准原文。 */
-  readonly text: string;
   /** 按失败先后顺序的不同工作项 id。 */
   readonly workItemIds: readonly string[];
   /** 与 workItemIds 一一对应的失败理由原文。 */
@@ -7819,10 +7765,9 @@ export interface CriteriaFailureDiagnostic {
 }
 
 /**
- * 一个事件对某条标准的意义：一次失败（带理由原文）或一次通过。
- *
- * 两者都只认**当前契约修订**、且带着 criteria 元数据的事件：契约一改，序号指向的
- * 就是另一批标准；没有这套元数据的历史事件只能靠猜它服务哪条标准，猜必然数错。
+ * 一个事件对某条标准的意义：一次失败（带理由原文）或一次通过。都只认**当前契约修订**
+ * 且带 criteria 元数据的事件：契约一改序号就指向另一批标准，没这套元数据的历史事件
+ * 只能靠猜它服务哪条标准。
  */
 type CriteriaSignal =
   | { readonly pass: false; readonly criteria: readonly number[]; readonly reason: string }
@@ -7830,8 +7775,7 @@ type CriteriaSignal =
 
 function isFailureEvent(event: ActivityEvent, data: Record<string, unknown>): boolean {
   if (event.kind === 'work_item.retired' || event.kind === 'blocked.reported') return true;
-  // review 只有 reject 算失败，submitted 只有 blocked 算：partial 是「还能再试」，
-  // 机器回退还会把它退回执行者，计进来等于同一次提交数两遍。
+  // review 只有 reject 算、submitted 只有 blocked 算：partial 会被机器回退退回执行者。
   if (event.kind === 'review.recorded') return data.verdict === 'reject';
   if (event.kind === 'execution_result.submitted') return data.outcome === 'blocked';
   return false;
@@ -7839,7 +7783,7 @@ function isFailureEvent(event: ActivityEvent, data: Record<string, unknown>): bo
 
 /** 失败理由原文。调用前已确认这是一次失败事件。 */
 function failureReasonText(event: ActivityEvent, data: Record<string, unknown>): string {
-  // review 的 reasons 数组原文照抄：协调者逐条写的东西，压成一句会丢掉他要改什么。
+  // review 的 reasons 原文照抄：协调者逐条写的东西，压成一句会丢掉他要改什么。
   if (event.kind === 'review.recorded') {
     return Array.isArray(data.reasons) ? (data.reasons as unknown[]).map(String).join('；') : '';
   }
@@ -7860,17 +7804,15 @@ function signalFor(event: ActivityEvent, revision: number): CriteriaSignal | und
 }
 
 /**
- * 从事件流重放「同一条标准上连续几个不同工作项没过」。纯函数、只读事件流：
- * 计数不能活在进程内存里——重启之后内存空了而事件还在，再数会从 0 开始，
- * 三个失败攒到第三次也可能攒不满。
+ * 从事件流重放「同一条标准上连续几个不同工作项没过」。计数不能活在进程内存里——
+ * 重启之后内存空了而事件还在。
  */
 export function criteriaFailureStopFor(
   events: readonly ActivityEvent[],
   revision: number,
   criteria: readonly number[],
 ): CriteriaFailureDiagnostic | undefined {
-  // 每条标准各自的连续链：工作项可以同时服务多条标准，
-  // 「A 上失败、B 上通过」不能把 A 的账算到 B 上。
+  // 每条标准各自一条链：「A 上失败、B 上通过」不能把 A 的账算到 B 上。
   const chains = new Map<number, { ids: string[]; reasons: string[] }>();
   for (const event of events) {
     if (event.kind === 'escalation.answered') {
@@ -7892,9 +7834,7 @@ export function criteriaFailureStopFor(
         continue;
       }
       const chain = chains.get(n) ?? { ids: [], reasons: [] };
-      // 同一个工作项在这条标准上重复失败（reject 之后又 retire）只占一个位置：
-      // 三张不同工单都栽在同一条标准上才说明标准有问题，一张工单栽三次
-      // 说明的是那张工单有问题。
+      // 同一工作项重复失败只占一个位置：一张工单栽三次说明的是工单有问题。
       if (!chain.ids.includes(event.workItemId)) {
         chain.ids.push(event.workItemId);
         chain.reasons.push(signal.reason);
@@ -7902,41 +7842,47 @@ export function criteriaFailureStopFor(
       chains.set(n, chain);
     }
   }
-  // 只看这次失败牵动的那几条标准：别的标准攒够三个是别的一张卡。
+  // 只看这次失败牵动的那几条：别的标准攒够三个是别的一张卡。
   for (const n of criteria) {
     const chain = chains.get(n);
     if (chain && chain.ids.length >= 3) {
-      return { criterion: n, text: '', workItemIds: [...chain.ids], reasons: [...chain.reasons] };
+      return { criterion: n, workItemIds: [...chain.ids], reasons: [...chain.reasons] };
     }
   }
   return undefined;
 }
 
 /**
- * 该工作项「上次是怎么没的」：上游挂了 / 被我们掐了 / 额度用完了。
- * 只从 attempt.ended 事件读、不做字符串匹配：failureMessage 是给人读的一句话，
- * 照它猜等于把判定挂在措辞上。没记到就说未知，不编。
+ * 一个工作项「每次是怎么没的」。取**所有** attempt.ended 而不是最后一次：只报最后一条
+ * L3 就看不见较早那次上游失败。只从事件读、不做字符串匹配：failureMessage 是给人读的
+ * 一句话，照它猜等于把判定挂在措辞上。
  */
 function attemptOutcomeFor(events: readonly ActivityEvent[], workItemId: string): string {
-  const last = events.filter((e) => e.kind === 'attempt.ended' && e.workItemId === workItemId).at(-1);
-  if (!last) return '未知（该工作项没有记录到已结束的尝试）';
-  const data = (last.data ?? {}) as { endedBy?: string; failureMessage?: string };
+  const ended = events.filter((e) => e.kind === 'attempt.ended' && e.workItemId === workItemId);
+  if (ended.length === 0) return '未知（该工作项没有记录到已结束的尝试）';
   const labels: Record<string, string> = {
     upstream_failure: '上游失败（upstream_failure）',
     killed_idle: '被空闲闸掐掉（killed_idle）',
     killed_wall_clock: '被墙钟闸掐掉（killed_wall_clock）',
     quota: '额度用完（quota）',
   };
-  const label = data.endedBy !== undefined ? (labels[data.endedBy] ?? data.endedBy) : '未记录';
-  // failureMessage 是执行者/运行时的原文，可能带 key：进卡之前必须过一遍脱敏。
-  const detail = data.failureMessage !== undefined ? redactSecrets(data.failureMessage) : undefined;
-  return detail ? `${label}：${detail}` : label;
+  return ended
+    .map((event) => {
+      const data = (event.data ?? {}) as { endedBy?: string; failureMessage?: string };
+      const suffix = event.attemptId === undefined ? '' : `（${event.attemptId}）`;
+      const label = data.endedBy !== undefined ? (labels[data.endedBy] ?? data.endedBy) : '未记录';
+      // failureMessage 是执行者/运行时的原文，可能带 key：进卡之前必须过一遍脱敏。
+      const detail = data.failureMessage !== undefined ? redactSecrets(data.failureMessage) : undefined;
+      return detail ? `${label}${suffix}：${detail}` : `${label}${suffix}`;
+    })
+    .join('；');
 }
 
 function criteriaText(mission: Mission, criterion: number): string {
   return mission.contract?.acceptance[criterion - 1] ?? '（当前契约没有这一条标准）';
 }
 
+/** 卡的正文。标准原文从当前契约取：只写序号等于让 L3 去翻契约。 */
 function criteriaFailureQuestion(mission: Mission, diagnostic: CriteriaFailureDiagnostic): string {
   const lines = diagnostic.workItemIds.map((id, i) => `  ${i + 1}. ${id}：${diagnostic.reasons[i] ?? '（无理由记录）'}`);
   return [
@@ -7947,22 +7893,17 @@ function criteriaFailureQuestion(mission: Mission, diagnostic: CriteriaFailureDi
   ].join('\n');
 }
 
-function criteriaFailureWhy(
-  mission: Mission,
-  diagnostic: CriteriaFailureDiagnostic,
-  events: readonly ActivityEvent[],
-): string {
-  const outcomes = diagnostic.workItemIds.map((id, i) => `  ${i + 1}. ${id} 的上次结束原因：${attemptOutcomeFor(events, id)}`);
+function criteriaFailureWhy(diagnostic: CriteriaFailureDiagnostic, events: readonly ActivityEvent[]): string {
+  const outcomes = diagnostic.workItemIds.map(
+    (id, i) => `  ${i + 1}. ${id} 的结束原因：${attemptOutcomeFor(events, id)}`,
+  );
   return [
     `同一条验收标准连续 ${diagnostic.workItemIds.length} 个工作项没通过（打回 / 作废 / 卡住都算），已停派等待答复。`,
     ...outcomes,
   ].join('\n');
 }
 
-/**
- * 还有没有未答复的诊断卡。只看「事件里开了卡、而这张卡在状态里还没被答复」：
- * 卡已答复时它仍在 mission.escalations 里（带 answer），不该再拦。
- */
+/** 有没有未答复的诊断卡。只看状态不够：已答复的卡仍留在 mission.escalations 里。 */
 function hasOpenDiagnosticEscalation(mission: Mission, events: readonly ActivityEvent[]): boolean {
   const open = new Set(mission.openEscalations.map((e) => e.question));
   if (open.size === 0) return false;
@@ -7974,9 +7915,9 @@ function hasOpenDiagnosticEscalation(mission: Mission, events: readonly Activity
 }
 
 /**
- * 这张卡是不是诊断卡；是就返回它管的标准序号。卡的身份只认事件里那个布尔量：
- * EscalationBody 是内核类型、形状已冻结，不能在它上面加字段标记「我是诊断卡」，
- * 所以身份留在事件流里。question 只用来对上「是这一张」，不是用来猜它的种类。
+ * 这张卡是不是诊断卡；是就返回它管的标准序号。身份只认事件里那个布尔量：
+ * EscalationBody 形状已冻结，加不了「我是诊断卡」这一格。question 只用来对上
+ * 「是这一张」，不用来猜它的种类。
  */
 function readDiagnosticCriteria(events: readonly ActivityEvent[], question: string): readonly number[] | undefined {
   for (const event of events) {
@@ -8089,9 +8030,8 @@ export interface AgentWorkItemView {
    */
   readonly validationReport?: ValidationReportView;
   /**
-   * 覆盖的 Mission acceptance 序号（1-based），无关联 `'—'`。
-   * 顶层字段：20KB 收紧时 order 会被裁掉甚至置 undefined，这一格必须还在——
-   * 它回答「这项服务哪条验收标准」，正是「连续失败要停」要看的那一列。
+   * 覆盖的 acceptance 序号，无关联 `'—'`。顶层字段：20KB 收紧时 order 会被裁掉，
+   * 这一格必须还在——它回答「这项服务哪条验收标准」。
    */
   readonly criteria: readonly number[] | '—';
   /** 序列化 UTF-8 超过 20 KB 时为真，内容已被截断到尽量贴近上限。 */
