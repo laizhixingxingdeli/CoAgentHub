@@ -1,3 +1,4 @@
+import * as commandTracking from './platform/command-tracking.ts';
 import * as validationReportViews from './platform/validation-report-views.ts';
 import * as standardRedispatch from './platform/standard-redispatch.ts';
 import * as standardValidation from './platform/standard-validation.ts';
@@ -1536,14 +1537,7 @@ export class Platform {
   }
 
   async #recordCommandTrackingEnabled(missionId: string, attemptId: string): Promise<void> {
-    const { mission } = await this.#locate(missionId);
-    await this.#event(
-      mission,
-      'runtime.command_tracking.enabled',
-      { schemaVersion: 1 },
-      undefined,
-      attemptId,
-    );
+    return commandTracking.recordCommandTrackingEnabled(this.#context, missionId, attemptId);
   }
 
   /**
@@ -1558,14 +1552,7 @@ export class Platform {
   }
 
   async #recordCommandStarted(missionId: string, attemptId: string, callId: string): Promise<void> {
-    const { mission } = await this.#locate(missionId);
-    await this.#event(
-      mission,
-      'runtime.command.started',
-      { schemaVersion: 1, callId },
-      undefined,
-      attemptId,
-    );
+    return commandTracking.recordCommandStarted(this.#context, missionId, attemptId, callId);
   }
 
   /**
@@ -1581,14 +1568,7 @@ export class Platform {
   }
 
   async #recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
-    const { mission } = await this.#locate(missionId);
-    await this.#event(
-      mission,
-      'runtime.command_tracking.invalid',
-      { schemaVersion: 1 },
-      undefined,
-      attemptId,
-    );
+    return commandTracking.recordCommandTrackingInvalid(this.#context, missionId, attemptId);
   }
 
   /**
