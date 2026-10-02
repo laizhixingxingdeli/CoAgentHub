@@ -331,6 +331,15 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
         platformSet.add(relPosix(f));
       }
     }
+    // 平台集合整体必须经 runDecisionShadow 做 PRE_DISPATCH shadow（一次，不在逐文件循环中）。
+    {
+      const platformSource = [...platformSet].map((rel) => readFileSync(join(root, rel), 'utf8')).join('\n');
+      assert.match(
+        platformSource,
+        /runDecisionShadow/,
+        `platformSet: 整体必须经 runDecisionShadow 做 PRE_DISPATCH shadow`,
+      );
+    }
     const srcDir = join(root, 'src');
     for (const file of walkTs(srcDir)) {
       const rel = relPosix(file);
@@ -360,11 +369,6 @@ describe('HOPT-03-B Decision/StateBuilder 离线边界守卫', () => {
           source,
           /buildDecisionState|toDecisionRequest/,
           `${rel}: 不得直接接线 StateBuilder`,
-        );
-        assert.match(
-          source,
-          /runDecisionShadow/,
-          `${rel}: 必须经 runDecisionShadow 做 PRE_DISPATCH shadow`,
         );
         continue;
       }
