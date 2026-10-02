@@ -37,15 +37,14 @@ function attemptCost(attempt: AttemptCostInput): number {
   return typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : NaN;
 }
 
-export function evaluateMissionCost(
+// 沿origin.rerunOf爬祖先链；循环或找不到祖先都明确抛错，不静默漏计。
+function collectMissionChain(
   mission: MissionCostInput,
   missions: readonly MissionCostInput[],
-  costCap?: number,
-): MissionCostResult {
+): MissionCostInput[] {
   const chain: MissionCostInput[] = [];
   const seen = new Set<string>();
   let cursor: MissionCostInput | undefined = mission;
-  // 沿origin.rerunOf爬祖先；循环或找不到祖先都明确抛错，不静默漏计。
   while (cursor) {
     if (seen.has(cursor.id)) throw new Error(`rerun cycle at ${cursor.id}`);
     seen.add(cursor.id);
@@ -54,6 +53,15 @@ export function evaluateMissionCost(
     cursor = nextId ? missions.find((m) => m.id === nextId) : undefined;
     if (nextId && !cursor) throw new Error(`missing rerun ancestor ${nextId}`);
   }
+  return chain;
+}
+
+export function evaluateMissionCost(
+  mission: MissionCostInput,
+  missions: readonly MissionCostInput[],
+  costCap?: number,
+): MissionCostResult {
+  const chain = collectMissionChain(mission, missions);
   const byRole = new Map<string, number>();
   const byCandidate = new Map<string, number>();
   let total = 0;
@@ -79,6 +87,6 @@ export function evaluateMissionCost(
     reached: validCap && total >= (costCap as number),
     byRole: [...byRole].map(([role, cost]) => ({ role, cost })),
     byCandidate: [...byCandidate].map(([candidateId, cost]) => ({ candidateId, cost })),
-    missionIds: [...seen],
+    missionIds: chain.map((m) => m.id),
   };
 }
