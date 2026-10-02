@@ -45,6 +45,11 @@ export interface WorkItemIndexEntry {
   readonly status: string;
   readonly attempts: number;
   readonly lastReviewVerdict?: string;
+  /**
+   * 该工作项覆盖的 acceptance 序号（1-based）；`'—'` 表示暂无关联，不能用空数组顶替——
+   * 「未投影」和「明确不覆盖任何一条」是两件事。可选以兼容既有 bundle 与调用方。
+   */
+  readonly criteria?: readonly number[] | '—';
 }
 
 /** 协调者专用：上一跳以来的新情况摘要，与后续 platform 取数可衔接。 */
