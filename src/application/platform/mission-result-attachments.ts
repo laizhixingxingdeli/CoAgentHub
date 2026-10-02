@@ -51,19 +51,26 @@ function isFullNodeTest(command: string | undefined): boolean {
   return trimmed === 'node --test';
 }
 
-/** `node --test` 两种结果行：新版 `ℹ tests 12`，旧版 `# tests 12`。 */
+/**
+ * 四项计数。三种写法都要认：新版 `ℹ tests 12`、旧版 `# tests 12`、以及已经把
+ * 摘要归纳成 `tests 12 / pass 12 / fail 0 / skipped 0` 的历史证据——只认带标记的
+ * 那两种，等于把这些 Mission 的附件全判成拿不到。
+ *
+ * 每项两侧都要词边界：没有它，`latest tests 12`、`passing 3` 这种挨着的词会被
+ * 当成计数行，读出来的数就不是这次跑出来的。
+ */
 const COUNT_PATTERNS = {
-  tests: /(?:ℹ|#)\s*tests\s+(\d+)/,
-  pass: /(?:ℹ|#)\s*pass\s+(\d+)/,
-  fail: /(?:ℹ|#)\s*fail\s+(\d+)/,
-  skipped: /(?:ℹ|#)\s*skipped\s+(\d+)/,
+  tests: /\btests\b\s+(\d+)/,
+  pass: /\bpass\b\s+(\d+)/,
+  fail: /\bfail\b\s+(\d+)/,
+  skipped: /\bskipped\b\s+(\d+)/,
 } as const;
 
 /**
  * 从一段输出里取四项计数。
  *
- * 现有形式（`tests 12 / pass 12 / fail 0 / skipped 0`）也要认：历史证据是那种
- * 写法，不兼容就等于把这些 Mission 的附件全判成拿不到。
+ * 四项缺一项就返回 undefined：**缺了是"这次没读到"**，不许拿 exitCode 或另一
+ * 项去推算凑齐（fail=tests-pass 这类推法在 cancelled 存在时是错的）。
  */
 function extractCounts(text: string): Record<keyof typeof COUNT_PATTERNS, number> | undefined {
   const out: Partial<Record<keyof typeof COUNT_PATTERNS, number>> = {};
@@ -76,9 +83,10 @@ function extractCounts(text: string): Record<keyof typeof COUNT_PATTERNS, number
 }
 
 /**
- * 结果行原样保留。
+ * 把读到的计数归纳成一行结算格式。
  *
- * 不重排、不改写：协调者和 L3 要能拿它去对，格式一成"整理过"的样子就对不上了。
+ * 不是原始输出的逐字拷贝：原始行可能是 `ℹ tests 41` 四行分散的样子。归纳只用
+ * 已经提取出来的四项真实计数，不补、不推算。
  */
 function resultLineOf(counts: Record<keyof typeof COUNT_PATTERNS, number>): string {
   return `tests ${counts.tests} / pass ${counts.pass} / fail ${counts.fail} / skipped ${counts.skipped}`;
@@ -114,18 +122,22 @@ function reportFullTestChecks(report: ValidationReport, worktreeCwd: string): Ca
   return report.checks
     .filter((check) => {
       if (check.kind !== 'command' || !check.command) return false;
-      // 报告里的 argv 是数组：cwd 也要对得上，否则那次跑的是别的目录。
-      return isFullNodeTest(argvToCommand(check.command.argv)) && check.command.cwd === worktreeCwd;
+      // argv 逐项对，不拼成串再比：`join(' ')` 会把 `['node --test']`（一项）也拼成
+      // `node --test`，把一次定向/复合命令认成全量。cwd 也要对得上，否则那次跑的
+      // 是别的目录，不能用它替本 Mission 的 worktree 背书。
+      const argv = check.command.argv;
+      return (
+        argv.length === 2 &&
+        argv[0] === 'node' &&
+        argv[1] === '--test' &&
+        check.command.cwd === worktreeCwd
+      );
     })
     .map((check) => ({
       at: check.endedAt,
       source: `report ${report.id}`,
       text: check.command?.outputTail ?? '',
     }));
-}
-
-function argvToCommand(argv: readonly string[]): string {
-  return argv.join(' ');
 }
 
 async function reportCandidates(
