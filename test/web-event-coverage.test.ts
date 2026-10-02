@@ -10,7 +10,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { isRuntimeCommand, narrateEvent } from '../src/web/narrate.js';
@@ -59,24 +59,14 @@ function walkTs(dir: string): string[] {
 
 /**
  * 平台逻辑入口可能已拆成 src/application/platform/ 下的多个实际文件。
- * 这里把逻辑入口 platform.ts 映射到它实际覆盖的 .ts 文件集合，顺序稳定。
- * 目录不存在时退化为逻辑入口本身（仍是单一文件）；目录存在时列出其下全部 .ts。
- * 目录存在但读取失败不能静默吞掉——readdirSync 直接抛错，让测试红，而不是假装扫过。
+ * 这里把逻辑入口 platform.ts 映射到它实际覆盖的 .ts 文件集合：
+ * 逻辑入口本身 + 其目录（若存在）下递归的全部 .ts，顺序稳定。
+ * 目录不存在时退化为逻辑入口本身（单一文件）。目录存在但读取失败
+ * 不静默吞掉——walkTs 内 readdirSync 直接抛错，让测试红，而不是假装扫过。
  */
 function platformFilesFor(logicalEntry: string): string[] {
   const dir = logicalEntry.replace(/\.ts$/, '');
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch (e) {
-    // 目录尚不存在：逻辑入口仍是单一文件。其它读取异常（权限等）不能吞，直接抛。
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [logicalEntry];
-    throw e;
-  }
-  return entries
-    .filter((e) => e.isFile() && e.name.endsWith('.ts'))
-    .map((e) => join(dir, e.name).replace(/\\/g, '/'))
-    .sort();
+  return [logicalEntry, ...(existsSync(dir) ? walkTs(dir).map((p) => p.replace(/\\/g, '/')).sort() : [])];
 }
 
 function collectConstStrings(src: string): Map<string, string> {
