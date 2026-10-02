@@ -122,6 +122,12 @@ const COORDINATOR_HAPPY: ScriptTable = {
           acceptanceEvidence: ['node --test 退出码 0'],
           memoryDelta: [],
           openRisks: [],
+          // 契约验收标准逐条结论：index 从 1 起、条数与 CONTRACT.acceptance 一致。
+          criteria: CONTRACT.acceptance.map((_, position) => ({
+            index: position + 1,
+            status: 'pass' as const,
+            evidence: '脚本化协调者夹具：工作项已验收，改动落在 src/foo.ts',
+          })),
         },
       },
     ],
@@ -1061,6 +1067,12 @@ async function seedHaForRunner() {
     acceptanceEvidence: [],
     memoryDelta: [],
     openRisks: [],
+    // 契约验收标准逐条结论：index 从 1 起、条数与 CONTRACT.acceptance 一致。
+    criteria: CONTRACT.acceptance.map((_, position) => ({
+      index: position + 1,
+      status: 'pass' as const,
+      evidence: 'HA 夹具：工作项已验收，foo 改动已在真实 worktree 里核对',
+    })),
   });
   await platform.finishAttempt('M-ha', coord.attemptId, { endedBy: 'structured_submit' });
   return {

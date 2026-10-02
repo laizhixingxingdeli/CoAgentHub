@@ -355,6 +355,12 @@ describe('持久化装配里机器 L3 可用', () => {
       acceptanceEvidence: [],
       memoryDelta: [],
       openRisks: [],
+      // 契约验收标准逐条结论：CONTRACT.acceptance 就一条，index 从 1 起。
+      criteria: CONTRACT.acceptance.map((_, position) => ({
+        index: position + 1,
+        status: 'pass' as const,
+        evidence: '合并后 HEAD:a.txt 为 mission，集成分支验证命令退出码 0',
+      })),
     });
     await platform.finishAttempt('M1', coord.attemptId, { endedBy: 'structured_submit' });
 
@@ -495,6 +501,12 @@ describe('真平台 + 真 git 跑一份方案', () => {
       acceptanceEvidence: [],
       memoryDelta: [],
       openRisks: [],
+      // 契约验收标准逐条结论：CONTRACT.acceptance 就一条，index 从 1 起。
+      criteria: CONTRACT.acceptance.map((_, position) => ({
+        index: position + 1,
+        status: 'pass' as const,
+        evidence: '工作项已验收，改动落在它自己的分支上等待最终检视',
+      })),
     });
     await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
   }
@@ -1429,6 +1441,9 @@ function haCoordinatorScript(workItemId = 'W-1'): ScriptTable {
             acceptanceEvidence: [],
             memoryDelta: [],
             openRisks: [],
+            // 契约验收标准逐条结论：用到这段脚本的方案功能点都只声明一条
+            // acceptance，index 从 1 起。
+            criteria: [{ index: 1, status: 'pass' as const, evidence: '脚本化协调者夹具：工作项已验收，改动已在 worktree 里核对' }],
           },
         },
       ],
@@ -1604,6 +1619,8 @@ async function advancePlanHaMission(
   });
   await platform.submitMissionResult(missionId, coord.attemptId, {
     outcome: 'delivered', summary: '已交付', acceptanceEvidence: [], memoryDelta: [], openRisks: [],
+    // 契约验收标准逐条结论：本夹具的契约 acceptance 就一条，index 从 1 起。
+    criteria: [{ index: 1, status: 'pass' as const, evidence: '真 Git HA 夹具：a.txt 已写为 mission，确定性验证命令退出码 0' }],
   });
   await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
   await platform.runHaDeterministicValidation(missionId, prepared.cwd);
@@ -1905,6 +1922,8 @@ describe('真 Git HA 可复用夹具', () => {
         });
         await platform.submitMissionResult(missionId, coord.attemptId, {
           outcome: 'delivered', summary: 'F2 已交付', acceptanceEvidence: [], memoryDelta: [], openRisks: [],
+          // 契约验收标准逐条结论：F2 功能点只声明一条 acceptance，index 从 1 起。
+          criteria: [{ index: 1, status: 'pass' as const, evidence: 'b.txt 已写为 good，工作项验收结论为 pass' }],
         });
         await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
         return { outcome: { kind: 'awaiting_l3_review' }, hops: [], workspace: undefined as never };
