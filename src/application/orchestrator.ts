@@ -494,17 +494,9 @@ export class Orchestrator {
     for (let round = 0; round < maxRounds; round += 1) {
       const view = await this.#platform.getMissionView(missionId);
 
-      // 名额被别人占着时**不在这里停**。
-      //
-      // 一度想在开工前就拦下来，理由是"实测 P2 花掉 $0.70 调查完才被告知名额
-      // 被占"。但那个前提是错的：**调查与规划的产出都写回平台了**（plan、
-      // 工作项都在），重跑时协调者读得到，接着派发就行，钱没白花。
-      //
-      // 而在这里停会砍掉一个刻意的设计：**名额只有派发才需要**，调查和规划
-      // 是纯读、不冲突，A 在改代码时 B 照样可以往前推。拿"省钱"去换掉流水线
-      // 并行，是用一个不存在的问题换掉一个真的特性。用例当场拦住了这次改动。
-      //
-      // 真正缺的只是"谁挡着我"看不见 —— 那一格补在 MissionView 上（blockedByMission）。
+      // 名额被别人占着时**不在这里停**：调查与规划的产出都写回平台了（plan、工作项都在），
+      // 重跑时协调者读得到，钱没白花；且**名额只有派发才需要**，A 改代码时 B 照样能往前推。
+      // 缺的只是"谁挡着我"看不见，那一格补在 MissionView 的 blockedByMission。
 
       // 被暂停就不碰。放在循环开头而不是入口：跑到一半被暂停也要停下来。
       if (view.paused) {
@@ -542,22 +534,11 @@ export class Orchestrator {
         };
       }
 
-      // 真要开始改代码之前，先看分叉基线还是不是目标分支的当前位置（S05.3 / S14.7）。
-      //
-      // 场景：Mission 排队等了一阵，期间别的改动落到了目标分支上。这时候
-      // 照着旧基线干，做出来的东西合不回去（落地那道闸会拦），而**那时候
-      // 已经花完钱了**。在派发之前发现，代价小得多。
-      //
-      // v1 不做语义 staleness 判定——只比版本号，不同就交回协调者让它自己
-      // 重新核对。文档明确推迟了自动判断"这次改动受不受影响"。
-      //
-      // **重跑不适用这一条。** 重跑是把起点钉在源头那次的基线上，为的是两次
-      // 可比；它按定义就处在"基线不等于目标分支当前位置"的状态。拿这条闸去拦
-      // 它，等于用对的规则打错的场景：一钉基线就永远跑不起来。实测 P1-single
-      // 派发后当场被停。
-      //
-      // 安全性质不受影响：落地那道闸照常核对基线，重跑想合回去仍然会被拦——
-      // 而重跑本来也不该合，它是拿来读数的。
+      // 真要开始改代码之前，先看分叉基线还是不是目标分支的当前位置（S05.3 / S14.7）：
+      // Mission 排队期间别的改动落到了目标分支上，照旧基线干出来的东西合不回去（落地闸
+      // 会拦），而**那时候已经花完钱了**。v1 不做语义 staleness 判定——只比版本号。
+      // 重跑不适用：它按定义就处在"基线不等于目标分支当前位置"，拿这条闸去拦等于一钉
+      // 基线就永远跑不起来（实测 P1-single 派发后当场被停）。落地闸照常核基线，不受影响。
       const isRerun = Boolean(view.origin?.rerunOf);
       if (
         !isRerun &&
@@ -585,6 +566,11 @@ export class Orchestrator {
       }
 
       // HA 走 Standard 式 Contract→协调者→执行者→L2；独立检视在 awaiting_review 分支。
+
+      // 票级门禁：钱到 cap、或工作项到未批准检查点，本轮就不再启动任何 hop（含下面的
+      // round.started）。模块已写好 waitReason 并投好升级，这里只决定回什么。
+      const ticketGate = await this.#enforceMissionTicketGate(missionId);
+      if (ticketGate) return ticketGate;
 
       // ---- Authoritative budget GATE-PRE (BUDGET-001-S5) ----
       // After HA, before orchestration.round.started / any hop.
@@ -629,11 +615,8 @@ export class Orchestrator {
         conflictFiles ?? [],
       );
 
-      // 有已派发但还没交回结果的工作项，就先把它们跑完。
-      //
-      // **但只在 executing 阶段跑。** 退回 planning 意味着有人（L3 改了契约、
-      // 或者 L2 自己）判定当前这批工单需要重新审视；这时候还去跑它们，
-      // 就是明知要重做还先花一遍钱。让协调者先说话。
+      // 有已派发但还没交回结果的工作项，就先把它们跑完——**但只在 executing 阶段跑**：
+      // 退回 planning 意味着这批工单要重新审视，这时候还跑就是明知要重做还先花一遍钱。
       const pending =
         view.status === 'executing'
           ? view.workItems.filter(
@@ -644,13 +627,14 @@ export class Orchestrator {
           : [];
       if (pending.length > 0) {
         for (const item of pending) {
-          // 只有冻结工单带了 validation.commands 的工作项才需要机器验证，也才需要基线。
-          // 没命令的一律不进这条路：给它们记基线等于凭空多出一批事件，而 W-321
-          // 的验证入口对空命令本来就是 no-op。
+          // 同轮第二个执行者也要过这道闸：第一个花到 cap 之后，同一轮剩下的工单不能照跑。
+          const perItemGate = await this.#enforceMissionTicketGate(missionId);
+          if (perItemGate) return perItemGate;
+          // 冻结工单带了 validation.commands 才需要机器验证，也才需要基线：给没命令的项记
+          // 基线等于凭空多一批事件，而 W-321 的入口对空命令本来就是 no-op。
           const needsStandardValidation = (item.order?.validation?.commands?.length ?? 0) > 0;
-          // 这一跳是不是「接着上一轮做」：平台把退回原因和上轮说明持久化在事件里，
-          // 断线重启后照样读得回来。读到了就写进唤醒语，并把 partial 留下的续跑句柄
-          // 原样交给运行时——执行者不必把同一件事从头再做一遍。
+          // 这一跳是不是「接着上一轮做」：退回原因和上轮说明持久化在事件里，断线重启也读得
+          // 回来；读到了就写进唤醒语，并把 partial 的续跑句柄原样交给运行时。
           const handoff = await this.#platform.getStandardAutoRedispatchHandoff(
             missionId,
             item.id,
@@ -671,8 +655,7 @@ export class Orchestrator {
                   // 起点。重启续跑（交卷之后、报告之前进程被杀）就是靠它才能补验；
                   // 放到交卷之后记，diff 会把自己刚提交的改动算成没改。
                   onExecutorStart: async () => {
-                    // 读不到可信 HEAD 就不记：宁可没有基线（验证入口 fail-closed），
-                    // 也不要一条谁都发现不了的假基线。
+                    // 读不到可信 HEAD 就不记：宁可没有基线（验证入口 fail-closed），也不要假基线。
                     const head = await this.#workspace.head(cwd).catch(() => undefined);
                     if (!head) return;
                     await this.#platform.recordStandardValidationBaseline({
@@ -700,11 +683,10 @@ export class Orchestrator {
             await this.#platform.setWaitReason(missionId, 'no_available_agent', detail);
             return { kind: 'waiting', reason: 'no_available_agent', detail };
           }
-          // 交卷了：趁协调者还没被叫起来，先把冻结命令跑一遍存成报告。报告只是给
-          // 协调者的证据，不是验收——跑绿了也不 reject/retry，机器不替它评审。
-          //
-          // **partial 不跑。** 冻结命令是给「做完了」的交付当验收材料的；拿半成品
-          // 去跑，等于把「还没做完」判成「做法不对」，然后退回一次本来就要接着做的交付。
+          // 交卷了：趁协调者还没被叫起来，先把冻结命令跑一遍存成报告。报告只是给协调者
+          // 的证据，不是验收——跑绿了也不 reject/retry，机器不替它评审。
+          // **partial 不跑**：冻结命令是给「做完了」的交付当验收材料的，拿半成品去跑等于
+          // 把「还没做完」判成「做法不对」，退回一次本来就要接着做的交付。
           if (needsStandardValidation && !(await this.#standardSubmitIsPartial(missionId, item.id))) {
             await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
           }
@@ -716,33 +698,31 @@ export class Orchestrator {
           if (gate.kind === 'stop') return gate.outcome;
           if (gate.kind === 'continue') break;
 
-          // 机器接续：partial、或验证没过，平台直接把工单退回执行者（最多两次）。
-          // 续派成功就不用叫协调者——下一轮 pending 会把这条工单重新领起来；
-          // 绿报告 / 缺报告 / blocked / 触顶都返回 false，原样交给 L2。
+          // 机器接续：partial、或验证没过，平台直接把工单退回执行者（最多两次）。续派成功
+          // 就不用叫协调者——下一轮 pending 会把这条工单重新领起来；绿报告 / 缺报告 /
+          // blocked / 触顶都返回 false，原样交给 L2。
           await this.#autoRedispatchStandard(missionId, item.id);
         }
         continue;
       }
 
-      // 补验：重启续跑、或上一轮验完没落盘时，工作项已经 submitted 但还没有报告。
-      // 放在协调者 hop 之前——它这一跳读的就是这份报告。W-321 幂等：已有报告
-      // （同一次 submitted attempt）不会重跑命令，只把那份报告原样返回。
+      // 补验：重启续跑、或上一轮验完没落盘时，工作项已 submitted 但还没有报告。放在协调
+      // 者 hop 之前——它这一跳读的就是这份报告。W-321 幂等：同一次 submitted attempt 已有
+      // 报告不会重跑命令，只把那份原样返回。
       let redispatchedOnRecovery = false;
       for (const item of view.workItems) {
         if (item.status !== 'submitted') continue;
-        // 只在**有命令且不是 partial** 时才补验。**不能因为 commands 为空就提前
-        // continue**：无命令的 partial 若在 pending 自动接续前停机，恢复后这里漏掉
-        // 续派就会错误叫醒 L2。
+        // 只在**有命令且不是 partial** 时才补验。**不能因为 commands 为空就提前 continue**：
+        // 无命令的 partial 若在 pending 自动接续前停机，恢复后这里漏掉续派就会错误叫醒 L2。
         if ((item.order?.validation?.commands?.length ?? 0) > 0) {
           // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
           if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
             await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
           }
         }
-        // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为
-        // 「重启过」就多叫一次协调者。幂等——同一次提交已经续派过、或已经触顶，
-        // 或者平台判定无可续派依据（绿报告 / 缺报告 / blocked / 非 partial），
-        // 这里都是 no-op，原样交给 L2。
+        // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为「重启
+        // 过」就多叫一次协调者。幂等——同一次提交已续派过 / 已触顶 / 平台判定无可续派依据
+        // （绿报告、缺报告、blocked、非 partial），这里都是 no-op，原样交给 L2。
         if (await this.#autoRedispatchStandard(missionId, item.id)) redispatchedOnRecovery = true;
       }
       // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
@@ -1402,6 +1382,26 @@ export class Orchestrator {
     }
     // half_open（探针已被领取）或读不到/读不懂的行：不可证明可用。
     return { profileId, availability: 'unknown' as const };
+  }
+
+  /**
+   * 票级门禁（费用到 cap / 工作项到未批准检查点）：**任何 agent hop 之前**都要过。
+   *
+   * undefined = 没被拦住。被拦住时平台侧已写好 waitReason 并投好升级：这里**不再写
+   * waitReason**（会把模块的原因覆盖掉），也**不重投升级**（L3 会收到两条一样的提问）。
+   * 重新取一次视图是因为升级可能这一趟刚投、也可能早就在等答复：有未答复的升级就回
+   * awaiting_l3（可答复，重跑之前先答），否则才是纯等待。
+   */
+  async #enforceMissionTicketGate(missionId: string): Promise<MissionRunOutcome | undefined> {
+    const gate = await this.#platform.enforceMissionTicketGates(missionId);
+    if (!gate.stopped) return undefined;
+    // reason 由模块按门禁类型保证存在；没有就回 blocked，不拿说不清原因的 waiting
+    // 让方案驱动继续等。
+    if (!gate.reason) return { kind: 'blocked', reason: gate.detail ?? '票级门禁阻止了本次执行' };
+    const after = await this.#platform.getMissionView(missionId);
+    const open = after.openEscalations[0];
+    if (open) return { kind: 'awaiting_l3', question: open.question };
+    return { kind: 'waiting', reason: gate.reason, detail: gate.detail ?? gate.reason };
   }
 
   /**
