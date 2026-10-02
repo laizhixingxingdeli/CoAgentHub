@@ -845,7 +845,6 @@ export class Mission {
             l2ReviewRefs: [...this.#independentReviewOpen.l2ReviewRefs],
           }
         : undefined,
-      costCap: this.#costCap,
     };
     return snapshot;
   }
