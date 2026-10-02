@@ -28,7 +28,7 @@
 ## 运维红线
 
 - **常驻服务开着时不读状态文件**：不跑 `l3 show` / `l3 plan` / `run-plan --check`——它们直接整份读 `.coagent-state.json`，撞上服务写盘会让整个运行崩掉。看进度用 HTTP：`curl -s --noproxy '*' http://127.0.0.1:3101/api/missions/<id>`、`/api/plan-runs`、`/api/pools`。写命令（revise / answer / plan decide / merge / pause / resume）会自动转给服务，可以用。
-- 平台的新代码要重启服务才生效：在两个 Mission 之间重启。停服务前确认没有在跑的 agent；强停后核实持锁进程已死、端口没人监听，再清 `.lock-.coagent-state.json`。
+- 平台的新代码要重启服务才生效：在两批之间重启，不在 Mission 进行中重启。互不依赖的票放进同一次运行、一批只重启一次；后面的票要用前面票的新平台行为、或前面的票挪动了代码位置（如 REF1）时才分批（用户 2026-10-03 要求提速）。停服务前确认没有在跑的 agent；强停后核实持锁进程已死、端口没人监听，再清 `.lock-.coagent-state.json`。
 - 不拿 run-plan 冒烟真仓库：开跑前的检查一过就真的派发 agent。验证只用 `--check`（服务停着时）、单测和只读的 l3 命令。
 - 只 `git add` 明确的路径；不碰 `.idea/`；不读、不打印凭据文件（`~/.pi/agent/auth.json`、`codebuddy-auth.json`、`typesafe.env` 等）与代理地址。
 - 主工作区是集成分支的检出：Mission 在跑时集成分支上不许有新提交、主工作区不许留未提交改动，否则平台合不进这个 Mission（合入要求目标 HEAD 等于开工时的提交、工作区干净）。别的会话（如前端会话）的改动在单独的 worktree / 分支上做，两个 Mission 之间由检视者合入。

@@ -20,8 +20,8 @@
 2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。**要脱离检视者会话单独起**——会话的后台任务约 30 分钟会被收、会话重启也会把它们一起结束（10-01、10-02 服务都这样退出过，退出码 4）：`powershell -NoProfile -Command "Start-Process -FilePath 'node' -ArgumentList 'src/main.ts' -WorkingDirectory 'C:\program1\coagenthub-v5' -WindowStyle Hidden -RedirectStandardOutput '<日志>' -RedirectStandardError '<日志>'"`。守候脚本用 `--max-minutes 25`，赶在后台时限前自己醒。
 3. 开跑：`node C:/program1/coagent-experiments/run-plan-platform.mjs <标签> [--project coagent-pi] --max-rounds <n>`。
    - 轮次：按「预计工作项数 × 2.5」给，最多 100。多组搬家这类大票每个工作项约耗 2.4 轮，REF1 先后撞了 30、60 两次上限。撞上限而仍在推进时：升级单选「停」→ `l3 pause` → 重开，平台续跑同一 Mission。
-   - 一次只放一张 pending：方案运行开跑时读一次方案、把所有 pending 都选进来，而平台代码合入后要在票与票之间重启服务。其余票用 `C:/program1/coagent-experiments/roles/hold-queue.mjs hold <id,…>` 暂改 planned，下一张开跑前 `release <id>`。
-   - 协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。执行者用 pi 的 workbuddy 提供方（用户 2026-10-02）：白天 cn:hy3 → cn:deepseek-v4.1-flash（exec-wb-hy3、exec-wb-ds-flash）；23:00–08:00 cn:hy4-preview 排第一（exec-wb-hy4，用户 10-02 23:0x「改hy4执行者」），hy3、ds-flash 顶替；启动脚本按开跑时的本地时间自动选，跨过边界的运行在票与票之间重开。
+   - 按批放票：方案运行开跑时读一次方案、把所有 pending 都选进来，跑完一张直接接下一张。互不依赖的票放进同一批，一批只在开跑前重启一次；后面的票要用前面票的新平台行为、或前面的票挪动了代码位置（如 REF1）时才分批。不在本批的票用 `C:/program1/coagent-experiments/roles/hold-queue.mjs hold <id,…>` 暂改 planned，下一批开跑前 `release <id,…>`（用户 2026-10-03 要求提速，原来一次只放一张）。
+   - 协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。执行者用 pi 的 workbuddy 提供方：全天 cn:hy4-preview 排第一（exec-wb-hy4），cn:hy3、cn:deepseek-v4.1-flash 顶替（exec-wb-hy3、exec-wb-ds-flash）——用户 10-02 23:0x「改hy4执行者」、10-03 白天「也用」。
 4. coagent-pi 的票要 `--worktrees`，常驻服务托管不支持（#26）：用 coagent-pi 自己的独立状态 `C:/program1/coagent-experiments/roles/state-pi/.coagent-state.json` 独立运行，可与主线并行。独立运行不发布端口，值守用只看日志的 `C:/program1/coagent-experiments/roles/log-watch.mjs --log <运行日志> --max-minutes 25`。适配器按每次派发现读，合入 coagent-pi 集成分支后下一次派发就生效：改协调者 / 执行者提示词或简报的票放到 Mission 之间跑。
 
 ## 3. 值守
@@ -37,7 +37,7 @@
 ## 4. 票与票之间
 
 1. 方案运行里的 Mission 由机器 L3 在集成分支验证后自动合入；`run-mission` 跑的由检视者合入（第 5 节）。
-2. 合入的票改了平台代码（`src/`）：立刻停服务、清锁、标方案源为 done、`--check`、重启服务、再开跑，让下一张票用上新代码。只改测试或文档的不用重启。
+2. 一批跑完、且批里有票改了平台代码（`src/`）：停服务、清锁、标方案源为 done、`--check`、重启服务、再开下一批，让下一批用上新代码。批内不重启；只改测试或文档的不用重启。
 3. 平台新增的协调者工具要等适配器注册（coagent-pi）合入后，服务才重启到依赖它的代码。
 4. 文档（`.coagent/`、`CLAUDE.md`）只在没有 Mission 在跑时提交，只 `git add` 明确的路径。
 5. Mission 在跑时集成分支上不许有任何新提交、主工作区不许留未提交改动——平台合入要求目标 HEAD 等于 Mission 开工时的提交、工作区干净。别的会话（如前端会话）的改动在单独的 worktree / 分支上做，在两个 Mission 之间合入。
