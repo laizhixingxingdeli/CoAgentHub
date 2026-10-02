@@ -2084,6 +2084,7 @@ async function openApi(options?: {
   queuedHops?: import('../src/application/ports.ts').QueuedHopRepository;
   candidateCircuits?: import('../src/application/ports.ts').CandidateCircuitRepository;
   now?: () => number;
+  planRunRuntime?: import('../src/api/server.ts').ApiDeps['planRunRuntime'];
 }): Promise<{
   server: Server;
   base: string;
@@ -2118,6 +2119,7 @@ async function openApi(options?: {
     ...(options?.queuedHops ? { queuedHops: options.queuedHops } : {}),
     ...(options?.candidateCircuits ? { candidateCircuits: options.candidateCircuits } : {}),
     ...(options?.now ? { now: options.now } : {}),
+    ...(options?.planRunRuntime ? { planRunRuntime: options.planRunRuntime } : {}),
   });
   await listenLoopback(server, 0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -3301,6 +3303,95 @@ describe('方案运行只读 API 与 Mission 来源投影', () => {
         assert.equal(String(traversal.json.message ?? '').includes('secret'), false);
         const slash = await request(base, '/api/plan-runs/R-old%2F../R-new');
         assert.notEqual(slash.status, 200);
+      } finally {
+        await closeServer(server);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('runtimeState：列表与详情按三记录推导 running/interrupted/stopped', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-rtstate-'));
+    try {
+      const activeId = 'R-active';
+      const interruptedId = 'R-interrupted';
+      const stoppedId = 'R-stopped';
+
+      const activeStore = new FilePlanRunStore(join(dir, `${activeId}.json`));
+      await activeStore.create(
+        PlanRun.start({
+          id: activeId,
+          planId: 'PLAN-active',
+          projectId: 'p-rt',
+          integrationBranch: 'auto/active',
+          reviewer: 'claude',
+          stopConditions: STOP,
+          featureIds: ['F1'],
+          startedAt: T0,
+        }),
+      );
+
+      const interruptedStore = new FilePlanRunStore(join(dir, `${interruptedId}.json`));
+      await interruptedStore.create(
+        PlanRun.start({
+          id: interruptedId,
+          planId: 'PLAN-interrupted',
+          projectId: 'p-rt',
+          integrationBranch: 'auto/interrupted',
+          reviewer: 'claude',
+          stopConditions: STOP,
+          featureIds: ['F1'],
+          startedAt: T0,
+        }),
+      );
+
+      const stoppedStore = new FilePlanRunStore(join(dir, `${stoppedId}.json`));
+      await stoppedStore.create(
+        PlanRun.start({
+          id: stoppedId,
+          planId: 'PLAN-stopped',
+          projectId: 'p-rt',
+          integrationBranch: 'auto/stopped',
+          reviewer: 'claude',
+          stopConditions: STOP,
+          featureIds: ['F1'],
+          startedAt: T0,
+        }),
+      );
+      await stoppedStore.update((run) => {
+        run.halt('service_shutdown', '受控关闭', T0);
+      });
+
+      const runtime = {
+        activeRunIds: () => [activeId],
+        isStateFileWriter: true,
+      };
+      const { server, base } = await openApi({
+        planRunDirs: () => [dir],
+        planRunRuntime: runtime,
+      });
+      try {
+        const listed = await request(base, '/api/plan-runs');
+        assert.equal(listed.status, 200);
+        const rows = listed.json as unknown as Array<Record<string, unknown>>;
+        assert.ok(Array.isArray(rows));
+        const byId = new Map(rows.map((row) => [row.id as string, row]));
+        assert.equal(byId.get(activeId)?.runtimeState, 'running');
+        assert.equal(byId.get(interruptedId)?.runtimeState, 'interrupted');
+        assert.equal(byId.get(stoppedId)?.runtimeState, 'stopped');
+
+        const activeDetail = await request(base, `/api/plan-runs/${activeId}`);
+        assert.equal(activeDetail.status, 200);
+        assert.equal(activeDetail.json.runtimeState, 'running');
+
+        const interruptedDetail = await request(base, `/api/plan-runs/${interruptedId}`);
+        assert.equal(interruptedDetail.status, 200);
+        assert.equal(interruptedDetail.json.runtimeState, 'interrupted');
+
+        const stoppedDetail = await request(base, `/api/plan-runs/${stoppedId}`);
+        assert.equal(stoppedDetail.status, 200);
+        assert.equal(stoppedDetail.json.runtimeState, 'stopped');
       } finally {
         await closeServer(server);
       }

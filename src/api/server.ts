@@ -197,6 +197,17 @@ export interface ApiDeps {
    * 独立 createApi / 无 hosted 回调的测试不能因此 404 把观测面打崩。
    */
   planLive?: PlanRunLiveOutput;
+  /**
+   * 方案运行读时的运行态投影来源。不注入则列表与详情一律标 unknown。
+   *
+   * 为什么是只读投影、不写回：观测面不能改记录格式或停止语义（plan-run-web-observability）。
+   * 推导规则——记录有 stopped 即 stopped；无 stopped 且 id 在 activeRunIds 登记即 running；
+   * 不在登记且注入方是状态文件写者（isStateFileWriter）即 interrupted；否则 unknown。
+   */
+  planRunRuntime?: {
+    activeRunIds: () => readonly string[];
+    isStateFileWriter: boolean;
+  };
 }
 
 class HttpError extends Error {
@@ -316,6 +327,29 @@ function writeJson(
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   deferredJson.set(res, { status, body });
+}
+
+/**
+ * 把一条方案运行记录投影成带 runtimeState 的只读视图，不改动入参快照。
+ * 读面推导运行态：stopped 看记录；running 看本进程托管登记；interrupted 看写者身份；
+ * 都不满足就 unknown。坏记录（{id,error}）原样返回，不投影。
+ */
+function withRuntimeState(
+  item: PlanRunListItem,
+  runtime: { activeRunIds: () => readonly string[]; isStateFileWriter: boolean } | undefined,
+): PlanRunListItem {
+  if (Object.hasOwn(item, 'error')) return item;
+  const ok = item as { readonly id: string; readonly stopped?: unknown };
+  if (ok.stopped !== undefined) {
+    return { ...ok, runtimeState: 'stopped' } as PlanRunListItem;
+  }
+  if (runtime !== undefined && runtime.activeRunIds().includes(ok.id)) {
+    return { ...ok, runtimeState: 'running' } as PlanRunListItem;
+  }
+  if (runtime !== undefined && runtime.isStateFileWriter) {
+    return { ...ok, runtimeState: 'interrupted' } as PlanRunListItem;
+  }
+  return { ...ok, runtimeState: 'unknown' } as PlanRunListItem;
 }
 
 function writeNdjsonHeaders(
@@ -676,6 +710,7 @@ export function createApi(deps: ApiDeps): Server {
   const { platform, tokens, deliveries, onMutation, beforeRead, resolveControlPrincipal } = deps;
   const planRunDirs = deps.planRunDirs ?? (() => [resolve('.coagent-plans')]);
   const planLive = deps.planLive;
+  const planRuntime = deps.planRunRuntime;
   const live: LiveOutput = deps.live ?? new NoLiveOutput();
   const agentPool: AgentPoolRepository = deps.agentPool ?? new InMemoryAgentPoolRepository();
   const listModels = deps.listRuntimeModels ?? listRuntimeModels;
@@ -1329,7 +1364,8 @@ export function createApi(deps: ApiDeps): Server {
     if (method === 'GET' && path === '/api/plan-runs') {
       await requireControl(req, POLICY_ACTION.missionRead);
       const project = url.searchParams.get('project');
-      return send(res, 200, listPlanRuns(planRunDirs(), project === null ? undefined : project));
+      const listed = listPlanRuns(planRunDirs(), project === null ? undefined : project);
+      return send(res, 200, listed.map((item) => withRuntimeState(item, planRuntime)));
     }
 
     const planRunMatch = /^\/api\/plan-runs\/([^/]+)$/.exec(path);
@@ -1347,7 +1383,7 @@ export function createApi(deps: ApiDeps): Server {
       if (result.status === 'corrupt') {
         throw new HttpError(409, 'PLAN_RUN_CORRUPT', result.error);
       }
-      return send(res, 200, result.snapshot);
+      return send(res, 200, withRuntimeState(result.snapshot, planRuntime));
     }
 
     const planRunLiveMatch = /^\/api\/plan-runs\/([^/]+)\/live$/.exec(path);
