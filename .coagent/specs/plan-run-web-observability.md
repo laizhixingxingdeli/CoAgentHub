@@ -5,9 +5,15 @@
 ## 记录与任务 API
 
 - `GET /api/plan-runs` 从服务已知记录目录枚举 JSON，默认目录为服务状态文件旁 `.coagent-plans`；服务成功托管的自定义 runDir 也登记。独立 createApi 默认读工作目录 `.coagent-plans`。非托管 CLI 任意自定义目录不会自动发现。按 startedAt 倒序；`?project=` 过滤有效记录的 projectId。有效摘要含 id、planId、projectId、integrationBranch、startedAt、stopped、features（featureId、title、status、missionIds）及 escalationCount。损坏或不可读文件单独 `{id,error}`，不使整份列表失败。读取走 PlanRun 的已有恢复校验，文件 id 安全验证，重复 id 确定性处理。
-- `GET /api/plan-runs/:id` 返回原记录完整快照（升级问题、可用动作、决定、理由、签名与时间均在内）；缺失/非法 id 为 404，损坏记录明确报错，路径不能越目录。
+- `GET /api/plan-runs/:id` 返回原记录完整快照（升级问题、可用动作、决定、理由、签名与时间均在内）及读时投影字段；缺失/非法 id 为 404，损坏记录明确报错，路径不能越目录。
 - `GET /api/missions` 保持原有字段；仅对 origin 指向 `plan-run:<runId>` 且能确认的 Mission 额外投影 planRunId、featureId。优先依记录 features[].missionIds 消歧；普通 Mission 不增加来源字段。
 - 上述路由与 live 均采用已有控制面只读鉴权策略，不新增写接口。
+
+## 读取时运行态
+
+列表的有效摘要与详情均添加 `runtimeState`，不回写文件或改变记录格式：有 stopped 为 `stopped`；无 stopped 且当前进程登记活跃为 `running`；无 stopped、不在登记且本进程是状态文件写者为 `interrupted`；不能判定为 `unknown`。停止记录优先于任何进程登记；损坏列表项仍为 `{id,error}`。
+
+`createApi` 可注入 `planRunRuntime: { activeRunIds: () => readonly string[], isStateFileWriter: boolean }`。每次读取动态取得登记。常驻文件服务使用 createHostedRunTracker 中 kind=plan 的 id；独立文件 CLI 显式提供自己的 runDir 与 runId。未注入或 PG 模式的未停止记录为 unknown。列表仍为裸数组，不加计数包装或响应头，计数由消费方自行计算。运行态字段不改变网页展示、驱动资格或停止语义。
 
 ## 托管方案输出
 
@@ -19,4 +25,4 @@ runId 确定后，常驻服务在原 CLI NDJSON stdout/stderr 输出之外，按
 - 项目页默认「方案运行」标签，按开跑时间倒序显示方案、票数及结局、升级数、费用，可进入详情；「全部任务」按 featureId 折叠多次 Mission，无 featureId 各自成组，按最新更新时间倒序，可筛进行中/需处理/已完成/已中止。任务页在 origin 指向方案时面包屑链接项目／方案运行／任务，普通任务旧面包屑不变。
 - `src/web/narrate.js` 集中状态、停止、票状态、费用等文案；HTML 渲染保持纯函数、DOM 更新留在页面装配部分；颜色沿用 tokens.css 令牌，静态文件仍是一层扁平小写名。
 
-实现：`src/application/plan-run-store.ts`、`src/application/live.ts`、`src/application/plan-runtime.ts`、`src/application/platform.ts`、`src/api/server.ts`、`src/main.ts`、`src/web/plan-run.js`、`src/web/projects.js`、`src/web/task.js`、`src/web/narrate.js`。
+实现：`src/application/plan-run-store.ts`、`src/application/live.ts`、`src/application/plan-runtime.ts`、`src/application/platform.ts`、`src/api/server.ts`、`src/main.ts`、`src/run-plan.ts`、`src/web/plan-run.js`、`src/web/projects.js`、`src/web/task.js`、`src/web/narrate.js`。
