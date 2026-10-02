@@ -17,6 +17,7 @@ import * as budgetUsage from './platform/budget-usage.ts';
 import * as missionControl from './platform/mission-control.ts';
 import * as planning from './platform/planning.ts';
 import * as escalations from './platform/escalations.ts';
+import * as ticketBudget from './platform/ticket-budget.ts';
 import * as lightweightSubmission from './platform/lightweight-submission.ts';
 import * as lightweightValidation from './platform/lightweight-validation.ts';
 import * as lightweightDispatch from './platform/lightweight-dispatch.ts';
@@ -1388,6 +1389,29 @@ export class Platform {
     answer: string,
   ): Promise<{ question: string; answer: string }> {
     return escalations.answerEscalation(this.#context, missionId, answer);
+  }
+
+  /**
+   * 独立票级门禁：费用上限已触及或工作项达未批准检查点时停等并升级给检视者。
+   * 薄转调：业务实现落在 platform/ticket-budget.ts，本事务里一并提交。
+   */
+  async enforceMissionTicketGates(
+    missionId: string,
+    attemptId?: string,
+  ): Promise<{ stopped: boolean; reason?: WaitReason; detail?: string }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => ticketBudget.enforceMissionTicketGates(this.#context, missionId, attemptId));
+  }
+
+  /**
+   * 提升票级费用上限（默认 +$10）；薄转调 platform/ticket-budget.ts。
+   */
+  async raiseMissionCostCap(
+    missionId: string,
+    by: number = 10,
+  ): Promise<{ costCap: number }> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => ticketBudget.raiseMissionCostCap(this.#context, missionId, by));
   }
 
   /**
