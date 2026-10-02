@@ -1,6 +1,8 @@
 import type { Mission, WorkItem, MissionResultBody } from '../../kernel/index.ts';
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 import { criteriaList } from './agent-view-helpers.ts';
+import { validateMissionResultCriteria } from './mission-result-criteria.ts';
+import { collectMissionResultAttachments } from './mission-result-attachments.ts';
 import { resultDeliveryKey } from '../delivery.ts';
 
 export async function retireWorkItem(
@@ -52,6 +54,10 @@ export async function submitMissionResult(
     body: MissionResultBody,
   ): Promise<void> {
     const { mission } = await ctx.requireAttempt(missionId, attemptId, 'coordinator');
+    // 逐条结论先校验：形状不对就 throws，**任何状态改动之前**。放在这里而不是
+    // recordResult 里，是因为聚合一旦进去了就查不出来那一条缺号是协调者给的
+    // 还是平台算错的。旧交卷没有 criteria（那时是自由文本）——那时跳校验。
+    validateMissionResultCriteria(body.criteria, mission.contract?.acceptance.length ?? 0);
     if (body.outcome === 'delivered') {
       // 作废掉的不算"没做完"——它是被判定为不用做了，拦着交卷没有道理。
       // 早先只认 accepted，于是任何作废过工作项的 Mission 都永远交不了卷，
@@ -68,7 +74,10 @@ export async function submitMissionResult(
         );
       }
     }
-    mission.recordResult(body);
+    // 附件是平台从记录里搬来的事实，**始终覆盖** caller 给的那一格：
+    // 谁说了什么必须对得上，交卷人自称的结果不算数。
+    const attachments = await collectMissionResultAttachments(ctx, mission);
+    mission.recordResult({ ...body, attachments });
     // **交卷 ≠ 完成。** 改动还躺在未合并的分支上，要等 L3 最终检视。
     // 名额也继续握着——这时候放掉，下一条 Mission 就会从看不见这些改动的
     // 基线上分叉。

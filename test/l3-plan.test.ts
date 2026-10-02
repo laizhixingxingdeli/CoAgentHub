@@ -1562,6 +1562,9 @@ function deliverScripts(workItemId = 'W-1'): ScriptTable {
           body: {
             outcome: 'delivered',
             summary: '交付',
+            // W-441：交卷闸门按契约要求显式逐条判 criteria；缺 criteria 就一直等 L3，
+            // 这两条合入场景会走到超时取消而不是它们要测的合入面。
+            criteria: [{ index: 1, status: 'pass', evidence: '测试替身：逐条核过' }],
             acceptanceEvidence: [],
             memoryDelta: [],
             openRisks: [],

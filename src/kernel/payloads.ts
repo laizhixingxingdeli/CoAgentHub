@@ -568,6 +568,42 @@ export interface MemoryDeltaProposal {
   readonly body: string;
 }
 
+/**
+ * 一条验收标准的结论。
+ *
+ * 契约验收标准是**有序定长**的列表，所以行项自带 `index`（从 1 起）而不是靠
+ * 数组位置：少一条、重一条、顺序乱了都能被引擎查出来，不会静默错位。
+ */
+export interface MissionResultCriterion {
+  readonly index: number;
+  /** `not_applicable` 必须带理由，否则等于一句话把标准划掉。 */
+  readonly status: 'pass' | 'fail' | 'unverified' | 'not_applicable';
+  readonly evidence: string;
+}
+
+/**
+ * 平台自己生成的交卷附件。
+ *
+ * 和 criteria **分开**放着：criteria 是协调者逐条打的结论，这些是平台从集成
+ * 验证、 diff、 pi 记录里原样搬来的事实。混进 criteria 里就会让"谁说的"变
+ * 模糊——协调者的判断和机器的输出不承担同样的责任。
+ *
+ * 全部 nullable：缺了是"这次没跑到"，不是"结果是空的"，两者不能合并成""。
+ */
+export interface MissionResultPlatformAttachments {
+  readonly lastFullTest: { readonly resultLine: string; readonly source: string } | null;
+  readonly diffStats:
+    | { readonly files: number; readonly insertions: number; readonly deletions: number }
+    | null;
+  /** 每条标准对应哪些 WorkItem——一条标准常常要几个工单合起来才成立。 */
+  readonly criterionWorkItems: readonly {
+    readonly index: number;
+    readonly workItemIds: readonly string[];
+  }[];
+  /** 想附但拿不到的东西，比如集成验证根本没跑过。写清楚为什么缺。 */
+  readonly unavailable: readonly string[];
+}
+
 export interface MissionResultBody {
   readonly outcome: 'delivered' | 'blocked';
   readonly summary: string;
@@ -575,6 +611,15 @@ export interface MissionResultBody {
   /** 本次该沉淀的长期知识。**没有就空数组**——不是每次改动都该留永久文档。 */
   readonly memoryDelta: readonly MemoryDeltaProposal[];
   readonly openRisks: readonly string[];
+  /**
+   * 逐条验收标准的结论。
+   *
+   * **可选**：早先交卷的结果里没有这个字段（`acceptanceEvidence` 是自由文
+   * 本），历史 Mission 必须还能读回来，不能因为缺它就解析失败。
+   */
+  readonly criteria?: readonly MissionResultCriterion[];
+  /** 平台自动附加的机器产出，写 side-channel 而非挤进 summary。 */
+  readonly attachments?: MissionResultPlatformAttachments;
 }
 
 /**
