@@ -6,7 +6,7 @@
 
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -526,9 +526,20 @@ describe('ValidationEngine — report shape, authority, immutability', () => {
 });
 
 describe('static isolation', () => {
-  test('orchestrator.ts / platform.ts 无 ValidationEngine production import', () => {
+  test('orchestrator.ts / platform.ts(+platform/ 全部实际 .ts) 无 ValidationEngine production import', () => {
     const orch = readFileSync(join(srcRoot, 'application/orchestrator.ts'), 'utf8');
-    const plat = readFileSync(join(srcRoot, 'application/platform.ts'), 'utf8');
+    // 入口源码 + platform/ 全部实际 .ts 源码；目录不存在只读入口，存在目录错误不吞。
+    let plat = readFileSync(join(srcRoot, 'application/platform.ts'), 'utf8');
+    const platDir = join(srcRoot, 'application/platform');
+    try {
+      for (const name of readdirSync(platDir)) {
+        if (name.endsWith('.ts')) {
+          plat += readFileSync(join(platDir, name), 'utf8');
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
     assert.doesNotMatch(orch, /ValidationEngine/);
     assert.doesNotMatch(orch, /application\/validation/);
     assert.doesNotMatch(plat, /ValidationEngine/);

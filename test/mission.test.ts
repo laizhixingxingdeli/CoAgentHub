@@ -606,6 +606,10 @@ describe('Mission: complexityAssessment', () => {
     ]);
     const routeBranch =
       /if\s*\([^)]*complexityAssessment|complexityAssessment\s*[=!]=|switch\s*\([^)]*complexityAssessment/;
+    // 平台子模块：入口 platform.ts + platform/ 下实际 .ts 文件，受同一套护栏约束。
+    const isPlatform = (rel: string) =>
+      rel === 'application/platform.ts' ||
+      (rel.startsWith('application/platform/') && rel.endsWith('.ts'));
 
     for (const full of files) {
       const rel = full.slice(srcRoot.length).replaceAll('\\', '/');
@@ -624,7 +628,7 @@ describe('Mission: complexityAssessment', () => {
         );
         continue;
       }
-      if (ALLOW_PERSIST.has(rel)) {
+      if (ALLOW_PERSIST.has(rel) || isPlatform(rel)) {
         assert.doesNotMatch(
           source,
           routeBranch,
@@ -948,6 +952,10 @@ describe('Mission: executionBudget', () => {
       'application/platform.ts',
       'application/orchestrator.ts',
     ]);
+    // 平台子模块：入口 platform.ts + platform/ 下实际 .ts 文件，拥有与旧 platform 相同的 executionBudget 权限。
+    const isPlatform = (rel: string) =>
+      rel === 'application/platform.ts' ||
+      (rel.startsWith('application/platform/') && rel.endsWith('.ts'));
 
     for (const full of files) {
       const rel = full.slice(srcRoot.length).replaceAll('\\', '/');
@@ -964,7 +972,7 @@ describe('Mission: executionBudget', () => {
         );
         continue;
       }
-      if (allowedField.has(rel)) continue;
+      if (allowedField.has(rel) || isPlatform(rel)) continue;
       assert.doesNotMatch(
         source,
         /executionBudget/,
