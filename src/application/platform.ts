@@ -1,4 +1,8 @@
 import * as mutationLane from './platform/mutation-lane.ts';
+import * as reviewerTodos from './platform/reviewer-todos.ts';
+import { getMasterMergeBrief } from './platform/master-brief.ts';
+import * as reviewerDuty from './platform/reviewer-duty.ts';
+export type { ReviewerTodo, ReviewerTodoDecision } from './platform/reviewer-todos.ts';
 import * as machineFinalization from './platform/machine-finalization.ts';
 import * as finalReview from './platform/final-review.ts';
 import { assertFinalizePolicy } from './platform/final-review.ts';
@@ -209,6 +213,7 @@ export { PlatformRuleError } from './platform/context.ts';
 
 export class Platform {
   #context: PlatformContext;
+  #reviewerQueue: Promise<unknown> = Promise.resolve();
   get #projects(): ProjectRepository { return this.#context.projects; }
   get #activity(): ActivityLog { return this.#context.activity; }
   get #ids(): IdGenerator { return this.#context.ids; }
@@ -229,6 +234,50 @@ export class Platform {
   }
 
   /* =============================== L3 面 =============================== */
+
+  async listReviewerTodos(projectId?: string): Promise<reviewerTodos.ReviewerTodo[]> {
+    return reviewerTodos.listReviewerTodos(this.#context, projectId);
+  }
+
+  async getMasterMergeBrief(projectId: string) {
+    return getMasterMergeBrief(this.#context, projectId);
+  }
+
+  async getReviewerDuty(projectId: string) {
+    return reviewerDuty.getReviewerDuty(this.#context, projectId);
+  }
+
+  async changeReviewerDuty(projectId: string, input: reviewerDuty.DutyCommand) {
+    return this.#reviewerTx(() => reviewerDuty.changeReviewerDuty(this.#context, projectId, input));
+  }
+
+  #reviewerTx<T>(action: () => Promise<T>): Promise<T> {
+    if (this.#transaction) return this.#tx(action);
+    // 内存装配没有仓储事务，也必须让领取与控制请求互斥。
+    const result = this.#reviewerQueue.then(action);
+    this.#reviewerQueue = result.catch(() => undefined);
+    return result;
+  }
+
+  /** HTTP L3 控制请求的租约核对与写入共用事务，防止检查后被交接。 */
+  async withReviewerControl<T>(projectId: string, identity: { owner: string; generation: number }, action: () => Promise<T>): Promise<T> {
+    return this.#reviewerTx(async () => {
+      const duty = await reviewerDuty.getReviewerDuty(this.#context, projectId);
+      if (duty?.active || identity.owner) {
+        await reviewerDuty.requireReviewerDuty(this.#context, projectId, identity.owner, identity.generation);
+      }
+      return action();
+    });
+  }
+
+  async requireReviewerDuty(projectId: string, owner: string, generation: number): Promise<void> {
+    return reviewerDuty.requireReviewerDuty(this.#context, projectId, owner, generation);
+  }
+
+  async decideReviewerTodo(todoId: string, input: reviewerTodos.ReviewerTodoDecision): Promise<reviewerTodos.ReviewerTodo> {
+    return this.#tx(() => reviewerTodos.decideReviewerTodo(this.#context,
+      (id, request) => this.parkMission(id, request), todoId, input));
+  }
 
   async createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。

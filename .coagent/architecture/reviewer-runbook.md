@@ -73,3 +73,13 @@
 2. 经适配器实测一次（query 角色读一个文件，确认工具调用正常）。
 3. 加候选：服务开着用 `POST /api/pools`；coagent-pi 独立状态用 `C:/program1/coagent-experiments/roles/pool-pi-state.ts`。候选池只增不删。
 4. 改启动脚本 `run-plan-platform.mjs` 的 `--coordinator` / `--executor`；下一次开跑生效。
+
+## 9. 检视者值守与统一待办（2026-10-03 后端）
+
+新接口见 `docs/http-api.md`。先读取 `/api/reviewer/todos` 权威投影，再读 Mission/PlanRun 详情和证据；列表不会消费 Delivery。确认通知仅停止重复提醒，不能代替升级答案、检查点签名或交卷审查；等用户会 park，恢复仍走 parked-resume。
+
+值守通过 `/api/projects/:id/reviewer-duty` claim 领取五分钟租约，每分钟 renew。handoff 递增代次，旧会话不能续约或守候；L3 写操作须携带真实 owner 与 generation。值守不是鉴权，D1d 仍暂缓。显式守候脚本 `node scripts/reviewer-watch.ts <projectId> <会话ID>` 只打印变化；不创建定时任务，本会话按用户要求不启动守候。
+
+可选 `node scripts/reviewer-mcp.ts` 提供六个新增工作流工具，仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
+
+`/api/projects/:id/master-brief` 只提供简报，不执行 master 合并。没有当前 HEAD 的可信平台全量报告时 ready=false，直接实施批的终端测试日志不会被伪造为平台报告。用户签名仍是合 master 的前置。

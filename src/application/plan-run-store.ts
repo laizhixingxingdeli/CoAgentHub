@@ -329,3 +329,18 @@ export function readPlanRunById(dirs: readonly string[], id: string): PlanRunRea
   }
   return { status: 'missing' };
 }
+
+/** HTTP 决策与驱动复用同一短锁；拿锁后重新读，并验证文件身份。 */
+export async function updatePlanRunById<T>(dirs: readonly string[], id: string, mutate: (run: PlanRun) => T): Promise<T> {
+  if (isSafePlanRunId(id)) {
+    for (const dir of uniqueResolvedDirs(dirs)) {
+      const file = planRunFileInDir(dir, id);
+      if (file === undefined || !existsSync(file)) continue;
+      return new FilePlanRunStore(file).update((run) => {
+        if (run.id !== id) throw new PlatformRuleError('PLAN_RUN_CORRUPT', '记录 id 与文件名不一致');
+        return mutate(run);
+      });
+    }
+  }
+  throw new PlatformRuleError('PLAN_RUN_NOT_FOUND', '没有方案运行记录');
+}

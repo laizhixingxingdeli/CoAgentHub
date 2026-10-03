@@ -520,6 +520,14 @@ const EVENT_TABLE = {
     detail: or(event && event.data && event.data.mergedInto, '改动已经落到目标分支'),
   }),
 
+  'reviewer.todo_decided': (event) => ({
+    badge: 'L3', action: '检视者处理待办',
+    detail: `${or(event.data?.reviewer, '检视者')}：${or(event.data?.action, '处理')}；${or(event.data?.reason, '未提供理由')}`,
+  }),
+  'reviewer.duty_changed': (event) => ({
+    badge: 'L3', action: '项目值守变更',
+    detail: `${or(event.data?.owner, '未指定会话')}，代次 ${num(event.data?.generation)}；${or(event.data?.action, '更新')}`,
+  }),
   'workspace.branch_cleanup_failed': (event) => ({
     badge: 'L3', action: '合入后保留 Mission 分支', detail: text(event?.data?.reason),
   }),
