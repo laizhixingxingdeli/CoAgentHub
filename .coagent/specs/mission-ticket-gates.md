@@ -16,6 +16,20 @@
 
 创建第15项时保留新工作项，但停下派发，以 `work_item_checkpoint` 等待并开可答复 Mission 升级。检视者答复继续批准该检查点后解除等待；第30、45…项再次询问是否拆票。
 
+### 显式签名检查点批准与恢复
+
+自然语言答复可能因包含否定场景名（例如 `reject`）被现有解析规则判作拒绝，导致升级已答复但检查点仍等待。保留现有自然语言规则及已答复历史，不改费用门禁；检视者可使用显式通路恢复同一 Mission。
+
+`Platform.approveWorkItemCheckpoint` 在单一事务内批准工作项检查点。`threshold` 必须为正整数且为15的倍数，已实际到达，存在对应 `platformGate` 检查点升级（包括已答复升级），并对应当前下一未批准检查点；禁止批准未来检查点。`reviewer` 与 `reason` 必须非空。成功记录 `mission.work_item_checkpoint.approved`，包含 `threshold`、`reviewer`、`reason`，原已答复升级历史不可覆盖。
+
+重复批准同一已批准 `threshold` 幂等，不重复事件。批准只清理匹配的 `work_item_checkpoint` 等待，不解除其他门禁，不改变 `costCap`。后续仍在第30、45…项遇到相应检查点。
+
+检视者命令：`node src/l3.ts checkpoint approve <missionId> --threshold 15 --as <reviewer> --reason <reason>`。常驻服务持锁时复用现有回环转发；控制 HTTP 入口复用既有控制鉴权与错误返回，均经同一 Platform 方法，不直接编辑状态、不引入新凭据。
+
 ## 验证
 
 `test/ticket-budget.test.ts` 两条综合场景：上报费用到$10停等，增额后同Mission续跑（含重跑链、免费与订阅归因）；第15项停派发，继续后解除，第30项再次停等。等待原因中文同时由 narrate.js 与 API 既有翻译表覆盖。
+
+`test/checkpoint-recovery.test.ts` 一条临时持久状态回归：含 `reject` 场景名的批准答复后，无开放升级仍检查点等待；显式签名批准后原 Mission 可继续，历史与 `costCap` 不变。
+
+`test/l3-checkpoint-approval.test.ts` 一条综合临时状态测试：HTTP 与 CLI（含回环转发）的签名批准、重复批准零重复事件，表驱动拒绝未来检查点及缺签名；复用既有控制授权。
