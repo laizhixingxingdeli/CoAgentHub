@@ -1413,6 +1413,18 @@ export class Platform {
   }
 
   /**
+   * 显式签名批准一个工作项检查点：门禁校验与写事件在同一个事务里完成。
+   * 本模块不开事务，业务实现直接落进本 #tx，调用方拿到的就是要么一起提交、要么一起回滚。
+   */
+  async approveWorkItemCheckpoint(
+    missionId: string,
+    input: { threshold: number; reviewer: string; reason: string },
+  ): Promise<{ threshold: number; approved: true; alreadyApproved: boolean }> {
+    // 单事务命令：签名校验、当前已到达 15 倍数、历史门禁、禁止跳过/未来、写批准事件一次提交。
+    return this.#tx(() => ticketBudget.approveWorkItemCheckpoint(this.#context, missionId, input));
+  }
+
+  /**
    * 轻量没有协调者可重派：只能在本事务里把「这条升级对应的」blocked 工单 dispatch。
    * 不能走 dispatchWorkItems（会要 coordinator attempt），也不能走 dispatchLightweightWorkItem
    * （只接受 created）。Standard 或对不上 attemptId 的项一律不动，避免误派。
