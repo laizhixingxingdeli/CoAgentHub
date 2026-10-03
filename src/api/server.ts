@@ -71,6 +71,14 @@ import {
 export const API_VERSION = 'v1';
 
 /**
+ * POST /api/missions/:id/checkpoint/approve 的输入形状校验用。
+ *
+ * 与 Platform 里的 WORK_ITEM_CHECKPOINT_INTERVAL 是同一个 15，这里不 import：
+ * 接口层只验形状，业务规则只有 Platform 一份；反向 import 会把接口层钉在用例模块上。
+ */
+const CHECKPOINT_THRESHOLD_INTERVAL = 15;
+
+/**
  * 成功的模型清单在同一 createApi 实例内缓存这么久。
  * 适配层一次约数秒，页面连刷不能每次都等；到期必须重取，否则界面会选已经下线的模型。
  */
@@ -1514,6 +1522,29 @@ export function createApi(deps: ApiDeps): Server {
       const by = body.by === undefined ? 10 : body.by;
       if (typeof by !== 'number' || !Number.isFinite(by) || by <= 0) throw new HttpError(400, 'INVALID_COST_CAP', 'by 必须是有限正数（美元）');
       return send(res, 200, await platform.raiseMissionCostCap(budgetRaiseMatch[1], by));
+    }
+
+    // 显式签名批准工作项检查点：权限沿用答复升级那一格（与 costCap 增额同一格），不新增 policy 动作。
+    // 这里只验**输入形状**（threshold/reviewer/reason 的类型与取值区间）；业务规则（到达、
+    // 历史门禁、禁止跳过/未来、幂等）只有 Platform 一份，重复一遍就会漂。
+    const checkpointApproveMatch = /^\/api\/missions\/([^/]+)\/checkpoint\/approve$/.exec(path);
+    if (method === 'POST' && checkpointApproveMatch) {
+      await requireControl(req, POLICY_ACTION.missionAnswerEscalation);
+      const body = await readJson(req);
+      const reviewer = body.reviewer;
+      const reason = body.reason;
+      if (typeof reviewer !== 'string' || reviewer.trim().length === 0) {
+        throw new HttpError(400, 'INVALID_CHECKPOINT_SIGNATURE', 'reviewer 必须是 trim 后非空字符串');
+      }
+      if (typeof reason !== 'string' || reason.trim().length === 0) {
+        throw new HttpError(400, 'INVALID_CHECKPOINT_SIGNATURE', 'reason 必须是 trim 后非空字符串');
+      }
+      // 15 的正整数倍：非 15 倍数和 Platform 投出的检查点卡对不上，会永不恢复。
+      const threshold = body.threshold;
+      if (typeof threshold !== 'number' || !Number.isInteger(threshold) || threshold <= 0 || threshold % CHECKPOINT_THRESHOLD_INTERVAL !== 0) {
+        throw new HttpError(400, 'INVALID_CHECKPOINT_THRESHOLD', `threshold 必须是 ${CHECKPOINT_THRESHOLD_INTERVAL} 的正整数倍`);
+      }
+      return send(res, 200, await platform.approveWorkItemCheckpoint(checkpointApproveMatch[1], { threshold, reviewer, reason }));
     }
 
     const answerMatch = /^\/api\/missions\/([^/]+)\/escalations\/answer$/.exec(path);
