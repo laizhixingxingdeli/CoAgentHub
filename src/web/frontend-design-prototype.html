@@ -55,7 +55,12 @@ models=function(){return `<div class="tabs">${Object.entries(roles).map(([id,n])
 docs=function(){return `<div class="panel"><h3>文档变更记录</h3><p>显示项目规则、架构说明和运行流程的修改提议：改了哪里、为什么改、是否由检视者批准，以及最终提交记录。</p><div class="row"><span><b>运行流程补充 · 第 2 版</b><br><span class="muted">样例 · 待检视者处理 · 尚未提交</span></span><button data-modal="document">查看差异说明</button></div><p class="muted">用户在聊天里与检视者讨论和决定，这里只用于查看记录，不提供用户审批操作。</p></div>`;};
 const platformBeforeExplanation=platform;platform=function(){return '<div class="notice"><span>运行诊断用于排查服务异常、模型候选故障、桥接投递及配置问题；任务执行进度在任务详情查看。</span></div>'+platformBeforeExplanation();};
 const renderBeforeNoTodos=render;render=function(){if(s.page==='todos')s.page='home';renderBeforeNoTodos();};document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.dataset.move===undefined)return;const i=Number(b.dataset.move),j=i+Number(b.dataset.dir),a=s.priorities[s.role];if(j>=0&&j<a.length){[a[i],a[j]]=[a[j],a[i]];render();}});render();
+</script><script>
+delete names.docs;delete names.platform;
+const homeStatusStyle=document.createElement('style');homeStatusStyle.textContent='.home-platform-status{display:flex;flex-wrap:wrap;gap:9px 20px;align-items:center;background:#eaf1fb;border:1px solid #d1dff2;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px}.home-platform-status strong{color:#405e87}.home-platform-status .diagnostic-note{color:#6c7c92;margin-left:auto}.home-platform-status details{margin:0;width:100%}.home-platform-status details p{margin:8px 0 2px}';document.head.append(homeStatusStyle);
+const renderBeforeHomeStatus=render;render=function(){if(s.page==='docs'||s.page==='platform')s.page='home';renderBeforeHomeStatus();if(s.page==='home'){const banner=document.querySelector('main>.demo');banner.insertAdjacentHTML('afterend',`<section class="home-platform-status" aria-label="平台状态"><strong>平台状态</strong><span>服务：${tag('未连接 · 演示')}</span><span>运行：1 项 · 样例</span><span>模型异常：未知</span><span>检视桥接：未验证</span><span class="diagnostic-note">离线原型，未查询真实健康状态</span><details><summary>展开诊断说明</summary><p>正式首页显示服务健康、正在运行的任务数、模型候选异常和桥接实际投递状态。异常可展开具体原因与记录；健康检查失败显示不可用或过期，不伪装为正常。任务执行过程仍在下方时间线查看。</p></details></section>`);}};render();
 </script></html>
+
 
 
 
