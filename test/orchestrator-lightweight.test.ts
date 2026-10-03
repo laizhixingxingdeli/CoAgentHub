@@ -1073,6 +1073,16 @@ describe('Orchestrator Lightweight：blocked 提问停靠 L3，答复后同单�
         );
         assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 2);
         assert.ok(orch.hops.every((hop) => hop.workItemId === 'W-1' || hop.role === 'coordinator'));
+
+        // L2 归因：accept 必须绑在协调者 attempt 上，且验的是答复之后新建的那次 executor attempt，
+        // 不是提问那一跳的 blocked 提交——否则「续跑」其实是在给旧提交盖章。
+        const coord = view.coordinatorAttemptIds[0]!;
+        const execHops = orch.hops.filter((hop) => hop.role === 'executor');
+        const lastReview = view.workItems[0]!.lastReview;
+        assert.equal(lastReview?.attemptId, coord);
+        assert.equal(lastReview?.verdict, 'accept');
+        assert.equal(lastReview?.submittedAttemptId, execHops[1]!.attemptId);
+        assert.notEqual(lastReview?.submittedAttemptId, execHops[0]!.attemptId);
       },
     );
 
