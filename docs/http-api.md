@@ -8,6 +8,61 @@
 
 ## 健康与平台
 
+## 检视者待办、值守与合并简报（RV1 / RV2 / RV3 / RV5）
+
+以下读取不消费或 ACK Delivery。控制面沿用可选 resolver：读需 viewer/operator，写需 operator；未装配时沿用本机兼容行为。值守是并发所有权，不是身份认证。已领取值守的项目执行 L3 Mission 控制操作或 PlanRun 决定时，必须携带 `x-coagent-reviewer: <owner>` 与 `x-coagent-reviewer-generation: <generation>`；旧代次拒绝。未采用值守协议的项目保留既有调用方式。
+
+### GET /api/reviewer/todos
+
+可选查询 `projectId`。返回 `{todos:[{id,projectId,missionId,kind,title,at,blocking,state,notify}]}`；kind 包括 question、diagnostic、cost_cap、checkpoint、result、documentation。只有当前服务实际承载的 PlanRun 升级投影为 `plan_escalation` 并带 `runId,decisionPath:"plan_run"`，历史来源仍走 Mission 路径。文档目前仅显示提议，不改变既有落地机制（RV4 尚未实现）。
+```bash
+curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/reviewer/todos?projectId=P'
+```
+
+### POST /api/reviewer/todos/:todoId
+
+输入 `{action:"acknowledge"|"wait_user"|"reopen",reviewer,reason,generation?}`，返回更新后的待办。reviewer/reason 必須非空。确认只停止重复提醒，不关闭升级、不放行门禁；等用户会调用 park，保存已验收成果并释放名额；parked 状态必须先经 parked-resume 安全同步才能 reopen。问题被权威源答复后，旧待办消失。PlanRun 升级须用专门 decide 路径。
+```bash
+curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/reviewer/todos/M%3Aescalation%3A0' -H 'Content-Type: application/json' -d '{"action":"acknowledge","reviewer":"session-A","reason":"已阅，继续调查","generation":1}'
+```
+
+### GET /api/projects/:projectId/reviewer-duty
+
+无 body，响应 `{duty:null|{projectId,owner,generation,expiresAt,released,active}}`。租约五分钟，按平台时钟判定过期；持久活动重建，服务重启不丢代次。
+```bash
+curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/reviewer-duty'
+```
+
+### POST /api/projects/:projectId/reviewer-duty
+
+输入 `{action:"claim"|"renew"|"release"|"handoff",owner,generation?,nextOwner?}`，返回上述 duty 对象。项目需至少一条 Mission 作为审计锚点。claim 与已有其它 owner 冲突；同 owner 重复 claim 幂等且不延长租约。renew/release/handoff 必须匹配当前 owner 和代次；handoff 需 nextOwner。交接或过期后重领会递增代次，旧会话不能继续写或守候。客户端建议每分钟 renew。
+```bash
+curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/projects/P/reviewer-duty' -H 'Content-Type: application/json' -d '{"action":"claim","owner":"session-A"}'
+```
+
+### GET /api/reviewer/wait
+
+查询必需 `projectId,owner,generation`，可选 `cursor,waitMs`（0–25000，默认25000）。响应 `{changed,cursor,todos}` 只包含需提醒项；同游标超时返回 changed=false。每次等待持续核对有效值守，交接或到期立即拒绝；断连停止等待。此端点不创建定时任务。
+```bash
+curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/reviewer/wait?projectId=P&owner=session-A&generation=1&waitMs=0'
+```
+
+### POST /api/plan-runs/:runId/decide
+
+输入 `{escalationId,action,decidedBy,reason?,answer?,dropFeatures?}`。action 为 answer、skip、rescope、stop、rerun_isolated；具体动作仍由 PlanRun 领域规则限制，非 answer 需要 reason。响应 `{resolution}`。decidedBy 必须是运行指定检视者；截止、额度、已解决升级均不放宽。必须由当前服务真实承载该运行，历史 PlanRun 来源不能借此写入。写入沿用记录短锁，拿锁后重新检查承载及最新状态；不写主状态文件。
+```bash
+curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/plan-runs/R/decide' -H 'Content-Type: application/json' -H 'x-coagent-reviewer: session-A' -H 'x-coagent-reviewer-generation: 1' -d '{"escalationId":"E-1","action":"skip","decidedBy":"session-A","reason":"本次明确跳过"}'
+```
+
+### GET /api/projects/:projectId/master-brief
+
+返回 `{projectId,integrationBranch,integrationHead,masterHead,ready,requiresUserSignature:true,reasons,activeMissions,verification,commits,changedFiles,missions}`；missions 汇总已合入票的验收、风险、文档标题与费用。项目需唯一可信工作区。前置检查核对真实 Git、干净集成分支、未结束 Mission/Attempt，以及与当前 HEAD 完全对应的可信平台全量 `node --test` 报告；旧 HEAD 或自由文本测试声明不算证据。无证据会明确 ready=false。接口绝不合 master。
+```bash
+curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/master-brief'
+```
+
+可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开六个上述工作流工具，所有状态仍经 HTTP；stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+
 ### GET /api/health
 
 鉴权：不需要。参数：无。
