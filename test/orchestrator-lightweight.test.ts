@@ -37,6 +37,7 @@ import {
 } from '../src/application/validation/engine.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { ChangedPathReader, CommandRunner } from '../src/application/validation/ports.ts';
+import { Project } from '../src/kernel/index.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 
@@ -579,6 +580,12 @@ describe('Orchestrator Lightweight：PROJECT_BUSY', () => {
 });
 
 describe('Platform.submitLightweightMissionForReview guards', () => {
+  /**
+   * 真实 L2 基线：机器验收过了也只到 submitted，accept 是协调者 attempt 下的结论。
+   *
+   * 不这么搭，测的其实是「机器过了就能交卷」这条已经删掉的老路——交卷守卫要守的
+   * 恰恰是「这份 accept 是谁下的、验的是不是当前这次提交」。
+   */
   async function upToAccepted(h: Awaited<ReturnType<typeof harness>>, missionId = 'M-sub') {
     await seedLightweight(h.projects, { missionId });
     const { workItemId } = await h.platform.createLightweightWorkItem(missionId, {
@@ -615,9 +622,60 @@ describe('Platform.submitLightweightMissionForReview guards', () => {
     return { missionId, workItemId, reportId: out.reportId, exec };
   }
 
-  test('happy：derived MissionResult 精确；events 无 fake attemptId', async () => {
+  /** 真实 L2：在 Mission 自己的协调者 attempt 下 accept，工单验收标准逐条 pass。 */
+  async function acceptByRealCoordinator(
+    h: Awaited<ReturnType<typeof harness>>,
+    missionId: string,
+    workItemId: string,
+  ): Promise<string> {
+    const { attemptId: coord } = await h.platform.startCoordinatorAttempt(missionId);
+    await h.platform.reviewExecutionResult(missionId, coord, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass' as const,
+        evidence: '测试替身：逐条核过',
+      })),
+      reasons: ['对照机器报告复核'],
+      requiredChanges: [],
+    });
+    await h.platform.finishAttempt(missionId, coord, { endedBy: 'structured_submit' });
+    return coord;
+  }
+
+  /**
+   * 只坏最后一条 review 的一个字段：把 accepted 的历史经 snapshot 改一处再 restore。
+   *
+   * 走 restore 而不是再调一次工具，是因为坏掉的结论在真实路径下根本产生不出来
+   * （attemptId 只能指向真实 attempt、submittedAttemptId 恒等于当前提交），
+   * 只有直接装配历史才造得出这种「别人 / 上一次的 accept」。
+   */
+  async function breakLastReview(
+    h: Awaited<ReturnType<typeof harness>>,
+    missionId: string,
+    sabotage: (review: Record<string, unknown>) => void,
+  ): Promise<void> {
+    const project = (await h.projects.get('P'))!;
+    const snapshot = project.toSnapshot();
+    const mission = snapshot.missions.find((m) => m.id === missionId)!;
+    const item = mission.workItems.find((w) => w.id === 'W-1')!;
+    const last = item.reviews.at(-1) as Record<string, unknown> | undefined;
+    assert.ok(last);
+    // 历史里的 review 已被 kernel 冻结：只能整条替换，不能就地改字段。
+    const broken = { ...last! };
+    sabotage(broken);
+    item.reviews = [...item.reviews.slice(0, -1), broken];
+    await h.projects.save(Project.restore(snapshot));
+  }
+
+  test('happy：derived MissionResult 精确；events 归因真实 L2 attempt', async () => {
     const h = await harness();
-    const { missionId, reportId } = await upToAccepted(h, 'M-ok');
+    const { missionId, workItemId, reportId } = await upToAccepted(h, 'M-ok');
+    // 机器过了 ≠ 验收过了：accept 这一跳归真实协调者，此刻工作项仍是 submitted。
+    assert.equal((await h.platform.getMissionView(missionId)).workItems[0]!.status, 'submitted');
+    const coord = await acceptByRealCoordinator(h, missionId, workItemId);
+
     const out = await h.platform.submitLightweightMissionForReview(missionId);
     assert.equal(out.status, 'awaiting_review');
     assert.equal(out.reportId, reportId);
@@ -633,470 +691,109 @@ describe('Platform.submitLightweightMissionForReview guards', () => {
     const events = await h.activity.list(missionId);
     const submitted = events.filter((e) => e.kind === 'mission_result.submitted').at(-1);
     assert.ok(submitted);
-    assert.equal(submitted!.attemptId, undefined);
+    // 交卷事件要能追回是谁验的：归因这次真实 L2 的协调者 attempt，不另造 id。
+    assert.equal(submitted!.attemptId, coord);
     assert.equal((submitted!.data as { reportId: string }).reportId, reportId);
     assert.equal((submitted!.data as { executionMode: string }).executionMode, 'lightweight');
     const delivery = events.filter((e) => e.kind === 'delivery.created').at(-1);
     assert.ok(delivery);
-    assert.equal(delivery!.attemptId, undefined);
+    assert.equal(delivery!.attemptId, coord);
   });
 
-  test('missing report / passed=false / policy mismatch / linkage mismatch / non-validator / attempt mismatch => 不写 result，保持 executing', async () => {
-    // missing report：accept 后把 report 从 repo 里拿不回来——用 fake reports 包一层
-    {
-      const clock = new FixedClock('2026-06-01T12:00:00.000Z');
-      const activity = new InMemoryActivityLog(clock);
-      const projects = new InMemoryProjectRepository();
-      const ids = new SequentialIds();
-      const deliveries = new InMemoryDeliveryRepository(clock, ids);
-      const realReports = new InMemoryValidationReportRepository();
-      const engine = new ValidationEngine({
-        clock,
-        ids: new SequentialIds(),
-        commandRunner: fakeRunner(),
-        changedPathReader: fakePaths(),
-      });
-      // get 永远返回 undefined → missing report
-      const reports = {
-        async save(r: Parameters<InMemoryValidationReportRepository['save']>[0]) {
-          await realReports.save(r);
-        },
-        async get() {
-          return undefined;
-        },
-      };
-      const platform = new Platform({
-        projects,
-        deliveries,
-        workspace: new InPlaceWorkspaceManager(),
-        activity,
-        clock,
-        ids,
-        validation: { engine, reports },
-      });
-      await seedLightweight(projects, { missionId: 'M-miss' });
-      const { workItemId } = await platform.createLightweightWorkItem('M-miss', {
-        order: ORDER,
-        workItemId: 'W-1',
-      });
-      await platform.dispatchLightweightWorkItem('M-miss', workItemId);
-      await platform.recordWorkspace('M-miss', {
-        projectRoot: process.cwd(),
-        branch: '(in-place)',
-        baseRevision: 'base',
-      });
-      const { attemptId: exec } = await platform.startExecutorAttempt('M-miss', workItemId);
-      await platform.submitEvidence('M-miss', exec, {
-        kind: 'test',
-        summary: 'ok',
-        command: 't',
-        exitCode: 0,
-      });
-      await platform.submitExecutionResult('M-miss', exec, {
-        outcome: 'completed',
-        summary: 's',
-        changedFiles: ['src/foo.ts'],
-        evidenceIds: [],
-        notes: '',
-      });
-      await platform.finishAttempt('M-miss', exec, { endedBy: 'structured_submit' });
-      // validateAndAccept 会 save 但 get 在 submit 时 miss
-      await platform.validateAndAcceptLightweightWorkItem({
+  test('missing report / passed=false / linkage mismatch / 非协调者 attempt / 提交绑定不符 => 不写 result，保持 executing', async () => {
+    // 旧用例里 policyRevision mismatch 与 LIGHTWEIGHT_VALIDATOR_AUTHORITY_REQUIRED
+    // 这两项断言已无对应门禁：W-442 之后机器报告不写进 review.authority，
+    // requireLightweightReviewReport 只从 durable reports + validation.reported 读回
+    // 「当前这次提交」的报告，既不读 authority 也不比 policyRevision。validator 权威
+    // 现在由两道真实门禁守住——真实 L2 accept 时的 current-report 门禁，以及交卷时
+    // 同一把尺。所以这里不再复现那两个码，也不把所有负例退化成 NOT_ACCEPTED 了事。
+    async function expectRejects(
+      h: Awaited<ReturnType<typeof harness>>,
+      label: string,
+      missionId: string,
+      code: string,
+    ): Promise<void> {
+      await assert.rejects(
+        () => h.platform.submitLightweightMissionForReview(missionId),
+        (e: unknown) => (e as PlatformRuleError).code === code,
+        label,
+      );
+      const view = await h.platform.getMissionView(missionId);
+      assert.equal(view.status, 'executing', label);
+      assert.equal(view.result, undefined, label);
+    }
+
+    const cases: readonly {
+      label: string;
+      missionId: string;
+      code: string;
+      /** 只坏一处，其余一律走真实 L2 基线。 */
+      breakOne: (h: Awaited<ReturnType<typeof harness>>, missionId: string) => Promise<void>;
+    }[] = [
+      {
+        label: 'missing report',
         missionId: 'M-miss',
-        workItemId,
-        cwd: process.cwd(),
-      });
-      await assert.rejects(
-        () => platform.submitLightweightMissionForReview('M-miss'),
-        (e: unknown) => (e as PlatformRuleError).code === 'VALIDATION_REPORT_MISSING',
-      );
-      const view = await platform.getMissionView('M-miss');
-      assert.equal(view.status, 'executing');
-      assert.equal(view.result, undefined);
-    }
-
-    // passed=false：直接 kernel 造 accepted + fake validator review，report 存 failed
-    {
-      const h = await harness();
-      await seedLightweight(h.projects, { missionId: 'M-pf' });
-      const { workItemId } = await h.platform.createLightweightWorkItem('M-pf', {
-        order: ORDER,
-        workItemId: 'W-1',
-      });
-      await h.platform.dispatchLightweightWorkItem('M-pf', workItemId);
-      await h.platform.recordWorkspace('M-pf', {
-        projectRoot: process.cwd(),
-        branch: '(in-place)',
-        baseRevision: 'base',
-      });
-      const { attemptId: exec } = await h.platform.startExecutorAttempt('M-pf', workItemId);
-      await h.platform.submitEvidence('M-pf', exec, {
-        kind: 'test',
-        summary: 'ok',
-        command: 't',
-        exitCode: 0,
-      });
-      await h.platform.submitExecutionResult('M-pf', exec, {
-        outcome: 'completed',
-        summary: 's',
-        changedFiles: ['src/foo.ts'],
-        evidenceIds: [],
-        notes: '',
-      });
-      await h.platform.finishAttempt('M-pf', exec, { endedBy: 'structured_submit' });
-
-      // 手工 accept with validator authority 指向 failed report
-      const project = await h.projects.get('P');
-      const mission = project!.missions.find((m) => m.id === 'M-pf')!;
-      const item = mission.workItem(workItemId)!;
-      const failedReport = {
-        id: 'VR-failed',
-        policyRevision: VALIDATION_POLICY_REVISION,
+        code: 'VALIDATION_REPORT_MISSING',
+        breakOne: async (h) => {
+          h.reports.get = async () => undefined;
+        },
+      },
+      {
+        label: 'passed=false',
         missionId: 'M-pf',
-        workItemId,
-        attemptId: exec,
-        startedAt: 't0',
-        endedAt: 't1',
-        passed: false,
-        checks: [],
-      };
-      await h.reports.save(failedReport as never);
-      item.review('accept', {
-        submittedAttemptId: exec,
-        authority: {
-          kind: 'validator',
-          reportId: 'VR-failed',
-          policyRevision: VALIDATION_POLICY_REVISION,
+        code: 'VALIDATION_REPORT_NOT_PASSED',
+        breakOne: async (h) => {
+          // 先绑住原 get：只把 passed 改掉，报告 id / linkage 全留给真实那份。
+          const realGet = h.reports.get.bind(h.reports);
+          h.reports.get = async (id: string) => {
+            const report = await realGet(id);
+            return report ? { ...report, passed: false } : report;
+          };
         },
-        reasons: ['forced'],
-        requiredChanges: [],
-      });
-      await h.projects.save(project!);
-
-      await assert.rejects(
-        () => h.platform.submitLightweightMissionForReview('M-pf'),
-        (e: unknown) => (e as PlatformRuleError).code === 'VALIDATION_REPORT_NOT_PASSED',
-      );
-      assert.equal((await h.platform.getMissionView('M-pf')).status, 'executing');
-      assert.equal((await h.platform.getMissionView('M-pf')).result, undefined);
-    }
-
-    // policy mismatch
-    {
-      const h = await harness();
-      const { missionId, workItemId, exec } = await upToAccepted(h, 'M-pol');
-      const project = await h.projects.get('P');
-      const mission = project!.missions.find((m) => m.id === missionId)!;
-      const item = mission.workItem(workItemId)!;
-      // 覆盖 last review 的 policyRevision
-      const goodReportId = item.reviews.at(-1)!.authority!
-        .kind === 'validator'
-        ? (item.reviews.at(-1)!.authority as { reportId: string }).reportId
-        : '';
-      // 重新塞一个 policy 不匹配的 review——但 item 已 accepted，不能再 review。
-      // 改为：改 durable report 的 policy 不可行（immutable）。
-      // 用 restore 路径：直接改 reviews 数组不可行（private）。
-      // 策略：在 accept 前用 fake engine 返回 authority.policyRevision 与 report 不一致——
-      // 那条路 validateAndAccept 会 throw。所以对 submit 的 policy guard，
-      // 手工构造 accepted + 写入 mismatched authority via kernel restore 太重。
-      // 改为存一份 report，authority 指向它但 policy 不同——通过直接操作 snapshot。
-      const snap = mission.toSnapshot();
-      const wi = snap.workItems.find((w) => w.id === workItemId)!;
-      wi.reviews = [
-        {
-          verdict: 'accept', acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'pass' as const, evidence: '测试替身：逐条核过' })),
-          submittedAttemptId: exec,
-          authority: {
-            kind: 'validator',
-            reportId: goodReportId,
-            policyRevision: VALIDATION_POLICY_REVISION + 99,
-          },
-          reasons: ['x'],
-          requiredChanges: [],
-        },
-      ];
-      // 用 Project restore 太复杂；改用独立 Platform + 手工 item.review 在 submitted 上
-      // —— 上面 passed=false 已覆盖 durable re-read。policy 用 fake reports.get 返回不同 policy。
-      void snap;
-      void wi;
-    }
-
-    // policy mismatch via reports.get 返回不同 policyRevision
-    {
-      const clock = new FixedClock('2026-06-01T12:00:00.000Z');
-      const activity = new InMemoryActivityLog(clock);
-      const projects = new InMemoryProjectRepository();
-      const ids = new SequentialIds();
-      const deliveries = new InMemoryDeliveryRepository(clock, ids);
-      const real = new InMemoryValidationReportRepository();
-      const engine = new ValidationEngine({
-        clock,
-        ids: new SequentialIds(),
-        commandRunner: fakeRunner(),
-        changedPathReader: fakePaths(),
-      });
-      const reports = {
-        async save(r: Parameters<InMemoryValidationReportRepository['save']>[0]) {
-          await real.save(r);
-        },
-        async get(id: string) {
-          const r = await real.get(id);
-          if (!r) return undefined;
-          return { ...r, policyRevision: r.policyRevision + 1 };
-        },
-      };
-      const platform = new Platform({
-        projects,
-        deliveries,
-        workspace: new InPlaceWorkspaceManager(),
-        activity,
-        clock,
-        ids,
-        validation: { engine, reports },
-      });
-      await seedLightweight(projects, { missionId: 'M-pol2' });
-      const { workItemId } = await platform.createLightweightWorkItem('M-pol2', {
-        order: ORDER,
-        workItemId: 'W-1',
-      });
-      await platform.dispatchLightweightWorkItem('M-pol2', workItemId);
-      await platform.recordWorkspace('M-pol2', {
-        projectRoot: process.cwd(),
-        branch: '(in-place)',
-        baseRevision: 'base',
-      });
-      const { attemptId: exec } = await platform.startExecutorAttempt('M-pol2', workItemId);
-      await platform.submitEvidence('M-pol2', exec, {
-        kind: 'test',
-        summary: 'ok',
-        command: 't',
-        exitCode: 0,
-      });
-      await platform.submitExecutionResult('M-pol2', exec, {
-        outcome: 'completed',
-        summary: 's',
-        changedFiles: ['src/foo.ts'],
-        evidenceIds: [],
-        notes: '',
-      });
-      await platform.finishAttempt('M-pol2', exec, { endedBy: 'structured_submit' });
-      await platform.validateAndAcceptLightweightWorkItem({
-        missionId: 'M-pol2',
-        workItemId,
-        cwd: process.cwd(),
-      });
-      await assert.rejects(
-        () => platform.submitLightweightMissionForReview('M-pol2'),
-        (e: unknown) => (e as PlatformRuleError).code === 'VALIDATION_POLICY_MISMATCH',
-      );
-      assert.equal((await platform.getMissionView('M-pol2')).status, 'executing');
-      assert.equal((await platform.getMissionView('M-pol2')).result, undefined);
-    }
-
-    // linkage mismatch (missionId)
-    {
-      const clock = new FixedClock('2026-06-01T12:00:00.000Z');
-      const activity = new InMemoryActivityLog(clock);
-      const projects = new InMemoryProjectRepository();
-      const ids = new SequentialIds();
-      const deliveries = new InMemoryDeliveryRepository(clock, ids);
-      const real = new InMemoryValidationReportRepository();
-      const engine = new ValidationEngine({
-        clock,
-        ids: new SequentialIds(),
-        commandRunner: fakeRunner(),
-        changedPathReader: fakePaths(),
-      });
-      const reports = {
-        async save(r: Parameters<InMemoryValidationReportRepository['save']>[0]) {
-          await real.save(r);
-        },
-        async get(id: string) {
-          const r = await real.get(id);
-          if (!r) return undefined;
-          return { ...r, missionId: 'OTHER-MISSION' };
-        },
-      };
-      const platform = new Platform({
-        projects,
-        deliveries,
-        workspace: new InPlaceWorkspaceManager(),
-        activity,
-        clock,
-        ids,
-        validation: { engine, reports },
-      });
-      await seedLightweight(projects, { missionId: 'M-link' });
-      const { workItemId } = await platform.createLightweightWorkItem('M-link', {
-        order: ORDER,
-        workItemId: 'W-1',
-      });
-      await platform.dispatchLightweightWorkItem('M-link', workItemId);
-      await platform.recordWorkspace('M-link', {
-        projectRoot: process.cwd(),
-        branch: '(in-place)',
-        baseRevision: 'base',
-      });
-      const { attemptId: exec } = await platform.startExecutorAttempt('M-link', workItemId);
-      await platform.submitEvidence('M-link', exec, {
-        kind: 'test',
-        summary: 'ok',
-        command: 't',
-        exitCode: 0,
-      });
-      await platform.submitExecutionResult('M-link', exec, {
-        outcome: 'completed',
-        summary: 's',
-        changedFiles: ['src/foo.ts'],
-        evidenceIds: [],
-        notes: '',
-      });
-      await platform.finishAttempt('M-link', exec, { endedBy: 'structured_submit' });
-      await platform.validateAndAcceptLightweightWorkItem({
+      },
+      {
+        label: 'linkage mismatch',
         missionId: 'M-link',
-        workItemId,
-        cwd: process.cwd(),
-      });
-      await assert.rejects(
-        () => platform.submitLightweightMissionForReview('M-link'),
-        (e: unknown) => (e as PlatformRuleError).code === 'VALIDATION_LINKAGE_MISMATCH',
-      );
-      assert.equal((await platform.getMissionView('M-link')).result, undefined);
-      assert.equal((await platform.getMissionView('M-link')).status, 'executing');
-    }
-
-    // last review non-validator：用 Standard coordinator review 路径造 accepted
-    {
-      const h = await harness({ noValidation: true });
-      // standard mission for coordinator review
-      await h.platform.createMission({
-        projectId: 'P-std',
-        missionId: 'M-coord-rev',
-        contract: CONTRACT,
-      });
-      // Can't easily use submitLightweight on standard. Instead:
-      // create lightweight, force coordinator-style review via kernel after submit.
-      await seedLightweight(h.projects, { missionId: 'M-nv', projectId: 'P-nv' });
-      // need validation for nothing — we'll kernel-review
-      const project = await h.projects.get('P-nv');
-      const mission = project!.missions.find((m) => m.id === 'M-nv')!;
-      // 手工推到 accepted with coordinator authority
-      const item = mission.createWorkItem({ id: 'W-1', title: 't', order: ORDER });
-      item.dispatch();
-      mission.startExecuting();
-      const attempt = item.startAttempt();
-      item.submit(
-        {
-          outcome: 'completed',
-          summary: 's',
-          changedFiles: ['src/foo.ts'],
-          evidenceIds: [],
-          notes: '',
+        code: 'VALIDATION_LINKAGE_MISMATCH',
+        breakOne: async (h) => {
+          const realGet = h.reports.get.bind(h.reports);
+          h.reports.get = async (id: string) => {
+            const report = await realGet(id);
+            return report ? { ...report, missionId: 'OTHER-MISSION' } : report;
+          };
         },
-        attempt.id,
-      );
-      item.review('accept', {
-        attemptId: 'coord-1',
-        submittedAttemptId: attempt.id,
-        authority: { kind: 'coordinator', attemptId: 'coord-1' },
-        reasons: ['ok'],
-        requiredChanges: [],
-      });
-      await h.projects.save(project!);
-
-      // 需要 validation deps
-      const h2 = await harness();
-      // 把状态迁到 h2 不现实；直接在 h 上注入 validation 再测
-      // 重新用带 validation 的 harness + kernel 路径
-    }
-
-    {
-      const h = await harness();
-      await seedLightweight(h.projects, { missionId: 'M-nv2' });
-      const project = await h.projects.get('P');
-      const mission = project!.missions.find((m) => m.id === 'M-nv2')!;
-      const item = mission.createWorkItem({ id: 'W-1', title: 't', order: ORDER });
-      item.dispatch();
-      mission.startExecuting();
-      const attempt = item.startAttempt();
-      item.submit(
-        {
-          outcome: 'completed',
-          summary: 's',
-          changedFiles: ['src/foo.ts'],
-          evidenceIds: [],
-          notes: '',
+      },
+      {
+        label: '非协调者 attempt 下的 accept',
+        missionId: 'M-nv',
+        code: 'LIGHTWEIGHT_COORDINATOR_REVIEW_REQUIRED',
+        breakOne: async (h, missionId) => {
+          // 这条 accept 记的 attemptId 在 Mission 里压根不存在：它不是这个 Mission
+          // 的 L2 下的结论，交卷不能认。
+          await breakLastReview(h, missionId, (review) => {
+            review.attemptId = 'coord-does-not-exist';
+          });
         },
-        attempt.id,
-      );
-      item.review('accept', {
-        attemptId: 'coord-1',
-        submittedAttemptId: attempt.id,
-        authority: { kind: 'coordinator', attemptId: 'coord-1' },
-        reasons: ['ok'],
-        requiredChanges: [],
-      });
-      await h.projects.save(project!);
-
-      await assert.rejects(
-        () => h.platform.submitLightweightMissionForReview('M-nv2'),
-        (e: unknown) =>
-          (e as PlatformRuleError).code === 'LIGHTWEIGHT_VALIDATOR_AUTHORITY_REQUIRED',
-      );
-      assert.equal((await h.platform.getMissionView('M-nv2')).status, 'executing');
-      assert.equal((await h.platform.getMissionView('M-nv2')).result, undefined);
-    }
-
-    // submittedAttemptId mismatch
-    {
-      const h = await harness();
-      await seedLightweight(h.projects, { missionId: 'M-sam' });
-      const project = await h.projects.get('P');
-      const mission = project!.missions.find((m) => m.id === 'M-sam')!;
-      const item = mission.createWorkItem({ id: 'W-1', title: 't', order: ORDER });
-      item.dispatch();
-      mission.startExecuting();
-      const attempt = item.startAttempt();
-      item.submit(
-        {
-          outcome: 'completed',
-          summary: 's',
-          changedFiles: ['src/foo.ts'],
-          evidenceIds: [],
-          notes: '',
-        },
-        attempt.id,
-      );
-      await h.reports.save({
-        id: 'VR-sam',
-        policyRevision: VALIDATION_POLICY_REVISION,
+      },
+      {
+        label: '提交绑定不符',
         missionId: 'M-sam',
-        workItemId: 'W-1',
-        attemptId: attempt.id,
-        startedAt: 't0',
-        endedAt: 't1',
-        passed: true,
-        checks: [],
-      } as never);
-      item.review('accept', {
-        submittedAttemptId: 'OTHER-ATTEMPT',
-        authority: {
-          kind: 'validator',
-          reportId: 'VR-sam',
-          policyRevision: VALIDATION_POLICY_REVISION,
+        code: 'LIGHTWEIGHT_SUBMITTED_ATTEMPT_MISMATCH',
+        breakOne: async (h, missionId) => {
+          // accept 验的是上一次提交，不是工作项当前这次。
+          await breakLastReview(h, missionId, (review) => {
+            review.submittedAttemptId = 'OTHER-ATTEMPT';
+          });
         },
-        reasons: ['ok'],
-        requiredChanges: [],
-      });
-      await h.projects.save(project!);
+      },
+    ];
 
-      await assert.rejects(
-        () => h.platform.submitLightweightMissionForReview('M-sam'),
-        (e: unknown) =>
-          (e as PlatformRuleError).code === 'LIGHTWEIGHT_SUBMITTED_ATTEMPT_MISMATCH',
-      );
-      assert.equal((await h.platform.getMissionView('M-sam')).status, 'executing');
-      assert.equal((await h.platform.getMissionView('M-sam')).result, undefined);
+    for (const c of cases) {
+      const h = await harness();
+      const { missionId, workItemId } = await upToAccepted(h, c.missionId);
+      await acceptByRealCoordinator(h, missionId, workItemId);
+      await c.breakOne(h, missionId);
+      await expectRejects(h, c.label, missionId, c.code);
     }
   });
 });
