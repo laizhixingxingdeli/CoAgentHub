@@ -330,3 +330,70 @@ export async function applyTicketGateAnswer(
   }
   return { released: true };
 }
+
+/**
+ * 显式签名批准一个工作项检查点。
+ *
+ * 与 answerEscalation 的「自然语言解析后自动批准」互补：这里走人工/平台显式签名，
+ * 不依赖模型读懂「继续」。校验（签名、阈值、到达、历史门禁、跳过/未来）全部在这里
+ * 做完；本模块不开事务，由 Platform 的 #tx 转调，调用方已开的事务里一起提交或一起回滚。
+ */
+export async function approveWorkItemCheckpoint(
+  ctx: PlatformContext,
+  missionId: string,
+  input: { threshold: number; reviewer: string; reason: string },
+): Promise<{ threshold: number; approved: true; alreadyApproved: boolean }> {
+  // 签名校验先于任何状态读取：空签名不该触发 load / 写盘。
+  const reviewer = typeof input.reviewer === 'string' ? input.reviewer.trim() : '';
+  if (reviewer.length === 0) {
+    throw new PlatformRuleError('INVALID_CHECKPOINT_SIGNATURE', 'reviewer 必须是 trim 后非空字符串');
+  }
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (reason.length === 0) {
+    throw new PlatformRuleError('INVALID_CHECKPOINT_SIGNATURE', 'reason 必须是 trim 后非空字符串');
+  }
+  const threshold = input.threshold;
+  // 正整数且 15 倍数：threshold 驱动事件门禁与 nextCheckpointThreshold，非 15 倍数会和
+  // enforceMissionTicketGates 投出的 15 倍数卡对不上，永不恢复。
+  if (!Number.isInteger(threshold) || threshold <= 0 || threshold % WORK_ITEM_CHECKPOINT_INTERVAL !== 0) {
+    throw new PlatformRuleError('INVALID_CHECKPOINT_THRESHOLD', `threshold 必须是 15 的正整数倍，收到 ${String(threshold)}`);
+  }
+
+  const { mission } = await ctx.locate(missionId);
+  // 到达阈值：检查点门禁只在工作项数量 >= 15 倍数时投出，没到就说没到。
+  if (mission.workItems.length < threshold) {
+    throw new PlatformRuleError('INVALID_CHECKPOINT_THRESHOLD', `工作项 ${mission.workItems.length} 个 < 检查点阈值 ${threshold}`);
+  }
+  // 历史门禁：必须曾为同 threshold 投过 work_item_checkpoint 升级（含已答复）。
+  // 没有说明这张卡是凭空造的——签名不能批准一个从未停过的检查点。
+  if (!mission.escalations.some((e) => e.platformGate?.kind === 'work_item_checkpoint' && e.platformGate.threshold === threshold)) {
+    throw new PlatformRuleError('INVALID_CHECKPOINT_THRESHOLD', `没有阈值 ${threshold} 的工作项检查点升级历史`);
+  }
+
+  // 已签名批准过同阈值的，直接返回，不写任何事件/状态。重复批准不能多投一条审批。
+  const already = (await ctx.activity.list(mission.id)).some(
+    (e) => e.kind === 'mission.work_item_checkpoint.approved' && (e.data as { threshold?: unknown } | undefined)?.threshold === threshold,
+  );
+  if (already) {
+    return { threshold, approved: true, alreadyApproved: true };
+  }
+
+  // 禁止跳过/未来：签名的阈值必须正好是下一个未批准检查点，否则等于替用户决定跳级。
+  const next = await nextCheckpointThreshold(ctx, mission);
+  if (threshold !== next) {
+    throw new PlatformRuleError('INVALID_CHECKPOINT_THRESHOLD', `阈值 ${threshold} 不是下一个检查点 ${next}，禁止跳过或提前批准`);
+  }
+
+  // 写批准事件（带签名），仅清「当前检查点等待」；不增额、不答其它升级、不碰其它等待。
+  await ctx.event(mission, 'mission.work_item_checkpoint.approved', {
+    missionId: mission.id,
+    threshold,
+    reviewer,
+    reason,
+  }, undefined, attemptIdFor(mission));
+  if (mission.waitReason === 'work_item_checkpoint') {
+    mission.setWaitReason(undefined);
+    await ctx.event(mission, 'mission.resumed', {}, undefined, attemptIdFor(mission));
+  }
+  return { threshold, approved: true, alreadyApproved: false };
+}

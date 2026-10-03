@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { collectCodeMetrics } from './code-metrics-files.ts';
 
 import type {
   Mission,
@@ -360,9 +361,19 @@ export async function collectMissionResultAttachments(
   }));
   if (diff.note) unavailable.push(diff.note);
 
+  let codeMetrics = null;
+  if (worktreeCwd && mission.workspaceRef && ctx.workspace) {
+    try {
+      const base = await ctx.workspace.targetHead(mission.workspaceRef.projectRoot);
+      const changed = await ctx.workspace.diff(mission.id, base, mission.workspaceRef.projectRoot);
+      codeMetrics = await collectCodeMetrics(worktreeCwd, changed.files);
+    } catch { unavailable.push('codeMetrics 不可用：源码或改动列表读取失败'); }
+  } else unavailable.push('codeMetrics 不可用：没有独立 worktree');
+
   return {
     lastFullTest: test.value,
     diffStats: diff.value,
+    codeMetrics,
     criterionWorkItems: criterionWorkItems(mission),
     unavailable,
   };

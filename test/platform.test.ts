@@ -280,7 +280,7 @@ describe('平台规则：能用工具层挡住的，不指望模型记得住', (
     assert.ok(last);
     assert.equal(last.attemptId, coord, 'attemptId = Coordinator reviewer Attempt');
     assert.notEqual(last.attemptId, exec);
-    assert.equal(last.submittedAttemptId, undefined);
+    assert.equal(last.submittedAttemptId, exec, '提交归因仍是 Executor，审查归因独立记录 Coordinator');
     assert.equal(last.authority, undefined);
   });
 

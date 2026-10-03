@@ -545,8 +545,23 @@ const lightweightSubmit: Scenario = {
       notes: '',
     });
     await platform.finishAttempt('M-lw', attemptId, { endedBy: 'structured_submit' });
+    // W-442 之后机器验收只留下报告，不再替协调者写 accept：这里停在 submitted 等真实 L2。
     const validated = await platform.validateAndAcceptLightweightWorkItem({ missionId: 'M-lw', workItemId, cwd: '/proj' });
-    assert.equal(validated.status, 'accepted');
+    assert.equal(validated.status, 'submitted');
+    const { attemptId: l2 } = await platform.startCoordinatorAttempt('M-lw');
+    // 交卷只认这一跳的 accept：逐条按工单 acceptance 判 pass，证据指向这次的机器报告。
+    await platform.reviewExecutionResult('M-lw', l2, {
+      workItemId,
+      verdict: 'accept',
+      acceptanceResults: order.acceptance.map((criterion) => ({
+        criterion,
+        status: 'pass' as const,
+        evidence: `机器报告 ${validated.reportId} 通过；${criterion} 复核过`,
+      })),
+      reasons: ['机器验收报告通过，逐条复核过'],
+      requiredChanges: [],
+    });
+    await platform.finishAttempt('M-lw', l2, { endedBy: 'structured_submit' });
     return (p) => p.submitLightweightMissionForReview('M-lw');
   },
   terminalEvent: 'mission_result.submitted',

@@ -224,7 +224,18 @@ export function coordinatorStartupSources(
   }));
   const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
   if (!prevEnd) {
-    return { workItemsIndex: index, sinceLastHop: [] };
+    // 快车道首跳：前面没有 coordinator，“上一跳增量”无从算起，但这一跳要验收的正是
+    // 机器验证刚过的那批成果——给空简报等于让协调者凭空判断。这里把开跑至今的全部
+    // 活动压成摘要（已提交结果、证据、机器验证报告），用的是后续各跳同一份
+    // summarizeSinceLastHop，不另造投影。standard 保持旧行为：它本来就有逐跳增量，
+    // 一次性灌进来只会淹掉重点。
+    if (mission.executionMode !== 'lightweight') {
+      return { workItemsIndex: index, sinceLastHop: [] };
+    }
+    return {
+      workItemsIndex: index,
+      sinceLastHop: summarizeSinceLastHop(mission, events, validationReports),
+    };
   }
   const prevIndex = events.findIndex((e) => e === prevEnd);
   const after = events.slice(prevIndex + 1);
@@ -308,11 +319,27 @@ function projectCriteria(order: WorkOrder | undefined): readonly number[] | '—
     : '—';
 }
 
-/** 统计视图：去重后的序号数组，`'—'` 给空数组。与给人看的 projectCriteria 分开。 */
-export function criteriaList(order: WorkOrder | undefined): readonly number[] {
+/**
+ * 统计视图：去重后的序号数组，`'—'` 给空数组。与给人看的 projectCriteria 分开。
+ *
+ * 显式写了 criteria 就照抄，不看 mission——协调者点名哪几条就是哪几条。
+ *
+ * criteria 缺省时 mission 决定语义：快车道分类常常不写 criteria，那不等于“这条
+ * 工单不覆盖任何标准”，而是整份契约都归它。只在两种情况下展开成全契约 1-based
+ * 序号——lightweight 首跳，或带 coordinator_rejected 晋升记录的工单（协调者打回
+ * 后转标准流程，账要接着记在同一条链上）。一般 standard 缺省仍按“无关联标准”
+ * 处理：那里缺省是真缺省，展开成全契约会把每条失败都算到它头上。
+ */
+export function criteriaList(order: WorkOrder | undefined, mission?: Mission): readonly number[] {
   const raw = order?.criteria;
-  if (raw === undefined) return [];
-  return [...new Set(raw.filter((n) => Number.isInteger(n)))];
+  if (raw !== undefined) return [...new Set(raw.filter((n) => Number.isInteger(n)))];
+  if (order === undefined || mission === undefined) return [];
+  const fastLane =
+    mission.executionMode === 'lightweight' ||
+    mission.promotions.some((p) => p.triggerCode === 'coordinator_rejected');
+  if (!fastLane) return [];
+  const total = mission.contract?.acceptance.length ?? 0;
+  return Array.from({ length: total }, (_, i) => i + 1);
 }
 
 

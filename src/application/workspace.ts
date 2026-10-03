@@ -131,6 +131,8 @@ export interface WorktreeReconcileResult {
 }
 
 export interface WorkspaceManager {
+  /** 成功合入并释放 worktree 后才可安全删除本 Mission 分支。 */
+  deleteMergedBranch?(missionId: string, projectRoot: string): Promise<void>;
   /**
    * @param pinnedBase 指定从哪个版本分叉。不给就用目标分支当前的 HEAD。
    *
@@ -172,6 +174,7 @@ export interface WorkspaceManager {
     projectRoot: string;
     branch: string;
     expectedBaseRevision: string;
+    message?: string;
   }): Promise<MergeOutcome>;
   /**
    * 给 L3 看的改动摘要：相对分叉基线的 diff --stat 与文件清单。
@@ -459,7 +462,7 @@ export class GitWorktreeManager implements WorkspaceManager {
     const stagedOutside = staged.filter((path) => !allowed.has(path));
     if (stagedOutside.length) throw new Error(`Git index 包含未授权路径：${stagedOutside.join(', ')}`);
     if (staged.length === 0) return;
-    await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `mission(${missionId}): ${workItemId} 检查点`], { cwd });
+    await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `chore(mission): ${workItemId} 检查点 ${missionId}`], { cwd });
   }
 
   async getMissionConflictFiles(missionId: string, projectRoot: string): Promise<string[]> {
@@ -522,6 +525,7 @@ export class GitWorktreeManager implements WorkspaceManager {
     projectRoot: string;
     branch: string;
     expectedBaseRevision: string;
+    message?: string;
   }): Promise<MergeOutcome> {
     const repo = resolve(input.projectRoot);
 
@@ -549,7 +553,7 @@ ${dirty}` };
       '执行者交付',
     );
 
-    const merge = await run('git', ['merge', '--no-ff', '--no-edit', input.branch], {
+    const merge = await run('git', ['merge', '--no-ff', '-m', input.message ?? `merge(mission): ${input.missionId}`, input.branch], {
       cwd: repo,
     }).catch((error: { stderr?: string; stdout?: string }) => ({
       stdout: '',
@@ -767,7 +771,7 @@ ${dirty}` };
         'user.email=noreply@local',
         'commit',
         '-m',
-        `mission(${missionId}): ${what}`,
+        `chore(mission): ${what} ${missionId}`,
       ],
       { cwd },
     ).catch(() => undefined);
@@ -783,6 +787,15 @@ ${dirty}` };
     // 只摘掉 worktree，**不删分支**：改动是 Mission 的产出，要留给 L3 检视。
     await run('git', ['worktree', 'remove', '--force', cwd], { cwd: repo }).catch(() => undefined);
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
+  }
+
+  async deleteMergedBranch(missionId: string, projectRoot: string): Promise<void> {
+    const cwd = join(this.#rootFor(projectRoot), missionId);
+    if (existsSync(cwd)) throw new Error('Mission worktree 尚未释放，保留分支');
+    const branch = `mission/${missionId}`;
+    // 显式核对相对当前集成 HEAD 已合入，再用 -d，避免 upstream 改变安全判断。
+    await run('git', ['merge-base', '--is-ancestor', branch, 'HEAD'], { cwd: projectRoot });
+    await run('git', ['branch', '-d', '--', branch], { cwd: projectRoot });
   }
 
   /**

@@ -193,7 +193,7 @@ test('真实 Orchestrator 成功交回 A 后按冻结授权创建 Git 检查点'
       executorHop?.endedBy === 'structured_submit',
       `expected executor:structured_submit; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`,
     );
-    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `chore(mission): W-1 检查点 ${missionId}`);
     assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
     assert.equal(git(tempRoot, 'log', '-1', '--format=%s'), 'initial');
     assert.deepEqual(ORDER.allowedScope, ['src/foo.ts']);
@@ -263,7 +263,7 @@ test('A 检查点后 B killed_idle 仅回滚 B 半成品', async () => {
       `expected sequential A/B executor hops; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`);
     assert.equal(executorHops[0].endedBy, 'structured_submit');
     assert.equal(executorHops[1].endedBy, 'killed_idle');
-    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `chore(mission): W-1 检查点 ${missionId}`);
     assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
     assert.equal(existsSync(join(missionWorktree, 'src/bar.ts')), false);
   } finally {
@@ -332,7 +332,7 @@ test('A 检查点后 B quota 仅回滚 B 半成品', async () => {
       `expected sequential A/B executor hops; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`);
     assert.equal(executorHops[0].endedBy, 'structured_submit');
     assert.equal(executorHops[1].endedBy, 'quota');
-    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `chore(mission): W-1 检查点 ${missionId}`);
     assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
     assert.equal(existsSync(join(missionWorktree, 'src/bar.ts')), false);
   } finally {
@@ -402,7 +402,7 @@ test('A 检查点后 B auth 仅回滚 B 半成品', async () => {
       `expected sequential A/B executor hops; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`);
     assert.equal(executorHops[0].endedBy, 'structured_submit');
     assert.equal(executorHops[1].endedBy, 'auth');
-    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `chore(mission): W-1 检查点 ${missionId}`);
     assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
     assert.equal(existsSync(join(missionWorktree, 'src/bar.ts')), false);
   } finally {
@@ -471,7 +471,7 @@ test('A 检查点后 B upstream_5xx 仅回滚 B 半成品', async () => {
       `expected sequential A/B executor hops; hops=${JSON.stringify(orchestrator.hops)}, result=${JSON.stringify(result)}`);
     assert.equal(executorHops[0].endedBy, 'structured_submit');
     assert.equal(executorHops[1].endedBy, 'upstream_5xx');
-    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `mission(${missionId}): W-1 检查点`);
+    assert.equal(git(missionWorktree, 'log', '-1', '--format=%s'), `chore(mission): W-1 检查点 ${missionId}`);
     assert.equal(git(missionWorktree, 'show', 'HEAD:src/foo.ts'), 'export const foo = 1;\\n');
     assert.equal(existsSync(join(missionWorktree, 'src/bar.ts')), false);
   } finally {
@@ -493,7 +493,7 @@ test('检查点 A 在回滚 B 半成品后仍保留', async () => {
     writeFileSync(join(tempRoot, 'a.txt'), 'A');
 
     await new GitWorktreeManager().checkpoint(tempRoot, 'M', 'W-A', ['a.txt']);
-    assert.equal(git('log', '-1', '--format=%s'), 'mission(M): W-A 检查点');
+    assert.equal(git('log', '-1', '--format=%s'), 'chore(mission): W-A 检查点 M');
     assert.equal(readFileSync(join(tempRoot, 'a.txt'), 'utf8'), 'A');
     const checkpointHead = git('rev-parse', 'HEAD');
 

@@ -372,7 +372,7 @@ describe('契约中途变更', () => {
 });
 
 describe('落地之后回收工作区', () => {
-  test('merge 之后 worktree 目录被摘掉，但分支留着', async () => {
+  test('merge 之后释放 worktree 并安全删除已合入的 Mission 分支', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'coagent-repo-'));
     const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(repo, worktrees);
@@ -425,7 +425,6 @@ describe('落地之后回收工作区', () => {
     await platform.finalizeMission('M-wt', { verdict: 'merge', reasons: ['ok'], projectRoot: repo });
 
     assert.doesNotMatch(git(repo, 'worktree', 'list'), /M-wt/, '落地后 worktree 该被摘掉');
-    // 分支留着：改动是 Mission 的产出，要查得到。
-    assert.match(git(repo, 'branch', '--list', 'mission/M-wt'), /mission\/M-wt/);
+    assert.equal(git(repo, 'branch', '--list', 'mission/M-wt'), '', '产出留在合并历史，已合入分支可回收');
   });
 });

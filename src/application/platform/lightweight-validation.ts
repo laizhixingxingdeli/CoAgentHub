@@ -94,14 +94,14 @@ export async function validateAndAcceptLightweightWorkItem(
     });
 
     // 跑完验收命令之后才开事务（C4）：跑命令可能要几分钟，不能占着事务。
-    // 报告、validation.reported、validator accept 一起提交；报告是 append-only 事实，authority 对不上时
+    // 报告与 validation.reported 一起提交；报告是 append-only 事实，authority 对不上时
     // 照旧保留——拒绝在事务里只做标记，提交之后再抛。
     const validation = ctx.validation;
     const committed = await ctx.tx(async () => {
       // 事务里重取：跑命令那几分钟里，活对象可能已经被别处换过。
       const { mission: live, item: liveItem } = await ctx.locateItem(input.missionId, input.workItemId);
 
-      // append-only：必须先于任何 review / accept。
+      // append-only：必须先于任何状态流转。
       await validation.reports.save(result.report);
 
       await ctx.event(
@@ -145,27 +145,10 @@ export async function validateAndAcceptLightweightWorkItem(
         return { kind: 'mismatch' as const, status: liveItem.status };
       }
 
-      liveItem.review('accept', {
-        submittedAttemptId,
-        authority,
-        reasons: [`ValidationReport ${report.id} passed`],
-        requiredChanges: [],
-      });
-
-      await ctx.event(
-        live,
-        'review.recorded',
-        {
-          verdict: 'accept',
-          authority: 'validator',
-          reportId: report.id,
-          reasons: [`ValidationReport ${report.id} passed`],
-        },
-        liveItem.id,
-        // ActivityEvent.attemptId 留空
-      );
-
-      return { kind: 'accepted' as const, status: liveItem.status };
+      // 机器过了也不 accept：验收结论归协调者（用户 09-30 定）。
+      // 一旦这里 accept，工作项直接 accepted，快车道就没有「协调者验收」这一跳了——
+      // 打回也无处可去。留在 submitted，由协调者凭这份报告下结论。
+      return { kind: 'passed' as const, status: liveItem.status };
     });
 
     if (committed.kind === 'failed') {

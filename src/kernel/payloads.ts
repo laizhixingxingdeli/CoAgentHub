@@ -99,7 +99,8 @@ export type PromotionTriggerCode =
   | 'validator_failure_unrepairable'
   | 'permission_expansion'
   | 'budget_exceeded'
-  | 'diff_intent_unprovable';
+  | 'diff_intent_unprovable'
+  | 'coordinator_rejected';
 
 /** 权威触发码表；kernel / platform 共用，禁止各写一份。 */
 export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
@@ -115,6 +116,7 @@ export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
   'permission_expansion',
   'budget_exceeded',
   'diff_intent_unprovable',
+  'coordinator_rejected',
 ] as const;
 
 export function isPromotionTriggerCode(value: unknown): value is PromotionTriggerCode {
@@ -591,6 +593,10 @@ export interface MissionResultCriterion {
  * 全部 nullable：缺了是"这次没跑到"，不是"结果是空的"，两者不能合并成""。
  */
 export interface MissionResultPlatformAttachments {
+  readonly codeMetrics?: {
+    readonly warnings: readonly { readonly path: string; readonly line: number; readonly kind: string; readonly value: number; readonly limit: number; readonly detail: string }[];
+    readonly unanalyzed: readonly string[];
+  } | null;
   readonly lastFullTest: { readonly resultLine: string; readonly source: string } | null;
   readonly diffStats:
     | { readonly files: number; readonly insertions: number; readonly deletions: number }

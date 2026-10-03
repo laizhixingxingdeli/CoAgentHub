@@ -126,6 +126,14 @@ export class PlatformContext {
   async releaseWorkspace(missionId: string, projectRoot?: string): Promise<void> {
     if (!this.workspace || !projectRoot) return;
     await this.workspace.release(missionId, projectRoot).catch(() => undefined);
+    const { mission } = await this.locate(missionId);
+    if (mission.status === 'completed' && mission.finalReview?.mergedInto && this.workspace.deleteMergedBranch) {
+      try {
+        await this.workspace.deleteMergedBranch(missionId, projectRoot);
+      } catch (error) {
+        await this.event(mission, 'workspace.branch_cleanup_failed', { reason: String(error) }).catch(() => undefined);
+      }
+    }
   }
 
   async ensureProject(projectId: string) {

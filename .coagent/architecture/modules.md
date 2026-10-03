@@ -21,6 +21,7 @@
 | `src/application/reconcile.ts`、`lock.ts`、`loopback-*.ts`、`token-issuer.ts` | 启动与周期修复、主锁（单写者）、常驻服务本机回环、run token | `acquireLock`、`probeLocalWriter` | 单机单写者 |
 | `src/application/policy-engine.ts`、`ha-authority-config.ts`、`redact.ts` | 主体 × 动作的授权表、高保证放行授权、凭据脱敏 | `PolicyEngine` | 引擎不读时钟、不碰存储 |
 | `src/application/workspace.ts` | git worktree：建、合并、回滚、检查点、改动摘要 | `GitWorktreeManager`（实现 `WorkspaceManager`） | master 不动；合并只进集成分支 |
+| `src/application/code-metrics.ts`、`platform/code-metrics-files.ts` | 零依赖近似源码告警、src 文件读取；交卷附件与离线脚本共用 | `analyzeCodeMetrics`、`collectCodeMetrics` | 仅读源码，告警不参与验收判定 |
 | `src/api/` | HTTP：路由表、agent 工具表、托管运行（`server.ts`）；网页后端视图（`web.ts`）；静态文件、run token、控制面鉴权 | `createApi` | 只调 Platform 公开方法，不写规则 |
 | `src/runtime/` | 起 agent 子进程与协议（stdin 规格、stdout 事件行与结果行）；只读查询运行时；测试用脚本运行时 | `spawn.ts`、`pi-query.ts`、`scripted.ts` | 不依赖任何 agent SDK |
 | `src/web/` | 无构建前端：路由（`app.js`）、项目页（`projects.js`、`project-catalog.js`、`project-spec.js`）、任务页（`task.js`）、收件箱（`inbox.js`）、角色与模型（`agents.js`）、设置（`settings.js`）、方案运行页、平台页、资源池页、事件叙事（`narrate.js`）、样式（`ui.css`） | `index.html` | 只走 `/api/*` |
@@ -50,7 +51,7 @@
 | 目录 | 内容 |
 |---|---|
 | `test/` | `node --test`；`helpers/`（PG 隔离库、探针），`fixtures/`（按字节比对，`-text`） |
-| `scripts/` | 离线用量报告 `context-replay-report.mjs` |
+| `scripts/` | 离线用量报告 `context-replay-report.mjs`；只告警的源码度量 `code-metrics.ts` |
 | `.coagent/` | 本文件、project.md、specs/、architecture/decisions/ |
 
 ## 相邻仓库：coagent-pi（pi 适配器）

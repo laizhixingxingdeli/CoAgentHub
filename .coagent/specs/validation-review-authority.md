@@ -10,7 +10,7 @@
 ```
 
 - 无 `executor` 分支（`src/kernel/payloads.ts`）。
-- Standard 路径继续由 Coordinator Attempt 做 `review`；Lightweight 机器验收只认 `validator`。
+- Standard 与 Lightweight 的逐条 L2 都由 Coordinator Attempt 做 `review`；Lightweight 机器验收报告的权威只认 `validator`，机器报告不替代协调者结论。
 - **这是工作项 L2 的轴，不是 Mission 终审的轴。** `FinalReviewAuthority`（human / machine / plan / reviewer）只出现在 L3 最终检视上；本文件的 ReviewAuthority 不给 executor 增加终审权，也不因为多了检视者代签就把终审下放到执行者。
 
 ## 独立检视（independent_reviewer，E2）
@@ -65,9 +65,9 @@ deny ∩ allow：changed-paths 可通过，forbidden-paths 仍 fail（deny wins�
 3. **先** `reports.save(report)`，再写 `validation.reported`。
 4. `passed=false`：报告已存，item 保持 submitted，不 accept。
 5. `passed=true`：authority/linkage（reportId、policyRevision、mission/workItem/attempt）必须一致，否则 `VALIDATION_AUTHORITY_MISMATCH`，仍不 accept。
-6. 一致则 `item.review('accept', { authority: validator, ... })`。
+6. 一致时仍保持 submitted，只保存机器事实，不写 accept；协调者必须基于本次报告给出逐条验收结论。
 
-`submitLightweightMissionForReview` 再次从仓储读 durable report：缺失 / 未通过 / policy 或 linkage 不一致一律拒绝；通过后 `submitForReview` → `awaiting_review`，**不** `complete`。
+`submitLightweightMissionForReview` 要求真实协调者 attempt 的最新 accept，绑定当前 submittedAttemptId，并再次从仓储读 durable report：缺失 / 未通过 / policy 或 linkage 不一致一律拒绝；通过后 `submitForReview` → `awaiting_review`，**不** `complete`。
 
 ## 权威源 / 测试
 

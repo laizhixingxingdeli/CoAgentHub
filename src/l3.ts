@@ -32,12 +32,19 @@ const MAIN_STATE_WRITES = new Set([
   'ack',
   'candidate',
   'budget',
+  'checkpoint',
 ]);
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
+
+/**
+ * checkpoint approve 先验阈值用的检查点间隔。与 Platform 的 WORK_ITEM_CHECKPOINT_INTERVAL
+ * 同一个 15，这里不 import：CLI 先验只是挡住明显坏值，规则本身只有 Platform 一份。
+ */
+const CHECKPOINT_THRESHOLD_INTERVAL = 15;
 
 type ReviewerSignature =
   | { readonly mode: 'human' }
@@ -60,6 +67,34 @@ function budgetRaiseBy(): number {
   const by = raw === undefined || raw.startsWith('--') ? Number.NaN : Number(raw);
   if (!Number.isFinite(by) || by <= 0) throw new Error(`--by 需要一个有限正数（美元）：${raw ?? '（缺值）'}`);
   return by;
+}
+
+/**
+ * checkpoint approve 的签名与阈值：`--threshold <15 的倍数> --as <检视者> --reason "…"`。
+ *
+ * 三个都必须是显式值：下一项是 `--` 不算值（否则 `--as --reason x` 会把 `--reason` 当成检视者名字，
+ * 签名就变了个人）。threshold 取完整 Number，不截前缀——「30abc」不能当成 30。
+ * 这里的校验只是「先验」：真正的到达/历史门禁/禁止跳级仍只有 Platform 一份。
+ */
+function checkpointApproval(): { threshold: number; reviewer: string; reason: string } {
+  const thresholdFlag = reviewFlag('--threshold');
+  const asFlag = reviewFlag('--as');
+  const reasonFlag = reviewFlag('--reason');
+  if (!thresholdFlag.present) throw new Error('需要 --threshold <15 的正整数倍>：只批准你写明的那一个检查点。');
+  if (thresholdFlag.value === undefined) throw new Error('--threshold 缺参数值：要写成 --threshold 15。');
+  const threshold = Number(thresholdFlag.value);
+  if (!Number.isInteger(threshold) || threshold <= 0 || threshold % CHECKPOINT_THRESHOLD_INTERVAL !== 0) {
+    throw new Error(`--threshold 必须是 ${CHECKPOINT_THRESHOLD_INTERVAL} 的正整数倍，收到 ${thresholdFlag.value}`);
+  }
+  if (!asFlag.present) throw new Error('需要 --as <检视者>：批准要签名，不写是谁批的不算数。');
+  if (asFlag.value === undefined) throw new Error('--as 缺参数值：要写成 --as <检视者>。');
+  const reviewer = asFlag.value.trim();
+  if (reviewer.length === 0) throw new Error('--as 的值不能只是空白。');
+  if (!reasonFlag.present) throw new Error('需要 --reason "..."：批准要留一句为什么。');
+  if (reasonFlag.value === undefined) throw new Error('--reason 缺参数值：要写成 --reason "..."。');
+  const reason = reasonFlag.value.trim();
+  if (reason.length === 0) throw new Error('--reason 的值不能只是空白。');
+  return { threshold, reviewer, reason };
 }
 
 function parseReviewerSignature(): ReviewerSignature {
@@ -197,6 +232,12 @@ function assertWriteArgs(command: string, target: string | undefined): void {
     if (target !== 'raise' || !missionId || missionId.startsWith('--')) throw new Error('需要 missionId：budget raise <missionId> [--by <美元>]。');
     budgetRaiseBy();
   }
+  if (command === 'checkpoint') {
+    // 与 budget 同构的两个前缀排列：target 是子命令 approve，missionId 在 argv[4]。
+    const missionId = process.argv[4];
+    if (target !== 'approve' || !missionId || missionId.startsWith('--')) throw new Error('需要 missionId：checkpoint approve <missionId> --threshold <15 的倍数> --as <检视者> --reason "..."。');
+    checkpointApproval();
+  }
 }
 
 async function forwardWriteCommand(holder: LockInfo, command: string, target: string): Promise<void> {
@@ -222,6 +263,18 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
     // 与本地持锁路径同一个 Platform 用例：增额规则只有一份，这里不改写也不兜底。
     const result = (await post(`/api/missions/${encodeURIComponent(missionId)}/budget/raise`, { by: budgetRaiseBy() })) as { costCap: number };
     console.log(`Mission ${missionId} 费用上限 → $${result.costCap}`);
+    return;
+  }
+
+  if (command === 'checkpoint') {
+    const missionId = process.argv[4]!;
+    // 同一个 Platform 用例（approveWorkItemCheckpoint）：批准规则只有一份，这里只搬手感签名。
+    const result = (await post(`/api/missions/${encodeURIComponent(missionId)}/checkpoint/approve`, checkpointApproval())) as {
+      threshold: number;
+      approved: boolean;
+      alreadyApproved: boolean;
+    };
+    console.log(`Mission ${missionId} 检查点 ${result.threshold} 已批准${result.alreadyApproved ? '（此前已批准，未改任何东西）' : ''}`);
     return;
   }
 
@@ -720,6 +773,16 @@ async function main() {
     return;
   }
 
+  if (command === 'checkpoint') {
+    const missionId = process.argv[4]!;
+    const approval = checkpointApproval();
+    const result = await platform.approveWorkItemCheckpoint(missionId, approval);
+    await persist();
+    // 打印批准阈值：重复批准同样成功（alreadyApproved）——幂等才敢重试，不必先查状态。
+    console.log(`Mission ${missionId} 检查点 ${result.threshold} 已批准${result.alreadyApproved ? '（此前已批准，未改任何东西）' : ''}`);
+    return;
+  }
+
   if (command === 'runs') {
     if (!target) throw new Error('需要 missionId');
     const runs = await platform.listRuns(target);
@@ -899,6 +962,7 @@ async function main() {
   node src/l3.ts ack <deliveryId>             确认收到
   node src/l3.ts candidate reset <profileId> --reason "..."  人工复位候选熔断
   node src/l3.ts budget raise <missionId> [--by <美元>]  提升票级费用上限（缺省 +$10）
+  node src/l3.ts checkpoint approve <missionId> --threshold <15 的倍数> --as <检视者> --reason "..."  签名批准工作项检查点（重复调用幂等）
   node src/l3.ts plan [--run <记录>]          方案运行交接面：✓ 已合入 / ⏸ 挂起等你 / ⊘ 检视者跳过 / ○ 没轮到
   node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "..." [--drop F7,F8] --as <检视者>
   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."] [--run <记录>]

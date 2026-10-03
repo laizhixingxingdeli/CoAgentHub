@@ -113,11 +113,13 @@ interface Ctx {
   w2?: string;
   w3?: string;
   w5?: string;
+  a3?: string;
   e1?: string;
   e2?: string;
   e3?: string;
   e5?: string;
   ev1?: string;
+  r3?: string;
   r5?: string;
 }
 interface Step {
@@ -231,7 +233,28 @@ const SCRIPT: Step[] = [
       void (await p.submitExecutionResult('M3', c.e3!, { outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '' })),
   },
   { name: 'finishAttempt e3', run: async (p, c) => void (await p.finishAttempt('M3', c.e3!, { endedBy: 'structured_submit' })) },
-  { name: 'validateAndAccept M3', run: async (p, c) => void (await p.validateAndAcceptLightweightWorkItem({ missionId: 'M3', workItemId: c.w3!, cwd: '/proj' })) },
+  // 机器验收只留报告，工作项停在 submitted：交卷前还得有真实协调者那一跳的 accept。
+  {
+    name: 'validateAndAccept M3',
+    run: async (p, c) => void (c.r3 = (await p.validateAndAcceptLightweightWorkItem({ missionId: 'M3', workItemId: c.w3!, cwd: '/proj' })).reportId),
+  },
+  { name: 'startCoordinatorAttempt a3', run: async (p, c) => void (c.a3 = (await p.startCoordinatorAttempt('M3')).attemptId) },
+  {
+    name: 'reviewExecutionResult M3',
+    run: async (p, c) =>
+      void (await p.reviewExecutionResult('M3', c.a3!, {
+        workItemId: c.w3!,
+        verdict: 'accept',
+        acceptanceResults: LW_ORDER().acceptance.map((criterion) => ({
+          criterion,
+          status: 'pass' as const,
+          evidence: `机器报告 ${c.r3!} 通过；${criterion} 复核过`,
+        })),
+        reasons: ['机器验收报告通过，逐条复核过'],
+        requiredChanges: [],
+      } as never)),
+  },
+  { name: 'finishAttempt a3', run: async (p, c) => void (await p.finishAttempt('M3', c.a3!, { endedBy: 'structured_submit' })) },
   { name: 'submitLightweightMissionForReview M3', run: async (p) => void (await p.submitLightweightMissionForReview('M3')) },
   { name: 'finalizeMission abandon M3', run: async (p) => void (await p.finalizeMission('M3', { verdict: 'abandon', reasons: ['不做了'] })) },
   // ---- Lightweight：验收失败 → 升级 Standard ----
@@ -326,6 +349,9 @@ const REQUIRED_EVENT_STEPS = [
   'dispatchWorkItems',
   'dispatchLightweightWorkItem M3',
   'reviewExecutionResult',
+  // 快车道交卷前的真实协调者验收：与上面的 Standard 复核同名不同步，各自都要被崩到。
+  'startCoordinatorAttempt a3',
+  'reviewExecutionResult M3',
   'recordOrchestrationRoundStarted',
   'recordBudgetThresholdEvents M7',
   'recordCommandTrackingEnabled',

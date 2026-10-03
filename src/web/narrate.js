@@ -520,6 +520,10 @@ const EVENT_TABLE = {
     detail: or(event && event.data && event.data.mergedInto, '改动已经落到目标分支'),
   }),
 
+  'workspace.branch_cleanup_failed': (event) => ({
+    badge: 'L3', action: '合入后保留 Mission 分支', detail: text(event?.data?.reason),
+  }),
+
   'mission.waiting': (event) => {
     const reason = text(event && event.data && event.data.reason);
     return {
