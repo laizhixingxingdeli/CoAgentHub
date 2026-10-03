@@ -27,6 +27,8 @@ function sourceTodos(mission: Mission, events: readonly ActivityEvent[]): Review
     rows.push({ id: `${mission.id}:${suffix}`, projectId: mission.projectId, missionId: mission.id,
       kind, title, at, blocking, state: 'open', notify: true });
   };
+  const queueFailure = events.filter((event) => event.kind === 'mission.queue_failed').at(-1);
+  if (queueFailure && mission.isPaused) add(`queue_failure:${events.lastIndexOf(queueFailure)}`, 'diagnostic', String((queueFailure.data as { reason?: string }).reason ?? 'Mission 队列启动失败'), queueFailure.at, true);
   mission.escalations.forEach((entry, index) => {
     if (entry.answeredAt) return;
     const opened = events.filter((event) => event.kind === 'escalation.opened')[index];

@@ -3,6 +3,7 @@ import * as reviewerTodos from './platform/reviewer-todos.ts';
 import { getMasterMergeBrief } from './platform/master-brief.ts';
 import * as reviewerDuty from './platform/reviewer-duty.ts';
 import * as documentQueue from './platform/document-queue.ts';
+import * as missionQueue from './platform/mission-queue.ts';
 export type { ReviewerTodo, ReviewerTodoDecision } from './platform/reviewer-todos.ts';
 import * as machineFinalization from './platform/machine-finalization.ts';
 import * as finalReview from './platform/final-review.ts';
@@ -237,6 +238,26 @@ export class Platform {
 
   /* =============================== L3 面 =============================== */
 
+  async getMissionQueue(projectId: string) {
+    return missionQueue.readMissionQueue(this.#context, projectId);
+  }
+
+  async configureProjectExecution(projectId: string, input: Parameters<typeof missionQueue.configureProjectExecution>[2]) {
+    return this.#reviewerTx(() => missionQueue.configureProjectExecution(this.#context, projectId, input));
+  }
+
+  async enqueueMissions(projectId: string, input: missionQueue.MissionQueueInput) {
+    return this.#reviewerTx(() => missionQueue.enqueueMissions(this.#context, projectId, input));
+  }
+
+  async recordQueuedMissionStart(missionId: string) {
+    return this.#reviewerTx(() => missionQueue.recordQueuedMissionStart(this.#context, missionId));
+  }
+
+  async holdQueuedMission(missionId: string, reason: string) {
+    return this.#tx(() => missionQueue.holdQueuedMission(this.#context, missionId, reason));
+  }
+
   async listDocumentProposals(projectId?: string) { return documentQueue.listDocumentProposals(this.#context, projectId); }
   async proposeDocument(input: Parameters<typeof documentQueue.proposeDocument>[1]) {
     return this.#tx(() => documentQueue.proposeDocument(this.#context, input));
@@ -316,7 +337,7 @@ export class Platform {
   }
 
   async #createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
-    return missionIntake.createMission(this.#context, { createMission: (input) => this.createMission(input), recordWorkspace: (id, ref) => this.recordWorkspace(id, ref) }, input);
+    return missionIntake.createMission(this.#context, input);
   }
 
   /**

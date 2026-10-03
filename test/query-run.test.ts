@@ -634,6 +634,7 @@ describe('buildPlatform 注入 query', () => {
     const built = buildPlatform(undefined, undefined, runtime);
     assert.ok(built.runQuery);
     assert.ok(built.queryRunner);
+    await built.agentPool.add({ role: 'classifier', profileId: 'query-test', endpoint: 'local' });
     const result = await built.runQuery!({
       projectId: 'P',
       prompt: 'hi',

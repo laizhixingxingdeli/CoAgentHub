@@ -21,7 +21,7 @@ import type { ExecutionProfile } from './ports.ts';
 
 /* ------------------------------ 类型 ------------------------------ */
 
-export type AgentRole = 'coordinator' | 'executor' | 'independent_reviewer';
+export type AgentRole = 'coordinator' | 'executor' | 'independent_reviewer' | 'classifier';
 
 /**
  * runtime 只有 'pi'。
@@ -64,6 +64,7 @@ export interface AgentPoolRow extends AgentPoolCandidate {
 }
 
 export interface AgentPoolSnapshot {
+  readonly classifier: readonly AgentPoolCandidate[];
   readonly coordinator: readonly AgentPoolCandidate[];
   readonly executor: readonly AgentPoolCandidate[];
   /** 老池缺这一行时 list 仍给出 []，不能当成「可以自审」。 */
@@ -120,28 +121,6 @@ export interface AgentPoolCandidateHealth {
   readonly resetCommand?: string;
 }
 
-export interface AgentPoolCandidateWithHealth extends AgentPoolCandidate {
-  readonly health: AgentPoolCandidateHealth;
-}
-
-export interface AgentPoolSnapshotWithHealth {
-  readonly coordinator: readonly AgentPoolCandidateWithHealth[];
-  readonly executor: readonly AgentPoolCandidateWithHealth[];
-  readonly independent_reviewer: readonly AgentPoolCandidateWithHealth[];
-}
-
-export function withCandidateHealth(
-  snapshot: AgentPoolSnapshot,
-  healthOf: (candidate: AgentPoolCandidate) => AgentPoolCandidateHealth,
-): AgentPoolSnapshotWithHealth {
-  const attach = (row: AgentPoolCandidate): AgentPoolCandidateWithHealth => ({ ...row, health: healthOf(row) });
-  return {
-    coordinator: snapshot.coordinator.map(attach),
-    executor: snapshot.executor.map(attach),
-    independent_reviewer: snapshot.independent_reviewer.map(attach),
-  };
-}
-
 /**
  * 追加输入。
  *
@@ -177,8 +156,8 @@ export function agentPoolRevision(rows: readonly AgentPoolRow[]): string {
 }
 
 export function agentPoolSnapshotRevision(snapshot: AgentPoolSnapshot): string {
-  const canonical = ['coordinator', 'executor', 'independent_reviewer'].map((role) =>
-    snapshot[role as AgentRole].map((candidate) => ({
+  const canonical = ['coordinator', 'executor', 'independent_reviewer', 'classifier'].map((role) =>
+    (snapshot[role as AgentRole] ?? []).map((candidate) => ({
       profileId: candidate.profileId, endpoint: candidate.endpoint, runtime: candidate.runtime,
       order: candidate.order, enabled: candidate.enabled ?? true,
       facts: candidate.facts.map((fact) => ({ key: fact.key, value: fact.value })),
@@ -298,10 +277,10 @@ export function validateAgentPoolAdd(
   existing: readonly AgentPoolRow[],
 ): AgentPoolRow {
   const role: unknown = input?.role;
-  if (role !== 'coordinator' && role !== 'executor' && role !== 'independent_reviewer') {
+  if (role !== 'coordinator' && role !== 'executor' && role !== 'independent_reviewer' && role !== 'classifier') {
     throw new AgentPoolError(
       'INVALID_ROLE',
-      `候选池的 role 只接受 coordinator、executor 或 independent_reviewer，收到：${show(role)}。` +
+      `候选池的 role 只接受 coordinator、executor、independent_reviewer 或 classifier，收到：${show(role)}。` +
         '三种角色是互相独立的候选列表；独立检视者不能复用终审签名的 reviewer。',
     );
   }
@@ -348,47 +327,11 @@ export function agentPoolSnapshot(rows: readonly AgentPoolRow[]): AgentPoolSnaps
       .sort((a, b) => a.order - b.order)
       .map(toAgentPoolCandidate);
   return {
+    classifier: ofRole('classifier'),
     coordinator: ofRole('coordinator'),
     executor: ofRole('executor'),
     independent_reviewer: ofRole('independent_reviewer'),
   };
-}
-
-/* ------------------------------ 缺省候选 ------------------------------ */
-
-/**
- * 缺省候选 —— 从 run-mission.ts 原来那段硬编码原样搬来，**顺序与内容都不能变**。
- *
- * 这些 profileId 是适配层那边认的身份标识，不是本仓库的内部字符串。写在这一处
- * 只是为了「第一次启动的默认行为与今天完全一致」；换它们应该改候选池而不是改
- * 代码 —— 这正是这一层的存在理由。
- */
-export const DEFAULT_AGENT_POOL: readonly {
-  readonly role: AgentRole;
-  readonly profileId: string;
-  readonly endpoint: string;
-}[] = [
-  { role: 'coordinator', profileId: 'coordinator-grok', endpoint: 'local' },
-  { role: 'executor', profileId: 'exec-qwen-flash', endpoint: 'local' },
-  { role: 'executor', profileId: 'exec-hy3', endpoint: 'local' },
-  { role: 'executor', profileId: 'exec-mimo', endpoint: 'local' },
-];
-
-/**
- * 空仓时写入缺省候选，否则原样返回。
- *
- * **只在 `run-mission` 这种"真的要开跑了"的入口调用。不要在 GET 或
- * startServer 里调用**：读路径带副作用，意味着「打开界面看一眼」就会按观察者
- * 那套默认值改写别人的配置，而观测面本来是只读的。
- *
- * 判据是「两边都空」而不是「coordinator 空」：只清空一侧是有人有意为之，
- * 平台不该替他猜要什么候选。
- */
-export async function loadPoolOrSeed(repo: AgentPoolRepository): Promise<AgentPoolSnapshot> {
-  const snapshot = await repo.list();
-  if (snapshot.coordinator.length > 0 || snapshot.executor.length > 0) return snapshot;
-  for (const candidate of DEFAULT_AGENT_POOL) await repo.add(candidate);
-  return repo.list();
 }
 
 /* ------------------------------ 内存实现 ------------------------------ */

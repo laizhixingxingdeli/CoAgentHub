@@ -2,6 +2,7 @@ import { PlatformRuleError, type PlatformContext } from './context.ts';
 import { recordEscalationAndDeliver } from './escalations.ts';
 import { assertFinalizePolicy, landMemory } from './final-review.ts';
 import { runIntegrationMergeVerify } from './integration-verification.ts';
+import { queuedExecutionConfig } from './mission-queue.ts';
 import { missionResultCriteriaIssues } from './mission-result-criteria.ts';
 import { POLICY_ACTION } from '../policy-engine.ts';
 import type { Mission } from '../../kernel/index.ts';
@@ -66,6 +67,9 @@ export async function finalizeMissionByMachine(ctx: PlatformContext,
     rolledBackTo?: string;
   }> {
     const { mission } = await ctx.locate(missionId);
+    const queueConfig = await queuedExecutionConfig(ctx, missionId);
+    if (queueConfig) input = { integrationBranch: queueConfig.integrationBranch, verification: queueConfig.verification, projectRoot: queueConfig.projectRoot };
+    if (queueConfig && (mission.workspaceRef?.projectRoot !== queueConfig.projectRoot || mission.workspaceRef?.targetBranch !== queueConfig.integrationBranch)) throw new PlatformRuleError('QUEUE_WORKSPACE_MISMATCH', 'Mission 工作区必须与固定项目配置一致。');
     if (mission.status !== 'awaiting_review') {
       throw new PlatformRuleError(
         'NOT_AWAITING_REVIEW',

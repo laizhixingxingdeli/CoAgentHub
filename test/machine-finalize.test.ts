@@ -212,6 +212,32 @@ async function readyForReview(
 
 const VERIFY = [{ argv: ['node', '--test'], timeoutMs: 60_000 }];
 
+test('队列人工终审使用项目验证，失败回滚且可重试；机器不能覆盖项目验证', async () => {
+  for (const machine of [false, true]) {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const worktrees = mkdtempSync(join(tmpdir(), 'queue-final-review-'));
+    dirs.push(worktrees);
+    const runner = scriptedRunner([1, 0]);
+    const missionId = machine ? 'M-queue-machine' : 'M-queue-human';
+    const { platform } = await readyForReview(repo, worktrees, missionId, runner);
+    const queue = await platform.getMissionQueue('P');
+    await platform.enqueueMissions('P', { expectedRevision: queue.revision, confirmedBy: '仅限测试明确确认',
+      config: { projectRoot: repo, adapter: join(repo, 'a.txt'), integrationBranch: 'auto/plan-x', reviewer: 'test', conversationRef: 'test-session', envPassthrough: '-', verification: [{ argv: ['project-verification'], timeoutMs: 1000 }] },
+      missions: [{ missionId }],
+    });
+    const anchor = git(repo, 'rev-parse', 'HEAD');
+    const finalize = () => machine
+      ? platform.finalizeMissionByMachine(missionId, { projectRoot: 'ignored', integrationBranch: 'master', verification: [] })
+      : platform.finalizeMissionByReviewer(missionId, { verdict: 'merge', reviewerId: 'test', confirmedBy: '仅限测试签字', reasons: ['测试逐条验收'] });
+    assert.equal((await finalize()).status, 'awaiting_review');
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), anchor);
+    assert.deepEqual(runner.seen, [['project-verification']]);
+    assert.equal((await finalize()).status, 'completed');
+    assert.deepEqual(runner.seen, [['project-verification'], ['project-verification']]);
+    assert.notEqual(git(repo, 'rev-parse', 'HEAD'), anchor);
+  }
+});
+
 describe('机器 L3 放行', () => {
   test('交卷附真实改动源码度量告警，告警不阻拦机器终审并安全删除已合入分支', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');

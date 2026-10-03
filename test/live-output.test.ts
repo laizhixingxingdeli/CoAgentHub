@@ -327,7 +327,7 @@ describe('文件版 buildPersistentPlatform 接通 live',
           fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
           'utf8',
         );
-        assert.match(runPlan, /const live = 'live' in built \? built\.live : undefined/);
+        assert.match(runPlan, /PLAN_RUN_RETIRED/);
         assert.match(runMission, /const live = 'live' in built \? built\.live : undefined/);
       },
     );

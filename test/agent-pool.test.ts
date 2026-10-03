@@ -29,7 +29,6 @@ import type { AddressInfo } from 'node:net';
 import {
   AgentPoolError,
   InMemoryAgentPoolRepository,
-  loadPoolOrSeed,
   agentPoolSnapshotRevision,
 } from '../src/application/agent-pool.ts';
 import type {
@@ -112,7 +111,7 @@ function behavesLikeThePort(
     if (skip?.(t)) return;
     const repo = await makeRepo();
     const snapshot: AgentPoolSnapshot = await repo.list();
-    assert.deepEqual(snapshot, { coordinator: [], executor: [], independent_reviewer: [] });
+    assert.deepEqual(snapshot, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
   });
 
   test('add 返回刚落库的那条：runtime 恒为 pi，order 从 0 起、按 role 独立计数', async (t: T) => {
@@ -150,7 +149,7 @@ function behavesLikeThePort(
       'INVALID_ROLE',
       ['undefined'],
     );
-    assert.deepEqual(await repo.list(), { coordinator: [], executor: [], independent_reviewer: [] }, '被挡的不该留下半个字');
+    assert.deepEqual(await repo.list(), { classifier: [], coordinator: [], executor: [], independent_reviewer: [] }, '被挡的不该留下半个字');
   });
 
   test('同 role 下重复 profileId 被挡，message 点名 role 与 profileId', async (t: T) => {
@@ -223,7 +222,7 @@ function behavesLikeThePort(
       'INVALID_ENDPOINT',
       ['endpoint'],
     );
-    assert.deepEqual(await repo.list(), { coordinator: [], executor: [], independent_reviewer: [] });
+    assert.deepEqual(await repo.list(), { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
   });
 
   test('首尾空白被收掉，不会被当成两条不同的候选', async (t: T) => {
@@ -375,7 +374,7 @@ describe('FileAgentPoolRepository', () => {
     const legacy = tempPath('legacy.json');
     writeFileSync(legacy, JSON.stringify({ version: 1, projects: [], idCounters: {} }), 'utf8');
     const reopened = new FileAgentPoolRepository(new FileStateStore(legacy));
-    assert.deepEqual(await reopened.list(), { coordinator: [], executor: [], independent_reviewer: [] });
+    assert.deepEqual(await reopened.list(), { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
     const added = await reopened.add({
       role: 'executor',
       profileId: 'after-legacy',
@@ -384,16 +383,7 @@ describe('FileAgentPoolRepository', () => {
     assert.equal(added.order, 0);
   });
 
-  test('播种过的文件 store，换一个新进程实例读得到且不再播', async () => {
-    const path = tempPath();
-    const seeded = await loadPoolOrSeed(new FileAgentPoolRepository(new FileStateStore(path)));
-    const reopened = await loadPoolOrSeed(
-      new FileAgentPoolRepository(new FileStateStore(path)),
-    );
-    assert.deepEqual(reopened, seeded);
-    assert.equal(reopened.coordinator.length, 1);
-    assert.equal(reopened.executor.length, DEFAULT_EXECUTORS.length);
-  });
+
 });
 
 /* ------------------------------ Postgres 实现 ------------------------------ */
@@ -531,43 +521,6 @@ describe('PgAgentPoolRepository', () => {
 
 /* --------------------------------- 播种 --------------------------------- */
 
-describe('loadPoolOrSeed', () => {
-  test('空仓写入那四条缺省，顺序与原来 run-mission 的硬编码一致', async () => {
-    const snapshot = await loadPoolOrSeed(new InMemoryAgentPoolRepository());
-    assert.deepEqual(snapshot.coordinator.map((row) => row.profileId), [DEFAULT_COORDINATOR]);
-    assert.deepEqual(snapshot.executor.map((row) => row.profileId), DEFAULT_EXECUTORS);
-    assert.deepEqual(snapshot.coordinator.map((row) => row.endpoint), ['local']);
-    assert.deepEqual(snapshot.executor.map((row) => row.endpoint), [
-      'local',
-      'local',
-      'local',
-    ]);
-    assert.deepEqual(snapshot.coordinator.map((row) => row.order), [0]);
-    assert.deepEqual(snapshot.executor.map((row) => row.order), [0, 1, 2]);
-    for (const row of [...snapshot.coordinator, ...snapshot.executor]) {
-      assert.equal(row.runtime, 'pi');
-    }
-  });
-
-  test('再调一次不会重复播种', async () => {
-    const repo = new InMemoryAgentPoolRepository();
-    const first = await loadPoolOrSeed(repo);
-    const again = await loadPoolOrSeed(repo);
-    assert.deepEqual(again, first);
-    assert.equal(again.coordinator.length, 1);
-    assert.equal(again.executor.length, 3);
-  });
-
-  test('非空仓不覆盖：只有一侧为空时也不动它', async () => {
-    const repo = new InMemoryAgentPoolRepository();
-    await repo.add({ role: 'executor', profileId: 'mine', endpoint: 'local' });
-    const snapshot = await loadPoolOrSeed(repo);
-    assert.deepEqual(snapshot.executor.map((row) => row.profileId), ['mine']);
-    // 判据是「两边都空」。只清了 coordinator 的人是有意的，不该替他猜。
-    assert.deepEqual(snapshot.coordinator, []);
-  });
-});
-
 /* -------------------------- run-mission 不再硬编码 -------------------------- */
 
 describe('run-mission.ts 改用候选池', () => {
@@ -597,7 +550,7 @@ describe('run-mission.ts 改用候选池', () => {
     assert.match(source, /--executor/, '执行者可按次指定');
   });
 
-  test('四条缺省候选的字面量只该出现在 agent-pool.ts', () => {
+  test('生产源代码不包含测试用默认候选', () => {
     const literals = [DEFAULT_COORDINATOR, ...DEFAULT_EXECUTORS];
     for (const literal of literals) {
       assert.ok(!source.includes(literal), `run-mission.ts 里还留着 ${literal}`);
@@ -611,7 +564,6 @@ describe('run-mission.ts 改用候选池', () => {
         return name.endsWith('.ts') ? [full] : [];
       });
     const offenders = walk(join(repoRoot, 'src'))
-      .filter((file) => !file.endsWith('agent-pool.ts'))
       .filter((file) => literals.some((literal) => readFileSync(file, 'utf8').includes(literal)));
     assert.deepEqual(offenders, [], `${offenders.join(', ')} 里不该再出现缺省候选的字面量`);
   });
@@ -660,7 +612,7 @@ describe('候选池 API', () => {
     try {
       const empty = await get(base, '/api/pools');
       assert.equal(empty.status, 200);
-      assert.deepEqual(empty.json, { coordinator: [], executor: [], independent_reviewer: [] });
+      assert.deepEqual(empty.json, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
 
       const created = await post(base, '/api/pools', {
         role: 'coordinator',
@@ -769,7 +721,7 @@ describe('候选池 API', () => {
     try {
       for (const _round of [1, 2, 3]) {
         const list = await get(base, '/api/pools');
-        assert.deepEqual(list.json, { coordinator: [], executor: [], independent_reviewer: [] });
+        assert.deepEqual(list.json, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
       }
     } finally {
       close();
@@ -806,7 +758,7 @@ describe('候选池 API', () => {
 
       const list = await get(base, '/api/pools');
       assert.equal(list.status, 200);
-      assert.deepEqual(list.json, { coordinator: [], executor: [], independent_reviewer: [] });
+      assert.deepEqual(list.json, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
 
       const created = await post(base, '/api/pools', {
         role: 'coordinator',
@@ -952,7 +904,7 @@ describe('候选池 API', () => {
 
       const pools = await get(base, '/api/pools');
       assert.equal(pools.status, 200);
-      assert.deepEqual(pools.json, { coordinator: [], executor: [], independent_reviewer: [] });
+      assert.deepEqual(pools.json, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
     } finally {
       close();
     }

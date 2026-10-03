@@ -291,6 +291,7 @@ describe('文件持久化', () => {
         queryRuntime: runtime,
       });
       assert.ok(built.runQuery);
+      await built.agentPool.add({ role: 'classifier', profileId: 'test-query', endpoint: 'local' });
       const result = await built.runQuery!({
         projectId: 'P-q',
         prompt: '仓库是干什么的？',

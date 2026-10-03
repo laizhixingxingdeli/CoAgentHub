@@ -1,4 +1,5 @@
 import { PlatformRuleError, type PlatformContext } from './context.ts';
+import { queuedExecutionConfig } from './mission-queue.ts';
 import type { Mission, FinalReviewAuthority, IndependentReviewRecord, ValidationReport } from '../../kernel/index.ts';
 import type { WorkspaceManager } from '../workspace.ts';
 import { HA_AUTHORITY_CODE, matchHaRelease, type HaAuthorityConfig } from '../ha-authority-config.ts';
@@ -87,6 +88,8 @@ export async function finalizeMissionByHaAuthority(ctx: PlatformContext, deps: H
     rolledBackTo?: string;
   }> {
     const { mission } = await ctx.locate(missionId);
+    const queueConfig = await queuedExecutionConfig(ctx, missionId);
+    if (queueConfig) input = { ...input, projectRoot: queueConfig.projectRoot, verification: queueConfig.verification };
     if (mission.executionMode !== 'high_assurance') {
       throw new PlatformRuleError(
         'HA_RELEASE_MODE_REQUIRED',

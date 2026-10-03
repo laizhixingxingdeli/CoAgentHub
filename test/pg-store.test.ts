@@ -10,6 +10,7 @@
 
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 
 import {
   PgActivityLog,
@@ -47,15 +48,35 @@ let available = false;
 /** 测试库的连接串。**不是开发库**——理由见 helpers/pg.ts。 */
 let dsn = '';
 
+test('项目队列 PG 原子提交、跨实例恢复及旧版本拒绝', async (t) => {
+  if (skipIfNoPg(t)) return;
+  const first = await buildPgPlatform({ connectionString: dsn });
+  const second = await buildPgPlatform({ connectionString: dsn });
+  try {
+    const config = { projectRoot: process.cwd(), adapter: resolve('src/main.ts'), integrationBranch: 'codex/test', reviewer: 'test', conversationRef: 'test-session', envPassthrough: '-', verification: [{ argv: ['node', '--test'], timeoutMs: 1000 }] };
+    const initial = await first.platform.getMissionQueue('P-queue-pg');
+    await assert.rejects(first.platform.enqueueMissions('P-queue-pg', { config, expectedRevision: initial.revision, confirmedBy: '测试确认', missions: [
+      { missionId: 'queue-pg-A', contract: CONTRACT }, { missionId: 'queue-pg-B', contract: CONTRACT, dependsOn: ['missing'] },
+    ] }), { code: 'QUEUE_DEPENDENCY_INVALID' });
+    assert.equal((await first.platform.getMissionQueue('P-queue-pg')).config, undefined);
+    await first.platform.enqueueMissions('P-queue-pg', { config, expectedRevision: initial.revision, confirmedBy: '测试确认', missions: [
+      { missionId: 'queue-pg-A', contract: CONTRACT }, { missionId: 'queue-pg-B', contract: CONTRACT, dependsOn: ['queue-pg-A'] },
+    ] });
+    await second.refresh();
+    assert.deepEqual((await second.platform.getMissionQueue('P-queue-pg')).entries.map((entry) => entry.missionId), ['queue-pg-A', 'queue-pg-B']);
+    await assert.rejects(second.platform.configureProjectExecution('P-queue-pg', { config, expectedRevision: initial.revision, confirmedBy: '测试确认' }), { code: 'QUEUE_STALE' });
+  } finally { await first.close(); await second.close(); }
+});
+
 before(async () => {
   try {
-    const target = await ensureTestDatabase();
+    const target = await ensureTestDatabase('pg_store');
     if (!target) return;
     dsn = target;
     store = await PgStateStore.open({ connectionString: dsn });
     // 每次从干净的库开始，免得上一轮的行影响断言。
     await store.pool.query(
-      'TRUNCATE projects, activity, deliveries, id_counters, query_runs, validation_reports',
+      'TRUNCATE projects, activity, deliveries, id_counters, query_runs, validation_reports, agent_pool',
     );
     await store.refresh();
     available = true;
@@ -654,6 +675,7 @@ describe('Postgres 存储', () => {
       });
       try {
         assert.ok(withQuery.runQuery);
+        await withQuery.agentPool.add({ role: 'classifier', profileId: 'test-query', endpoint: 'local' });
         const result = await withQuery.runQuery!({
           projectId: 'P-pg-q',
           prompt: 'hi',

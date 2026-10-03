@@ -38,6 +38,7 @@ import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUs
 import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
 import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
+import type { QueryRunRepository } from '../application/query-run.ts';
 import type { RunContext } from './run-tokens.ts';
 import type { ControlPrincipalResolver } from './control-auth.ts';
 import { redactSecretsDeep } from '../application/redact.ts';
@@ -107,6 +108,7 @@ export type HostedRunHandler = (
 ) => Promise<number>;
 
 export interface ApiDeps {
+  queryRuns?: QueryRunRepository;
   platform: Platform;
   tokens: RunTokenRegistry;
   deliveries: DeliveryRepository;
@@ -672,12 +674,33 @@ async function buildPoolsHealth(
   candidateCircuits: CandidateCircuitRepository | undefined,
   nowMsValue: number,
   usageRows: readonly UsageRow[],
+  queryRuns?: QueryRunRepository,
 ) {
   const hops = queuedHops ? await queuedHops.list() : [];
   const nowIso = new Date(nowMsValue).toISOString();
   const observed = await collectCandidateObservations(platform, hops, nowMsValue);
+  const queries = await queryRuns?.list() ?? [];
+  for (const query of queries) {
+    if (!query.profileId) continue;
+    const failure = query.endedBy ? classifyCandidateFailure(query.endedBy, query.failureMessage) : undefined;
+    if (failure) {
+      const hints = observed.hints.get(query.profileId) ?? [];
+      hints.push({ failureClass: failure.failureClass, at: query.endedAt ?? null, source: 'query.ended' });
+      observed.hints.set(query.profileId, hints);
+    }
+    const at = Date.parse(query.startedAt);
+    if (at < nowMsValue - SEVEN_DAYS_MS || at > nowMsValue || !Number.isFinite(at)) continue;
+    const acc = observed.usage.get(query.profileId) ?? emptyUsage();
+    acc.attempts += 1;
+    if (query.outcome === 'answered') acc.successes += 1;
+    if (query.usage.quality === 'reported' && typeof query.usage.cost === 'number' && Number.isFinite(query.usage.cost)) {
+      acc.reportedCost = (acc.reportedCost ?? 0) + query.usage.cost;
+    }
+    observed.usage.set(query.profileId, acc);
+  }
   const healthOf = async (candidate: AgentPoolCandidate): Promise<AgentPoolCandidateHealth> => {
     const lease = activeLeaseForProfile(hops, candidate.profileId, nowIso);
+    const runningQuery = queries.find((query) => query.profileId === candidate.profileId && query.status === 'running');
     const hints = observed.hints.get(candidate.profileId) ?? [];
     const window7d = observed.usage.get(candidate.profileId) ?? emptyUsage();
     const runtime = queuedHops
@@ -697,7 +720,7 @@ async function buildPoolsHealth(
       circuit: circuitHealth(circuit),
       lastFailure: resolveCandidateLastFailure(circuit, hints),
       window7d,
-      runtime,
+      runtime: runningQuery?.runtimeKind ? { running: true, hopId: runningQuery.id, runtimeKind: runningQuery.runtimeKind } : runtime,
       // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，摘几个重命名等于又抄一份会过期的表。
       ...(usage ? { usage } : {}),
       ...quotaExtras(circuit),
@@ -709,6 +732,7 @@ async function buildPoolsHealth(
     return out;
   };
   return {
+    classifier: await attach(snapshot.classifier ?? []),
     coordinator: await attach(snapshot.coordinator),
     executor: await attach(snapshot.executor),
     independent_reviewer: await attach(snapshot.independent_reviewer),
@@ -1194,10 +1218,12 @@ export function createApi(deps: ApiDeps): Server {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
     const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
     const planControl = /^\/api\/plan-runs\/([^/]+)\/decide$/.exec(path);
-    if (!missionControl && !planControl) return handle(req, res);
+    const projectControl = /^\/api\/projects\/([^/]+)\/(?:mission-queue|execution-config)$/.exec(path);
+    if (!missionControl && !planControl && !projectControl) return handle(req, res);
     await requireControlAuth(req, POLICY_ACTION.missionPause);
     let projectId: string | undefined;
-    if (missionControl) projectId = (await platform.getMissionView(missionControl[1])).projectId;
+    if (projectControl) projectId = decodeURIComponent(projectControl[1]);
+    else if (missionControl) projectId = (await platform.getMissionView(missionControl[1])).projectId;
     else {
       const record = readPlanRunById(planRunDirs(), planControl![1]);
       if (record.status === 'ok') projectId = record.snapshot.projectId;
@@ -1345,6 +1371,7 @@ export function createApi(deps: ApiDeps): Server {
         ...pool.coordinator,
         ...pool.executor,
         ...pool.independent_reviewer,
+        ...(pool.classifier ?? []),
       ].some((row) => row.profileId === profileId);
       if (!known) throw new HttpError(404, 'CANDIDATE_NOT_FOUND', `候选池里没有：${profileId}`);
       // actor 只取受控主体：调用方自称是谁不作数，审计要由凭据说话。
@@ -1372,7 +1399,7 @@ export function createApi(deps: ApiDeps): Server {
       const snapshot = await agentPool.list();
       return send(res, 200, { revision: agentPoolSnapshotRevision(snapshot), ...snapshot });
     }
-    const replacePoolMatch = /^\/api\/pools\/(coordinator|executor|independent_reviewer)\/configure$/.exec(path);
+    const replacePoolMatch = /^\/api\/pools\/(coordinator|executor|independent_reviewer|classifier)\/configure$/.exec(path);
     if (method === 'POST' && replacePoolMatch) {
       await requireControl(req, POLICY_ACTION.poolAdd);
       const body = await readJson(req);
@@ -1396,6 +1423,7 @@ export function createApi(deps: ApiDeps): Server {
             deps.candidateCircuits,
             nowMs(),
             usageRows,
+            deps.queryRuns,
           ),
         ),
       );
@@ -1425,6 +1453,23 @@ export function createApi(deps: ApiDeps): Server {
       });
       res.end(WEB_PAGE);
       return;
+    }
+
+    const missionQueueMatch = /^\/api\/projects\/([^/]+)\/mission-queue$/.exec(path);
+    if (method === 'GET' && missionQueueMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      return send(res, 200, await platform.getMissionQueue(decodeURIComponent(missionQueueMatch[1])));
+    }
+    if (method === 'POST' && missionQueueMatch) {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      const body = await readJson(req);
+      return send(res, 201, await platform.enqueueMissions(decodeURIComponent(missionQueueMatch[1]), body as unknown as Parameters<Platform['enqueueMissions']>[1]));
+    }
+    const executionConfigMatch = /^\/api\/projects\/([^/]+)\/execution-config$/.exec(path);
+    if (method === 'POST' && executionConfigMatch) {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      const body = await readJson(req);
+      return send(res, 200, await platform.configureProjectExecution(decodeURIComponent(executionConfigMatch[1]), body as unknown as Parameters<Platform['configureProjectExecution']>[1]));
     }
 
     if (method === 'GET' && path === '/api/plan-runs') {
@@ -1941,6 +1986,8 @@ export function createApi(deps: ApiDeps): Server {
       return startHostedRun(req, res, deps.runMission, 'run-mission');
     }
     if (method === 'POST' && path === '/api/control/run-plan') {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      if (!deps.runPlan) throw new HttpError(410, 'PLAN_RUN_RETIRED', '方案运行已退役，请确认 Mission 列表后提交项目 mission-queue。');
       return startHostedRun(req, res, deps.runPlan, 'run-plan');
     }
 
