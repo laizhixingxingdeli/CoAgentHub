@@ -196,6 +196,9 @@ export async function submitLightweightMissionForReview(
         criteria: body.criteria,
       },
       // 交卷由这次交卷的协调者 attempt 引发：事件要能追回是谁验的。
+      // 第 4 参是 workItemId：交卷是整份 Mission 的事，不落到某个工作项上，
+      // 塞 lastReview.attemptId 进去会让 workItemId 变成一个 attempt id。
+      undefined,
       lastReview.attemptId,
     );
 
@@ -213,6 +216,7 @@ export async function submitLightweightMissionForReview(
       'delivery.created',
       { deliveryId: delivery.id },
       // 与 mission_result.submitted 同源；不另造 attemptId。
+      undefined,
       lastReview.attemptId,
     );
 
