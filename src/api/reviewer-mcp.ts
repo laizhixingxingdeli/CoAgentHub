@@ -4,6 +4,7 @@ import type { Readable, Writable } from 'node:stream';
 
 const text = { type: 'string', minLength: 1 };
 const generation = { type: 'integer', minimum: 1 };
+const changes = { type: 'array', items: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } }, required: ['before', 'after'], additionalProperties: false } };
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const tools = [
   { name: 'coagenthub_reviewer_todos', description: '读取统一待办，不消费或 ACK Delivery', inputSchema: schema({ projectId: text }) },
@@ -19,6 +20,14 @@ const tools = [
       dropFeatures: { type: 'array', items: text } }, ['runId', 'escalationId', 'decidedBy', 'action']) },
   { name: 'coagenthub_master_brief', description: '读取合 master 简报及前置检查，始终要求用户签名，不执行合并',
     inputSchema: schema({ projectId: text }, ['projectId']) },
+  { name: 'coagenthub_list_documents', description: '读取独立文档提议及差异，不 ACK Delivery', inputSchema: schema({ projectId: text }, ['projectId']) },
+  { name: 'coagenthub_propose_document', description: '检视者提出文档精确差异，尚未批准不会写 Git',
+    inputSchema: schema({ projectId: text, missionId: text, path: text, title: text, changes, reviewer: text, reason: text, generation }, ['projectId', 'missionId', 'path', 'title', 'changes', 'reviewer', 'reason']) },
+  { name: 'coagenthub_decide_document', description: '核对版本和基线后批准、编辑或撤回；编辑后需要重新批准',
+    inputSchema: schema({ documentId: text, action: { enum: ['approve', 'edit', 'withdraw'] }, reviewer: text, reason: text,
+      revision: generation, baseHash: text, changes, generation }, ['documentId', 'action', 'reviewer', 'reason', 'revision', 'baseHash']) },
+  { name: 'coagenthub_flush_documents', description: '只在空档提交已批准文档；工作区脏或基线变化时保留队列',
+    inputSchema: schema({ projectId: text, reviewer: text, generation }, ['projectId']) },
 ];
 
 function validate(name: string, args: Record<string, unknown>) {
@@ -30,7 +39,9 @@ function validate(name: string, args: Record<string, unknown>) {
     if (!rule || rule.enum && !rule.enum.includes(value as string)
       || rule.type === 'string' && (typeof value !== 'string' || !value.trim())
       || rule.type === 'integer' && (!Number.isSafeInteger(value) || Number(value) < rule.minimum! || Number(value) > (rule.maximum ?? Infinity))
-      || rule.type === 'array' && (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item.trim()))) {
+      || rule.type === 'array' && (!Array.isArray(value) || value.some((item) => field === 'changes'
+        ? !item || typeof item !== 'object' || typeof item.before !== 'string' || typeof item.after !== 'string' || Object.keys(item).some((key) => !['before', 'after'].includes(key))
+        : typeof item !== 'string' || !item.trim()))) {
       throw new Error(`INVALID_ARGUMENT:${field}`);
     }
   }
@@ -46,16 +57,20 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
   let ready = false;
   async function call(name: string, args: Record<string, unknown>) {
     validate(name, args);
-    const { projectId, todoId, runId, ...body } = args;
+    const { projectId, todoId, runId, documentId, ...body } = args;
     let path: string;
     let method = 'GET';
     if (name === 'coagenthub_reviewer_todos') path = `/api/reviewer/todos${projectId ? `?projectId=${encodeURIComponent(String(projectId))}` : ''}`;
     else if (name === 'coagenthub_reviewer_wait') path = `/api/reviewer/wait?${new URLSearchParams(Object.entries(args).map(([key, value]) => [key, String(value)]))}`;
     else if (name === 'coagenthub_master_brief') path = `/api/projects/${encodeURIComponent(String(projectId))}/master-brief`;
+    else if (name === 'coagenthub_list_documents') path = `/api/projects/${encodeURIComponent(String(projectId))}/documents`;
     else {
       method = 'POST';
       path = name === 'coagenthub_reviewer_duty' ? `/api/projects/${encodeURIComponent(String(projectId))}/reviewer-duty`
         : name === 'coagenthub_reviewer_todo_decide' ? `/api/reviewer/todos/${encodeURIComponent(String(todoId))}`
+        : name === 'coagenthub_propose_document' ? `/api/projects/${encodeURIComponent(String(projectId))}/documents`
+        : name === 'coagenthub_decide_document' ? `/api/documents/${encodeURIComponent(String(documentId))}/decide`
+        : name === 'coagenthub_flush_documents' ? `/api/projects/${encodeURIComponent(String(projectId))}/documents/flush`
         : `/api/plan-runs/${encodeURIComponent(String(runId))}/decide`;
     }
     const response = await request(`${endpoint.origin}${path}`, { method, redirect: 'error', signal: AbortSignal.timeout(35000),

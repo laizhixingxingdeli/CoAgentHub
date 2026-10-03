@@ -2,6 +2,7 @@ import * as mutationLane from './platform/mutation-lane.ts';
 import * as reviewerTodos from './platform/reviewer-todos.ts';
 import { getMasterMergeBrief } from './platform/master-brief.ts';
 import * as reviewerDuty from './platform/reviewer-duty.ts';
+import * as documentQueue from './platform/document-queue.ts';
 export type { ReviewerTodo, ReviewerTodoDecision } from './platform/reviewer-todos.ts';
 import * as machineFinalization from './platform/machine-finalization.ts';
 import * as finalReview from './platform/final-review.ts';
@@ -231,9 +232,28 @@ export class Platform {
 
   constructor(deps: PlatformDeps) {
     this.#context = new PlatformContext(deps);
+    this.#context.onProjectIdle = (projectId) => this.flushDocumentQueue(projectId);
   }
 
   /* =============================== L3 面 =============================== */
+
+  async listDocumentProposals(projectId?: string) { return documentQueue.listDocumentProposals(this.#context, projectId); }
+  async proposeDocument(input: Parameters<typeof documentQueue.proposeDocument>[1]) {
+    return this.#tx(() => documentQueue.proposeDocument(this.#context, input));
+  }
+  async decideDocument(id: string, input: documentQueue.DocumentDecision, deferCommit = false) {
+    const row = await this.#tx(() => documentQueue.decideDocument(this.#context, id, input));
+    // 批准须先持久提交，再做 Git 副作用；HTTP 值守外层事务完成后另行触发。
+    if (deferCommit || input.action !== 'approve') return { ...row, queue: undefined };
+    const queue = await this.flushDocumentQueue(row.projectId);
+    return { ...(await this.listDocumentProposals(row.projectId)).find((entry) => entry.id === id)!, queue };
+  }
+  async flushDocumentQueue(projectId?: string) {
+    if (!(await this.listDocumentProposals(projectId)).some((row) => row.state === 'approved')) {
+      return { committed: [], deferred: [], errors: [] };
+    }
+    return this.#tx(() => documentQueue.flushDocumentQueue(this.#context, projectId));
+  }
 
   async listReviewerTodos(projectId?: string): Promise<reviewerTodos.ReviewerTodo[]> {
     return reviewerTodos.listReviewerTodos(this.#context, projectId);

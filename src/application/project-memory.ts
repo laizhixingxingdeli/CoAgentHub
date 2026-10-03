@@ -193,7 +193,7 @@ export function initProjectMemory(projectRoot: string, projectName: string): str
  * 于是「批准 N 条记忆、落地 N+1 个文件」，那多出来的一个谁都没看过 ——
  * 而它写在别人仓库的根目录上。
  */
-export function plannedMemoryFiles(deltas: readonly MemoryDelta[]): string[] {
+export function plannedMemoryFiles(deltas: readonly Pick<MemoryDelta, 'kind' | 'slug'>[]): string[] {
   if (deltas.length === 0) return [];
   return [
     ...deltas.map((delta) =>

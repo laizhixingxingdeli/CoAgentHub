@@ -353,7 +353,10 @@ describe('叙事模块的加载与文件形状', () => {
 
   test('不拼 HTML、不 esc、不碰 DOM —— 这一层只回字符串', () => {
     const source = readFileSync(path, 'utf8');
-    for (const forbidden of ['document', 'innerHTML', 'esc(', 'fetch(', 'Date.now', 'new Date']) {
+    // document.proposal_changed 是合法事件名；检查 DOM 引用，不能误伤字符串键。
+    const code = source.replace(/'[^']*'|"[^"]*"/g, '');
+    assert.ok(!/\bdocument\s*(?:\.|\[)/.test(code), 'narrate.js 不应调用 DOM document');
+    for (const forbidden of ['innerHTML', 'esc(', 'fetch(', 'Date.now', 'new Date']) {
       assert.ok(!source.includes(forbidden), `narrate.js 里不该出现 ${forbidden}`);
     }
   });

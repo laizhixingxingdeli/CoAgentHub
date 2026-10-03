@@ -46,7 +46,7 @@
 ## 5. 合入集成分支（检视者签）
 
 1. 看交卷：逐条验收的证据、Mission worktree 全量测试结果行（0 fail，只允许 HAOFF1 既有的 7 条 skip）。
-2. 核对随交卷落地的规格（memoryDelta）：平台按 slug 整文件覆盖——改既有规格只许改相关段落，原文不得被截短；与现有文件逐行比对。
+2. 文档提议（memoryDelta）经独立队列处理，不阻塞代码合入。查 `/api/projects/:id/documents` 的精确差异，批准时核对 revision/baseHash；只改相关段落，保留未改条款。旧整份正文也必须独立审查，原文不得被截短。
 3. 合入：`node src/l3.ts merge <missionId> --as "检视者（<模型名>）" --confirmed-by "用户常设授权：集成分支合入由检视者签，仅合入 master 需用户签名（2026-09-28）" --reason "…"`。
 4. 方案源里把该票标 done，并记下合入提交、用时、花费。
 5. 平台合不进去时（集成分支在交卷后被推进、或工作区不干净，平台没有换基线再合的通路）：先查两边改动的文件有没有重叠、Mission 有没有规格改动要落地，再请用户批准手动合入——`git merge --no-ff <Mission 分支>`，对合并结果跑全量 `node --test`；绿了再 `l3 merge` 留签名（预期被基线校验拒、Mission 转 blocked，同时释放改动名额），方案源标 done 并写明手动合入的提交（AC1 25903aa、REF1 25eea70）。
@@ -80,6 +80,14 @@
 
 值守通过 `/api/projects/:id/reviewer-duty` claim 领取五分钟租约，每分钟 renew。handoff 递增代次，旧会话不能续约或守候；L3 写操作须携带真实 owner 与 generation。值守不是鉴权，D1d 仍暂缓。显式守候脚本 `node scripts/reviewer-watch.ts <projectId> <会话ID>` 只打印变化；不创建定时任务，本会话按用户要求不启动守候。
 
-可选 `node scripts/reviewer-mcp.ts` 提供六个新增工作流工具，仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
+可选 `node scripts/reviewer-mcp.ts` 提供十个工作流工具，仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
 
 `/api/projects/:id/master-brief` 只提供简报，不执行 master 合并。没有当前 HEAD 的可信平台全量报告时 ready=false，直接实施批的终端测试日志不会被伪造为平台报告。用户签名仍是合 master 的前置。
+
+## 10. 文档提议与空档提交（RV4）
+
+协调者用 `memoryDelta.changes:[{before,after}]` 提出精确差异；检视者规则与架构决定可经 `/api/projects/:id/documents` 提出，仍绑定可信项目 Mission。读取详情、核对保留条款后 approve；edit 会取消旧批准并递增版本，withdraw 不写 Git。文档等用户只抑制通知，不 park 已完成代码。
+
+批准先持久保存，再尝试 Git 提交。项目有未结束且未 park 的 Mission，或仍有 in_progress Attempt，就保持队列；paused 未 park 也保护基线。空档在隔离检出生成文档及 VIBE.md，核对集成分支/HEAD/干净工作区后 fast-forward 提交；目标 master、工作区脏、基线已变均拒写，不覆盖第三方条款。服务启动、批准后、Mission 释放工作区时会尝试处理，必要时经 `/documents/flush` 重试。不创建定时任务。
+
+Git 已成功而队列确认丢失时，提交标记与最终文档内容用于重入恢复，不再追加重复提交。源 Mission 尚有未处理文档时禁止归档；先提交或撤回。文档提交推进集成 HEAD 后，旧 HEAD 测试报告不能代替当前 HEAD 的 master 前置验证。

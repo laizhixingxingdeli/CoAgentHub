@@ -117,12 +117,16 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
   assert.ok((await invoke('tools/list', undefined, 1))?.error);
   await invoke('initialize', { protocolVersion: '2025-11-25' }, 2);
   assert.equal(await invoke('notifications/initialized'), undefined);
-  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 6);
+  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 10);
   await invoke('tools/call', { name: 'coagenthub_reviewer_todos', arguments: { projectId: 'P' } }, 4);
   assert.equal(calls[0].url, 'http://127.0.0.1:3101/api/reviewer/todos?projectId=P');
   assert.equal(calls[0].init?.method, 'GET');
   const bad = await invoke('tools/call', { name: 'coagenthub_plan_run_decide', arguments: { runId: 'R', escalationId: 'E-1', decidedBy: 'B', action: 'merge' } }, 5);
   assert.equal(bad?.result.isError, true); assert.equal(calls.length, 1);
+  await invoke('tools/call', { name: 'coagenthub_decide_document', arguments: { documentId: 'DOC:M:A:0', action: 'approve', reviewer: 'B', generation: 2,
+    reason: '审阅差异', revision: 1, baseHash: 'hash' } }, 6);
+  assert.equal(calls[1].url, 'http://127.0.0.1:3101/api/documents/DOC%3AM%3AA%3A0/decide');
+  assert.equal(calls[1].init?.headers?.['x-coagent-reviewer-generation'], '2');
   assert.throws(() => createReviewerMcpHandler('http://example.invalid'), /LOOPBACK/);
 });
 

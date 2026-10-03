@@ -524,6 +524,9 @@ const EVENT_TABLE = {
     badge: 'L3', action: '检视者处理待办',
     detail: `${or(event.data?.reviewer, '检视者')}：${or(event.data?.action, '处理')}；${or(event.data?.reason, '未提供理由')}`,
   }),
+  'document.proposal_changed': (event) => ({
+    badge: 'L3', action: '文档提议更新', detail: `${text(event.data?.title)}；${text(event.data?.state)}；版本 ${num(event.data?.revision)}`,
+  }),
   'reviewer.duty_changed': (event) => ({
     badge: 'L3', action: '项目值守变更',
     detail: `${or(event.data?.owner, '未指定会话')}，代次 ${num(event.data?.generation)}；${or(event.data?.action, '更新')}`,

@@ -8,13 +8,13 @@
 
 ## 健康与平台
 
-## 检视者待办、值守与合并简报（RV1 / RV2 / RV3 / RV5）
+## 检视者待办、值守与合并简报（RV1–RV5）
 
 以下读取不消费或 ACK Delivery。控制面沿用可选 resolver：读需 viewer/operator，写需 operator；未装配时沿用本机兼容行为。值守是并发所有权，不是身份认证。已领取值守的项目执行 L3 Mission 控制操作或 PlanRun 决定时，必须携带 `x-coagent-reviewer: <owner>` 与 `x-coagent-reviewer-generation: <generation>`；旧代次拒绝。未采用值守协议的项目保留既有调用方式。
 
 ### GET /api/reviewer/todos
 
-可选查询 `projectId`。返回 `{todos:[{id,projectId,missionId,kind,title,at,blocking,state,notify}]}`；kind 包括 question、diagnostic、cost_cap、checkpoint、result、documentation。只有当前服务实际承载的 PlanRun 升级投影为 `plan_escalation` 并带 `runId,decisionPath:"plan_run"`，历史来源仍走 Mission 路径。文档目前仅显示提议，不改变既有落地机制（RV4 尚未实现）。
+可选查询 `projectId`。返回 `{todos:[{id,projectId,missionId,kind,title,at,blocking,state,notify}]}`；kind 包括 question、diagnostic、cost_cap、checkpoint、result、documentation。只有当前服务实际承载的 PlanRun 升级投影为 `plan_escalation` 并带 `runId,decisionPath:"plan_run"`，历史来源仍走 Mission 路径。文档待办来源于独立提议队列，代码合入后仍保留待批；批准排队、撤回或提交后不重复提醒，编辑产生新版本。
 ```bash
 curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/reviewer/todos?projectId=P'
 ```
@@ -61,7 +61,37 @@ curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/plan-runs/R/decide
 curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/master-brief'
 ```
 
-可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开六个上述工作流工具，所有状态仍经 HTTP；stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+
+### GET /api/projects/:projectId/documents
+
+读需 viewer/operator。无请求正文，返回 `{proposals:[{id,missionId,path,title,revision,base,baseHash,changes,proposed,state,reviewer?,reason?,commit?,error?}]}`。`changes:[{before,after}]` 是精确替换差异；before 必须唯一匹配，新文档用空 before。state 为 proposed、approved、needs_revision、withdrawn、committed。读取不 ACK Delivery，不批准提议。
+```bash
+curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/documents'
+```
+
+### POST /api/projects/:projectId/documents
+
+写需 operator；输入 `{missionId,path,title,changes,reviewer,reason,generation?}`，返回新提议（201）。Mission 必须属于项目并提供可信工作区。path 只允许 `.coagent/` 下安全 Markdown 路径、AGENTS.md、CLAUDE.md；拒绝遍历、设备名及符号链接。规则/架构决定同样可经此入口提出，尚未批准不会写 Git。存在值守时 reviewer/generation 必须匹配租约。
+```bash
+curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/projects/P/documents' -H 'Content-Type: application/json' -d '{"missionId":"M","path":".coagent/project.md","title":"规则修订","changes":[{"before":"旧条款","after":"新条款"}],"reviewer":"session-A","reason":"已确认的规则"}'
+```
+
+### POST /api/documents/:documentId/decide
+
+写需 operator。输入 `{action:"approve"|"edit"|"withdraw",reviewer,reason,revision,baseHash,changes?,generation?}`。revision/baseHash 必须对应已审查差异；edit 用当前原文重建差异、递增版本并取消旧批准。approve 先持久记录签名，再尝试独立提交；代码不等文档，工作区脏、仍有运行或目标是 master 时保持 approved 排队；基线变化须重审。返回提议及可选 `queue:{committed,deferred,errors:[{id,reason}]}`。撤回不写文档。等用户的文档通知可用待办入口，独立等待不会 park 已完成代码 Mission。
+```bash
+curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/documents/DOC%3AM%3AA%3A0/decide' -H 'Content-Type: application/json' -d '{"action":"approve","reviewer":"session-A","reason":"逐条核对并保留其它条款","revision":1,"baseHash":"<GET返回的hash>"}'
+```
+
+### POST /api/projects/:projectId/documents/flush
+
+写需 operator。正文 `{reviewer?,generation?}`；值守已启用时必需真实 reviewer/generation。返回 `{committed,deferred,errors}`。只提交已批准且项目无运行的提议；paused 但未 park 的 Mission 仍保护原基线。隔离 worktree 生成文档和 VIBE.md 后核对目标干净、分支与 HEAD，以 fast-forward 落入集成分支，绝不写 master。不改 root 的索引或未提交文件。提交标记用于 Git 成功/队列确认丢失后的恢复，不重复提交。服务启动、Mission 释放工作区及批准后也尝试 flush；未处理文档会阻止源 Mission 归档。
+```bash
+curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/projects/P/documents/flush' -H 'Content-Type: application/json' -d '{}'
+```
+
+协调者交卷 `memoryDelta` 新形式为 `{kind,slug,title,changes:[{before,after}]}`。旧 `{body}` 仍可恢复为显式整体替换差异，必须单独审查，不再自动落地；坏提议进入 needs_revision，不阻止代码合入。文档匹配与哈希统一 LF 换行，Windows Git 的 CRLF 转换不会制造虚假漂移。多个提议修改同一旧基线时，先提交的一条会使后续旧差异要求重审；不做模糊合并。
 
 ### GET /api/health
 

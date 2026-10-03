@@ -551,7 +551,7 @@ async function main() {
     if (diff.pendingMemory.length > 0) {
       console.log(`\n  ⚠ 另有 ${diff.pendingMemory.length} 个文件会随本次落地一并写入项目：`);
       for (const file of diff.pendingMemory) console.log(`      ${file}`);
-      console.log('      （正文见下面的「记忆」；VIBE.md 是由它们生成的索引）');
+      console.log('      （文档另行审批，代码合入不自动写；VIBE.md 在批准文档后生成）');
     }
 
     if (view.result) {
@@ -559,10 +559,11 @@ async function main() {
       console.log(`  ${view.result.summary}`);
       for (const item of view.result.acceptanceEvidence) console.log(`  证据 · ${item}`);
       for (const item of view.result.openRisks) console.log(`  遗留 · ${item}`);
-      // 记忆增量跟着落地那次 merge 写进项目，**签字之前必须看得见正文**：只印一行 [object Object] 等于让 L3 盲签。
+      // 差异与旧正文都显示，文档独立批准；不能让缺省 body 的新交卷读面崩溃。
       for (const item of view.result.memoryDelta) {
         console.log(`\n  记忆 · [${item.kind}] ${item.slug} —— ${item.title}`);
-        for (const line of item.body.split('\n')) console.log(`      ${line}`);
+        const detail = item.changes ? JSON.stringify(item.changes, null, 2) : item.body ?? '（差异无效，需修订）';
+        for (const line of detail.split('\n')) console.log(`      ${line}`);
       }
     }
 

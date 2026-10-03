@@ -1106,6 +1106,7 @@ export async function startServer(
     // 显式绑 loopback：观测面/API 不对外网口开放。动态 port=0 时日志必须读
     // server.address()，不能回显调用方传入的 port（那会打出 :0）。
     // port=0 时避开 fetch 屏蔽的端口；重绑在周期调度启动、close 被包装之前做，关的是原生 server。
+    await built.platform.flushDocumentQueue();
     await listenLoopback(server, port);
     const addr = server.address() as AddressInfo;
     loopback.baseUrl = `http://${addr.address}:${addr.port}`;

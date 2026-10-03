@@ -719,6 +719,15 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     if (!project) throw new Error(`不可归档：Project 不存在：${projectId}`);
     const mission = project.missions.find((row) => row.id === missionId);
     if (!mission) throw new Error(`不可归档：Mission 不存在：${key}`);
+    const documents = new Map<string, { state: string }>();
+    for (const event of this.#state.events) {
+      if (event.missionId === missionId && event.kind === 'document.proposal_changed') {
+        const data = event.data as { id: string; state: string }; documents.set(data.id, data);
+      }
+    }
+    if ([...documents.values()].some((row) => !['committed', 'withdrawn'].includes(row.state))) {
+      throw new Error(`不可归档：Mission 尚有未处理的文档提议：${key}`);
+    }
 
     if (mission.isPaused) {
       throw new Error(`不可归档：Mission 已暂停：${key}`);

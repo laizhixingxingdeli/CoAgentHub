@@ -46,7 +46,7 @@ export async function runIntegrationMergeVerify(ctx: PlatformContext, landMemory
     if (!ref) {
       throw new PlatformRuleError('NO_WORKSPACE_REF', `Mission ${mission.id} 没记下分支信息。`);
     }
-    // 与人工放行同一步：协调者提议的长期知识跟代码同一次合进去。
+    // 补入独立文档队列，代码合并不等待文档批准。
     await landMemory(mission);
     const merged = await workspace.mergeToTarget({
       missionId: mission.id,

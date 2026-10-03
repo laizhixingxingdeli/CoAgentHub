@@ -1091,6 +1091,8 @@ export function createApi(deps: ApiDeps): Server {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
         writeJson(res, 409, { error: error.code, message: error.message }, identity);
+      } else if (error instanceof Error && /^DOCUMENT_(?:PATH_FORBIDDEN|SYMLINK_FORBIDDEN|CHANGES_REQUIRED|CHANGE_INVALID|EMPTY_ANCHOR|ANCHOR_NOT_UNIQUE)$/.test(error.message)) {
+        writeJson(res, 400, { error: error.message, message: '文档路径或精确差异无效，请刷新原文并重新提交' }, identity);
       } else if (error instanceof AgentPoolError) {
         // 与 PlatformRuleError 同构：请求本身合法，是当前候选池容不下它。
         // 界面要把 message 原样显示出来，所以那里写的就是「下一步该干什么」。
@@ -1756,6 +1758,43 @@ export function createApi(deps: ApiDeps): Server {
     }
 
     /* ---- 收件箱：结果回到发起方。Host 离线时结果就在这儿等着 ---- */
+
+    const projectDocumentsMatch = /^\/api\/projects\/([^/]+)\/documents$/.exec(path);
+    if (method === 'GET' && projectDocumentsMatch) {
+      await requireControl(req, POLICY_ACTION.inboxRead);
+      return send(res, 200, { proposals: await platform.listDocumentProposals(decodeURIComponent(projectDocumentsMatch[1])) });
+    }
+    if (method === 'POST' && projectDocumentsMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      const projectId = decodeURIComponent(projectDocumentsMatch[1]);
+      if (typeof body.missionId !== 'string' || (await platform.getMissionView(body.missionId)).projectId !== projectId) {
+        throw new HttpError(400, 'DOCUMENT_PROJECT_MISMATCH', '提议需绑定本项目的 Mission');
+      }
+      const result = await platform.withReviewerControl(projectId, { owner: body.generation === undefined ? '' : String(body.reviewer ?? ''),
+        generation: Number(body.generation) }, () => platform.proposeDocument(body as never));
+      return send(res, 201, result);
+    }
+    const documentDecisionMatch = /^\/api\/documents\/([^/]+)\/decide$/.exec(path);
+    if (method === 'POST' && documentDecisionMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const id = decodeURIComponent(documentDecisionMatch[1]);
+      const row = (await platform.listDocumentProposals()).find((entry) => entry.id === id);
+      if (!row) throw new HttpError(404, 'DOCUMENT_NOT_FOUND', '文档提议不存在');
+      const body = await readJson(req);
+      const result = await platform.withReviewerControl(row.projectId, { owner: body.generation === undefined ? '' : String(body.reviewer ?? ''),
+        generation: Number(body.generation) }, () => platform.decideDocument(id, body as never, true));
+      const queue = body.action === 'approve' ? await platform.flushDocumentQueue(row.projectId) : undefined;
+      return send(res, 200, { ...(await platform.listDocumentProposals(row.projectId)).find((entry) => entry.id === result.id), queue });
+    }
+    const documentFlushMatch = /^\/api\/projects\/([^/]+)\/documents\/flush$/.exec(path);
+    if (method === 'POST' && documentFlushMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      return send(res, 200, await platform.withReviewerControl(decodeURIComponent(documentFlushMatch[1]), {
+        owner: body.generation === undefined ? '' : String(body.reviewer ?? ''), generation: Number(body.generation),
+      }, () => platform.flushDocumentQueue(decodeURIComponent(documentFlushMatch[1]))));
+    }
 
     if (method === 'GET' && path === '/api/reviewer/todos') {
       await requireControl(req, POLICY_ACTION.inboxRead);
