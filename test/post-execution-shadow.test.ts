@@ -748,7 +748,7 @@ describe('编排器接线：什么时候问', () => {
 
   test('Lightweight 验收通过：机器验收之后问一次', async () => {
     const { evaluator, seen } = recordingEvaluator();
-    const h = await orchestrated({ coordinator: {}, evaluator, validation: { exitCode: 0, files: ['src/foo.ts'] } });
+    const h = await orchestrated({ coordinator: { 'coordinator:-:0': { steps: REVIEW_AND_SUBMIT.slice(0, 2) } }, evaluator, validation: { exitCode: 0, files: ['src/foo.ts'] } });
     await seedLightweight(h.projects, h.platform, LW_ORDER);
 
     const result = await h.orchestrator.runMission('M-lw', { projectRoot: process.cwd() });

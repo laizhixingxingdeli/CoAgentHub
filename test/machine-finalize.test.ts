@@ -16,7 +16,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -103,6 +103,7 @@ async function readyForReview(
     memoryDelta?: MemoryDeltaProposal[];
     /** 把那条验收标准的结论改成别的状态（默认 pass）。 */
     criterionStatus?: 'pass' | 'fail' | 'unverified' | 'not_applicable';
+    metricsSource?: string;
   },
 ) {
   const clock = new FixedClock();
@@ -157,6 +158,10 @@ async function readyForReview(
   }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
+  if (options?.metricsSource) {
+    mkdirSync(join(prepared.cwd, 'src'));
+    writeFileSync(join(prepared.cwd, 'src', 'warning.ts'), options.metricsSource);
+  }
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
   await platform.submitEvidence(missionId, exec.attemptId, {
     kind: 'test',
@@ -208,6 +213,20 @@ async function readyForReview(
 const VERIFY = [{ argv: ['node', '--test'], timeoutMs: 60_000 }];
 
 describe('机器 L3 放行', () => {
+  test('交卷附真实改动源码度量告警，告警不阻拦机器终审并安全删除已合入分支', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-metrics-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M-metrics', scriptedRunner([0]), {
+      metricsSource: 'export function wide(a,b,c,d,e) { return a; }',
+    });
+    const before = await platform.getMissionView('M-metrics');
+    assert.ok(before.result?.attachments?.codeMetrics?.warnings.some((warning) => warning.kind === 'parameters'));
+    const result = await platform.finalizeMissionByMachine('M-metrics', { integrationBranch: 'auto/plan-x', verification: VERIFY, projectRoot: repo });
+    assert.equal(result.status, 'completed');
+    assert.equal(git(repo, 'branch', '--list', 'mission/M-metrics'), '');
+    assert.equal(git(repo, 'log', '-1', '--format=%s'), 'merge(mission): M-metrics 修 X');
+  });
   test('集成验证通过 → completed，权威是 machine 且指向那份报告', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));

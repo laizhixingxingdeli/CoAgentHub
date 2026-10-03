@@ -593,6 +593,10 @@ export interface MissionResultCriterion {
  * 全部 nullable：缺了是"这次没跑到"，不是"结果是空的"，两者不能合并成""。
  */
 export interface MissionResultPlatformAttachments {
+  readonly codeMetrics?: {
+    readonly warnings: readonly { readonly path: string; readonly line: number; readonly kind: string; readonly value: number; readonly limit: number; readonly detail: string }[];
+    readonly unanalyzed: readonly string[];
+  } | null;
   readonly lastFullTest: { readonly resultLine: string; readonly source: string } | null;
   readonly diffStats:
     | { readonly files: number; readonly insertions: number; readonly deletions: number }

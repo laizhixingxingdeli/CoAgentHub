@@ -197,6 +197,7 @@ export async function applyFinalReview(ctx: PlatformContext,
         projectRoot,
         branch: ref.branch,
         expectedBaseRevision: ref.baseRevision,
+        message: `merge(mission): ${missionId} ${mission.contract.intent.split(/[。！？.!?\n]/u)[0].slice(0, 60)}`,
       });
       if (!outcome.ok) {
         // 落不了地不算完成，也不该假装完成。转 blocked，原因说清楚。

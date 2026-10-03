@@ -345,6 +345,47 @@ const COORDINATOR_L2_ACCEPT: ScriptTable = {
 };
 
 describe('Orchestrator Lightweight：happy Fast Lane', () => {
+  test('L2 reject 同 attempt 转 Standard 并规划', async () => {
+    const plan = { findings: '复核后需要修正', rejectedHypotheses: [], decisions: [], direction: '标准流程补做', risks: [] };
+    const coordinator = new ScriptedRuntime({
+      'coordinator:-:0': { steps: [
+        { tool: 'coagent_get_mission', body: {} },
+        { tool: 'coagent_get_work_item', body: { workItemId: 'W-1' } },
+        { tool: 'coagent_review_execution_result', body: {
+          workItemId: 'W-1', verdict: 'reject', reasons: ['行为不符合工单'], requiredChanges: ['修正返回值'],
+          acceptanceResults: ORDER.acceptance.map((criterion) => ({ criterion, status: 'fail', evidence: 'L2复核失败' })),
+        } },
+        { tool: 'coagent_update_plan', body: plan },
+      ] },
+    });
+    const h = await harness({ coordinator });
+    const { missionId } = await seedLightweight(h.projects);
+    await h.platform.createLightweightWorkItem(missionId, { order: ORDER, workItemId: 'W-1' });
+    const orch = h.makeOrchestrator();
+    await orch.runMission(missionId, { projectRoot: process.cwd(), maxRounds: 3 });
+    const view = await h.platform.getMissionView(missionId);
+    const coord = view.coordinatorAttemptIds[0];
+    assert.equal(view.executionMode, 'standard');
+    assert.equal(view.workItems[0].status, 'rejected');
+    assert.equal(view.workItems[0].lastReview?.verdict, 'reject');
+    assert.equal(view.workItems[0].lastReview?.attemptId, coord);
+    assert.equal(view.workItems[0].lastReview?.submittedAttemptId, orch.hops.find((hop) => hop.role === 'executor')?.attemptId);
+    assert.equal(view.coordinatorAttemptIds.length, 1);
+    assert.equal(view.promotions.length, 1);
+    assert.equal(view.promotions[0].triggerCode, 'coordinator_rejected');
+    assert.deepEqual(view.plan, plan);
+    assert.ok(view.planRevision > 0);
+    const events = await h.activity.list(missionId);
+    const reviews = events.filter((event) => event.kind === 'review.recorded');
+    assert.equal(reviews.length, 1);
+    assert.deepEqual((reviews[0].data as { criteria: number[] }).criteria, CONTRACT.acceptance.map((_, i) => i + 1));
+    assert.equal(reviews[0].contractRevision, view.contractRevision);
+    assert.equal(reviews[0].attemptId, coord);
+    const planned = events.findIndex((event) => event.kind === 'plan.updated');
+    assert.ok(planned > events.indexOf(reviews[0]));
+    assert.equal(events[planned].attemptId, coord);
+  });
+
   test('executor → 机器验收 → 同 Standard 候选池 L2 accept → awaiting_review；L3 finalize 才 completed', async () => {
     const coordinator = new ScriptedRuntime(COORDINATOR_L2_ACCEPT);
     const h = await harness({ coordinator });

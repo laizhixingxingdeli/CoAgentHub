@@ -53,6 +53,7 @@ export async function runIntegrationMergeVerify(ctx: PlatformContext, landMemory
       projectRoot,
       branch: ref.branch,
       expectedBaseRevision: ref.baseRevision,
+      message: `merge(mission): ${mission.id} ${mission.contract.intent.split(/[。！？.!?\n]/u)[0].slice(0, 60)}`,
     });
     if (!merged.ok) {
       return { kind: 'merge_failed', reason: merged.reason, anchor };

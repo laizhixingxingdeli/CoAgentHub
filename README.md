@@ -23,7 +23,7 @@ node --test
 | 并发写 | 靠进程锁，同时只有一个写者 | 版本号挡冲突，多进程可并行 |
 | 活动日志 | 每记一条重写整份状态 | 一条 INSERT |
 | 发号 | 读-加一-写，跨进程有竞态 | 原子自增，按号段预取 |
-| 实时输出 | 没有（跨不过进程边界） | 有 |
+| 实时输出 | 持久 Activity 与 cursor Live 轮询 | 有 |
 
 ```bash
 COAGENT_STORE=pg node src/main.ts
@@ -114,6 +114,37 @@ S15.2 把 **Recovery Reconciler** 列入推迟项，但 `reconcileInterruptedAtt
 （可重试）。另有可关闭的周期投递补建（`COAGENT_RECONCILE_INTERVAL_MS`），
 只补可核实的缺失投递，不是 DurableScheduler。
 
-其余推迟项（每 WorkItem 独立 worktree、自动语义冲突解决、完整 Circuit
+以下为早期基线记录；后续熔断、fencing 等实现以 `.coagent/specs/` 和模块地图为准。其余当时推迟项（每 WorkItem 独立 worktree、自动语义冲突解决、完整 Circuit
 Breaker、Fencing Token、Transactional Outbox、Saga、exactly-once、自主
 Provider 路由、跨机器迁移、完整 Shell Sandbox、改 pi agent-core）都没有碰。
+
+## 安装、启动与开发
+
+CoAgentHub 把需求拆成 Mission、WorkItem 与 Attempt，保存工单、证据、验收和恢复记录。Node 24+ 可直接运行文件存储版本；Postgres 版本先执行 `npm ci` 并准备独立数据库。规则入口是 [AGENTS.md](AGENTS.md)，模块职责见 [.coagent/architecture/modules.md](.coagent/architecture/modules.md)。
+
+三层分工为 L3 冻结需求与签字、L2 规划并逐项验收、L1 执行冻结工单；用户明确授权直接开发时按 AGENTS.md 的本批例外执行。`src/l3.ts` 是检视者控制入口，查看命令用 `node src/l3.ts --help`；服务运行时进度通过插件或观测 HTTP 读取。
+
+PowerShell 启动示例（新建状态必须显式指定路径，已有环境务必复用原状态）：
+
+```powershell
+$env:COAGENT_STATE = 'C:/path/to/coagent-state.json'
+$env:COAGENT_AGENT_ENV_PASSTHROUGH = '-'
+node src/main.ts
+```
+
+默认观测页面为 `http://127.0.0.1:3101`，健康入口 `/api/health`；完整路由、参数、鉴权与 curl 示例见 [docs/http-api.md](docs/http-api.md)。未显式指定状态且默认状态不存在时，启动会拒绝静默新建，以免分裂状态。观测页面不代替检视者验收或消费其 Delivery。
+
+```powershell
+node src/run-mission.ts C:/path/to/mission.json --cwd C:/path/to/repo --adapter C:/path/to/agent-entry.ts --max-rounds 20
+node src/run-plan.ts C:/path/to/plan.json --cwd C:/path/to/repo --adapter C:/path/to/agent-entry.ts --max-rounds 40
+node --test
+npm run metrics -- --changed HEAD
+```
+
+服务持锁时 CLI 转交运行请求；不得另开写者直接加载主状态。`run-plan --check` 仅服务停止时运行。开发验证优先一两条对应测试，交付前运行全量 `node --test`；本批只允许 HAOFF1 既有 7 条跳过，任何新增跳过需解释。度量为零依赖近似告警，默认扫描 src，`--changed` 限制告警到指定基线后的改动，不参与合入判定；复杂签名和不可读取文件单列未分析。
+
+## 部署与恢复
+
+文件模式保持一个真实状态写者；备份状态与 `.coagent/`、Git 版本，并保留运行日志。Postgres 模式设置 `COAGENT_STORE=pg` 与 `COAGENT_PG`，不要将开发库和测试库混用。控制面可注入授权解析器，部署前按 HTTP 文档核实读写权限；示例请求头不代表内置认证配置。
+
+Windows 常驻运行使用现有隐藏 VBS 包装器调用 cmd，再由 `explorer.exe` 启动；仅在持锁进程已退出且 3101 空闲时执行，避免重复启动。换代码前先暂停 Mission，核实执行者退出，再停止服务。进程已死、端口空闲、锁心跳超过 120 秒时由平台自动接管；不编辑状态文件恢复任务。具体停服、检查点批准和 runaway 处置见 [.coagent/architecture/reviewer-runbook.md](.coagent/architecture/reviewer-runbook.md)。
