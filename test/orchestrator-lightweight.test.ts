@@ -597,21 +597,38 @@ describe('Orchestrator Lightweight：submitted crash-recovery', () => {
       return realValidate(input);
     };
 
+    // POST_EXECUTION shadow 同理：崩之前那一轮已经问过，恢复时再问就是同一份产物
+    // 两份 shadow。它在真实 Platform 上被调（生产里由 current 分支挡掉），所以数的是
+    // 真实方法有没有被调用，不是替身有没有被问。
+    let shadowRuns = 0;
+    const realShadow = h.platform.runPostExecutionShadow.bind(h.platform);
+    h.platform.runPostExecutionShadow = async (m: string, w: string) => {
+      shadowRuns += 1;
+      return realShadow(m, w);
+    };
+
     const orch = h.makeOrchestrator();
     const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
     assert.deepEqual(result, { kind: 'awaiting_l3_review' });
     const view = await h.platform.getMissionView(missionId);
     assert.equal(view.status, 'awaiting_review');
     assert.equal(view.result?.summary, '从 crash 恢复');
-    // 没重跑命令，交卷凭的还是崩之前那份报告。
+    // 没重跑命令、没再问 shadow，交卷凭的还是崩之前那份报告。
     assert.equal(engineRuns, 0);
+    assert.equal(shadowRuns, 0);
+    assert.equal(view.workItems[0]!.validationReport?.reportId, validated.reportId);
     assert.deepEqual(view.result?.acceptanceEvidence, [
       `validation-report:${validated.reportId}`,
     ]);
     // L2 那一跳用了标准候选池；恢复之后没有多余的协调者会议。
     assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 1);
     assert.equal(view.workItems[0]!.status, 'accepted');
-    assert.equal(view.workItems[0]!.lastReview?.attemptId, view.coordinatorAttemptIds[0]);
+    const coord = view.coordinatorAttemptIds[0]!;
+    assert.ok(coord);
+    assert.equal(view.workItems[0]!.lastReview?.attemptId, coord);
+    assert.equal(view.workItems[0]!.lastReview?.verdict, 'accept');
+    // L2 验的就是崩之前执行者交的那次提交：恢复没有另起一次提交。
+    assert.equal(view.workItems[0]!.lastReview?.submittedAttemptId, exec);
   });
 });
 
