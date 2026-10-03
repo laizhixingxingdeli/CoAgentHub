@@ -1,9 +1,7 @@
 /**
  * Project Memory（S04）。
  *
- * 核心判据只有一条：**memory 的改动跟代码同一次 merge 落地**。
- * 分两次提交的话，"代码进去了文档没进去"就会发生，而且没人会发现——
- * 一年之后 .coagent/ 描述的是一个已经不存在的系统。
+ * RV4：代码独立合入；文档提议经批准后在空档落地，不覆盖未审查的正文。
  */
 
 import { after, describe, test } from 'node:test';
@@ -352,9 +350,10 @@ describe('读写 .coagent/', () => {
   });
 });
 
-describe('落地时把知识跟代码一起合进去', () => {
-  test('批准的 memoryDelta 写进 worktree，随同一次 merge 进目标分支', async () => {
+describe('文档独立审批与落地', () => {
+  test('memoryDelta 不随代码自动写，检视者批准后独立提交并更新 VIBE', async () => {
     const repo = tempRepo(true);
+    git(repo, 'checkout', '-b', 'auto/memory');
     const worktrees = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(worktrees);
 
@@ -444,8 +443,15 @@ describe('落地时把知识跟代码一起合进去', () => {
     });
     assert.equal(result.status, 'completed');
 
-    // **关键**：代码和文档在同一个提交里进了目标分支。
+    // 代码先合，文档差异留在独立队列；旧正文也必须独立签字。
     assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'mission');
+    const codeHead = git(repo, 'rev-parse', 'HEAD');
+    const proposals = await platform.listDocumentProposals('P');
+    assert.equal(proposals.length, 2);
+    assert.equal(proposals.every((row) => row.state === 'proposed'), true);
+    for (const row of proposals) await platform.decideDocument(row.id, { action: 'approve', reviewer: 'test-L3',
+      reason: '测试逐条审阅提议差异', revision: row.revision, baseHash: row.baseHash });
+    assert.notEqual(git(repo, 'rev-parse', 'HEAD'), codeHead);
     assert.match(git(repo, 'show', 'HEAD:.coagent/specs/scheduling.md'), /交卷不放名额/);
     assert.match(
       git(repo, 'show', 'HEAD:.coagent/architecture/decisions/adr-0001-single-writer-lock.md'),

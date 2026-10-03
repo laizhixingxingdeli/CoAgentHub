@@ -4,6 +4,7 @@ import { criteriaList } from './agent-view-helpers.ts';
 import { validateMissionResultCriteria } from './mission-result-criteria.ts';
 import { collectMissionResultAttachments } from './mission-result-attachments.ts';
 import { resultDeliveryKey } from '../delivery.ts';
+import { captureMissionDocuments } from './document-queue.ts';
 
 export async function retireWorkItem(
   ctx: PlatformContext,  criteriaFailureStop: (mission: Mission, item: WorkItem) => Promise<void>,
@@ -89,6 +90,7 @@ export async function submitMissionResult(
       undefined,
       attemptId,
     );
+    await captureMissionDocuments(ctx, mission, attemptId);
     const delivery = await ctx.deliveries.create({
       missionId: mission.id,
       projectId: mission.projectId,

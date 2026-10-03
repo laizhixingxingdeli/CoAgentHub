@@ -1,6 +1,7 @@
 import type { Mission } from '../../kernel/index.ts';
 import type { ActivityEvent } from '../ports.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
+import { listDocumentProposals } from './document-queue.ts';
 
 export type ReviewerTodoKind = 'question' | 'diagnostic' | 'cost_cap' | 'checkpoint' | 'result' | 'documentation';
 export interface ReviewerTodo {
@@ -41,9 +42,6 @@ function sourceTodos(mission: Mission, events: readonly ActivityEvent[]): Review
     // messageId / attemptId 固定于那次提交，确认不因其它活动更新而失效。
     const ref = submission.messageId ?? submission.attemptId ?? submission.at;
     add(`result:${ref}`, 'result', mission.result.summary, submission.at, mission.status === 'awaiting_review');
-    if (mission.status === 'awaiting_review') mission.result.memoryDelta.forEach((proposal, index) => {
-      add(`documentation:${ref}:${index}`, 'documentation', proposal.title, submission.at, false);
-    });
   }
   return rows;
 }
@@ -58,7 +56,7 @@ function applyDecisions(rows: ReviewerTodo[], mission: Mission, events: readonly
   for (const row of rows) {
     const action = states.get(row.id);
     if (action === 'acknowledge') row.state = 'acknowledged';
-    if (action === 'wait_user' && mission.isParked) row.state = 'waiting_user';
+    if (action === 'wait_user' && (mission.isParked || row.kind === 'documentation')) row.state = 'waiting_user';
     if (mission.isParked && [...states.values()].includes('wait_user') && row.state === 'open') row.state = 'waiting_user';
     row.notify = row.state === 'open';
   }
@@ -76,6 +74,15 @@ export async function listReviewerTodos(ctx: PlatformContext, projectId?: string
       rows.push(...current);
     }
   }
+  for (const proposal of await listDocumentProposals(ctx, projectId)) {
+    if (proposal.state === 'withdrawn' || proposal.state === 'committed') continue;
+    const row: ReviewerTodo = { id: `${proposal.id}:revision:${proposal.revision}`, projectId: proposal.projectId, missionId: proposal.missionId,
+      kind: 'documentation', title: proposal.title, at: proposal.at, blocking: false,
+      state: proposal.state === 'approved' ? 'acknowledged' : 'open', notify: proposal.state !== 'approved' };
+    const { mission } = await ctx.locate(proposal.missionId);
+    applyDecisions([row], mission, await ctx.activity.list(mission.id));
+    rows.push(row);
+  }
   return rows.sort((a, b) => b.at.localeCompare(a.at) || a.id.localeCompare(b.id));
 }
 
@@ -91,10 +98,10 @@ export async function decideReviewerTodo(ctx: PlatformContext,
   if (!row) throw new PlatformRuleError('REVIEWER_TODO_NOT_FOUND', '待办已解决或不存在，请刷新。');
   const { mission } = await ctx.locate(row.missionId);
   if (input.action === 'acknowledge' && row.state === 'acknowledged') return row;
-  if (input.action === 'reopen' && mission.isParked) {
+  if (input.action === 'reopen' && mission.isParked && row.kind !== 'documentation') {
     throw new PlatformRuleError('TODO_MISSION_PARKED', '请先经 parked-resume 同步基线并恢复 Mission，再重开待办。');
   }
-  if (input.action === 'wait_user') await park(mission.id, input);
+  if (input.action === 'wait_user' && row.kind !== 'documentation') await park(mission.id, input);
   // park 可能保存后重建聚合，重新定位再记事件，避免旧对象覆盖。
   const current = await ctx.locate(mission.id);
   await ctx.event(current.mission, 'reviewer.todo_decided', { todoId, ...input,

@@ -24,6 +24,7 @@
 | `src/application/code-metrics.ts`、`platform/code-metrics-files.ts` | 零依赖近似源码告警、src 文件读取；交卷附件与离线脚本共用 | `analyzeCodeMetrics`、`collectCodeMetrics` | 仅读源码，告警不参与验收判定 |
 | `src/api/` | HTTP：路由表、agent 工具表、托管运行（`server.ts`）；网页后端视图（`web.ts`）；静态文件、run token、控制面鉴权 | `createApi` | 只调 Platform 公开方法，不写规则 |
 | `platform/reviewer-todos.ts`、`reviewer-duty.ts`、`master-brief.ts` | 权威源待办投影、持久值守租约、真实 Git 合 master 简报 | Platform 的 reviewer 方法 | 读不 ACK；确认不解门禁；master 只读，不执行合并 |
+| `platform/document-queue.ts`、`application/document-files.ts` | 文档精确差异、持久提议状态、批准后的空档提交及重入恢复 | `listDocumentProposals`、`decideDocument`、`flushDocumentQueue` | 代码合入不自动落文档；基线漂移重审；隔离检出提交后核对目标，master 不动 |
 | `src/api/reviewer-wait.ts`、`reviewer-mcp.ts`；`scripts/reviewer-watch.ts`、`reviewer-mcp.ts` | 有界守候、零依赖 stdio MCP、显式客户端 | HTTP 与 MCP 入口 | 所有状态经服务；不自动启动、不创建定时任务、不改已安装插件 |
 | `src/runtime/` | 起 agent 子进程与协议（stdin 规格、stdout 事件行与结果行）；只读查询运行时；测试用脚本运行时 | `spawn.ts`、`pi-query.ts`、`scripted.ts` | 不依赖任何 agent SDK |
 | `src/web/` | 无构建前端：路由（`app.js`）、项目页（`projects.js`、`project-catalog.js`、`project-spec.js`）、任务页（`task.js`）、收件箱（`inbox.js`）、角色与模型（`agents.js`）、设置（`settings.js`）、方案运行页、平台页、资源池页、事件叙事（`narrate.js`）、样式（`ui.css`） | `index.html` | 只走 `/api/*` |

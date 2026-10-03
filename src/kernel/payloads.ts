@@ -567,7 +567,9 @@ export interface MemoryDeltaProposal {
   /** Living Spec 用稳定的 Capability 名，不要用 Mission 名或日期。 */
   readonly slug: string;
   readonly title: string;
-  readonly body: string;
+  /** 旧记录兼容；新交卷给精确差异，整份正文也必须独立审批。 */
+  readonly body?: string;
+  readonly changes?: readonly { readonly before: string; readonly after: string }[];
 }
 
 /**

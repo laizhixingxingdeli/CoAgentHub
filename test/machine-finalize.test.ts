@@ -16,7 +16,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -641,12 +641,13 @@ describe('方案放弃失败的 Mission', () => {
 });
 
 describe('机器 L3 与项目记忆', () => {
-  test('协调者提议的 Living Spec 跟代码同一次合进集成分支——人工放行怎么落，机器放行也怎么落', async () => {
+  test('机器合入代码后文档提议仍独立待批，不自动覆盖规格', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(wt);
     const { platform } = await readyForReview(repo, wt, 'M1', scriptedRunner([0]), {
-      memoryDelta: [{ kind: 'living_spec', slug: 'demo-capability', title: 'Demo', body: '# Demo\n\n机器放行也要落这份。' }],
+      memoryDelta: [{ kind: 'living_spec', slug: 'demo-capability', title: 'Demo', body: '# Demo\n\n机器放行也要落这份。' },
+        { kind: 'living_spec', slug: '../outside', title: '无效差异', body: '不能越界' }],
     });
 
     const result = await platform.finalizeMissionByMachine('M1', {
@@ -656,9 +657,11 @@ describe('机器 L3 与项目记忆', () => {
     });
 
     assert.equal(result.status, 'completed');
-    // 以前只合了代码：这份提议被悄悄丢掉，没有事件、没有提示。
-    assert.match(git(repo, 'show', 'HEAD:.coagent/specs/demo-capability.md'), /机器放行也要落这份/);
-    assert.match(git(repo, 'show', 'HEAD:VIBE.md'), /demo-capability/);
+    assert.equal(existsSync(join(repo, '.coagent/specs/demo-capability.md')), false);
+    const proposals = await platform.listDocumentProposals('P');
+    assert.equal(proposals.length, 2); assert.equal(proposals[0].state, 'proposed');
+    assert.equal(proposals[1].state, 'needs_revision', '坏文档不阻止已验证代码完成');
+    assert.equal(proposals[0].proposed.includes('机器放行也要落这份'), true);
   });
 });
 

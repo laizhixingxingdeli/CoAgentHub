@@ -1,7 +1,7 @@
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 import type { Mission, FinalReviewAuthority } from '../../kernel/index.ts';
 import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from '../policy-engine.ts';
-import { applyMemoryDelta, writeVibe } from '../project-memory.ts';
+import { captureMissionDocuments } from './document-queue.ts';
 
 export function assertFinalizePolicy(
   input: Parameters<typeof evaluatePolicy>[0],
@@ -221,14 +221,7 @@ export async function applyFinalReview(ctx: PlatformContext,
   }
 
 export async function landMemory(ctx: PlatformContext, mission: Mission): Promise<void> {
-    const ref = mission.workspaceRef;
-    const proposals = mission.result?.memoryDelta ?? [];
-    if (!ref || proposals.length === 0 || ref.branch === '(in-place)') return;
-    const worktreeRoot = ctx.workspace?.worktreePath?.(mission.id, ref.projectRoot);
-    if (!worktreeRoot) return;
-    const written = applyMemoryDelta(worktreeRoot, proposals);
-    // 传 projectId：worktree 的目录名是 Mission ID，
-    // 靠它兜底会让 VIBE.md 的标题变成 Mission 名。
-    const vibe = writeVibe(worktreeRoot, mission.projectId);
-    await ctx.event(mission, 'memory.applied', { written: [...written, vibe] });
+    const submission = (await ctx.activity.list(mission.id)).filter((event) => event.kind === 'mission_result.submitted').at(-1);
+    // 恢复旧交卷也补入独立队列，不在代码分支上写文档。
+    await captureMissionDocuments(ctx, mission, submission?.attemptId ?? submission?.at ?? 'legacy');
   }
