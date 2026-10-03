@@ -29,7 +29,7 @@
 | `src/runtime/` | 起 agent 子进程与协议（stdin 规格、stdout 事件行与结果行）；只读查询运行时；测试用脚本运行时 | `spawn.ts`、`pi-query.ts`、`scripted.ts` | 不依赖任何 agent SDK |
 | `src/web/` | 无构建前端：路由（`app.js`）、项目页（`projects.js`、`project-catalog.js`、`project-spec.js`）、任务页（`task.js`）、收件箱（`inbox.js`）、角色与模型（`agents.js`）、设置（`settings.js`）、方案运行页、平台页、资源池页、事件叙事（`narrate.js`）、样式（`ui.css`） | `index.html` | 只走 `/api/*` |
 | `src/main.ts` | 常驻服务与三种装配（内存 / 文件 / PG） | `startServer`、`buildPersistentPlatform`、`buildPgPlatform` | 状态文件路径必须显式 |
-| `src/l3.ts`、`src/run-plan.ts`、`src/run-mission.ts` | 检视者命令行；方案运行与单 Mission 运行入口（有常驻服务时转发给它） | 各文件顶部用法说明 | 写命令在持锁进程里执行 |
+| `src/l3.ts`、`src/run-queue.ts`、`src/run-mission.ts`、`src/run-plan.ts` | 检视者命令、已确认 Mission 队列提交、单 Mission 运行；旧 Plan 入口只作历史预检/兼容 | 各文件顶部用法说明 | 写命令在持锁服务里执行；不新建 PlanRun |
 
 ## `src/application/platform/` 按职责
 
@@ -68,3 +68,7 @@
 | `src/extension.ts` | 每轮注入角色提示词与开跑简报；写入越界、危险 git 命令的拦截 |
 | `src/agent-entry.ts`、`src/runtime.ts` | 读 stdin 规格、跑 pi 会话、写结果行；执行者没做终结提交就结束时，在同一会话提醒一次（PI-END1） |
 | `src/failure-classify.ts` | 上游失败分类 |
+
+## 后端队列与分类角色（2026-10-04）
+
+mission-queue.ts 负责项目执行配置、已确认 Mission 顺序/依赖的活动投影与启动配置固定；mission-queue-worker.ts 只负责调度和排空。main.ts 在持锁服务中复用 runHostedMission，不创建第二写者。run-queue.ts 只向本机服务提交清单；run-plan.ts 保留历史只读预检与兼容转发，生产执行退役。QueryRunner 使用 classifier 角色池，与 Mission 调度分开；字段、事实、熔断和健康视图沿用原候选仓储。

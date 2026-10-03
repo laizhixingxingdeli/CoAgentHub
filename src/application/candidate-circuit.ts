@@ -191,7 +191,7 @@ export function classifyCandidateFailure(
   return { failureClass: 'unknown', failover: false };
 }
 
-export type CandidateFailureSource = 'circuit' | 'queue' | 'attempt.ended' | 'unknown';
+export type CandidateFailureSource = 'circuit' | 'queue' | 'attempt.ended' | 'query.ended' | 'unknown';
 
 export interface CandidateFailureHint {
   readonly failureClass: string;

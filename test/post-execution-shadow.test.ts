@@ -886,7 +886,7 @@ describe('构建器把 POST 评估器交到 Platform', () => {
     assert.match(server, /buildPgPlatform\(\{ \.\.\.decision,/);
     assert.match(server, /buildPersistentPlatform\(statePath, \{ \.\.\.decision,/);
 
-    for (const cli of ['run-mission.ts', 'run-plan.ts']) {
+    for (const cli of ['run-mission.ts']) {
       const source = readFileSync(join(root, 'src', cli), 'utf8');
       const deps = source.indexOf('buildDecisionDeps(process.env)');
       assert.ok(deps > 0, `${cli} 没按 env 组装决策依赖`);

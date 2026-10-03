@@ -290,6 +290,10 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 输入、权限、版本门禁和响应同协调者配置，替换执行者列表；不会改其他角色。
 
+### POST /api/pools/classifier/configure
+
+输入、权限、版本门禁和响应同协调者配置，替换分类用只读候选；每次 QueryRun 重读启用列表，上游可切换故障才按序顶替，空池拒绝，不借用协调者或请求中指定的模型。只读工具白名单保持强制。
+
 ### POST /api/pools/independent_reviewer/configure
 
 输入、权限、版本门禁和响应同协调者配置，替换独立检视者列表；空池不会复用协调者身份。
@@ -1372,18 +1376,20 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ### POST /api/control/run-plan
 
-鉴权：控制面（可选resolver）。参数：plan、selection、cwd、adapter、state、store、runDir；可选候选与maxRounds。真实派发入口，会执行agent。推荐使用run-mission/run-plan CLI构造请求。响应是NDJSON，不是单个JSON；断线不取消已接收job；501表示未装配，503表示drain。 示例为空候选，不派发；实际候选必须经CLI资格筛选与分类。
+生产服务返回 HTTP 410 与 {"error":"PLAN_RUN_RETIRED","message":"方案运行已退役…"}，不会创建 PlanRun 或派发 agent。历史 PlanRun 查询及恢复裁决继续保留；测试专用历史装配不代表生产入口可运行。
 
-请求示例及本机curl：
+### GET /api/projects/:projectId/mission-queue
 
-```bash
-curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' --data '{"plan":{"planId":"PLAN-example","projectId":"P","intent":"示例","integrationBranch":"codex/integration","reviewer":"L3","stopConditions":{"unresolvedEscalations":1,"wallClockMs":3600000,"escalationTimeoutMs":60000,"maxEscalations":5,"maxRerunsPerFeature":1},"integrationVerification":[{"argv":["node","--test"],"timeoutMs":600000}],"features":[]},"selection":{"candidates":[],"exclusions":[],"warnings":[]},"cwd":"C:/path/to/repo","adapter":"C:/path/to/agent-entry.ts","state":"C:/path/to/state.json","store":"file","runDir":"C:/path/to/run","env":{"COAGENT_AGENT_ENV_PASSTHROUGH":"-"},"maxRounds":40}' 'http://127.0.0.1:3101/api/control/run-plan'
-```
+返回 {projectId,config,revision,entries:[{missionId,position,dependsOn,status,eligible,blockedBy,contract}]}。读需 missionRead 权限；没有项目时返回空队列与可用于首次提交的 revision，不建项目。
 
-响应结构摘录：
+### POST /api/projects/:projectId/mission-queue
 
-```json
-{"channel":"stdout","line":"开始运行"}
-{"exitCode":0}
-```
+输入 {expectedRevision,confirmedBy,config?,missions:[{missionId,contract?,dependsOn?}]}，成功返回 HTTP 201 与新队列。写需 missionCreate 权限；已领取项目值守时必须携带真实 reviewer 与 generation 头。confirmedBy 必须记录真实确认原文。新 Mission 必须提供冻结契约，已有 Mission 不允许在入队时覆盖契约。依赖只能引用同项目已有或本批更早的 Mission；整批先验证再写入，旧版本返回 QUEUE_STALE。
 
+config 为 {projectRoot,adapter,integrationBranch,reviewer,conversationRef,envPassthrough,verification:[{argv,timeoutMs}]}，目录和适配器须存在，禁止 master/main 目标，验证命令必须非空。没有旧配置时可连同清单一次提交。
+
+### POST /api/projects/:projectId/execution-config
+
+输入 {expectedRevision,confirmedBy,config}，返回 HTTP 200 与队列新版本。权限及值守要求同入队。配置存为项目活动，在途 Mission 保留启动时配置，后续任务读取新配置；续跑已有工作区不能改目录或目标分支。
+
+本机使用：先 GET 获取 revision，再 POST；CLI 可使用 node src/run-queue.ts missions.json --confirmed-by "真实确认原文"，已有值守时附 --reviewer 与 --generation。--check 只预览输入，不触碰主状态。队列仅按序、依赖推进，暂停、挂起、升级、费用、重试和终审均由 Mission 承载，不创建方案级预算或升级。前一项等待验收时不启动后一项；lightweight 完成后仍须通过逐条验收与项目集成验证。

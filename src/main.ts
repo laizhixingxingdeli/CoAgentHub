@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { API_VERSION, createApi, drainApi } from './api/server.ts';
+import { API_VERSION, createApi, drainApi, type ApiDeps } from './api/server.ts';
 import type { ControlPrincipalResolver } from './api/control-auth.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
@@ -28,7 +28,8 @@ import { Platform } from './application/platform.ts';
 import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
-import { InMemoryAgentPoolRepository, loadPoolOrSeed } from './application/agent-pool.ts';
+import { MissionQueueWorker } from './application/mission-queue-worker.ts';
+import { InMemoryAgentPoolRepository, loadRoleProfiles } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
@@ -186,11 +187,12 @@ export function buildPlatform(
     ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     ...(validation ? { validation } : {}),
   });
+  const agentPool = new InMemoryAgentPoolRepository();
   const tokens = new RunTokenRegistry();
   // 未声明 supportsQuery 的 runtime（含 Spawn/Pi/未知）不得伪装成 read-only query。
   const queryRunner =
     queryRuntime?.supportsQuery === true
-      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
+      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids, loadCandidates: () => loadRoleProfiles(agentPool, 'classifier') })
       : undefined;
   return {
     platform,
@@ -204,7 +206,7 @@ export function buildPlatform(
       ? (input: Parameters<QueryRunner['runQuery']>[0]) => queryRunner.runQuery(input)
       : undefined,
     tokens,
-    agentPool: new InMemoryAgentPoolRepository(),
+    agentPool,
     issuer: makeIssuer(platform, tokens),
     persist: () => {},
   };
@@ -307,11 +309,12 @@ export async function buildPersistentPlatform(
     transaction: store,
     live,
   });
+  const agentPool = new FileAgentPoolRepository(store);
   const tokens = new RunTokenRegistry();
   const queryRuntime = options.queryRuntime;
   const queryRunner =
     queryRuntime?.supportsQuery === true
-      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
+      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids, candidateCircuits, loadCandidates: () => loadRoleProfiles(agentPool, 'classifier') })
       : undefined;
 
   // 刚起来 = 没有任何 attempt 可能还活着。不收敛的话，上一次崩溃留下的
@@ -365,7 +368,7 @@ export async function buildPersistentPlatform(
     reconciled,
     workspaceReconciled,
     tokens,
-    agentPool: new FileAgentPoolRepository(store),
+    agentPool,
     issuer: makeIssuer(platform, tokens),
     live,
     persist: () => store.flush(),
@@ -457,11 +460,12 @@ export async function buildPgPlatform(options?: {
     transaction: store,
     live,
   });
+  const agentPool = new PgAgentPoolRepository(store);
   const tokens = new RunTokenRegistry();
   const queryRuntime = options?.queryRuntime;
   const queryRunner =
     queryRuntime?.supportsQuery === true
-      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids })
+      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids, candidateCircuits, loadCandidates: () => loadRoleProfiles(agentPool, 'classifier') })
       : undefined;
 
   // 传 live：收敛判死的那些跳正是**没跑到 Orchestrator finally** 的那些，
@@ -491,7 +495,7 @@ export async function buildPgPlatform(options?: {
     live,
     reconciled,
     tokens,
-    agentPool: new PgAgentPoolRepository(store),
+    agentPool,
     issuer: makeIssuer(platform, tokens),
     persist: () => projects.persist(),
     // 读请求前刷新：别的进程写过的东西，这个进程要看得见。
@@ -889,6 +893,8 @@ export interface StartServerOptions {
    * 生产不传——按请求 body.adapter 构造 SpawnRuntime。
    */
   runtime?: AgentRuntime;
+  /** 只供历史 PlanRun 隔离回归使用；生产默认不挂方案运行入口。 */
+  legacyPlanRunsForTests?: boolean;
   /**
    * 测试用：替换工作区。生产不传则 GitWorktreeManager。
    * 必须与装配 Platform 校验器共用同一份，否则 hosted 入口会改错树。
@@ -1004,6 +1010,31 @@ export async function startServer(
     const passthrough = parseAgentEnvPassthrough(
       typeof passthroughRaw === 'string' ? passthroughRaw : undefined,
     );
+    const runMission: NonNullable<ApiDeps['runMission']> = async (body, emit) => {
+      rememberHostedAdapter(body);
+      const token = randomUUID();
+      try {
+        return await runHostedMission(
+          body,
+          {
+            built: hostedBuilt,
+            baseUrl: loopback.baseUrl,
+            workspace,
+            env,
+            ...hostedRuntime,
+            heldState,
+            onStarted: (id) => {
+              // Asynchronous views cannot be synchronously observed in this API; never cache
+              // a result that may become stale while the hosted run remains active.
+              hostedRuns.register(token, { kind: 'mission', id, status: '运行中/状态暂不可读' });
+            },
+          },
+          emit,
+        );
+      } finally {
+        hostedRuns.finish(token);
+      }
+    };
     server = createApi({
       platform: built.platform,
       tokens: built.tokens,
@@ -1012,6 +1043,7 @@ export async function startServer(
       agentPool: built.agentPool,
       queuedHops: built.queuedHops,
       candidateCircuits: built.candidateCircuits,
+      queryRuns: built.queryRuns,
       platformStatus: {
         store: usePg ? 'pg' : 'file',
         startedAt,
@@ -1039,32 +1071,8 @@ export async function startServer(
           }
         : {}),
       planLive,
-      runMission: async (body, emit) => {
-        rememberHostedAdapter(body);
-        const token = randomUUID();
-        try {
-          return await runHostedMission(
-            body,
-            {
-              built: hostedBuilt,
-              baseUrl: loopback.baseUrl,
-              workspace,
-              env,
-              ...hostedRuntime,
-              heldState,
-              onStarted: (id) => {
-                // Asynchronous views cannot be synchronously observed in this API; never cache
-                // a result that may become stale while the hosted run remains active.
-                hostedRuns.register(token, { kind: 'mission', id, status: '运行中/状态暂不可读' });
-              },
-            },
-            emit,
-          );
-        } finally {
-          hostedRuns.finish(token);
-        }
-      },
-      runPlan: async (body, emit) => {
+      runMission,
+      runPlan: options?.legacyPlanRunsForTests && options?.runtime ? async (body, emit) => {
         rememberHostedAdapter(body);
         const token = randomUUID();
         try {
@@ -1094,7 +1102,7 @@ export async function startServer(
         } finally {
           hostedRuns.finish(token);
         }
-      },
+      } : undefined,
       ...(options?.resolveControlPrincipal
         ? { resolveControlPrincipal: options.resolveControlPrincipal }
         : {}),
@@ -1131,6 +1139,24 @@ export async function startServer(
         `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
       );
     }
+    const missionQueueWorker = new MissionQueueWorker({
+      read: async () => Promise.all((await built.platform.listProjects()).map((project) => built.platform.getMissionQueue(project.projectId))),
+      run: async (entry, _config, projectId) => {
+        const config = await built.platform.recordQueuedMissionStart(entry.missionId);
+        if (await workspace.currentBranch?.(config.projectRoot) !== config.integrationBranch) throw new Error('项目仓当前分支与执行配置不一致');
+        await runMission({ spec: { projectId, missionId: entry.missionId, contract: entry.contract },
+          cwd: config.projectRoot, adapter: config.adapter, state: statePath, store: usePg ? 'pg' : 'file',
+          env: { [SPAWN_ENV_PASSTHROUGH_VAR]: config.envPassthrough } }, () => {});
+        const view = await built.platform.getMissionView(entry.missionId);
+        if (view.status === 'awaiting_review' && view.executionMode === 'lightweight') {
+          await built.platform.finalizeMissionByMachine(entry.missionId, { projectRoot: config.projectRoot,
+            integrationBranch: config.integrationBranch, verification: config.verification });
+        }
+      },
+      hold: (missionId, error) => built.platform.holdQueuedMission(missionId, error instanceof Error ? error.message : String(error)),
+      warn: warnPeriodicRepair,
+    });
+    missionQueueWorker.start();
     // 文件版周期在 server 主锁下用已持锁 store，不再短借自己的锁。PG 独立 store。只补投递。
     // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
     const periodic = startPeriodicDeliveryRepair({
@@ -1146,7 +1172,9 @@ export async function startServer(
     bindServerCloseToPeriodicStop(
       server,
       async () => {
+        const queueStopped = missionQueueWorker.stop();
         await drainApi(server);
+        await queueStopped;
         if (safeShutdown) await safeShutdown;
         await (periodic?.stop() ?? Promise.resolve());
         await built.persist();

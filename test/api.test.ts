@@ -2521,8 +2521,8 @@ describe('hosted run 流与排空门禁', () => {
           }, () => {}),
         (error: unknown) =>
           error instanceof LoopbackHttpError &&
-          error.status === 501 &&
-          error.code === 'HOSTED_RUN_UNAVAILABLE',
+          error.status === 410 &&
+          error.code === 'PLAN_RUN_RETIRED',
       );
       const health = await request(base, '/api/health');
       assert.equal(health.status, 200);

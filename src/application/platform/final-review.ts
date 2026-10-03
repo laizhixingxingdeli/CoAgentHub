@@ -1,4 +1,6 @@
 import { PlatformRuleError, type PlatformContext } from './context.ts';
+import { queuedExecutionConfig } from './mission-queue.ts';
+import { runIntegrationMergeVerify } from './integration-verification.ts';
 import type { Mission, FinalReviewAuthority } from '../../kernel/index.ts';
 import { evaluatePolicy, POLICY_ACTION, POLICY_REASON } from '../policy-engine.ts';
 import { captureMissionDocuments } from './document-queue.ts';
@@ -173,8 +175,9 @@ export async function applyFinalReview(ctx: PlatformContext,
     }
 
     // merge
+    const queueConfig = await queuedExecutionConfig(ctx, missionId);
     let mergedInto: string | undefined;
-    if (mission.hasMutated) {
+    if (mission.hasMutated || queueConfig) {
       const ref = mission.workspaceRef;
       if (!ref) {
         throw new PlatformRuleError(
@@ -183,7 +186,9 @@ export async function applyFinalReview(ctx: PlatformContext,
         );
       }
       // projectRoot 优先用调用方给的，其次用 Mission 自己记下的那个。
-      const projectRoot = input.projectRoot ?? ref.projectRoot;
+      const projectRoot = queueConfig?.projectRoot ?? input.projectRoot ?? ref.projectRoot;
+      if (queueConfig && input.projectRoot && input.projectRoot !== projectRoot) throw new PlatformRuleError('QUEUE_ROOT_MISMATCH', '排队 Mission 只能在启动时固定的项目仓合入。');
+      if (queueConfig && (ref.projectRoot !== projectRoot || ref.targetBranch !== queueConfig.integrationBranch)) throw new PlatformRuleError('QUEUE_WORKSPACE_MISMATCH', 'Mission 工作区必须与固定项目配置一致。');
       if (!ctx.workspace || !projectRoot) {
         throw new PlatformRuleError(
           'NO_WORKSPACE_MANAGER',
@@ -191,6 +196,23 @@ export async function applyFinalReview(ctx: PlatformContext,
         );
       }
       await landMemory(ctx, mission);
+
+      if (queueConfig) {
+        if (await ctx.workspace.currentBranch?.(projectRoot) !== queueConfig.integrationBranch) throw new PlatformRuleError('INTEGRATION_BRANCH_MISMATCH', '项目仓当前分支与 Mission 固定的集成分支不一致。');
+        const result = await runIntegrationMergeVerify(ctx, (row) => landMemory(ctx, row), {
+          mission, projectRoot, integrationBranch: queueConfig.integrationBranch, verification: queueConfig.verification,
+        });
+        if (result.kind !== 'verified') {
+          const reason = `项目集成合入或验证未通过：${result.kind}`;
+          mission.setWaitReason('waiting_l3', reason);
+          await ctx.event(mission, 'final_review.merge_failed', tag({ reason }));
+          await ctx.event(mission, 'mission.waiting', { reason: 'waiting_l3', integrationOutcome: result.kind,
+            ...('report' in result ? { reportId: result.report.id } : {}),
+            ...(result.kind === 'verify_failed' ? { rolledBack: result.reset.ok, rollbackReason: result.reset.reason } : {}) });
+          return { status: mission.status, reason };
+        }
+        mergedInto = result.mergedInto;
+      } else {
 
       const outcome = await ctx.workspace.mergeToTarget({
         missionId,
@@ -206,6 +228,7 @@ export async function applyFinalReview(ctx: PlatformContext,
         return { status: mission.status, reason: outcome.reason };
       }
       mergedInto = outcome.mergedInto;
+      }
     }
 
     mission.complete({

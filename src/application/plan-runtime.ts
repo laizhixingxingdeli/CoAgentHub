@@ -710,6 +710,8 @@ export async function runHostedPlan(
   if (queryRuntime?.supportsQuery === true) {
     const queryRunner = new QueryRunner({
       runtime: queryRuntime,
+      loadCandidates: () => loadRoleProfiles(agentPool, 'classifier'),
+      candidateCircuits,
       queryRuns: ctx.built.queryRuns ?? new InMemoryQueryRunRepository(),
       clock: ctx.built.clock ?? new SystemClock(),
       ids: ctx.built.ids ?? new SequentialIds(),
@@ -751,7 +753,7 @@ export async function runHostedPlan(
     runMission: (missionId, options) => runner.run(missionId, hostedPlanRunOptions(options, parsed.maxRounds)),
     ...(runQuery ? { runQuery } : {}),
     ...(Object.keys(resumeMissions).length > 0 ? { resumeMissions } : {}),
-    ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
+
     persist: async () => {
       await persist();
     },

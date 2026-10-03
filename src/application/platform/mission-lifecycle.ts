@@ -153,7 +153,9 @@ export async function resumeParkedMission(ctx: PlatformContext, answerEscalation
 
 export async function resumeMission(ctx: PlatformContext, answerEscalation: AnswerEscalation, missionId: string): Promise<{ paused: boolean }> {
     const { mission } = await ctx.locate(missionId);
-    mission.resume();
+      mission.resume();
+      const lastQueueFailure = (await ctx.activity.list(missionId)).filter((event) => event.kind === 'mission.queue_failed').at(-1);
+      if (lastQueueFailure && mission.waitReason === 'waiting_l3' && mission.waitDetail === (lastQueueFailure.data as { reason?: string }).reason) mission.setWaitReason(undefined);
     await ctx.event(mission, 'mission.resumed_from_pause', {});
     return { paused: mission.isPaused };
   }

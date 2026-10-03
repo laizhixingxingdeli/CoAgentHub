@@ -47,7 +47,7 @@ export async function recordStandardFallbackRoute(ctx: PlatformContext, callback
     });
   }
 
-export async function createMission(ctx: PlatformContext, callbacks: IntakeCallbacks, input: CreateMissionInput): Promise<{ missionId: string }> {
+export async function createMission(ctx: PlatformContext, input: CreateMissionInput): Promise<{ missionId: string }> {
     const project = await ctx.ensureProject(input.projectId);
     const missionId = input.missionId ?? ctx.ids.next('M');
     const mission = project.createMission({

@@ -382,6 +382,10 @@ const sameAsEscalated = (event) => ({
 
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
+  'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
+  'mission.queued': () => ({ badge: 'L3', action: '确认任务入队', detail: '按项目顺序与依赖推进' }),
+  'mission.queue_started': () => ({ badge: '平台', action: '启动队列任务', detail: '执行配置已固定' }),
+  'mission.queue_failed': (event) => ({ badge: '平台', action: '队列任务暂停', detail: event.data?.reason || '等待检视者处理' }),
   'mission.created': (event, ctx) => ({
     badge: 'L3 → L2',
     action: '发起任务',
