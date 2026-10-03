@@ -166,6 +166,7 @@ async function harness(opts?: {
     projects,
     deliveries,
     reports,
+    engine,
     tokens,
     makeOrchestrator: () =>
       new Orchestrator({
@@ -314,9 +315,39 @@ describe('Orchestrator Lightweight：WorkItem 数量守卫', () => {
   });
 });
 
+/**
+ * 快车道机器验收通过之后的那一跳 L2：标准候选池的协调者凭报告下 accept。
+ *
+ * 机器过了只到 submitted，accept 是协调者 attempt 下的结论（用户 09-30 定）；
+ * 没有这一步，交卷守卫 LIGHTWEIGHT_REVIEW_REQUIRED 根本过不去。
+ */
+const COORDINATOR_L2_ACCEPT: ScriptTable = {
+  'coordinator:-:0': {
+    steps: [
+      { tool: 'coagent_get_mission', body: {} },
+      { tool: 'coagent_get_work_item', body: { workItemId: 'W-1' } },
+      {
+        tool: 'coagent_review_execution_result',
+        body: {
+          workItemId: 'W-1',
+          verdict: 'accept',
+          acceptanceResults: ORDER.acceptance.map((criterion) => ({
+            criterion,
+            status: 'pass' as const,
+            evidence: '测试替身：逐条核过',
+          })),
+          reasons: ['对照机器报告复核，改动符合工单'],
+          requiredChanges: [],
+        },
+      },
+    ],
+  },
+};
+
 describe('Orchestrator Lightweight：happy Fast Lane', () => {
-  test('dispatch → 唯一 executor hop → validator accept → awaiting_review；L3 finalize 才 completed', async () => {
-    const h = await harness();
+  test('executor → 机器验收 → 同 Standard 候选池 L2 accept → awaiting_review；L3 finalize 才 completed', async () => {
+    const coordinator = new ScriptedRuntime(COORDINATOR_L2_ACCEPT);
+    const h = await harness({ coordinator });
     const { missionId } = await seedLightweight(h.projects, { missionId: 'M-happy' });
     await h.platform.createLightweightWorkItem(missionId, {
       order: ORDER,
@@ -340,19 +371,38 @@ describe('Orchestrator Lightweight：happy Fast Lane', () => {
     assert.match(view.result!.acceptanceEvidence[0]!, /^validation-report:VR-/);
     assert.deepEqual(view.result?.memoryDelta, []);
     assert.deepEqual(view.result?.openRisks, []);
-    assert.deepEqual(view.coordinatorAttemptIds, []);
     assert.ok(view.isMutating, 'awaiting_review 仍占 mutation slot');
 
-    // hops：只能有 executor
-    assert.ok(orch.hops.length >= 1);
-    assert.ok(orch.hops.every((hop) => hop.role === 'executor'));
-    assert.equal(orch.hops.filter((hop) => hop.endedBy === 'structured_submit').length, 1);
+    // 执行者一跳、L2 一跳，各一次；L2 走的是标准候选池的同一个 coordinator 池。
+    assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 1);
+    assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 1);
+    // 只有执行者以终态工具收尾；L2 那跳以 review 交卷，没有再调 submit_mission_result。
+    const executorHops = orch.hops.filter((hop) => hop.role === 'executor');
+    assert.equal(
+      executorHops.filter((hop) => hop.endedBy === 'structured_submit').length,
+      1,
+    );
+    assert.deepEqual(
+      view.coordinatorAttemptIds,
+      orch.hops.filter((hop) => hop.role === 'coordinator').map((hop) => hop.attemptId),
+    );
 
-    // events：mission_result.submitted + delivery.created 无 fake attemptId
+    // 全契约 AC1 由 L2 那次 accept 映射：一条契约标准，逐条 pass。
+    assert.deepEqual(view.result?.criteria, [
+      {
+        index: 1,
+        status: 'pass',
+        evidence: view.result?.criteria?.[0]?.evidence,
+      },
+    ]);
+    assert.match(view.result?.criteria?.[0]?.evidence ?? '', /整份工单 1 条验收全部 pass/);
+
+    // events：mission_result.submitted + delivery.created 归因真实 L2 attempt
     const events = await h.activity.list(missionId);
     const submitted = events.find((e) => e.kind === 'mission_result.submitted');
     assert.ok(submitted);
-    assert.equal(submitted!.attemptId, undefined);
+    const coord = view.coordinatorAttemptIds[0]!;
+    assert.equal(submitted!.attemptId, coord);
     const submittedData = submitted!.data as {
       outcome: string;
       missionStatus: string;
@@ -368,17 +418,34 @@ describe('Orchestrator Lightweight：happy Fast Lane', () => {
     ]);
     const deliveryEv = events.find((e) => e.kind === 'delivery.created');
     assert.ok(deliveryEv);
-    assert.equal(deliveryEv!.attemptId, undefined);
+    assert.equal(deliveryEv!.attemptId, coord);
+
+    // 交卷凭据就是那份机器验收报告：evidence 里那条与落盘报告同一个 id。
+    // 当前提交 id 从真实事件取：MissionView 不投影 submittedAttemptId，视图上的同名字段
+    // 恒为 undefined，拿它比等于在比一个不存在的东西。
+    const execSubmitted = events.filter((e) => e.kind === 'execution_result.submitted');
+    assert.ok(execSubmitted.length >= 1);
+    const submittedAttemptId = execSubmitted.at(-1)!.attemptId;
+    assert.ok(submittedAttemptId);
+
+    const report = await h.reports.get(submittedData.reportId);
+    assert.ok(report);
+    assert.equal(report!.passed, true);
+    assert.equal(report!.missionId, missionId);
+    assert.equal(report!.workItemId, 'W-1');
+    assert.equal(report!.attemptId, submittedAttemptId);
+    assert.equal(report!.attemptId, view.workItems[0]!.attemptIds.at(-1));
 
     const inbox = await h.deliveries.pending('local-cli');
     assert.equal(inbox.length, 1);
     assert.equal(inbox[0]!.outcome, 'delivered');
     assert.equal(inbox[0]!.summary, '改了初始值');
 
-    // last review = validator
+    // 最后一次 review 是协调者下的 accept，且验的就是当前这次提交。
     const lastReview = view.workItems[0]!.lastReview;
-    assert.equal(lastReview?.authority?.kind, 'validator');
     assert.equal(lastReview?.verdict, 'accept');
+    assert.equal(lastReview?.attemptId, coord);
+    assert.equal(lastReview?.submittedAttemptId, submittedAttemptId);
 
     // 未 completed
     assert.notEqual(view.status, 'completed');
@@ -479,9 +546,13 @@ describe('Orchestrator Lightweight：验收没过 → 自动升级 Standard（§
   });
 });
 
-describe('Orchestrator Lightweight：accepted crash-recovery', () => {
-  test('accepted 状态可直接 submitForReview', async () => {
-    const h = await harness();
+describe('Orchestrator Lightweight：submitted crash-recovery', () => {
+  // W-442 之后机器验收不再 accept：崩之前留下的那份报告就是 current report，
+  // 恢复时不重跑命令、不再问 shadow，把它取出来直接交给 L2。
+  test('机器已验断定后恢复：不重跑命令，直接同一份报告走 L2 accept', async () => {
+    const coordinator = new ScriptedRuntime(COORDINATOR_L2_ACCEPT);
+    const h = await harness({ coordinator });
+    const engine = h.engine;
     const { missionId } = await seedLightweight(h.projects, { missionId: 'M-rec' });
     const { workItemId } = await h.platform.createLightweightWorkItem(missionId, {
       order: ORDER,
@@ -514,9 +585,17 @@ describe('Orchestrator Lightweight：accepted crash-recovery', () => {
       cwd: process.cwd(),
     });
     assert.equal(validated.passed, true);
-    assert.equal(validated.status, 'accepted');
-    // 模拟 crash：不调用 submitForReview，让 Orchestrator 从 accepted 接上。
+    // 机器过了也停在 submitted：结论归协调者，模拟 crash 时不调用 submitForReview。
+    assert.equal(validated.status, 'submitted');
     assert.equal((await h.platform.getMissionView(missionId)).status, 'executing');
+
+    // 跑第二遍命令就是重验：报告会被再落一份。包住 engine 数着它，不容许悄悄发生。
+    let engineRuns = 0;
+    const realValidate = engine.validate.bind(engine);
+    engine.validate = async (input) => {
+      engineRuns += 1;
+      return realValidate(input);
+    };
 
     const orch = h.makeOrchestrator();
     const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
@@ -524,7 +603,15 @@ describe('Orchestrator Lightweight：accepted crash-recovery', () => {
     const view = await h.platform.getMissionView(missionId);
     assert.equal(view.status, 'awaiting_review');
     assert.equal(view.result?.summary, '从 crash 恢复');
-    assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 0);
+    // 没重跑命令，交卷凭的还是崩之前那份报告。
+    assert.equal(engineRuns, 0);
+    assert.deepEqual(view.result?.acceptanceEvidence, [
+      `validation-report:${validated.reportId}`,
+    ]);
+    // L2 那一跳用了标准候选池；恢复之后没有多余的协调者会议。
+    assert.equal(orch.hops.filter((x) => x.role === 'coordinator').length, 1);
+    assert.equal(view.workItems[0]!.status, 'accepted');
+    assert.equal(view.workItems[0]!.lastReview?.attemptId, view.coordinatorAttemptIds[0]);
   });
 });
 
@@ -926,9 +1013,11 @@ describe('Orchestrator Lightweight：blocked 提问停靠 L3，答复后同单�
       assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 0);
     });
 
-    test('答复后新 executor attempt 用同一 WorkItem，验收交 L3，全程无协调者',
+    test('答复后新 executor attempt 用同一 WorkItem，机器验收后 L2 accept 交 L3',
       async () => {
+        const coordinator = new ScriptedRuntime(COORDINATOR_L2_ACCEPT);
         const h = await harness({
+          coordinator,
           executor: new ScriptedRuntime(EXECUTOR_BLOCK_QUESTION),
         });
         const { missionId } = await seedLightweight(h.projects, { missionId: 'M-resume' });
@@ -959,10 +1048,14 @@ describe('Orchestrator Lightweight：blocked 提问停靠 L3，答复后同单�
         assert.equal(view.workItems[0]?.id, 'W-1');
         assert.equal(view.workItems[0]?.status, 'accepted');
         assert.equal(view.workItems[0]?.attempts, 2);
-        assert.deepEqual(view.coordinatorAttemptIds, []);
-        assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 0);
+        // 提问那一跳没有协调者；L2 是机器验收通过之后才出现的那一跳。
+        assert.equal(orch.hops.filter((hop) => hop.role === 'coordinator').length, 1);
+        assert.deepEqual(
+          view.coordinatorAttemptIds,
+          orch.hops.filter((hop) => hop.role === 'coordinator').map((hop) => hop.attemptId),
+        );
         assert.equal(orch.hops.filter((hop) => hop.role === 'executor').length, 2);
-        assert.ok(orch.hops.every((hop) => hop.role === 'executor' && hop.workItemId === 'W-1'));
+        assert.ok(orch.hops.every((hop) => hop.workItemId === 'W-1' || hop.role === 'coordinator'));
       },
     );
 
