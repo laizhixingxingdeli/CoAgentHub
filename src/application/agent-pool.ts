@@ -12,11 +12,12 @@
  * 为什么不进 `src/kernel/`：候选池整个是 runtime 侧概念，内核连这类词都不许
  * 出现（架构红线）。
  *
- * 只支持追加。删除/改/重排在「有正在跑的 attempt」时语义上有的说（动的是这一跳
- * 还是下一跳？），那不是这次的范围 —— 而且这个界面没有鉴权。
+ * 配置支持整角色列表替换；调度器在下一跳重新读取，在途 attempt 保留已选身份。
  */
 
 import type { UsageRow } from './runtime-catalog.ts';
+import { createHash } from 'node:crypto';
+import type { ExecutionProfile } from './ports.ts';
 
 /* ------------------------------ 类型 ------------------------------ */
 
@@ -46,6 +47,8 @@ export interface AgentPoolFact {
 
 /** 一条候选。不带 role —— role 由它落在快照里哪个数组决定。 */
 export interface AgentPoolCandidate {
+  /** 缺字段的旧配置仍启用；停用只影响后续选择。 */
+  readonly enabled?: boolean;
   readonly profileId: string;
   readonly endpoint: string;
   readonly runtime: AgentPoolRuntime;
@@ -159,6 +162,53 @@ export interface AgentPoolRepository {
   list(): Promise<AgentPoolSnapshot>;
   /** 追加一条，返回刚落库的那条。非法 role / 同 role 重复 → throw AgentPoolError。 */
   add(input: AgentPoolAddInput): Promise<AgentPoolCandidate>;
+  replaceRole(input: AgentPoolReplaceInput): Promise<AgentPoolSnapshot>;
+}
+
+export interface AgentPoolReplaceInput {
+  readonly role: string;
+  readonly expectedRevision: string;
+  readonly candidates: readonly (Omit<AgentPoolAddInput, 'role'> & { readonly enabled?: boolean })[];
+}
+
+/** 比较整个配置，拒绝从旧页面覆盖另一位操作者的新配置。 */
+export function agentPoolRevision(rows: readonly AgentPoolRow[]): string {
+  return agentPoolSnapshotRevision(agentPoolSnapshot(rows));
+}
+
+export function agentPoolSnapshotRevision(snapshot: AgentPoolSnapshot): string {
+  const canonical = ['coordinator', 'executor', 'independent_reviewer'].map((role) =>
+    snapshot[role as AgentRole].map((candidate) => ({
+      profileId: candidate.profileId, endpoint: candidate.endpoint, runtime: candidate.runtime,
+      order: candidate.order, enabled: candidate.enabled ?? true,
+      facts: candidate.facts.map((fact) => ({ key: fact.key, value: fact.value })),
+    })));
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/** 每次读取当前有序配置，模型与思考档位仍由适配层解释 facts。 */
+export async function loadRoleProfiles(repo: AgentPoolRepository, role: AgentRole): Promise<readonly ExecutionProfile[]> {
+  return ((await repo.list())[role] ?? []).filter((candidate) => candidate.enabled !== false).map((candidate) => ({
+    profileId: candidate.profileId, endpoint: candidate.endpoint, facts: candidate.facts,
+  }));
+}
+
+export function replaceAgentPoolRole(input: AgentPoolReplaceInput, existing: readonly AgentPoolRow[]): AgentPoolRow[] {
+  if (input?.expectedRevision !== agentPoolRevision(existing)) {
+    throw new AgentPoolError('STALE_POOL', '候选池已变化，请刷新后重新提交。');
+  }
+  // 空列表也必须校验角色，不能让非法角色成为一次成功的空操作。
+  validateAgentPoolAdd({ role: input.role, profileId: '__validation__', endpoint: 'local' }, []);
+  if (!Array.isArray(input.candidates)) throw new AgentPoolError('INVALID_CANDIDATES', 'candidates 必须是有序数组。');
+  const rows = existing.filter((row) => row.role !== input.role);
+  for (const candidate of input.candidates) {
+    if (candidate?.enabled !== undefined && typeof candidate.enabled !== 'boolean') {
+      throw new AgentPoolError('INVALID_ENABLED', 'enabled 必须是布尔值。');
+    }
+    const row = validateAgentPoolAdd({ ...candidate, role: input.role }, rows);
+    rows.push({ ...row, ...(candidate.enabled === undefined ? {} : { enabled: candidate.enabled }) });
+  }
+  return rows;
 }
 
 /** 候选池规则被违反。形状仿 PlatformRuleError：靠 instanceof + code 判别。 */
@@ -355,5 +405,10 @@ export class InMemoryAgentPoolRepository implements AgentPoolRepository {
     const row = validateAgentPoolAdd(input, this.#rows);
     this.#rows.push(row);
     return toAgentPoolCandidate(row);
+  }
+
+  async replaceRole(input: AgentPoolReplaceInput): Promise<AgentPoolSnapshot> {
+    this.#rows = replaceAgentPoolRole(input, this.#rows);
+    return this.list();
   }
 }

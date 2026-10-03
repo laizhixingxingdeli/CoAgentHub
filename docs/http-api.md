@@ -278,6 +278,22 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 }
 ```
 
+### GET /api/pools/config
+
+读取候选配置和 revision，不播种或改变配置；需要 poolList 权限。返回协调者、执行者、独立检视者的有序列表。旧记录缺 enabled 时默认启用，facts 保持适配层定义的模型与思考档位键值。
+
+### POST /api/pools/coordinator/configure
+
+需要 poolAdd 权限。请求 `{expectedRevision, candidates}`，candidates 按提交顺序成为完整角色列表，每项含 profileId、endpoint、可选 facts 和 enabled；省略的候选删除，空数组清空角色。服务器校验整个配置的版本，旧页面提交返回 409 STALE_POOL，成功返回新 revision 与配置。错误输入不会部分落库。已运行跳次保留选定配置，下一跳重新读取当前启用列表。
+
+### POST /api/pools/executor/configure
+
+输入、权限、版本门禁和响应同协调者配置，替换执行者列表；不会改其他角色。
+
+### POST /api/pools/independent_reviewer/configure
+
+输入、权限、版本门禁和响应同协调者配置，替换独立检视者列表；空池不会复用协调者身份。
+
 ### POST /api/pools/:profileId/circuit/reset
 
 鉴权：控制面（可选resolver）。参数：路径profileId；body非空reason。复位者身份来自控制凭据，不接受body自称actor；503表示无仓储。

@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { API_VERSION, createApi } from './api/server.ts';
-import { loadPoolOrSeed } from './application/agent-pool.ts';
+import { loadRoleProfiles } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { rememberAdapterDir } from './application/runtime-catalog.ts';
@@ -357,20 +357,9 @@ async function main() {
     // 不传 env：child 源保持真实 process.env，再由 SpawnRuntime 按名单过滤。
   });
 
-  // 候选池。空仓时写进缺省候选（与以前那四条硬编码逐字段一致），下一次跑就用
-  // 改过的配置 —— 换候选不再需要改代码。这播种放在这里而不是 GET 里：只读
-  // 的观测面没立场替别人定默认值。
-  const pool = await loadPoolOrSeed(agentPool);
+  // 启动只读配置。旧角色参数仅做兼容校验，不覆写下一跳的全局配置与顺序。
+  const pool = await agentPool.list();
 
-  /**
-   * 这一跑只用哪些候选。
-   *
-   * 候选池是全局的，而「换个配置再跑一遍看是不是更省」要求配置能**按次**指定 ——
-   * 不然比较就得在两次运行之间改全局池，既容易忘、也说不清当时到底用的哪个。
-   *
-   * 只做过滤、不新增：名字必须在池子里，打错立刻报错并把可选项列出来。
-   * 悄悄回退到全池会让人以为比的是 A 和 B，实际两次都是 B。
-   */
   function pick(
     role: 'coordinator' | 'executor' | 'independent_reviewer',
     flag: string,
@@ -396,7 +385,7 @@ async function main() {
   const independentReviewerPool = pick('independent_reviewer', '--independent-reviewer');
   if (arg('--coordinator') || arg('--executor') || arg('--independent-reviewer')) {
     console.log(
-      `本次候选：协调者 ${coordinatorPool.map((c) => c.profileId).join('、')} / ` +
+      `兼容参数校验（实际调度读取当前配置）：协调者 ${coordinatorPool.map((c) => c.profileId).join('、')} / ` +
         `执行者 ${executorPool.map((c) => c.profileId).join('、')} / ` +
         `独立检视 ${independentReviewerPool.map((c) => c.profileId).join('、') || '（无）'}\n`,
     );
@@ -419,15 +408,18 @@ async function main() {
     coordinator: {
       runtime,
       candidates: coordinatorPool.map(toProfile),
+      loadCandidates: () => loadRoleProfiles(agentPool, 'coordinator'),
     },
     executor: {
       runtime,
       // 有序候选池：**只有上游失败**才往后换。顺序就是仓储里的 order。
       candidates: executorPool.map(toProfile),
+      loadCandidates: () => loadRoleProfiles(agentPool, 'executor'),
     },
     independentReviewer: {
       runtime,
       candidates: independentReviewerPool.map(toProfile),
+      loadCandidates: () => loadRoleProfiles(agentPool, 'independent_reviewer'),
     },
   });
 

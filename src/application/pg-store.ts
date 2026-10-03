@@ -49,7 +49,7 @@ import type {
   AgentRole,
   AgentPoolRuntime,
 } from './agent-pool.ts';
-import { AgentPoolError, agentPoolSnapshot, validateAgentPoolAdd } from './agent-pool.ts';
+import { AgentPoolError, agentPoolSnapshot, validateAgentPoolAdd, replaceAgentPoolRole, type AgentPoolReplaceInput } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 import {
   closedCandidateCircuit,
@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS agent_pool (
 );
 -- 已有库的补列。CREATE TABLE IF NOT EXISTS 不会给老表加字段。
 ALTER TABLE agent_pool ADD COLUMN IF NOT EXISTS facts jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE agent_pool ADD COLUMN IF NOT EXISTS enabled boolean;
 `;
 
 export interface PgOptions {
@@ -1419,45 +1420,57 @@ export class PgAgentPoolRepository implements AgentPoolRepository {
     return agentPoolSnapshot(await this.#rows());
   }
 
-  async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
-    const row = validateAgentPoolAdd(input, await this.#rows());
+  async replaceRole(input: AgentPoolReplaceInput): Promise<AgentPoolSnapshot> {
+    const client = await this.#store.pool.connect();
     try {
-      await this.#store.pool.query(
-        `INSERT INTO agent_pool (role, profile_id, endpoint, runtime, ord, facts)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-        [
-          row.role,
-          row.profileId,
-          row.endpoint,
-          row.runtime,
-          row.order,
-          JSON.stringify(row.facts),
-        ],
-      );
-    } catch (error) {
-      if ((error as { code?: string })?.code === '23505') {
-        throw new AgentPoolError(
-          'DUPLICATE_PROFILE',
-          `候选池 ${row.role} 里已经有 profileId=${row.profileId}：两个进程同时加了同一个候选，` +
-            '以库里已有的那条为准。',
-        );
+      await client.query('BEGIN');
+      // 也锁住空池；行锁不能保护空列表配置的并发替换。
+      await client.query('LOCK TABLE agent_pool IN EXCLUSIVE MODE');
+      const current = await this.#rows(client);
+      const rows = replaceAgentPoolRole(input, current);
+      await client.query('DELETE FROM agent_pool WHERE role = $1', [input.role]);
+      for (const row of rows.filter((row) => row.role === input.role)) {
+        await client.query('INSERT INTO agent_pool (role, profile_id, endpoint, runtime, ord, facts, enabled) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)',
+          [row.role, row.profileId, row.endpoint, row.runtime, row.order, JSON.stringify(row.facts), row.enabled ?? null]);
       }
+      await client.query('COMMIT');
+      return agentPoolSnapshot(rows);
+    } catch (error) {
+      await client.query('ROLLBACK');
       throw error;
-    }
-    const { role: _role, ...candidate } = row;
-    return candidate;
+    } finally { client.release(); }
   }
 
-  async #rows(): Promise<AgentPoolRow[]> {
-    const { rows } = await this.#store.pool.query<{
+  async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
+    const client = await this.#store.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('LOCK TABLE agent_pool IN EXCLUSIVE MODE');
+      const row = validateAgentPoolAdd(input, await this.#rows(client));
+      await client.query(
+        'INSERT INTO agent_pool (role, profile_id, endpoint, runtime, ord, facts) VALUES ($1,$2,$3,$4,$5,$6::jsonb)',
+        [row.role, row.profileId, row.endpoint, row.runtime, row.order, JSON.stringify(row.facts)],
+      );
+      await client.query('COMMIT');
+      const { role: _role, ...candidate } = row;
+      return candidate;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async #rows(client: pg.Pool | pg.PoolClient = this.#store.pool): Promise<AgentPoolRow[]> {
+    const { rows } = await client.query<{
       role: string;
       profile_id: string;
       endpoint: string;
       runtime: string;
       ord: string | number;
       facts: unknown;
+      enabled: boolean | null;
     }>(
-      'SELECT role, profile_id, endpoint, runtime, ord, facts FROM agent_pool ORDER BY role, ord',
+      'SELECT role, profile_id, endpoint, runtime, ord, facts, enabled FROM agent_pool ORDER BY role, ord',
     );
     return rows.map((row) => ({
       role: row.role as AgentRole,
@@ -1468,6 +1481,7 @@ export class PgAgentPoolRepository implements AgentPoolRepository {
       // 驱动已经把 jsonb 解成 JS 值了；不是数组 = 这行被人手改过，按空处理而不是
       // 把垃圾往下传（适配层宁可选不到身份也不要拿到一个不是数组的 facts）。
       facts: Array.isArray(row.facts) ? (row.facts as AgentPoolFact[]) : [],
+      ...(row.enabled == null ? {} : { enabled: row.enabled }),
     }));
   }
 }

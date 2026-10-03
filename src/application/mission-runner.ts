@@ -14,7 +14,7 @@ import type {
   WorkOrder,
 } from '../kernel/index.ts';
 import {
-  loadPoolOrSeed,
+  loadRoleProfiles,
   type AgentPoolCandidate,
   type AgentPoolRepository,
 } from './agent-pool.ts';
@@ -422,7 +422,7 @@ export async function runHostedMission(
 
   // 非法 --coordinator/--executor/--independent-reviewer 必须在 createMission 之前抛：
   // 否则会留下半截 Mission，独立 CLI 路径也不会在开跑前写入。
-  const pool = await loadPoolOrSeed(agentPool);
+  const pool = await agentPool.list();
   const coordinatorPool = pickHostedCandidates(
     pool.coordinator,
     'coordinator',
@@ -478,7 +478,7 @@ export async function runHostedMission(
   if (parsed.coordinator || parsed.executor || parsed.independentReviewer) {
     emit(
       'stdout',
-      `本次候选：协调者 ${coordinatorPool.map((c) => c.profileId).join('、')} / ` +
+      `兼容参数校验（实际调度读取当前配置）：协调者 ${coordinatorPool.map((c) => c.profileId).join('、')} / ` +
         `执行者 ${executorPool.map((c) => c.profileId).join('、')} / ` +
         `独立检视 ${independentReviewerPool.map((c) => c.profileId).join('、') || '（无）'}`,
     );
@@ -499,14 +499,17 @@ export async function runHostedMission(
     coordinator: {
       runtime,
       candidates: coordinatorPool.map(toProfile),
+      loadCandidates: () => loadRoleProfiles(agentPool, 'coordinator'),
     },
     executor: {
       runtime,
       candidates: executorPool.map(toProfile),
+      loadCandidates: () => loadRoleProfiles(agentPool, 'executor'),
     },
     independentReviewer: {
       runtime,
       candidates: independentReviewerPool.map(toProfile),
+      loadCandidates: () => loadRoleProfiles(agentPool, 'independent_reviewer'),
     },
   });
 

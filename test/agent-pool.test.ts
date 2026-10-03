@@ -30,6 +30,7 @@ import {
   AgentPoolError,
   InMemoryAgentPoolRepository,
   loadPoolOrSeed,
+  agentPoolSnapshotRevision,
 } from '../src/application/agent-pool.ts';
 import type {
   AgentPoolRepository,
@@ -90,6 +91,23 @@ function behavesLikeThePort(
   makeRepo: () => Promise<AgentPoolRepository> | AgentPoolRepository,
   skip?: (t: T) => boolean,
 ) {
+  test('整角色替换版本与重读一致，停用持久化且旧版本无法覆盖', async (t: T) => {
+    if (skip?.(t)) return;
+    const repo = await makeRepo();
+    await repo.add({ role: 'coordinator', profileId: 'stable', endpoint: 'local' });
+    const expectedRevision = agentPoolSnapshotRevision(await repo.list());
+    const input = { role: 'executor', expectedRevision, candidates: [
+      { role: 'executor', profileId: 'paused', endpoint: 'local', enabled: false },
+      { role: 'executor', profileId: 'active', endpoint: 'local', facts: [{ key: 'reasoning', value: 'high' }] },
+    ] };
+    const replaced = await repo.replaceRole(input);
+    assert.equal(agentPoolSnapshotRevision(replaced), agentPoolSnapshotRevision(await repo.list()));
+    assert.equal((await repo.list()).executor[0].enabled, false);
+    await assert.rejects(repo.replaceRole(input), { code: 'STALE_POOL' });
+    const next = await repo.replaceRole({ role: 'executor', expectedRevision: agentPoolSnapshotRevision(replaced), candidates: [] });
+    assert.deepEqual(next.executor, []);
+    assert.equal(next.coordinator[0].profileId, 'stable');
+  });
   test('空仓的 list 形状对，两个 role 都是空数组', async (t: T) => {
     if (skip?.(t)) return;
     const repo = await makeRepo();
@@ -556,8 +574,10 @@ describe('run-mission.ts 改用候选池', () => {
   const repoRoot = fileURLToPath(new URL('../', import.meta.url));
   const source = readFileSync(join(repoRoot, 'src/run-mission.ts'), 'utf8');
 
-  test('调用 loadPoolOrSeed 并把快照交给调度器', () => {
-    assert.match(source, /loadPoolOrSeed\(/, '空仓播种必须发生在 run-mission 这一侧');
+  test('只读取配置并在下一跳刷新候选，不自动播种', () => {
+    assert.match(source, /await agentPool\.list\(/);
+    assert.doesNotMatch(source, /loadPoolOrSeed\(/);
+    assert.match(source, /loadCandidates:.*loadRoleProfiles/);
     // 原先断的是 `pool.coordinator` / `pool.executor` 两个字面量；改成按 role
     // 动态取之后那个代理失效了 —— 守的性质没变：**候选来自池子，不是代码里
     // 写死的**（写死的那一面由下一条扫整棵 src 来守）。

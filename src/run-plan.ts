@@ -22,7 +22,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { API_VERSION, createApi } from './api/server.ts';
-import { loadPoolOrSeed } from './application/agent-pool.ts';
+import { loadRoleProfiles } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
@@ -583,7 +583,7 @@ async function main() {
       stream: true,
       envPassthrough,
     });
-    const pool = await loadPoolOrSeed(agentPool);
+    const pool = await agentPool.list();
     const pick = (role: 'coordinator' | 'executor' | 'independent_reviewer', flag: string): AgentPoolCandidate[] => {
       const wanted = arg(flag);
       if (!wanted) return [...pool[role]];
@@ -661,9 +661,9 @@ async function main() {
       candidateCircuits,
       queuedHops,
       inRunBackoffWaitMs: 120_000,
-      coordinator: { runtime, candidates: coordinators },
-      executor: { runtime, candidates: executors },
-      independentReviewer: { runtime, candidates: independentReviewers },
+      coordinator: { runtime, candidates: coordinators, loadCandidates: () => loadRoleProfiles(agentPool, 'coordinator') },
+      executor: { runtime, candidates: executors, loadCandidates: () => loadRoleProfiles(agentPool, 'executor') },
+      independentReviewer: { runtime, candidates: independentReviewers, loadCandidates: () => loadRoleProfiles(agentPool, 'independent_reviewer') },
     });
     // 共享资格工厂：project_busy 委托队列探针认本 Mission 的退避/占位，
     // no_available_agent 接上 runner 的同池角色快照认全部候选短冷却。

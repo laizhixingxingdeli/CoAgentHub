@@ -10,7 +10,7 @@
 
 import { join, resolve } from 'node:path';
 import {
-  loadPoolOrSeed,
+  loadRoleProfiles,
   type AgentPoolCandidate,
   type AgentPoolRepository,
 } from './agent-pool.ts';
@@ -643,7 +643,7 @@ export async function runHostedPlan(
     parsed.coordinator !== undefined ||
     parsed.executor !== undefined ||
     parsed.independentReviewer !== undefined;
-  const pool = hasRoleFlags ? await agentPool.list() : await loadPoolOrSeed(agentPool);
+  const pool = await agentPool.list();
   const coordinators = pickHostedCandidates(
     pool.coordinator,
     'coordinator',
@@ -726,9 +726,9 @@ export async function runHostedPlan(
     candidateCircuits,
     queuedHops,
     inRunBackoffWaitMs: 120_000,
-    coordinator: { runtime, candidates: coordinators },
-    executor: { runtime, candidates: executors },
-    independentReviewer: { runtime, candidates: independentReviewers },
+    coordinator: { runtime, candidates: coordinators, loadCandidates: () => loadRoleProfiles(agentPool, 'coordinator') },
+    executor: { runtime, candidates: executors, loadCandidates: () => loadRoleProfiles(agentPool, 'executor') },
+    independentReviewer: { runtime, candidates: independentReviewers, loadCandidates: () => loadRoleProfiles(agentPool, 'independent_reviewer') },
   });
 
   ctx.onStarted?.({ runId, runPath: store.path, reviewer: parsed.plan.reviewer });

@@ -51,7 +51,7 @@ import type {
   AgentPoolRow,
   AgentPoolSnapshot,
 } from './agent-pool.ts';
-import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
+import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd, replaceAgentPoolRole, type AgentPoolReplaceInput } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 import { claimHop, claimHopWithCandidate, cloneQueuedHop, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, reportHopFailure, validateEnqueueHop } from './durable-scheduler.ts';
 import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
@@ -1246,6 +1246,16 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
   async list(): Promise<AgentPoolSnapshot> {
     this.#store.refreshIfChanged();
     return agentPoolSnapshot(this.#rows());
+  }
+
+  async replaceRole(input: AgentPoolReplaceInput): Promise<AgentPoolSnapshot> {
+    return this.#store.run(async () => {
+      this.#store.refreshIfChanged();
+      const rows = replaceAgentPoolRole(input, this.#rows());
+      this.#store.raw().agentPool = rows;
+      this.#store.flush();
+      return agentPoolSnapshot(rows);
+    });
   }
 
   async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {

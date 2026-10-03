@@ -71,8 +71,8 @@
 
 1. 用户指定模型（UI1 之前由检视者代改）：在 pi 的模型清单里确认提供方与型号（`pi --list-models <词>`）。
 2. 经适配器实测一次（query 角色读一个文件，确认工具调用正常）。
-3. 加候选：服务开着用 `POST /api/pools`；coagent-pi 独立状态用 `C:/program1/coagent-experiments/roles/pool-pi-state.ts`。候选池只增不删。
-4. 改启动脚本 `run-plan-platform.mjs` 的 `--coordinator` / `--executor`；下一次开跑生效。
+3. 三种执行角色的配置后端：先读 `GET /api/pools/config`，保留 revision，再经 `POST /api/pools/<role>/configure` 提交完整有序列表。可编辑模型与思考 facts、停用、排序、删除；旧版本拒绝，失败不部分落库。原 `POST /api/pools` 追加入口保留兼容。网页编辑入口仍待前端设计。
+4. 不再通过启动脚本改候选。启动只读配置，不为空池播种；旧 `--coordinator` / `--executor` 参数只做兼容校验，不覆盖实际调度顺序。下一跳重新读取当前启用列表，在途 attempt 保留启动身份。分类用只读角色池尚待独立接线，不能把本阶段标作完整 UI1。
 
 ## 9. 检视者值守与统一待办（2026-10-03 后端）
 

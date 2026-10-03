@@ -23,7 +23,7 @@ import {
   type PlanRunListItem,
 } from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
-import { AgentPoolError, InMemoryAgentPoolRepository } from '../application/agent-pool.ts';
+import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -1367,6 +1367,18 @@ export function createApi(deps: ApiDeps): Server {
       }
       return send(res, 200, { profileId, events: await circuits.listResetEvents(profileId) });
     }
+    if (method === 'GET' && path === '/api/pools/config') {
+      await requireControl(req, POLICY_ACTION.poolList);
+      const snapshot = await agentPool.list();
+      return send(res, 200, { revision: agentPoolSnapshotRevision(snapshot), ...snapshot });
+    }
+    const replacePoolMatch = /^\/api\/pools\/(coordinator|executor|independent_reviewer)\/configure$/.exec(path);
+    if (method === 'POST' && replacePoolMatch) {
+      await requireControl(req, POLICY_ACTION.poolAdd);
+      const body = await readJson(req);
+      const snapshot = await agentPool.replaceRole({ ...body, role: replacePoolMatch[1] } as Parameters<typeof agentPool.replaceRole>[0]);
+      return send(res, 200, { revision: agentPoolSnapshotRevision(snapshot), ...snapshot });
+    }
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
       const snapshot = await agentPool.list();
@@ -1874,7 +1886,7 @@ export function createApi(deps: ApiDeps): Server {
       const pool = await agentPool.list();
       const { attemptId, profileId } = await platform.startIndependentReviewerAttempt(
         missionId,
-        pool.independent_reviewer.map((row) => ({
+        pool.independent_reviewer.filter((row) => row.enabled !== false).map((row) => ({
           profileId: row.profileId,
           endpoint: row.endpoint,
         })),
