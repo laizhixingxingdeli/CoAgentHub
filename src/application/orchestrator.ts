@@ -60,6 +60,8 @@ export interface RolePool {
   readonly runtime: AgentRuntime;
   /** 有序候选集。只有上游失败才允许往后换。 */
   readonly candidates: readonly ExecutionProfile[];
+  /** 装配层可提供实时配置；每次选下一跳重新读取，已启动的跳保留自己的 profile。 */
+  readonly loadCandidates?: () => Promise<readonly ExecutionProfile[]>;
   /**
    * 同一个工作项最多尝试几次（跨候选累计）。
    *
@@ -829,7 +831,7 @@ export class Orchestrator {
     }
 
     const pool = this.#independentReviewer;
-    const candidates = pool?.candidates ?? [];
+    const candidates = pool ? await this.#poolCandidates(pool) : [];
     const startReviewer = this.#tokens.startIndependentReviewer;
     if (!startReviewer || !pool) {
       // 缺发牌口时先建 Attempt 会留下无 token 的 in_progress，下次开审被 concurrent_attempt 挡住。
@@ -1388,11 +1390,12 @@ export class Orchestrator {
 
   /** 现在还能用的候选。全在冷却 = 没有可用 agent（S14.4）。 */
   async #availableCandidates(pool: RolePool, now: number): Promise<ExecutionProfile[]> {
+    const candidates = await this.#poolCandidates(pool);
     if (!this.#candidateCircuits) {
-      return pool.candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
+      return candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
     }
     const available: ExecutionProfile[] = [];
-    for (const profile of pool.candidates) {
+    for (const profile of candidates) {
       const circuit = await this.#candidateCircuits.get(profile.profileId);
       if (circuit.state === 'closed') {
         const resetAt = await this.#usageResetAt(profile, now);
@@ -1410,6 +1413,10 @@ export class Orchestrator {
       }
     }
     return available;
+  }
+
+  async #poolCandidates(pool: RolePool): Promise<readonly ExecutionProfile[]> {
+    return pool.loadCandidates ? pool.loadCandidates() : pool.candidates;
   }
 
   async #usageResetAt(profile: ExecutionProfile, now: number): Promise<string | undefined> {
@@ -1487,7 +1494,7 @@ export class Orchestrator {
           : this.#independentReviewer;
     if (!pool) return [];
     const snapshot: RoleCooldownCandidate[] = [];
-    for (const profile of pool.candidates) {
+    for (const profile of await this.#poolCandidates(pool)) {
       snapshot.push(await this.#candidateCooldown(profile.profileId, now));
     }
     return snapshot;

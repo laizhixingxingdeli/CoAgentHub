@@ -36,6 +36,7 @@ import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import type { AgentRunSpec } from '../src/application/ports.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
+import { DEFAULT_AGENT_POOL } from '../src/application/agent-pool.ts';
 import { buildPersistentPlatform, startServer } from '../src/main.ts';
 import { ScriptedRuntime, type ScriptTable } from '../src/runtime/scripted.ts';
 
@@ -1607,7 +1608,11 @@ function escalateThenDeliverScripts(workItemId = 'W-1'): ScriptTable {
 async function emptyPlanState(): Promise<{ dir: string; statePath: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-plan-hosted-'));
   dirs.push(dir);
-  return { dir, statePath: join(dir, 'state.json') };
+  const statePath = join(dir, 'state.json');
+  const fixture = await buildPersistentPlatform(statePath, { reconcile: false });
+  for (const candidate of DEFAULT_AGENT_POOL) await fixture.agentPool.add(candidate);
+  await fixture.persist();
+  return { dir, statePath };
 }
 
 async function closeServer(server: Server): Promise<void> {

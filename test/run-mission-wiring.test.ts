@@ -734,7 +734,7 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.match(cli, /runner\.run\(/);
     assert.match(cli, /createApi\(/);
     assert.match(cli, /listenLoopback\(/);
-    assert.match(cli, /loadPoolOrSeed\(/);
+    assert.match(cli, /await agentPool\.list\(/);
     assert.match(cli, /exclusive:\s*\{\s*what:/);
     assert.match(cli, /platform\.createMission\(/);
     assert.match(cli, /platform\.createClassifiedMission\(/);
