@@ -96,12 +96,6 @@ function validateHopIdentity(input: HopIdentity): void {
   if (input.role !== 'coordinator') throw new Error('impact hops must use the coordinator role');
 }
 
-function validateHopCycle(value: unknown): asserts value is number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error('attemptCycle must be a non-negative safe integer');
-  }
-}
-
 export function validateEnqueueHop(input: EnqueueHopInput): void {
   const runtimeInput = input as EnqueueHopInput & Record<string, unknown>;
   for (const field of ['status', 'owner', 'leaseUntil', 'claimGeneration', 'runtimeKind', 'profileId', 'lastFailure']) {
@@ -629,7 +623,6 @@ export function hopIdempotencyKey(input: HopIdentity & {
   readonly attemptCycle: number;
 }): string {
   validateHopIdentity(input);
-  validateHopCycle(input.attemptCycle);
   // JSON.stringify, not bare `:`-joining: a changeId carrying the separator would
   // otherwise forge another change's key (e.g. 'a:b' vs 'a' + ':b').
   if (isImpactIdentity(input)) {

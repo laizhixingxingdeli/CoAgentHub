@@ -65,6 +65,8 @@ async function rejectEnqueue(input: Record<string, unknown>): Promise<void> {
 
 test('impact identity is validated at all three entries and never reuses the ordinary slot', async () => {
   assert.equal(hopIdempotencyKey({ ...plain, attemptCycle: 0 }), 'm:coordinator:w:r1:n0');
+  // Ordinary keys interpolate attemptCycle verbatim: no extra cycle validation may be added.
+  assert.equal(hopIdempotencyKey({ ...plain, attemptCycle: -1 }), 'm:coordinator:w:r1:n-1');
   assert.equal(nextLogicalHopCycle([row({ id: 'h0', idempotencyKey: 'm:coordinator:w:r1:n0' })], plain), 0);
   assert.equal(nextLogicalHopCycle([row({ id: 'h0', idempotencyKey: 'm:coordinator:w:r1:n0', status: 'completed' })], plain), 1);
 
