@@ -1943,6 +1943,21 @@ export class Platform {
   }
 
   /**
+   * 协调者读「本工单当前提交」的完整机器验证报告。
+   *
+   * 只读：不记事件、不改状态。读不到（没交卷、没跑过验收、归属不符、没注入 reports）
+   * 一律 undefined，由 HTTP 层统一成 404——不区分「不存在」和「属于别处」，
+   * 否则就给了跨 Mission 探测报告 id 的接口。
+   */
+  async getAgentValidationReport(
+    missionId: string,
+    workItemId: string,
+    reportId?: string,
+  ): Promise<ValidationReport | undefined> {
+    return validationReportViews.getAgentValidationReport(this.#context, missionId, workItemId, reportId);
+  }
+
+  /**
    * 已交卷工作项 → 机器验证简版（视图共用同一份只读投影）。
    *
    * 一个 Mission 一条活动流：正序扫一遍得到「每个 (workItemId, submittedAttemptId)
