@@ -374,17 +374,17 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
 .platform { display: grid; gap: 12px; }
 .dim-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
 </style>
+<link rel="stylesheet" href="/ui.css" />
 </head>
 <body>
 <div class="shell">
   <nav class="nav" aria-label="主导航">
     <div class="brand">CoAgentHub</div>
-    <!-- 图标是内联 SVG 且 fill=currentColor：不额外取网络资源，也不新攏一个色值。 -->
-    <a class="item" href="#/projects" data-route="projects"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M1.6 3.2A1.2 1.2 0 0 1 2.8 2h3.1c.36 0 .7.16.93.43l.87 1.07h6.5A1.2 1.2 0 0 1 15.4 4.7v7.5a1.2 1.2 0 0 1-1.2 1.2H2.8a1.2 1.2 0 0 1-1.2-1.2V3.2Z"/></svg>项目</a>
-    <a class="item" href="#/plan-runs" data-route="plan-runs"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2.2 2.2h11.6c.44 0 .8.36.8.8v2.2c0 .44-.36.8-.8.8H2.2A.8.8 0 0 1 1.4 5.2V3c0-.44.36-.8.8-.8Zm0 5.4h11.6c.44 0 .8.36.8.8v2.2c0 .44-.36.8-.8.8H2.2a.8.8 0 0 1-.8-.8V8.4c0-.44.36-.8.8-.8Zm0 5.4h7.4c.44 0 .8.36.8.8v.2c0 .44-.36.8-.8.8H2.2a.8.8 0 0 1-.8-.8v-.2c0-.44.36-.8.8-.8Z"/></svg>方案运行</a>
-    <a class="item" href="#/pool" data-route="pool"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8 1.4 14.4 4.6 8 7.8 1.6 4.6 8 1.4Zm5.2 5.7 1.2.6L8 10.9 1.6 7.7l1.2-.6L8 9.6l5.2-2.5ZM8 12.1l5.2-2.5 1.2.6L8 13.4 1.6 10.2l1.2-.6L8 12.1Z"/></svg>资源池</a>
-    <a class="item" href="#/platform" data-route="platform"><svg class="ico" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M1.6 2.2h12.8c.44 0 .8.36.8.8v3c0 .44-.36.8-.8.8H1.6A.8.8 0 0 1 .8 6V3c0-.44.36-.8.8-.8Zm0 5.8h12.8c.44 0 .8.36.8.8v3c0 .44-.36.8-.8.8H1.6a.8.8 0 0 1-.8-.8v-3c0-.44.36-.8.8-.8ZM3 4.1h1.2V3.3H3v.8Zm0 5.8h1.2v-.8H3v.8Zm3-5.8h6V3.3H6v.8Zm0 5.8h6v-.8H6v.8Z"/></svg>平台</a>
+    <a class="item" href="#/" data-route="home"><span class="nav-glyph">⌂</span>首页</a>
+    <a class="item" href="#/projects" data-route="projects"><span class="nav-glyph">□</span>项目任务列表</a>
+    <a class="item" href="#/agents" data-route="agents"><span class="nav-glyph">◉</span>角色与模型</a>
     <div class="spacer"></div>
+    <div class="foot">CoAgentHub</div>
   </nav>
 
   <div class="main">

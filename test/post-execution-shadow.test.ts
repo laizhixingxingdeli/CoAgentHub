@@ -748,7 +748,7 @@ describe('编排器接线：什么时候问', () => {
 
   test('Lightweight 验收通过：机器验收之后问一次', async () => {
     const { evaluator, seen } = recordingEvaluator();
-    const h = await orchestrated({ coordinator: {}, evaluator, validation: { exitCode: 0, files: ['src/foo.ts'] } });
+    const h = await orchestrated({ coordinator: { 'coordinator:-:0': { steps: REVIEW_AND_SUBMIT.slice(0, 2) } }, evaluator, validation: { exitCode: 0, files: ['src/foo.ts'] } });
     await seedLightweight(h.projects, h.platform, LW_ORDER);
 
     const result = await h.orchestrator.runMission('M-lw', { projectRoot: process.cwd() });
@@ -886,7 +886,7 @@ describe('构建器把 POST 评估器交到 Platform', () => {
     assert.match(server, /buildPgPlatform\(\{ \.\.\.decision,/);
     assert.match(server, /buildPersistentPlatform\(statePath, \{ \.\.\.decision,/);
 
-    for (const cli of ['run-mission.ts', 'run-plan.ts']) {
+    for (const cli of ['run-mission.ts']) {
       const source = readFileSync(join(root, 'src', cli), 'utf8');
       const deps = source.indexOf('buildDecisionDeps(process.env)');
       assert.ok(deps > 0, `${cli} 没按 env 组装决策依赖`);

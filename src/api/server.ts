@@ -13,15 +13,17 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
 import { Platform, PlatformRuleError } from '../application/platform.ts';
-import type { MissionSummary } from '../application/platform.ts';
+import { waitForReviewerTodos } from './reviewer-wait.ts';
+import type { MissionSummary, ReviewerTodo } from '../application/platform.ts';
 import {
   isSafePlanRunId,
   listPlanRuns,
   readPlanRunById,
+  updatePlanRunById,
   type PlanRunListItem,
 } from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
-import { AgentPoolError, InMemoryAgentPoolRepository } from '../application/agent-pool.ts';
+import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -36,6 +38,7 @@ import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUs
 import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
 import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
+import type { QueryRunRepository } from '../application/query-run.ts';
 import type { RunContext } from './run-tokens.ts';
 import type { ControlPrincipalResolver } from './control-auth.ts';
 import { redactSecretsDeep } from '../application/redact.ts';
@@ -71,6 +74,14 @@ import {
 export const API_VERSION = 'v1';
 
 /**
+ * POST /api/missions/:id/checkpoint/approve 的输入形状校验用。
+ *
+ * 与 Platform 里的 WORK_ITEM_CHECKPOINT_INTERVAL 是同一个 15，这里不 import：
+ * 接口层只验形状，业务规则只有 Platform 一份；反向 import 会把接口层钉在用例模块上。
+ */
+const CHECKPOINT_THRESHOLD_INTERVAL = 15;
+
+/**
  * 成功的模型清单在同一 createApi 实例内缓存这么久。
  * 适配层一次约数秒，页面连刷不能每次都等；到期必须重取，否则界面会选已经下线的模型。
  */
@@ -97,6 +108,7 @@ export type HostedRunHandler = (
 ) => Promise<number>;
 
 export interface ApiDeps {
+  queryRuns?: QueryRunRepository;
   platform: Platform;
   tokens: RunTokenRegistry;
   deliveries: DeliveryRepository;
@@ -197,6 +209,17 @@ export interface ApiDeps {
    * 独立 createApi / 无 hosted 回调的测试不能因此 404 把观测面打崩。
    */
   planLive?: PlanRunLiveOutput;
+  /**
+   * 方案运行读时的运行态投影来源。不注入则列表与详情一律标 unknown。
+   *
+   * 为什么是只读投影、不写回：观测面不能改记录格式或停止语义（plan-run-web-observability）。
+   * 推导规则——记录有 stopped 即 stopped；无 stopped 且 id 在 activeRunIds 登记即 running；
+   * 不在登记且注入方是状态文件写者（isStateFileWriter）即 interrupted；否则 unknown。
+   */
+  planRunRuntime?: {
+    activeRunIds: () => readonly string[];
+    isStateFileWriter: boolean;
+  };
 }
 
 class HttpError extends Error {
@@ -316,6 +339,29 @@ function writeJson(
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   deferredJson.set(res, { status, body });
+}
+
+/**
+ * 把一条方案运行记录投影成带 runtimeState 的只读视图，不改动入参快照。
+ * 读面推导运行态：stopped 看记录；running 看本进程托管登记；interrupted 看写者身份；
+ * 都不满足就 unknown。坏记录（{id,error}）原样返回，不投影。
+ */
+function withRuntimeState(
+  item: PlanRunListItem,
+  runtime: { activeRunIds: () => readonly string[]; isStateFileWriter: boolean } | undefined,
+): PlanRunListItem {
+  if (Object.hasOwn(item, 'error')) return item;
+  const ok = item as { readonly id: string; readonly stopped?: unknown };
+  if (ok.stopped !== undefined) {
+    return { ...ok, runtimeState: 'stopped' } as PlanRunListItem;
+  }
+  if (runtime !== undefined && runtime.activeRunIds().includes(ok.id)) {
+    return { ...ok, runtimeState: 'running' } as PlanRunListItem;
+  }
+  if (runtime !== undefined && runtime.isStateFileWriter) {
+    return { ...ok, runtimeState: 'interrupted' } as PlanRunListItem;
+  }
+  return { ...ok, runtimeState: 'unknown' } as PlanRunListItem;
 }
 
 function writeNdjsonHeaders(
@@ -628,12 +674,33 @@ async function buildPoolsHealth(
   candidateCircuits: CandidateCircuitRepository | undefined,
   nowMsValue: number,
   usageRows: readonly UsageRow[],
+  queryRuns?: QueryRunRepository,
 ) {
   const hops = queuedHops ? await queuedHops.list() : [];
   const nowIso = new Date(nowMsValue).toISOString();
   const observed = await collectCandidateObservations(platform, hops, nowMsValue);
+  const queries = await queryRuns?.list() ?? [];
+  for (const query of queries) {
+    if (!query.profileId) continue;
+    const failure = query.endedBy ? classifyCandidateFailure(query.endedBy, query.failureMessage) : undefined;
+    if (failure) {
+      const hints = observed.hints.get(query.profileId) ?? [];
+      hints.push({ failureClass: failure.failureClass, at: query.endedAt ?? null, source: 'query.ended' });
+      observed.hints.set(query.profileId, hints);
+    }
+    const at = Date.parse(query.startedAt);
+    if (at < nowMsValue - SEVEN_DAYS_MS || at > nowMsValue || !Number.isFinite(at)) continue;
+    const acc = observed.usage.get(query.profileId) ?? emptyUsage();
+    acc.attempts += 1;
+    if (query.outcome === 'answered') acc.successes += 1;
+    if (query.usage.quality === 'reported' && typeof query.usage.cost === 'number' && Number.isFinite(query.usage.cost)) {
+      acc.reportedCost = (acc.reportedCost ?? 0) + query.usage.cost;
+    }
+    observed.usage.set(query.profileId, acc);
+  }
   const healthOf = async (candidate: AgentPoolCandidate): Promise<AgentPoolCandidateHealth> => {
     const lease = activeLeaseForProfile(hops, candidate.profileId, nowIso);
+    const runningQuery = queries.find((query) => query.profileId === candidate.profileId && query.status === 'running');
     const hints = observed.hints.get(candidate.profileId) ?? [];
     const window7d = observed.usage.get(candidate.profileId) ?? emptyUsage();
     const runtime = queuedHops
@@ -653,9 +720,8 @@ async function buildPoolsHealth(
       circuit: circuitHealth(circuit),
       lastFailure: resolveCandidateLastFailure(circuit, hints),
       window7d,
-      runtime,
-      // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，
-      // 平台摘几个出来重命名等于又抄一份会过期的表。
+      runtime: runningQuery?.runtimeKind ? { running: true, hopId: runningQuery.id, runtimeKind: runningQuery.runtimeKind } : runtime,
+      // 原样附上整行：套餐、remainingPercent、resetAt 都是适配层的字段，摘几个重命名等于又抄一份会过期的表。
       ...(usage ? { usage } : {}),
       ...quotaExtras(circuit),
     };
@@ -666,6 +732,7 @@ async function buildPoolsHealth(
     return out;
   };
   return {
+    classifier: await attach(snapshot.classifier ?? []),
     coordinator: await attach(snapshot.coordinator),
     executor: await attach(snapshot.executor),
     independent_reviewer: await attach(snapshot.independent_reviewer),
@@ -676,6 +743,7 @@ export function createApi(deps: ApiDeps): Server {
   const { platform, tokens, deliveries, onMutation, beforeRead, resolveControlPrincipal } = deps;
   const planRunDirs = deps.planRunDirs ?? (() => [resolve('.coagent-plans')]);
   const planLive = deps.planLive;
+  const planRuntime = deps.planRunRuntime;
   const live: LiveOutput = deps.live ?? new NoLiveOutput();
   const agentPool: AgentPoolRepository = deps.agentPool ?? new InMemoryAgentPoolRepository();
   const listModels = deps.listRuntimeModels ?? listRuntimeModels;
@@ -685,14 +753,10 @@ export function createApi(deps: ApiDeps): Server {
   let cachedRuntimeUsage: { readonly at: number; readonly usage: RuntimeUsage } | undefined;
 
   /**
-   * 这一次请求要用的适配层用量。
-   *
-   * 与 GET /api/runtime/usage **共用同一份缓存**：两个页面都在问适配层同一个
-   * 问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只
-   * 降级不进缓存 —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。
-   *
-   * 成功（UsageRow[]）和适配器自己给出的 unavailable 都原样交出去，由调用方
-   * 决定怎么显示；只有**抛异常**才往上传，让端点把它翻成 unavailable。
+   * 这一次请求要用的适配层用量。与 GET /api/runtime/usage **共用同一份缓存**：两个页面问的是
+   * 同一个问题，各读一次意味着打开资源池页要等两遍适配层（一遍好几十秒）。失败只降级不进缓存
+   * —— 否则一次适配层故障会把「取不到用量」锁死 10 分钟。成功（UsageRow[]）和适配器自己给出
+   * 的 unavailable 都原样交出去，由调用方决定怎么显示；只有**抛异常**才往上传。
    */
   const readUsage = async (): Promise<RuntimeUsage> => {
     const hit = cachedRuntimeUsage;
@@ -705,10 +769,8 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
-   * 资源池那一列要用的用量行。
-   *
-   * 拿不到（适配层不在 / 返回不可用 / 抛异常）就是空数组：资源池照原样返回，
-   * 用量那几个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
+   * 资源池那一列要用的用量行。拿不到（适配层不在 / 不可用 / 抛异常）就是空数组：资源池
+   * 照原样返回，用量那几个可选键干脆不出现。凭空造一行等于告诉运维「还有额度」。
    */
   const readUsageRows = async (): Promise<readonly UsageRow[]> => {
     try {
@@ -734,7 +796,7 @@ export function createApi(deps: ApiDeps): Server {
    * 注入后先解析身份再求 PolicyEngine：缺失/未知 401，过期 401，其余拒绝 403。
    * HTTP 状态码与文案与接线前一致。错误体不得带回原始凭据。
    */
-  const requireControl = async (req: IncomingMessage, action: PolicyAction): Promise<void> => {
+  const requireControlAuth = async (req: IncomingMessage, action: PolicyAction): Promise<void> => {
     if (!resolveControlPrincipal) return;
     const resolved = await resolveControlPrincipal(req);
     const verdict = evaluatePolicy({
@@ -749,6 +811,39 @@ export function createApi(deps: ApiDeps): Server {
       throw new HttpError(401, 'CONTROL_EXPIRED', '控制面凭据已过期');
     }
     throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
+  };
+
+  const requireControl = async (req: IncomingMessage, action: PolicyAction): Promise<void> => {
+    await requireControlAuth(req, action);
+    if (req.method !== 'POST') return;
+    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
+    if (!controlled) return;
+    const mission = await platform.getMissionView(controlled[1]);
+    const duty = await platform.getReviewerDuty(mission.projectId);
+    if (duty?.active || req.headers['x-coagent-reviewer']) {
+      await platform.requireReviewerDuty(mission.projectId, String(req.headers['x-coagent-reviewer'] ?? ''), Number(req.headers['x-coagent-reviewer-generation']));
+    }
+  };
+
+  const reviewerTodoList = async (projectId?: string) => {
+    const todos: Array<ReviewerTodo | { id: string; kind: 'plan_escalation'; projectId: string;
+      runId: string; missionId?: string; title: string; at: string; blocking: boolean;
+      state: 'open'; notify: boolean; decisionPath: 'plan_run' }> = await platform.listReviewerTodos(projectId);
+    for (const item of listPlanRuns(planRunDirs(), projectId)) {
+      if ('error' in item || withRuntimeState(item, planRuntime).runtimeState !== 'running') continue;
+      const record = readPlanRunById(planRunDirs(), item.id);
+      if (record.status !== 'ok') continue;
+      for (const entry of record.snapshot.escalations.filter((row) => !row.resolution)) {
+        // 真实 PlanRun 承载时只保留它的决策入口，避免同一问题走普通 Mission 答复。
+        const duplicate = todos.findIndex((row) => row.missionId === entry.missionId && row.title === entry.question && row.kind !== 'result' && row.kind !== 'documentation');
+        if (duplicate >= 0) todos.splice(duplicate, 1);
+        todos.push({ id: `plan:${item.id}:${entry.id}`, kind: 'plan_escalation', projectId: item.projectId,
+          runId: item.id, missionId: entry.missionId, title: entry.question, at: entry.openedAt,
+          blocking: true, state: 'open', notify: true, decisionPath: 'plan_run' });
+      }
+    }
+    return todos.sort((a, b) => b.at.localeCompare(a.at));
   };
 
   /**
@@ -807,9 +902,8 @@ export function createApi(deps: ApiDeps): Server {
       if (typeof workItemId !== 'string' || workItemId.length === 0) {
         throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
       }
-      // 只有协调者能取精简详情。enforceAgentPolicy 对非 coordinator 的 ACTION_DENIED
-      // 保留「让 Platform 抛 WRONG_ROLE」的旧工具兼容回退（不在此改动），executor
-      // 会落到放行，故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
+      // 只有协调者能取精简详情：executor 在 enforceAgentPolicy 的旧兼容回退下会落到放行，
+      // 故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
       if (run.role !== 'coordinator') {
         throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取工作项详情。');
       }
@@ -987,7 +1081,7 @@ export function createApi(deps: ApiDeps): Server {
   const server = createServer((req, res) => {
     const isPost = (req.method ?? 'GET') === 'POST';
     if (isPost) inFlightWrites += 1;
-    void handle(req, res)
+    void handleWithReviewerFence(req, res)
       .then(async () => {
         // 成功应答必须在 onMutation 完成之后才 writeHead。先写头再 persist，
         // 落盘失败时客户端已经拿到 2xx，无法改成非 2xx。
@@ -1021,6 +1115,8 @@ export function createApi(deps: ApiDeps): Server {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
         writeJson(res, 409, { error: error.code, message: error.message }, identity);
+      } else if (error instanceof Error && /^DOCUMENT_(?:PATH_FORBIDDEN|SYMLINK_FORBIDDEN|CHANGES_REQUIRED|CHANGE_INVALID|EMPTY_ANCHOR|ANCHOR_NOT_UNIQUE)$/.test(error.message)) {
+        writeJson(res, 400, { error: error.message, message: '文档路径或精确差异无效，请刷新原文并重新提交' }, identity);
       } else if (error instanceof AgentPoolError) {
         // 与 PlatformRuleError 同构：请求本身合法，是当前候选池容不下它。
         // 界面要把 message 原样显示出来，所以那里写的就是「下一步该干什么」。
@@ -1117,6 +1213,26 @@ export function createApi(deps: ApiDeps): Server {
     }
   }
 
+  async function handleWithReviewerFence(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method !== 'POST') return handle(req, res);
+    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
+    const planControl = /^\/api\/plan-runs\/([^/]+)\/decide$/.exec(path);
+    const projectControl = /^\/api\/projects\/([^/]+)\/(?:mission-queue|execution-config)$/.exec(path);
+    if (!missionControl && !planControl && !projectControl) return handle(req, res);
+    await requireControlAuth(req, POLICY_ACTION.missionPause);
+    let projectId: string | undefined;
+    if (projectControl) projectId = decodeURIComponent(projectControl[1]);
+    else if (missionControl) projectId = (await platform.getMissionView(missionControl[1])).projectId;
+    else {
+      const record = readPlanRunById(planRunDirs(), planControl![1]);
+      if (record.status === 'ok') projectId = record.snapshot.projectId;
+    }
+    if (!projectId) return handle(req, res);
+    return platform.withReviewerControl(projectId, { owner: String(req.headers['x-coagent-reviewer'] ?? ''),
+      generation: Number(req.headers['x-coagent-reviewer-generation']) }, () => handle(req, res));
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
@@ -1127,8 +1243,7 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, { ok: true, api: API_VERSION });
     }
 
-    // S12.1：客户端 API 带版本。所有客户端（Web / L3 CLI / 别的 Host）
-    // 走同一套，没有谁是特权客户端。
+    // S12.1：客户端 API 带版本，所有客户端（Web / L3 CLI / 别的 Host）走同一套，没有谁是特权客户端。
     if (method === 'GET' && path === '/api/version') {
       return send(res, 200, { api: API_VERSION });
     }
@@ -1256,6 +1371,7 @@ export function createApi(deps: ApiDeps): Server {
         ...pool.coordinator,
         ...pool.executor,
         ...pool.independent_reviewer,
+        ...(pool.classifier ?? []),
       ].some((row) => row.profileId === profileId);
       if (!known) throw new HttpError(404, 'CANDIDATE_NOT_FOUND', `候选池里没有：${profileId}`);
       // actor 只取受控主体：调用方自称是谁不作数，审计要由凭据说话。
@@ -1278,6 +1394,18 @@ export function createApi(deps: ApiDeps): Server {
       }
       return send(res, 200, { profileId, events: await circuits.listResetEvents(profileId) });
     }
+    if (method === 'GET' && path === '/api/pools/config') {
+      await requireControl(req, POLICY_ACTION.poolList);
+      const snapshot = await agentPool.list();
+      return send(res, 200, { revision: agentPoolSnapshotRevision(snapshot), ...snapshot });
+    }
+    const replacePoolMatch = /^\/api\/pools\/(coordinator|executor|independent_reviewer|classifier)\/configure$/.exec(path);
+    if (method === 'POST' && replacePoolMatch) {
+      await requireControl(req, POLICY_ACTION.poolAdd);
+      const body = await readJson(req);
+      const snapshot = await agentPool.replaceRole({ ...body, role: replacePoolMatch[1] } as Parameters<typeof agentPool.replaceRole>[0]);
+      return send(res, 200, { revision: agentPoolSnapshotRevision(snapshot), ...snapshot });
+    }
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
       const snapshot = await agentPool.list();
@@ -1295,6 +1423,7 @@ export function createApi(deps: ApiDeps): Server {
             deps.candidateCircuits,
             nowMs(),
             usageRows,
+            deps.queryRuns,
           ),
         ),
       );
@@ -1326,10 +1455,28 @@ export function createApi(deps: ApiDeps): Server {
       return;
     }
 
+    const missionQueueMatch = /^\/api\/projects\/([^/]+)\/mission-queue$/.exec(path);
+    if (method === 'GET' && missionQueueMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      return send(res, 200, await platform.getMissionQueue(decodeURIComponent(missionQueueMatch[1])));
+    }
+    if (method === 'POST' && missionQueueMatch) {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      const body = await readJson(req);
+      return send(res, 201, await platform.enqueueMissions(decodeURIComponent(missionQueueMatch[1]), body as unknown as Parameters<Platform['enqueueMissions']>[1]));
+    }
+    const executionConfigMatch = /^\/api\/projects\/([^/]+)\/execution-config$/.exec(path);
+    if (method === 'POST' && executionConfigMatch) {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      const body = await readJson(req);
+      return send(res, 200, await platform.configureProjectExecution(decodeURIComponent(executionConfigMatch[1]), body as unknown as Parameters<Platform['configureProjectExecution']>[1]));
+    }
+
     if (method === 'GET' && path === '/api/plan-runs') {
       await requireControl(req, POLICY_ACTION.missionRead);
       const project = url.searchParams.get('project');
-      return send(res, 200, listPlanRuns(planRunDirs(), project === null ? undefined : project));
+      const listed = listPlanRuns(planRunDirs(), project === null ? undefined : project);
+      return send(res, 200, listed.map((item) => withRuntimeState(item, planRuntime)));
     }
 
     const planRunMatch = /^\/api\/plan-runs\/([^/]+)$/.exec(path);
@@ -1347,7 +1494,35 @@ export function createApi(deps: ApiDeps): Server {
       if (result.status === 'corrupt') {
         throw new HttpError(409, 'PLAN_RUN_CORRUPT', result.error);
       }
-      return send(res, 200, result.snapshot);
+      return send(res, 200, withRuntimeState(result.snapshot, planRuntime));
+    }
+
+    const planRunDecideMatch = /^\/api\/plan-runs\/([^/]+)\/decide$/.exec(path);
+    if (method === 'POST' && planRunDecideMatch) {
+      await requireControl(req, POLICY_ACTION.missionPause);
+      const id = planRunDecideMatch[1];
+      const record = readPlanRunById(planRunDirs(), id);
+      if (record.status === 'missing') throw new HttpError(404, 'PLAN_RUN_NOT_FOUND', '没有方案运行记录');
+      if (record.status === 'corrupt') throw new HttpError(409, 'PLAN_RUN_CORRUPT', record.error);
+      const duty = await platform.getReviewerDuty(record.snapshot.projectId);
+      if (duty?.active || req.headers['x-coagent-reviewer']) {
+        await platform.requireReviewerDuty(record.snapshot.projectId, String(req.headers['x-coagent-reviewer'] ?? ''), Number(req.headers['x-coagent-reviewer-generation']));
+      }
+      const body = await readJson(req);
+      if (typeof body.escalationId !== 'string' || typeof body.decidedBy !== 'string'
+        || (body.reason !== undefined && typeof body.reason !== 'string')
+        || (body.answer !== undefined && typeof body.answer !== 'string')) {
+        throw new HttpError(400, 'INVALID_PLAN_DECISION', '需要 escalationId、decidedBy，reason 与 answer 须为字符串');
+      }
+      const decision = { action: body.action, decidedBy: body.decidedBy,
+        reason: body.reason as string | undefined, answer: body.answer as string | undefined, dropFeatures: body.dropFeatures };
+      const resolution = await updatePlanRunById(planRunDirs(), id, (run) => {
+        if (!planRuntime?.activeRunIds().includes(id)) {
+          throw new PlatformRuleError('PLAN_RUN_NOT_ACTIVE', '当前服务没有承载该 PlanRun；请核实实际 Mission 决策路径');
+        }
+        return run.choose(body.escalationId as string, decision, new Date().toISOString());
+      });
+      return send(res, 200, { resolution });
     }
 
     const planRunLiveMatch = /^\/api\/plan-runs\/([^/]+)\/live$/.exec(path);
@@ -1439,18 +1614,24 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 201, await platform.createClassifiedMission(body as never));
     }
 
+    // Web 项目规范只读入口：复用 Platform.getProjectContext，不给浏览器直读文件系统。
+    const projectContextMatch = /^\/api\/missions\/([^/]+)\/project-context$/.exec(path);
+    if (method === 'GET' && projectContextMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const slug = url.searchParams.get('slug') ?? undefined;
+      return send(res, 200, await platform.getProjectContext(projectContextMatch[1], slug));
+    }
+
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
     if (method === 'GET' && missionMatch) {
       await requireControl(req, POLICY_ACTION.missionRead);
       return send(res, 200, await platform.getMissionView(missionMatch[1]));
     }
 
-    // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks
-    // 可能很长，列表页不该为了显示一行状态把它整个拉过来。
-    // 取报告与取 Mission 同级只读，共用 missionRead；报告的不可变性与归属判断都在
-    // Platform.getValidationReport 里，这里只透传，不直连任何存储适配器。
-    // 归属不符与不存在同样回 404：报告是 append-only 机器证据，若告诉调用方
-    // 「这份报告属于别的 Mission」，等于给了跨 Mission 探测报告 id 的接口。
+    // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks 可能很长，
+    // 列表页不该为了显示一行状态把它整个拉过来。取报告与取 Mission 同级只读，共用 missionRead；
+    // 归属不符与不存在同样回 404：报告是 append-only 机器证据，说「这份属于别的 Mission」
+    // 等于给了跨 Mission 探测报告 id 的接口。
     const validationReportMatch = /^\/api\/missions\/([^/]+)\/validation-reports\/([^/]+)$/.exec(path);
     if (method === 'GET' && validationReportMatch) {
       await requireControl(req, POLICY_ACTION.missionRead);
@@ -1472,6 +1653,39 @@ export function createApi(deps: ApiDeps): Server {
       return send(res, 200, await platform.getMissionDiff(diffMatch[1]));
     }
 
+    // 费用增额：权限沿用答复升级那一格（控制面 operator），不新增 policy 动作、也不给 agent 工具开口；
+    // 增额规则（基数、溢出、解除门禁）只有 Platform 一份，这里只验输入形状。
+    const budgetRaiseMatch = /^\/api\/missions\/([^/]+)\/budget\/raise$/.exec(path);
+    if (method === 'POST' && budgetRaiseMatch) {
+      await requireControl(req, POLICY_ACTION.missionAnswerEscalation);
+      const body = await readJson(req);
+      const by = body.by === undefined ? 10 : body.by;
+      if (typeof by !== 'number' || !Number.isFinite(by) || by <= 0) throw new HttpError(400, 'INVALID_COST_CAP', 'by 必须是有限正数（美元）');
+      return send(res, 200, await platform.raiseMissionCostCap(budgetRaiseMatch[1], by));
+    }
+
+    // 显式签名批准工作项检查点：权限沿用答复升级那一格（与 costCap 增额同一格），不新增 policy 动作。
+    // 这里只验**输入形状**（threshold/reviewer/reason 的类型与取值区间）；业务规则（到达、
+    // 历史门禁、禁止跳过/未来、幂等）只有 Platform 一份，重复一遍就会漂。
+    const checkpointApproveMatch = /^\/api\/missions\/([^/]+)\/checkpoint\/approve$/.exec(path);
+    if (method === 'POST' && checkpointApproveMatch) {
+      await requireControl(req, POLICY_ACTION.missionAnswerEscalation);
+      const body = await readJson(req);
+      const reviewer = body.reviewer;
+      const reason = body.reason;
+      if (typeof reviewer !== 'string' || reviewer.trim().length === 0) {
+        throw new HttpError(400, 'INVALID_CHECKPOINT_SIGNATURE', 'reviewer 必须是 trim 后非空字符串');
+      }
+      if (typeof reason !== 'string' || reason.trim().length === 0) {
+        throw new HttpError(400, 'INVALID_CHECKPOINT_SIGNATURE', 'reason 必须是 trim 后非空字符串');
+      }
+      // 15 的正整数倍：非 15 倍数和 Platform 投出的检查点卡对不上，会永不恢复。
+      const threshold = body.threshold;
+      if (typeof threshold !== 'number' || !Number.isInteger(threshold) || threshold <= 0 || threshold % CHECKPOINT_THRESHOLD_INTERVAL !== 0) {
+        throw new HttpError(400, 'INVALID_CHECKPOINT_THRESHOLD', `threshold 必须是 ${CHECKPOINT_THRESHOLD_INTERVAL} 的正整数倍`);
+      }
+      return send(res, 200, await platform.approveWorkItemCheckpoint(checkpointApproveMatch[1], { threshold, reviewer, reason }));
+    }
 
     const answerMatch = /^\/api\/missions\/([^/]+)\/escalations\/answer$/.exec(path);
     if (method === 'POST' && answerMatch) {
@@ -1602,6 +1816,89 @@ export function createApi(deps: ApiDeps): Server {
 
     /* ---- 收件箱：结果回到发起方。Host 离线时结果就在这儿等着 ---- */
 
+    const projectDocumentsMatch = /^\/api\/projects\/([^/]+)\/documents$/.exec(path);
+    if (method === 'GET' && projectDocumentsMatch) {
+      await requireControl(req, POLICY_ACTION.inboxRead);
+      return send(res, 200, { proposals: await platform.listDocumentProposals(decodeURIComponent(projectDocumentsMatch[1])) });
+    }
+    if (method === 'POST' && projectDocumentsMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      const projectId = decodeURIComponent(projectDocumentsMatch[1]);
+      if (typeof body.missionId !== 'string' || (await platform.getMissionView(body.missionId)).projectId !== projectId) {
+        throw new HttpError(400, 'DOCUMENT_PROJECT_MISMATCH', '提议需绑定本项目的 Mission');
+      }
+      const result = await platform.withReviewerControl(projectId, { owner: body.generation === undefined ? '' : String(body.reviewer ?? ''),
+        generation: Number(body.generation) }, () => platform.proposeDocument(body as never));
+      return send(res, 201, result);
+    }
+    const documentDecisionMatch = /^\/api\/documents\/([^/]+)\/decide$/.exec(path);
+    if (method === 'POST' && documentDecisionMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const id = decodeURIComponent(documentDecisionMatch[1]);
+      const row = (await platform.listDocumentProposals()).find((entry) => entry.id === id);
+      if (!row) throw new HttpError(404, 'DOCUMENT_NOT_FOUND', '文档提议不存在');
+      const body = await readJson(req);
+      const result = await platform.withReviewerControl(row.projectId, { owner: body.generation === undefined ? '' : String(body.reviewer ?? ''),
+        generation: Number(body.generation) }, () => platform.decideDocument(id, body as never, true));
+      const queue = body.action === 'approve' ? await platform.flushDocumentQueue(row.projectId) : undefined;
+      return send(res, 200, { ...(await platform.listDocumentProposals(row.projectId)).find((entry) => entry.id === result.id), queue });
+    }
+    const documentFlushMatch = /^\/api\/projects\/([^/]+)\/documents\/flush$/.exec(path);
+    if (method === 'POST' && documentFlushMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      return send(res, 200, await platform.withReviewerControl(decodeURIComponent(documentFlushMatch[1]), {
+        owner: body.generation === undefined ? '' : String(body.reviewer ?? ''), generation: Number(body.generation),
+      }, () => platform.flushDocumentQueue(decodeURIComponent(documentFlushMatch[1]))));
+    }
+
+    if (method === 'GET' && path === '/api/reviewer/todos') {
+      await requireControl(req, POLICY_ACTION.inboxRead);
+      return send(res, 200, { todos: await reviewerTodoList(url.searchParams.get('projectId') ?? undefined) });
+    }
+    if (method === 'GET' && path === '/api/reviewer/wait') {
+      await requireControl(req, POLICY_ACTION.inboxRead);
+      const projectId = url.searchParams.get('projectId') ?? '';
+      const owner = url.searchParams.get('owner') ?? '';
+      const generation = Number(url.searchParams.get('generation'));
+      const waitMs = Number(url.searchParams.get('waitMs') ?? 25000);
+      if (!projectId || !owner || !Number.isSafeInteger(generation) || generation <= 0
+          || !Number.isInteger(waitMs) || waitMs < 0 || waitMs > 25000) {
+        throw new HttpError(400, 'INVALID_REVIEWER_WAIT', '需要 projectId、owner、正整数 generation；waitMs 为0–25000。');
+      }
+      const result = await waitForReviewerTodos({ platform, projectId, owner, generation, waitMs,
+        cursor: url.searchParams.get('cursor') ?? undefined, disconnected: () => res.destroyed,
+        list: () => reviewerTodoList(projectId) });
+      if (!res.destroyed) return send(res, 200, result);
+      return;
+    }
+    const masterBriefMatch = /^\/api\/projects\/([^/]+)\/master-brief$/.exec(path);
+    if (method === 'GET' && masterBriefMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      return send(res, 200, await platform.getMasterMergeBrief(decodeURIComponent(masterBriefMatch[1])));
+    }
+    const reviewerDutyMatch = /^\/api\/projects\/([^/]+)\/reviewer-duty$/.exec(path);
+    if (method === 'GET' && reviewerDutyMatch) {
+      await requireControl(req, POLICY_ACTION.inboxRead);
+      return send(res, 200, { duty: await platform.getReviewerDuty(decodeURIComponent(reviewerDutyMatch[1])) ?? null });
+    }
+    if (method === 'POST' && reviewerDutyMatch) {
+      await requireControl(req, POLICY_ACTION.missionPause);
+      return send(res, 200, await platform.changeReviewerDuty(decodeURIComponent(reviewerDutyMatch[1]), await readJson(req) as never));
+    }
+    const reviewerTodoMatch = /^\/api\/reviewer\/todos\/([^/]+)$/.exec(path);
+    if (method === 'POST' && reviewerTodoMatch) {
+      await requireControl(req, POLICY_ACTION.missionPause);
+      const body = await readJson(req);
+      // 已领取值守的项目拒绝另一个会话，保留尚未采用值守协议的兼容入口。
+      const todo = (await platform.listReviewerTodos()).find((entry) => entry.id === decodeURIComponent(reviewerTodoMatch[1]));
+      const decide = () => platform.decideReviewerTodo(decodeURIComponent(reviewerTodoMatch[1]), body as never);
+      const result = todo ? await platform.withReviewerControl(todo.projectId,
+        { owner: body.generation === undefined ? '' : String(body.reviewer ?? ''), generation: Number(body.generation) }, decide) : await decide();
+      return send(res, 200, result);
+    }
+
     if (method === 'GET' && path === '/api/inbox') {
       await requireControl(req, POLICY_ACTION.inboxRead);
       const recipient = url.searchParams.get('recipient') ?? undefined;
@@ -1634,7 +1931,7 @@ export function createApi(deps: ApiDeps): Server {
       const pool = await agentPool.list();
       const { attemptId, profileId } = await platform.startIndependentReviewerAttempt(
         missionId,
-        pool.independent_reviewer.map((row) => ({
+        pool.independent_reviewer.filter((row) => row.enabled !== false).map((row) => ({
           profileId: row.profileId,
           endpoint: row.endpoint,
         })),
@@ -1689,6 +1986,8 @@ export function createApi(deps: ApiDeps): Server {
       return startHostedRun(req, res, deps.runMission, 'run-mission');
     }
     if (method === 'POST' && path === '/api/control/run-plan') {
+      await requireControl(req, POLICY_ACTION.missionCreate);
+      if (!deps.runPlan) throw new HttpError(410, 'PLAN_RUN_RETIRED', '方案运行已退役，请确认 Mission 列表后提交项目 mission-queue。');
       return startHostedRun(req, res, deps.runPlan, 'run-plan');
     }
 

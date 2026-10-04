@@ -16,7 +16,9 @@ import type {
   ExecutionProfile,
   IdGenerator,
   RuntimeOutcome,
+  CandidateCircuitRepository,
 } from './ports.ts';
+import { classifyCandidateFailure, resolveQuotaResetTime } from './candidate-circuit.ts';
 
 /* ------------------------------ 模型 ------------------------------ */
 
@@ -30,6 +32,8 @@ export type QueryOutcome = 'answered' | 'failed' | 'needs_mutation';
  * 跨进程可追溯由 FileQueryRunRepository / PgQueryRunRepository 负责。
  */
 export interface QueryRunRecord {
+  readonly profileId?: string;
+  readonly runtimeKind?: string;
   readonly id: string;
   readonly projectId: string;
   /** 调用来源（cli / api / test / …），不解释语义。 */
@@ -151,6 +155,9 @@ export interface QueryRunnerDeps {
   ids: IdGenerator;
   /** 默认 query 用的 profile；input.profile 优先。 */
   defaultProfile?: ExecutionProfile;
+  /** 服务装配提供分类角色池；有此端口时禁止按请求覆盖或自动借其他角色。 */
+  loadCandidates?: () => Promise<readonly ExecutionProfile[]>;
+  candidateCircuits?: CandidateCircuitRepository;
 }
 
 const DEFAULT_QUERY_PROFILE: ExecutionProfile = Object.freeze({
@@ -166,6 +173,8 @@ export class QueryRunner {
   #clock: Clock;
   #ids: IdGenerator;
   #defaultProfile: ExecutionProfile;
+  #loadCandidates?: QueryRunnerDeps['loadCandidates'];
+  #circuits?: CandidateCircuitRepository;
 
   constructor(deps: QueryRunnerDeps) {
     // 构造期即 fail-closed：未声明 supportsQuery 的 runtime 不得挂上 QueryRunner。
@@ -175,6 +184,8 @@ export class QueryRunner {
     this.#clock = deps.clock;
     this.#ids = deps.ids;
     this.#defaultProfile = deps.defaultProfile ?? DEFAULT_QUERY_PROFILE;
+    this.#loadCandidates = deps.loadCandidates;
+    this.#circuits = deps.candidateCircuits;
   }
 
   /**
@@ -193,10 +204,52 @@ export class QueryRunner {
     // 写工具必须在 runtime.start 前拒绝——进了 runtime 再靠 prompt 已经晚了。
     assertQueryToolsAllowed(tools);
 
+    if (this.#loadCandidates) {
+      const candidates = await this.#loadCandidates();
+      if (candidates.length === 0) throw new PlatformRuleError('QUERY_NO_CANDIDATES', '分类角色没有启用候选，请先配置 classifier 池。');
+      let result: RunQueryResult | undefined;
+      for (const profile of candidates) {
+        const run = await this.#runCandidate(input, profile, tools);
+        if (!run) continue;
+        result = run.result;
+        if (!run.failover) return result;
+      }
+      if (!result) throw new PlatformRuleError('QUERY_NO_CANDIDATES', '分类角色候选全部不可用，请核对熔断状态。');
+      return result;
+    }
+    return this.#runOne(input, tools);
+  }
+
+  async #runCandidate(input: RunQueryInput, profile: ExecutionProfile, tools: readonly string[]) {
+    const now = this.#clock.now().toISOString();
+    const circuit = await this.#circuits?.get(profile.profileId);
+    let probe = false;
+    if (circuit && circuit.state !== 'closed') {
+      if (circuit.state === 'half_open' || circuit.openUntil === null || Date.parse(circuit.openUntil) > Date.parse(now)) return undefined;
+      probe = await this.#circuits!.tryClaimProbe({ profileId: profile.profileId, now });
+      if (!probe) return undefined;
+    }
+    const result = await this.#runOne({ ...input, profile }, tools);
+    const failure = classifyCandidateFailure(result.record.endedBy ?? 'structured_submit', result.record.failureMessage)
+      ?? { failureClass: 'unknown', failover: false };
+    const failed = result.outcome === 'failed';
+    const openUntil = failure.failureClass === 'quota'
+      ? resolveQuotaResetTime({ message: result.record.failureMessage, now })
+      : new Date(Date.parse(now) + 5 * 60_000).toISOString();
+    if (probe) await this.#circuits!.resolveProbe({ profileId: profile.profileId, succeeded: !failed,
+      ...(failed ? { failureClass: failure.failureClass, openUntil } : {}) });
+    else if (failed && failure.failover) await this.#circuits?.open({ profileId: profile.profileId, failureClass: failure.failureClass, openUntil });
+    return { result, failover: failed && failure.failover };
+  }
+
+  async #runOne(input: RunQueryInput, tools: readonly string[]): Promise<RunQueryResult> {
+
     const id = this.#ids.next('Q');
     const startedAt = this.#clock.now().toISOString();
     const running: QueryRunRecord = {
       id,
+      profileId: (input.profile ?? this.#defaultProfile).profileId,
+      runtimeKind: this.#runtime.kind,
       projectId: input.projectId,
       source: input.source,
       prompt: input.prompt,
@@ -289,6 +342,8 @@ function endRecord(
 ): QueryRunRecord {
   return {
     id: running.id,
+    profileId: running.profileId,
+    runtimeKind: running.runtimeKind,
     projectId: running.projectId,
     source: running.source,
     prompt: running.prompt,

@@ -78,7 +78,7 @@ describe('外壳的文件形状', () => {
   test('四个文件都在，且都是静态服务认得的扁平小写名', () => {
     // 静态服务只认 `^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$`：大写、多级目录、
     // 别的扩展名，全都是浏览器里一个 404。这里先红，好过界面上是白屏。
-    for (const name of ['index.html', 'app.js', 'tokens.css', 'projects.js', 'plan-run.js', 'platform.js']) {
+    for (const name of ['index.html', 'app.js', 'tokens.css', 'ui.css', 'projects.js', 'project-catalog.js', 'project-spec.js', 'inbox.js', 'agents.js', 'settings.js', 'plan-run.js', 'platform.js']) {
       assert.ok(existsSync(new URL(`../src/web/${name}`, import.meta.url)), `缺 src/web/${name}`);
       assert.match(name, /^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$/);
     }
@@ -91,28 +91,25 @@ describe('外壳的文件形状', () => {
     assert.match(html, /projects\.js/);
   });
 
-  test('外壳有品牌、四个入口、无设置/用户占位、面包屑容器', () => {
+  test('外壳有新版主导航、设置入口和面包屑容器', () => {
     const html = read('index.html');
     assert.match(html, /CoAgentHub/);
-    assert.match(html, />项目</);
-    assert.match(html, />方案运行</);
-    assert.match(html, />资源池</);
-    assert.match(html, />平台</);
-    assert.match(html, /href="#\/platform"/);
-    assert.equal(html.includes('>设置<') || /\n\s*设置\s*\n/.test(html), false, '设置占位还在');
+    for (const label of ['首页', '项目任务列表', '角色与模型']) {
+      assert.ok(html.includes(label), `导航缺 ${label}`);
+    }
+    for (const href of ['#/', '#/projects', '#/agents']) {
+      assert.ok(html.includes(`href="${href}"`), `导航缺 ${href}`);
+    }
     assert.equal(/>用户</.test(html), false, '用户占位还在');
-    // 面包屑的文字由 app.js 按当前 hash 填，所以这里要的是那个容器本身。
     assert.match(html, /id="crumbs"/);
   });
 
-  test('导航有图标（内联 SVG，fill=currentColor），也不引外链图片', () => {
+  test('导航图标不依赖外链图片，使用本地 glyph', () => {
     const html = read('index.html');
     const nav = /<nav[\s\S]*?<\/nav>/.exec(html);
     assert.ok(nav, '找不到导航');
-    assert.equal((nav[0].match(/<svg/g) || []).length, 4, '「项目」「方案运行」「资源池」「平台」各要一个图标');
-    assert.equal((nav[0].match(/fill="currentColor"/g) || []).length, 4, '图标要 fill=currentColor');
-    // 不靠图片资源：这一页零构建、零外链，图标必须内联。
-    assert.equal(/<img/.test(nav[0]), false);
+    assert.ok((nav[0].match(/class="nav-glyph"/g) || []).length === 3, '三项导航都有 glyph');
+    assert.equal(/<img/.test(nav[0]), false, '导航不引外链图片');
   });
 
   test('narrate.js 被 modulepreload，且不是会执行的 script', () => {
@@ -146,8 +143,8 @@ describe('外壳的文件形状', () => {
       assert.ok(projects.includes(`#${id}`) && projects.includes(`id="${id}"`), `骨架里缺 #${id}`);
     }
     assert.match(html, /class="item"[^>]*data-route="projects"/);
-    assert.match(html, /class="item"[^>]*data-route="pool"/);
-    assert.match(html, /class="item"[^>]*data-route="platform"/);
+    assert.match(html, /class="item"[^>]*data-route="agents"/);
+    assert.match(html, /class="item"[^>]*data-route="home"/);
   });
 
   test('外壳不靠内置观测面', () => {
@@ -491,7 +488,7 @@ describe('GET / 是正式页，不是内置观测面', () => {
 
   test('三个资源都能按扁平路径取到', async () => {
     const { base } = await serveDefaultWebRoot();
-    for (const path of ['/index.html', '/app.js', '/tokens.css', '/projects.js', '/plan-run.js', '/platform.js']) {
+    for (const path of ['/index.html', '/app.js', '/tokens.css', '/ui.css', '/projects.js', '/project-catalog.js', '/project-spec.js', '/inbox.js', '/agents.js', '/settings.js', '/plan-run.js', '/platform.js']) {
       const res = await fetch(base + path);
       assert.equal(
         res.status,
@@ -499,6 +496,17 @@ describe('GET / 是正式页，不是内置观测面', () => {
         `${path} 取不到：名字不满足 SAFE_NAME（大写/多级目录/扩展名），或文件没写出来`,
       );
     }
+  });
+
+  test('项目规范 Web 只读口复用项目上下文读取', async () => {
+    const { platform, base } = await serveDefaultWebRoot();
+    const contract = { intent: '读项目规范', acceptance: [], constraints: [], nonGoals: [], guardrails: [] };
+    await platform.createMission({ projectId: 'proj-spec', missionId: 'M-spec', contract });
+    const res = await fetch(`${base}/api/missions/M-spec/project-context`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { available?: boolean; note?: string };
+    assert.equal(body.available, false, '没有 workspaceRef 时要如实说明不可读');
+    assert.match(body.note ?? '', /工作区/);
   });
 
   test('静态层没把 API 吃掉', async () => {

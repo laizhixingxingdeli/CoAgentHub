@@ -10,7 +10,7 @@
 
 import { join, resolve } from 'node:path';
 import {
-  loadPoolOrSeed,
+  loadRoleProfiles,
   type AgentPoolCandidate,
   type AgentPoolRepository,
 } from './agent-pool.ts';
@@ -643,7 +643,7 @@ export async function runHostedPlan(
     parsed.coordinator !== undefined ||
     parsed.executor !== undefined ||
     parsed.independentReviewer !== undefined;
-  const pool = hasRoleFlags ? await agentPool.list() : await loadPoolOrSeed(agentPool);
+  const pool = await agentPool.list();
   const coordinators = pickHostedCandidates(
     pool.coordinator,
     'coordinator',
@@ -710,6 +710,8 @@ export async function runHostedPlan(
   if (queryRuntime?.supportsQuery === true) {
     const queryRunner = new QueryRunner({
       runtime: queryRuntime,
+      loadCandidates: () => loadRoleProfiles(agentPool, 'classifier'),
+      candidateCircuits,
       queryRuns: ctx.built.queryRuns ?? new InMemoryQueryRunRepository(),
       clock: ctx.built.clock ?? new SystemClock(),
       ids: ctx.built.ids ?? new SequentialIds(),
@@ -726,9 +728,9 @@ export async function runHostedPlan(
     candidateCircuits,
     queuedHops,
     inRunBackoffWaitMs: 120_000,
-    coordinator: { runtime, candidates: coordinators },
-    executor: { runtime, candidates: executors },
-    independentReviewer: { runtime, candidates: independentReviewers },
+    coordinator: { runtime, candidates: coordinators, loadCandidates: () => loadRoleProfiles(agentPool, 'coordinator') },
+    executor: { runtime, candidates: executors, loadCandidates: () => loadRoleProfiles(agentPool, 'executor') },
+    independentReviewer: { runtime, candidates: independentReviewers, loadCandidates: () => loadRoleProfiles(agentPool, 'independent_reviewer') },
   });
 
   ctx.onStarted?.({ runId, runPath: store.path, reviewer: parsed.plan.reviewer });
@@ -751,7 +753,7 @@ export async function runHostedPlan(
     runMission: (missionId, options) => runner.run(missionId, hostedPlanRunOptions(options, parsed.maxRounds)),
     ...(runQuery ? { runQuery } : {}),
     ...(Object.keys(resumeMissions).length > 0 ? { resumeMissions } : {}),
-    ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
+
     persist: async () => {
       await persist();
     },

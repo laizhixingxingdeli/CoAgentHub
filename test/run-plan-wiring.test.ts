@@ -355,6 +355,12 @@ describe('持久化装配里机器 L3 可用', () => {
       acceptanceEvidence: [],
       memoryDelta: [],
       openRisks: [],
+      // 契约验收标准逐条结论：CONTRACT.acceptance 就一条，index 从 1 起。
+      criteria: CONTRACT.acceptance.map((_, position) => ({
+        index: position + 1,
+        status: 'pass' as const,
+        evidence: '合并后 HEAD:a.txt 为 mission，集成分支验证命令退出码 0',
+      })),
     });
     await platform.finishAttempt('M1', coord.attemptId, { endedBy: 'structured_submit' });
 
@@ -495,6 +501,12 @@ describe('真平台 + 真 git 跑一份方案', () => {
       acceptanceEvidence: [],
       memoryDelta: [],
       openRisks: [],
+      // 契约验收标准逐条结论：CONTRACT.acceptance 就一条，index 从 1 起。
+      criteria: CONTRACT.acceptance.map((_, position) => ({
+        index: position + 1,
+        status: 'pass' as const,
+        evidence: '工作项已验收，改动落在它自己的分支上等待最终检视',
+      })),
     });
     await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
   }
@@ -663,8 +675,7 @@ describe('开跑前：项目的改动名额被谁占着', () => {
     const result = runOpen(planPath, repo, ['--state', statePath, '--run-dir', runDir, '--worktrees', join(home, 'wt')]);
     const out = `${result.stdout}${result.stderr}`;
     assert.notEqual(result.status, 0, out);
-    assert.match(out, /R0-F2/);
-    assert.match(out, /占着/);
+    assert.match(out, /PLAN_RUN_RETIRED/);
     assert.doesNotMatch(out, /开跑：/);
     assert.equal(existsSync(runDir), false, '名额拒绝不得新建 PlanRun');
 
@@ -754,15 +765,6 @@ function samplePlan(features: unknown[]) {
     features,
   };
 }
-
-describe('run-plan 轮次选项接线', () => {
-  test('仅配置时追加 maxRounds，原 projectRoot 和其他 options 保留；省略时原样传递', async () => {
-    const { missionRunOptions } = await import('../src/run-plan.ts');
-    const options = { projectRoot: '/plan-runtime-root', attemptWallClockMs: 1234 };
-    assert.deepEqual(missionRunOptions(options, 30), { ...options, maxRounds: 30 });
-    assert.equal(missionRunOptions(options, undefined), options);
-  });
-});
 
 describe('run-plan --check 只读、零副作用', () => {
   function runCheck(planPath: string, cwd: string, extra: string[] = [], env?: NodeJS.ProcessEnv) {
@@ -1153,7 +1155,7 @@ describe('run-plan 开跑路径真实副作用次序', () => {
     assert.doesNotMatch(out, /开跑：/);
   });
 
-  test('有警告时正式开跑可继续：首次预检通过后仍拿锁（状态文件使二次预检失败）', () => {
+  test('历史预检警告仍可显示，退役入口不创建状态', () => {
     const repo = repoOn('auto/plan-x');
     const home = temp('coagent-open-warn-continue-');
     const planPath = join(home, 'PLAN.json');
@@ -1184,15 +1186,15 @@ describe('run-plan 开跑路径真实副作用次序', () => {
     assert.match(out, /Warn 待跑/);
     assert.match(out, /Warn：验收路径 src\/miss\.ts 未被范围覆盖/);
     const warnAt = out.search(/^警告：/m);
-    const lockAt = out.search(/拿到状态锁之后项目仓变脏了/);
+    const lockAt = out.search(/PLAN_RUN_RETIRED/);
     assert.ok(warnAt >= 0 && lockAt > warnAt, out);
     assert.doesNotMatch(out, /开跑：/);
     assert.equal(existsSync(join(home, 'plans')), false);
     assert.equal(hasLockDir(repo), false);
-    assert.ok(existsSync(statePath), '警告之后仍开状态拿锁，证明未因警告停止');
+    assert.equal(existsSync(statePath), false, '退役入口不创建状态');
   });
 
-  test('锁后二次预检失败：已拿锁并释放，不建 PlanRun / 不起 API 开跑', () => {
+  test('退役入口在持锁前停止，不建 PlanRun / 不起 API 开跑', () => {
     const repo = repoOn('auto/plan-x');
     const home = temp('coagent-open-lock-');
     const planPath = join(home, 'PLAN.json');
@@ -1216,13 +1218,13 @@ describe('run-plan 开跑路径真实副作用次序', () => {
     ]);
     const out = `${result.stdout}${result.stderr}`;
     assert.notEqual(result.status, 0, out);
-    assert.match(out, /拿到状态锁之后项目仓变脏了/);
+    assert.match(out, /PLAN_RUN_RETIRED/);
     assert.doesNotMatch(out, /开跑：/);
     assert.equal(readFileSync(planPath).equals(beforePlan), true);
     assert.equal(existsSync(join(home, 'plans')), false);
     assert.equal(hasLockDir(repo), false);
     assert.equal(hasLockDir(home), false);
-    assert.ok(existsSync(statePath), '首次预检过后才开状态；二次预检失败仍会留下状态文件');
+    assert.equal(existsSync(statePath), false, '退役入口不创建状态');
   });
 });
 
@@ -1429,6 +1431,9 @@ function haCoordinatorScript(workItemId = 'W-1'): ScriptTable {
             acceptanceEvidence: [],
             memoryDelta: [],
             openRisks: [],
+            // 契约验收标准逐条结论：用到这段脚本的方案功能点都只声明一条
+            // acceptance，index 从 1 起。
+            criteria: [{ index: 1, status: 'pass' as const, evidence: '脚本化协调者夹具：工作项已验收，改动已在 worktree 里核对' }],
           },
         },
       ],
@@ -1604,6 +1609,8 @@ async function advancePlanHaMission(
   });
   await platform.submitMissionResult(missionId, coord.attemptId, {
     outcome: 'delivered', summary: '已交付', acceptanceEvidence: [], memoryDelta: [], openRisks: [],
+    // 契约验收标准逐条结论：本夹具的契约 acceptance 就一条，index 从 1 起。
+    criteria: [{ index: 1, status: 'pass' as const, evidence: '真 Git HA 夹具：a.txt 已写为 mission，确定性验证命令退出码 0' }],
   });
   await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
   await platform.runHaDeterministicValidation(missionId, prepared.cwd);
@@ -1905,6 +1912,8 @@ describe('真 Git HA 可复用夹具', () => {
         });
         await platform.submitMissionResult(missionId, coord.attemptId, {
           outcome: 'delivered', summary: 'F2 已交付', acceptanceEvidence: [], memoryDelta: [], openRisks: [],
+          // 契约验收标准逐条结论：F2 功能点只声明一条 acceptance，index 从 1 起。
+          criteria: [{ index: 1, status: 'pass' as const, evidence: 'b.txt 已写为 good，工作项验收结论为 pass' }],
         });
         await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
         return { outcome: { kind: 'awaiting_l3_review' }, hops: [], workspace: undefined as never };
@@ -2441,15 +2450,15 @@ describe('合格 HA 跑到 pending_release',
 
     test('独立检视池为空时不以 coordinator 自审代替',
       () => {
-        const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
-        assert.match(src, /candidates: independentReviewers/);
+        const src = readFileSync(join(import.meta.dirname, '..', 'src/application/mission-runner.ts'), 'utf8');
+        assert.match(src, /candidates: independentReviewerPool\.map/);
         assert.doesNotMatch(src, /independentReviewer:[\s\S]{0,160}candidates:\s*coordinators/);
-        assert.match(src, /空池也原样交给 MissionRunner/);
+        assert.match(src, /loadCandidates:.*independent_reviewer/);
       });
 
     test('CLI 把运行内退避等待上限 120000 交给 MissionRunner',
       () => {
-        const src = readFileSync(join(import.meta.dirname, '..', 'src', 'run-plan.ts'), 'utf8');
+        const src = readFileSync(join(import.meta.dirname, '..', 'src/application/mission-runner.ts'), 'utf8');
         assert.match(src, /new MissionRunner\(\{[\s\S]*?inRunBackoffWaitMs:\s*120_000/);
       });
   });
@@ -3127,7 +3136,7 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
     );
     assert.equal(existsSync(join(home, 'plans')), false);
     assert.equal(persistCalls, 0);
-    assert.deepEqual(await agentPool.list(), { coordinator: [], executor: [], independent_reviewer: [] });
+    assert.deepEqual(await agentPool.list(), { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
   });
 
   test('非法 --coordinator 在 seed / 建 PlanRun 之前拒绝且不写主状态', async () => {
@@ -3169,7 +3178,7 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
     );
     assert.equal(existsSync(join(home, 'plans')), false);
     assert.equal(persistCalls, 0);
-    assert.deepEqual(await agentPool.list(), { coordinator: [], executor: [], independent_reviewer: [] });
+    assert.deepEqual(await agentPool.list(), { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
   });
 
   test('注入既有 platform 后预检通过才建 PlanRun；开跑早于停了', async () => {
@@ -3590,45 +3599,18 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
     }
   });
 
-  test('独立 run-plan 在开跑信息后标明本进程持主锁', async () => {
+  test('独立 run-plan 已退役，不创建状态、PlanRun 或工作树', () => {
     const repo = repoOn('auto/plan-x');
-    const home = temp('coagent-indie-plan-');
+    const home = temp('coagent-retired-plan-');
     const planPath = join(home, 'PLAN.json');
-    writeFileSync(
-      planPath,
-      JSON.stringify(
-        samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }]),
-        null,
-        2,
-      ),
-    );
-    const adapter = join(home, 'adapter.ts');
-    writeFileSync(adapter, 'export {}\n');
-    const spawned = await spawnUntilNeedle(
-      [
-        RUN_PLAN,
-        '--plan',
-        planPath,
-        '--cwd',
-        repo,
-        '--reviewer',
-        'claude',
-        '--state',
-        join(home, 'state.json'),
-        '--run-dir',
-        join(home, 'plans'),
-        '--worktrees',
-        join(home, 'wt'),
-        '--adapter',
-        adapter,
-      ],
-      '无常驻服务，独立运行（本进程持主锁）',
-    );
-    const out = `${spawned.stdout}${spawned.stderr}`;
-    const startAt = out.indexOf('开跑：');
-    const modeAt = out.indexOf('无常驻服务，独立运行（本进程持主锁）');
-    assert.ok(startAt >= 0 && modeAt > startAt, out);
-    assert.doesNotMatch(out, /由常驻服务托管/);
+    writeFileSync(planPath, JSON.stringify(samplePlan([{ id: 'Ok', title: '待跑', why: 'w', allowedScope: ['a.txt'], acceptance: ['x'], status: 'pending' }])));
+    const statePath = join(home, 'state.json');
+    const result = runOpen(planPath, repo, ['--state', statePath, '--run-dir', join(home, 'plans')]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout + result.stderr, /PLAN_RUN_RETIRED/);
+    assert.equal(existsSync(statePath), false);
+    assert.equal(existsSync(join(home, 'plans')), false);
+    assert.equal(hasLockDir(home), false);
   });
 
   test('live 锁 run-mission 在开跑信息后标明托管实例与端口', async () => {
@@ -3731,7 +3713,6 @@ describe('hosted Plan 入口与 CLI 回环转发', () => {
     const runMission = readFileSync(join(import.meta.dirname, '..', 'src', 'run-mission.ts'), 'utf8');
 
     for (const [name, src] of [
-      ['run-plan', runPlan],
       ['run-mission', runMission],
     ] as const) {
       assert.ok(src.includes(`const PG_INDEPENDENT_RUN_MODE = '${pgLine}'`), name);

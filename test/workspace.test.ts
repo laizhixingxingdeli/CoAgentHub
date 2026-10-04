@@ -65,7 +65,7 @@ test('checkpoint commits only authorized paths, including new/deleted files, and
   writeFileSync(join(cwd, 'nested', 'new'), 'new');
   writeFileSync(join(cwd, 'base'), 'changed');
   await manager.checkpoint!(cwd, 'm1', 'w1', ['base', 'nested/new']);
-  assert.match(git(cwd, 'log', '-1', '--format=%s'), /^mission\(m1\): w1 检查点$/);
+  assert.match(git(cwd, 'log', '-1', '--format=%s'), /^chore\(mission\): w1 检查点 m1$/);
   assert.equal(git(cwd, 'show', 'HEAD:nested/new'), 'new');
   const head = git(cwd, 'rev-parse', 'HEAD');
   await manager.checkpoint!(cwd, 'm1', 'w1', ['base']);

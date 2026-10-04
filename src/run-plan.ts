@@ -1,37 +1,16 @@
-/**
- * 按方案无人值守地逐个推进功能点。睡前启动，早上看交接面。
- *
- *   node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]
- *        [--state <状态文件>] [--run-dir <方案运行记录目录>] [--store pg]
- *        [--coordinator <profileId,...>] [--executor <profileId,...>]
- *   node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check
- *
- * `--plan` 是位置参数的别名。`--check` 只解析、筛选资格、只读检查仓库与主状态名额，
- * 不拿锁、不建状态、不派 agent。缺 --cwd / --reviewer 直接退出。
- *
- * 与 run-mission 并列：run-mission 跑完一条就退；这里一个功能点一条 Mission，
- * 交卷了走机器 L3 合进集成分支，没合进去就开升级单等检视者（另一个会话，定时
- * 醒来，经 `node src/l3.ts plan` 读单、写回决定）。停下的原因写进方案运行记录。
- *
- * 顺序要紧：透传名单、方案文件、项目仓检查都在**任何副作用之前**——开跑之后才
- * 发现，就是每个功能都白跑一遍再被拒。
+/** 历史 Plan 的只读预检与回环兼容入口；生产执行已退役，使用 run-queue.ts。
+ * --check 仅在服务停止时使用。保留历史计划解析与查询，不再创建离线 PlanRun。
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { API_VERSION, createApi } from './api/server.ts';
-import { loadPoolOrSeed } from './application/agent-pool.ts';
-import type { AgentPoolCandidate } from './application/agent-pool.ts';
-import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
+import { API_VERSION } from './api/server.ts';
+import { probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
-import { MissionRunner, parseMaxRounds } from './application/mission-runner.ts';
+import { parseMaxRounds } from './application/mission-runner.ts';
 import { preflightPlanMissionSlots, preflightPlanRepo } from './application/plan-preflight.ts';
-import { renderPlanHandoff } from './application/plan-handoff.ts';
-import { rememberAdapterDir } from './application/runtime-catalog.ts';
-import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE, createPlanWaitEligibility, runPlanOnPlatform } from './application/plan-runtime.ts';
-import { FilePlanRunStore } from './application/plan-run-store.ts';
+import { HOSTED_AGENT_ENV_UNPROVEN_MESSAGE } from './application/plan-runtime.ts';
 import {
   candidateHandoffText,
   parsePlanSpec,
@@ -40,29 +19,19 @@ import {
   type PlanCandidateSelection,
   type PlanSpec,
 } from './application/plan-spec.ts';
-import type { ExecutionProfile } from './application/ports.ts';
-import { GitWorktreeManager } from './application/workspace.ts';
-import { listenLoopback } from './application/loopback-listen.ts';
-import type { FileStateStore } from './application/file-store.ts';
 import {
-  cleanupAfterSignal,
   formatErrorForLog,
   parseReconcileIntervalMs,
-  runIndependentCleanup,
-  type PeriodicReconcileHandle,
 } from './application/reconcile.ts';
 import {
   buildDecisionDeps,
   buildPersistentPlatform,
   buildPgPlatform,
-  makeIssuer,
-  startPeriodicDeliveryRepair,
 } from './main.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_PASSTHROUGH_VAR,
   SPAWN_ENV_UNDECLARED_MESSAGE,
-  SpawnRuntime,
 } from './runtime/spawn.ts';
 
 function arg(name: string): string | undefined {
@@ -112,10 +81,6 @@ function planFileArg(): string | undefined {
   return flagValue('--plan') ?? positionalPlanFile();
 }
 
-export function missionRunOptions<T extends { readonly projectRoot: string }>(options: T, maxRounds: number | undefined): T | (T & { readonly maxRounds: number }) {
-  return maxRounds === undefined ? options : { ...options, maxRounds };
-}
-
 function usage(): string {
   return (
     '用法：node src/run-plan.ts <PLAN.json> --cwd <项目仓> [--reviewer <谁>] [--adapter <agent-entry.ts>]\n' +
@@ -124,7 +89,7 @@ function usage(): string {
       '     node src/run-plan.ts --plan <PLAN.json> --cwd <项目仓> --reviewer <谁> --check\n' +
       '\n' +
       '项目仓必须 checkout 在方案的 integrationBranch 上且工作区干净（未跟踪文件也算）。\n' +
-      '检视者（另一个会话）每 20 分钟：node src/l3.ts plan --run <方案运行记录>\n' +
+      '旧 Plan 执行入口已退役；新运行使用 src/run-queue.ts，历史记录保留查询与恢复。\n' +
       '--check 只读：解析 + 资格筛选 + 仓库/主状态名额预检，不建状态或运行记录、不派发。没有可跑候选时以 0 退出。'
   );
 }
@@ -156,9 +121,6 @@ const FORMAL_COUNTED_EXCLUSION_REASONS = new Set<string>([
   PLAN_ELIGIBILITY_REASONS.rework,
 ]);
 
-const INDEPENDENT_RUN_MODE = '无常驻服务，独立运行（本进程持主锁）';
-// PG 不探测、不转发、不持文件主锁；再用文件独立句会虚报持锁。
-const PG_INDEPENDENT_RUN_MODE = 'PG 存储：独立运行（不经常驻服务转发，不持文件主锁）';
 
 function hostedRunModeLine(instanceId: string, port: number): string {
   return `由常驻服务托管：实例 ${instanceId.slice(0, 8)}、端口 ${port}`;
@@ -284,23 +246,6 @@ async function checkPlanOnly(planFile: string, maxRounds: number | undefined): P
   console.log('仓库预检通过。主状态名额可用。以上为只读检查，未开跑。');
 }
 
-function toProfile(candidate: AgentPoolCandidate): ExecutionProfile {
-  return {
-    endpoint: candidate.endpoint,
-    profileId: candidate.profileId,
-    ...(candidate.facts.length > 0 ? { facts: candidate.facts } : {}),
-  };
-}
-
-/** 运行 id 的时间戳：本地时间到分钟，文件名里好认。 */
-function stamp(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return (
-    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
-    `${pad(date.getHours())}${pad(date.getMinutes())}`
-  );
-}
-
 function occupiedMessage(reason: string): string {
   return `无法安全转发到本机写者：${reason}。主状态未改。`;
 }
@@ -409,10 +354,10 @@ async function main() {
   }
 
   // 正式跑：读 plan JSON 之前就 fail-closed。--check 已先行返回，不在这里做决策校验。
-  const decision = buildDecisionDeps(process.env);
+  buildDecisionDeps(process.env);
 
   // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
-  const reconcileIntervalMs = parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
+  parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);
 
   const envPassthroughRaw = process.env.COAGENT_AGENT_ENV_PASSTHROUGH;
   const envPassthrough = parseAgentEnvPassthrough(envPassthroughRaw);
@@ -470,244 +415,8 @@ async function main() {
     }
   }
 
-  // 本进程的用量查询要问本次 --adapter 所在仓库：只有走到这里才是独立本地写者，
-  // 转发给常驻服务时仍由服务按 body 记目录，不能让 CLI 子进程盖掉服务已缓存的目录。
-  // COAGENT_ADAPTER_DIR 优先级更高，由 adapterDir() 自己判。
-  rememberAdapterDir(resolve(adapter, '../..'));
+  throw new Error('PLAN_RUN_RETIRED：方案运行已退役。启动持锁服务后，用 src/run-queue.ts 确认并提交 Mission 队列。未写入状态。');
 
-  const workspace = new GitWorktreeManager(arg('--worktrees'));
-  // 分类员：同一个适配器的只读模式。工具表只有 read / grep / find / ls，由 QueryRunner 强制。
-  const queryRuntime = new SpawnRuntime({
-    kind: 'pi',
-    command: 'npx',
-    args: ['tsx', adapter],
-    cwd: resolve(adapter, '../..'),
-    timeoutMs: 5 * 60 * 1000,
-    stream: false,
-    supportsQuery: true,
-    envPassthrough,
-  });
-  let built;
-  try {
-    built = usePg
-      ? await buildPgPlatform({ ...decision, workspace, queryRuntime })
-      : await buildPersistentPlatform(statePath, {
-          ...decision,
-          workspace,
-          queryRuntime,
-          exclusive: { what: `run-plan ${plan.planId}` },
-        });
-  } catch (error) {
-    if (!usePg && error instanceof LockBusyError) {
-      const again = await probeLocalWriter(statePath);
-      if (again.status === 'live') {
-        const code = await forwardLivePlan(again.holder, forwardBody);
-        process.exit(code);
-      }
-      throw new Error(
-        again.status === 'occupied'
-          ? occupiedMessage(again.reason)
-          : '启动竞争：未能成为唯一写者，不得再取锁建第二平台。主状态未改。',
-      );
-    }
-    throw error;
-  }
-  const { platform, tokens, deliveries, persist, agentPool, candidateCircuits, queuedHops } = built;
-  const releaseLock = 'releaseLock' in built ? built.releaseLock : () => {};
-  const live = 'live' in built ? built.live : undefined;
-  const runQuery = built.runQuery;
-  const warnRepair = (message: string) => {
-    console.warn(message);
-  };
-  // 与 startServer 同一处装配：文件版已持锁不再取锁，PG 独立 store。不得在这里再选 tick。
-  const periodic: PeriodicReconcileHandle | undefined = startPeriodicDeliveryRepair({
-    intervalMs: reconcileIntervalMs,
-    warn: warnRepair,
-    mode: usePg
-      ? { kind: 'pg' }
-      : { kind: 'file-held', store: built.store as FileStateStore },
-  });
-
-  let primary: { error: unknown } | undefined;
-  try {
-    // 状态文件、锁目录落在项目仓里却没被忽略的话，机器 L3 每一次合并都会拒绝。
-    // 拿锁之后再看一次，才看得见这把锁自己。
-    const afterLock = await preflightPlanRepo(projectRoot, plan.integrationBranch);
-    if (afterLock.length > 0) {
-      console.error(`拿到状态锁之后项目仓变脏了（状态文件多半就在仓库里且没被忽略）：\n${afterLock.join('\n')}`);
-      process.exitCode = 2;
-      return;
-    }
-    // 上一晚停下时原样留给人的 Mission 还占着名额的话，今晚一个都派发不了。
-    const slots = preflightPlanMissionSlots({ selection, plan, runDir, missions: await platform.listMissions() });
-    if (slots.problems.length > 0) {
-      console.error(`开跑前检查没过，一个功能都没跑：\n${slots.problems.map((h) => `  ✗ ${h}`).join('\n')}`);
-      process.exitCode = 2;
-      return;
-    }
-
-    const started = new Date();
-    const runId = `${plan.planId}-${stamp(started)}`;
-    const store = new FilePlanRunStore(join(runDir, `${runId}.json`));
-
-    const server = createApi({ platform, tokens, deliveries, onMutation: persist, live, agentPool });
-    // 派出去的 agent 用 fetch 连回这个口：分到 fetch 屏蔽的端口，它们会以 bad port 连不上平台。
-    await listenLoopback(server, 0);
-    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-
-    const runtime = new SpawnRuntime({
-      kind: 'pi',
-      command: 'npx',
-      args: ['tsx', adapter],
-      cwd: resolve(adapter, '../..'),
-      timeoutMs: 5 * 60 * 1000,
-      stream: true,
-      envPassthrough,
-    });
-    const pool = await loadPoolOrSeed(agentPool);
-    const pick = (role: 'coordinator' | 'executor' | 'independent_reviewer', flag: string): AgentPoolCandidate[] => {
-      const wanted = arg(flag);
-      if (!wanted) return [...pool[role]];
-      return wanted
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((id) => {
-          const found = pool[role].find((c) => c.profileId === id);
-          if (!found) {
-            throw new Error(`${flag} 指定的候选 ${id} 不在${role}池里。可选：${pool[role].map((c) => c.profileId).join('、')}`);
-          }
-          return found;
-        });
-    };
-    const coordinators = pick('coordinator', '--coordinator').map(toProfile);
-    const executors = pick('executor', '--executor').map(toProfile);
-    // 空池也原样交给 MissionRunner：不得拿 coordinator 候选顶替独立检视。
-    const independentReviewers = pick('independent_reviewer', '--independent-reviewer').map(toProfile);
-
-    console.log(`方案 ${plan.planId} 开跑：${remaining.map((f) => f.id).join(' → ')}`);
-    console.log(`集成分支 ${plan.integrationBranch}，项目仓 ${projectRoot}`);
-    console.log(`方案运行记录：${store.path}`);
-    console.log(
-      `检视者 ${plan.reviewer} 每 ${Math.round(plan.stopConditions.escalationTimeoutMs / 60_000)} 分钟醒一次：` +
-        `node src/l3.ts plan --run "${store.path}"\n`,
-    );
-    console.log(usePg ? PG_INDEPENDENT_RUN_MODE : INDEPENDENT_RUN_MODE);
-
-    // Ctrl+C / 被杀：信号结束的进程不发 exit 事件，锁目录会留下，后面每次写都被挡；
-    // 方案运行记录也会停在「还在跑」。先记下原因、落盘、放锁再退。在途 Mission 原样
-    // 留给人（它可能占着名额，下一晚开跑前检查会点名它）。
-    // 记录改由内部入口创建：信号必须在那之前挂上，否则刚落盘就被杀会停在「还在跑」。
-    let interrupted = false;
-    const onSignal = (signal: string) => {
-      if (interrupted) return;
-      interrupted = true;
-      console.error(`\n收到 ${signal}：记下原因后退出。在途的 Mission 原样留给人。`);
-      void cleanupAfterSignal({
-        steps: [
-          {
-            name: 'halt',
-            run: async () => {
-              if (!store.read()) return;
-              await store.update((r) => {
-                if (!r.stopped) r.halt('crashed', `被人中断（${signal}）`, new Date().toISOString());
-              });
-            },
-          },
-          {
-            name: 'periodic.stop',
-            run: async () => {
-              if (periodic) await periodic.stop();
-            },
-          },
-          { name: 'persist', run: persist },
-          { name: 'releaseLock', run: () => releaseLock() },
-        ],
-        report: (message, error) => {
-          console.error(message);
-          if (error !== undefined) console.error(error);
-        },
-        exit: (code) => process.exit(code),
-      });
-    };
-    process.once('SIGINT', () => onSignal('SIGINT'));
-    process.once('SIGTERM', () => onSignal('SIGTERM'));
-
-    const runner = new MissionRunner({
-      platform,
-      live,
-      tokens: makeIssuer(platform, tokens),
-      baseUrl,
-      workspace,
-      candidateCircuits,
-      queuedHops,
-      inRunBackoffWaitMs: 120_000,
-      coordinator: { runtime, candidates: coordinators },
-      executor: { runtime, candidates: executors },
-      independentReviewer: { runtime, candidates: independentReviewers },
-    });
-    // 共享资格工厂：project_busy 委托队列探针认本 Mission 的退避/占位，
-    // no_available_agent 接上 runner 的同池角色快照认全部候选短冷却。
-    // 即使没装队列也启用冷却判断——指定角色候选全在 15 分钟内冷却时就在运行内等待续跑，
-    // 不把未知或非候选失败误当冷却、也不开升级单。
-    const waitEligibility = createPlanWaitEligibility({
-      ...(queuedHops ? { queuedHops } : {}),
-      roleCooldownSnapshot: (role, now) => runner.roleCooldownSnapshot(role, now),
-      now: () => Date.now(),
-    });
-    const stop = await runPlanOnPlatform(plan, selection, {
-      store,
-      projectRoot,
-      platform,
-      ...(waitEligibility ? { waitEligibility } : {}),
-      runMission: (missionId, options) => runner.run(missionId, missionRunOptions(options, maxRounds)),
-      ...(runQuery ? { runQuery } : {}),
-      ...(coordinators[0] ? { queryProfile: coordinators[0] } : {}),
-      persist,
-      pauseInFlight: async (missionId) => {
-        await platform.pauseMission(missionId);
-      },
-      now: () => new Date().toISOString(),
-      sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
-      log: (line) => console.log(`[${new Date().toLocaleTimeString()}] ${line}`),
-      runId,
-      startedAt: started.toISOString(),
-      checkRepo: () => preflightPlanRepo(projectRoot, plan.integrationBranch),
-      resumeMissions: Object.fromEntries(slots.resume.map(({ featureId, missionId }) => [featureId, missionId])),
-    });
-
-    const run = store.read();
-    console.log(`\n${'='.repeat(72)}`);
-    console.log(`方案 ${plan.planId} 停了：${stop.reason} —— ${stop.detail}`);
-    console.log('='.repeat(72));
-    // 与早上 l3 plan 看到的是同一张交接面。这里不算花销：要读全部 Mission 的用量，
-    // 交给 l3 plan 去算。
-    if (run) for (const text of renderPlanHandoff(run, { now: new Date().toISOString() })) console.log(text);
-    console.log(`\n早上看（带花销）：node src/l3.ts plan --run "${store.path}"`);
-    server.close();
-  } catch (error) {
-    // 先记下，交给 finally 里的清理一起报；在这里直接 throw 的话，清理失败时会被盖掉。
-    primary = { error };
-  } finally {
-    // stop 失败不能跳过 persist / 释锁：排他锁留在盘上，下一晚开跑会一直锁忙。
-    await runIndependentCleanup({
-      primary,
-      steps: [
-        {
-          name: 'periodic.stop',
-          run: async () => {
-            if (periodic) await periodic.stop();
-          },
-        },
-        { name: 'persist', run: persist },
-        { name: 'releaseLock', run: () => releaseLock() },
-      ],
-      report: (message, error) => {
-        console.error(message);
-        if (error !== undefined) console.error(error);
-      },
-    });
-  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -30,7 +30,7 @@ import {
   shutdownHostedPlan,
   isDirectMainEntry,
   resolveDirectMainStatePath,
-  startServer,
+  startServer as startServerUnconfigured,
   buildPersistentPlatform,
 } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
@@ -40,6 +40,20 @@ import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
+
+import { DEFAULT_TEST_AGENT_POOL } from './helpers/agent-pool.ts';
+
+/** 有假 agent 的运行测试显式配置模型；生产启动入口保持只读。 */
+async function startServer(...args: Parameters<typeof startServerUnconfigured>) {
+  const built = await startServerUnconfigured(args[0], args[1], { ...args[2], legacyPlanRunsForTests: !!args[2]?.runtime });
+  if (args[2]?.runtime) {
+    const pool = await built.agentPool.list();
+    if (pool.coordinator.length === 0 && pool.executor.length === 0) {
+      for (const candidate of DEFAULT_TEST_AGENT_POOL) await built.agentPool.add(candidate);
+    }
+  }
+  return built;
+}
 
 const servers: Server[] = [];
 const dirs: string[] = [];
@@ -303,7 +317,7 @@ describe('startServer 绑定与启动日志', () => {
       executor: unknown[];
       independent_reviewer: unknown[];
     };
-    assert.deepEqual(emptyJson, { coordinator: [], executor: [], independent_reviewer: [] });
+    assert.deepEqual(emptyJson, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
 
     const added = await fetch(`${base}/api/pools`, {
       method: 'POST',

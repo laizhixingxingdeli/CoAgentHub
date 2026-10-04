@@ -425,12 +425,12 @@ describe('任务页的文件形状', () => {
     assert.equal(skeleton.includes('id="task-tabs"'), false, 'tab 条已经去掉，别为凑数留一个不用的锚点');
   });
 
-  test('这一页只读：不发 POST，也不碰写操作', () => {
+  test('任务页只有显式取消这一条写操作，其余数据仍走只读接口', () => {
     const src = read('task.js');
-    assert.equal(/method:\s*'POST'/.test(src), false, '不许发写请求');
+    assert.equal((src.match(/method:\s*'POST'/g) || []).length, 1, '任务页只允许取消任务这一条 POST');
+    assert.match(src, /\/cancel'/, '取消按钮必须走后端现有 cancel 接口');
     assert.match(src, /cache: 'no-store'/, '读接口不该被缓存住');
-    // cursor 是实时输出的全部要点：不带 cursor 就是每次从头拉。
-    assert.match(src, /\/live\?cursor=/);
+    assert.match(src, /\/live\?cursor=/, '实时输出必须带 cursor 增量拉取');
   });
 
   test('tab 那一套已经从呈现层拿掉了', () => {
@@ -532,8 +532,9 @@ describe('环节分组', () => {
 
     // 线要接上：纯函数对了而调用方不喂展开集，页面上仍是每次重画全收起。
     const src = read('task.js');
-    const at = src.indexOf('innerHTML = stageListHtml(');
-    assert.ok(at > 0, '找不到重画环节列表的地方');
+    const paintAt = src.indexOf('function paintStages');
+    const at = src.indexOf('stageListHtml(', paintAt);
+    assert.ok(paintAt > 0 && at > paintAt, '找不到重画环节列表的地方');
     assert.match(src.slice(at, src.indexOf(');', at)), /expanded/, '重画必须把展开集喂给 stageListHtml');
     assert.match(src, /node\.open/, '重画之前要先从 DOM 收原生展开状态');
   });
@@ -563,7 +564,7 @@ describe('环节分组', () => {
       { at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'coord-9', data: {} },
     ];
     const html = stageListHtml(rows, null, null, W4_CTX);
-    assert.ok(html.includes('这一跳还没结束，用量要等它收尾'), html);
+    assert.ok(html.includes('进行中 · 用量暂未上报'), html);
     assert.equal(html.includes('<span class="stage-usage">—</span>'), false);
     assert.equal(/undefined|NaN/.test(html), false, html);
   });
@@ -619,7 +620,7 @@ describe('环节分组', () => {
     assert.ok(html.includes('L3 检视者'), html);
     const l3 = html.slice(html.lastIndexOf('class="stage '));
     assert.equal(l3.includes('mission.waiting') || l3.includes('blocked.reported'), false, l3);
-    assert.equal(l3.includes('这一跳还没结束'), true, '未终态 L3 仍说在途');
+    assert.equal(l3.includes('事件记录 · 不单独计量'), true, '检视记录不冒充运行尝试');
   });
 
   test('命令族不逐条上屏：环节头汇总、清单可折叠、callId 去重、文本转义', async () => {
@@ -666,7 +667,7 @@ describe('环节分组', () => {
     assert.ok(running.includes('跑了 20 条命令'), running);
     assert.ok(running.includes('>平台<'), running);
     assert.ok(running.includes('L3 检视者'), running);
-    assert.ok(running.includes('这一跳还没结束，用量要等它收尾'), running);
+    assert.ok(running.includes('进行中 · 用量暂未上报'), running);
     assert.equal(running.includes('runtime.command.started'), false, running);
     assert.equal(running.includes('runtime.command_tracking'), false, running);
 
@@ -771,9 +772,9 @@ describe('用量卡', () => {
     assert.ok(html.includes(localStamp('2026-03-04T05:00:00.000Z')));
     assert.equal(html.includes('Token'), false, '页头不该再有 Token 那一格');
     assert.equal(html.includes('新增'), false, '用量拆项该在独立卡里，不在 task-stats');
-    assert.match(html, /disabled title="API 尚无鉴权，写操作暂不开放"/);
-    assert.ok(html.includes('停止任务'));
-    assert.equal(html.includes('onclick'), false, '不绑定点击：不发 POST');
+    assert.ok(html.includes('data-task-cancel'), '非终态应显示真实取消按钮');
+    assert.ok(html.includes('取消任务'));
+    assert.equal(html.includes('onclick'), false, '仍用 addEventListener，不写内联事件');
   });
 
   test('页头：等待时停机原因看得见，runaway_suspected 是人话', async () => {
@@ -1083,7 +1084,7 @@ describe('实时输出', () => {
     });
     assert.ok(withUsage.includes('第一行'));
     assert.equal(withUsage.includes('undefined'), false, 'usage chunk 被当终端行拼进来了');
-    assert.match(withUsage, /tokens 1,234/);
+    assert.match(withUsage, /词元 1,234/);
     assert.match(liveLinesHtml([{ kind: 'tool', text: 'read a.ts' }]), /▸ read a\.ts/);
   });
 
@@ -1162,7 +1163,7 @@ describe('上下文采集指标', () => {
     assert.equal(html.includes('0 字节'), false, html);
     assert.equal(html.includes('简报'), false, html);
     const list = stageListHtml([ended()], null, null, {});
-    assert.ok(list.includes('这一跳没有上报上下文指标'), list);
+    assert.equal(list.includes('这一跳没有上报上下文指标'), false, '时间线不重复缺失指标说明');
     assert.equal(list.includes('简报 0'), false, list);
   });
 });
@@ -1615,7 +1616,7 @@ describe('真 API 字段喂真渲染函数', () => {
     }
     // 终端里没有 usage chunk 的形状。
     assert.equal(liveHtml.includes('undefined'), false);
-    assert.match(liveHtml, /tokens 14/);
+    assert.match(liveHtml, /词元 14/);
   });
 
   test('任务表点进去的那条 id 与路由要读的是同一个键', async () => {

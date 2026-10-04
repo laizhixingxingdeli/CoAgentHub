@@ -11,7 +11,14 @@
  */
 
 import { renderProjectsPage } from './projects.js';
+import { renderOverviewPage } from './overview.js';
+import { renderModelPriorityPage, leaveModelPriorityPage } from './model-priority.js';
+import { renderProjectCatalogPage } from './project-catalog.js';
+import { renderProjectSpecPage } from './project-spec.js';
+import { renderInboxPage } from './inbox.js';
 import { renderTaskPage } from './task.js';
+import { renderAgentsPage } from './agents.js';
+import { renderSettingsPage } from './settings.js';
 import { renderPoolPage } from './pool.js';
 import { renderPlanRunListPage, renderPlanRunPage } from './plan-run.js';
 import { renderPlatformPage } from './platform.js';
@@ -40,8 +47,24 @@ darkScheme.addEventListener('change', applyTheme);
  * 后端那个 id，路由与 API 用同一个名字，读代码的人不用在脑子里做映射。
  */
 function parseRoute(hash) {
-  const raw = String(hash ?? '').replace(/^#/, '');
+  const full = String(hash ?? '').replace(/^#/, '');
+  const raw = full.split('?')[0];
+  const query = new URLSearchParams(full.includes('?') ? full.slice(full.indexOf('?') + 1) : '');
   if (raw === '' || raw === '/') return { name: 'home' };
+  if (raw === '/inbox') return { name: 'inbox' };
+  if (raw === '/settings') return { name: 'settings' };
+  const agentHit = /^\/agents(?:\/(.+))?$/.exec(raw);
+  if (agentHit) {
+    let agentId = agentHit[1] || '';
+    try { agentId = decodeURIComponent(agentId); } catch { /* 保留原样 */ }
+    return { name: 'agents', agentId };
+  }
+  const specHit = /^\/projects\/([^/]+)\/spec$/.exec(raw);
+  if (specHit) {
+    let projectId = specHit[1];
+    try { projectId = decodeURIComponent(projectId); } catch { /* 保留原样 */ }
+    return { name: 'project-spec', projectId };
+  }
   const hit = /^\/projects(?:\/(.+))?$/.exec(raw);
   if (hit) {
     let projectId = hit[1] || '';
@@ -62,7 +85,7 @@ function parseRoute(hash) {
     } catch {
       // 与项目 id 同一策略。
     }
-    return { name: 'mission', missionId };
+    return { name: 'mission', missionId, selectedStep: query.get('step') };
   }
   // 资源池是静态的一条路由（没有参数），所以匹配落在这里而不是上面那几条正则里。
   // 不再认原来那个占位地址（resources）：两个地址指同一个页面，而人一旦把旧
@@ -107,7 +130,10 @@ const link = (text, href) => {
 
 function renderChrome(route) {
   // 任务页归在「项目」下：它是从项目页的任务表点进去的，没有自己的入口。
-  const active = route.name === 'pool' ? 'pool'
+  const active = route.name === 'home' ? 'home' : route.name === 'mission' ? 'projects' : route.name === 'inbox' ? 'inbox'
+    : route.name === 'agents' ? 'agents'
+    : route.name === 'settings' ? 'settings'
+    : route.name === 'pool' ? 'pool'
     : route.name === 'platform' ? 'platform'
     : (route.name === 'plan-runs' || route.name === 'plan-run') ? 'plan-runs'
     : 'projects';
@@ -117,6 +143,20 @@ function renderChrome(route) {
   }
 
   crumbs.replaceChildren();
+  if (route.name === 'home') { crumbs.appendChild(node('首页', 'here')); return; }
+  if (route.name === 'inbox') {
+    crumbs.appendChild(node('任务收件箱', 'here'));
+    return;
+  }
+  if (route.name === 'agents') {
+    if (route.agentId) crumbs.append(link('智能体', '#/agents'), node('/', 'sep'), node(route.agentId, 'here'));
+    else crumbs.appendChild(node('角色与模型', 'here'));
+    return;
+  }
+  if (route.name === 'settings') {
+    crumbs.appendChild(node('设置', 'here'));
+    return;
+  }
   if (route.name === 'pool') {
     crumbs.appendChild(node('资源池', 'here'));
     return;
@@ -159,18 +199,38 @@ function renderChrome(route) {
   );
 }
 
+let lastHash = location.hash;
 function render() {
   const route = parseRoute(location.hash);
+  if (!(route.name === 'agents' && !route.agentId) && !leaveModelPriorityPage()) {
+    history.replaceState(null, '', lastHash || '#/'); return;
+  }
+  lastHash = location.hash;
 
-  if (route.name === 'home' || route.name === 'unknown') {
-    // 改地址而不是直接渲染项目页：让"地址=视图"这一条是唯一通路。
-    // 绕过去就会出现地址写着 #/abc 而屏幕上是一条别的东西，
-    // 那时链接没法发给别人，刷新也不落在原地。
+
+  if (route.name === 'unknown') {
     location.hash = '#/projects';
     return;
   }
 
   renderChrome(route);
+  if (route.name === 'home') { void renderOverviewPage(view); return; }
+
+  if (route.name === 'inbox') {
+    void renderInboxPage(view);
+    return;
+  }
+
+  if (route.name === 'agents') {
+    if (route.agentId) void renderAgentsPage(view, route.agentId);
+    else void renderModelPriorityPage(view);
+    return;
+  }
+
+  if (route.name === 'settings') {
+    void renderSettingsPage(view);
+    return;
+  }
 
   if (route.name === 'pool') {
     void renderPoolPage(view);
@@ -193,11 +253,21 @@ function render() {
   }
 
   if (route.name === 'mission') {
-    void renderTaskPage(view, route.missionId);
+    void renderTaskPage(view, route.missionId, route.selectedStep);
     return;
   }
 
-  void renderProjectsPage(view, route.projectId);
+  if (route.name === 'project-spec') {
+    void renderProjectSpecPage(view, route.projectId);
+    return;
+  }
+
+  if (route.name === 'projects' && !route.projectId) {
+    void renderOverviewPage(view, '');
+    return;
+  }
+
+  void renderOverviewPage(view, route.projectId);
 }
 
 window.addEventListener('hashchange', render);

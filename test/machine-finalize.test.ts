@@ -16,7 +16,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -54,6 +54,8 @@ const ORDER: WorkOrder = {
   verification: ['cat a.txt'],
   doNot: [],
   contextRefs: [],
+  // 这张工单对第 1 条验收标准负责：附件里的 criterionWorkItems 靠它算出来。
+  criteria: [1],
 };
 
 const PLAN = { summary: 'p', steps: ['s'], risks: [] };
@@ -96,16 +98,24 @@ async function readyForReview(
   worktreeRoot: string,
   missionId: string,
   runner: ReturnType<typeof scriptedRunner>,
-  options?: { executionMode?: 'high_assurance'; memoryDelta?: MemoryDeltaProposal[] },
+  options?: {
+    executionMode?: 'high_assurance';
+    memoryDelta?: MemoryDeltaProposal[];
+    /** 把那条验收标准的结论改成别的状态（默认 pass）。 */
+    criterionStatus?: 'pass' | 'fail' | 'unverified' | 'not_applicable';
+    metricsSource?: string;
+  },
 ) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
   const workspace = new GitWorktreeManager(worktreeRoot);
   const reports = new InMemoryValidationReportRepository();
   const projects = new InMemoryProjectRepository();
+  // 同一个仓储实例：升级的投递要能从测试里数出来。
+  const deliveries = new InMemoryDeliveryRepository(clock, ids);
   const platform = new Platform({
     projects,
-    deliveries: new InMemoryDeliveryRepository(clock, ids),
+    deliveries,
     workspace,
     activity: new InMemoryActivityLog(clock),
     clock,
@@ -127,9 +137,13 @@ async function readyForReview(
     await platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
   }
   const prepared = await workspace.prepare(missionId, repo);
+  // projectRoot 必须记下来：交卷的 diffStats 附件要拿它去读集成分支的 HEAD，
+  // 没有它就只能报「拿不到」，检视者看到的是一片空白而不是事实。
   await platform.recordWorkspace(missionId, {
     branch: prepared.branch,
     baseRevision: prepared.baseRevision,
+    projectRoot: repo,
+    targetBranch: 'auto/plan-x',
   });
   const coord = await platform.startCoordinatorAttempt(missionId);
   await platform.updatePlan(missionId, coord.attemptId, PLAN);
@@ -144,12 +158,17 @@ async function readyForReview(
   }
   await platform.dispatchWorkItems(missionId, coord.attemptId, [workItemId]);
   writeFileSync(join(prepared.cwd, 'a.txt'), 'mission\n');
+  if (options?.metricsSource) {
+    mkdirSync(join(prepared.cwd, 'src'));
+    writeFileSync(join(prepared.cwd, 'src', 'warning.ts'), options.metricsSource);
+  }
   const exec = await platform.startExecutorAttempt(missionId, workItemId);
   await platform.submitEvidence(missionId, exec.attemptId, {
     kind: 'test',
     summary: '绿',
     command: 'node --test',
     exitCode: 0,
+    output: 'tests 1 / pass 1 / fail 0 / skipped 0',
   });
   await platform.submitExecutionResult(missionId, exec.attemptId, {
     outcome: 'completed',
@@ -171,20 +190,91 @@ async function readyForReview(
     acceptanceEvidence: [],
     memoryDelta: options?.memoryDelta ?? [],
     openRisks: [],
+    // 逐条结论。机器终审只认这个字段，acceptanceEvidence 一律不参与判定。
+    criteria: [
+      {
+        index: 1,
+        status: options?.criterionStatus ?? 'pass',
+        evidence: '测试替身：绿',
+      },
+    ],
   });
   await platform.finishAttempt(missionId, coord.attemptId, { endedBy: 'structured_submit' });
-  return { platform, workspace, reports };
+  return {
+    platform,
+    workspace,
+    reports,
+    deliveries,
+    workItemId,
+    coordinatorAttemptId: coord.attemptId,
+  };
 }
 
 const VERIFY = [{ argv: ['node', '--test'], timeoutMs: 60_000 }];
 
+test('队列人工终审使用项目验证，失败回滚且可重试；机器不能覆盖项目验证', async () => {
+  for (const machine of [false, true]) {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const worktrees = mkdtempSync(join(tmpdir(), 'queue-final-review-'));
+    dirs.push(worktrees);
+    const runner = scriptedRunner([1, 0]);
+    const missionId = machine ? 'M-queue-machine' : 'M-queue-human';
+    const { platform } = await readyForReview(repo, worktrees, missionId, runner);
+    const queue = await platform.getMissionQueue('P');
+    await platform.enqueueMissions('P', { expectedRevision: queue.revision, confirmedBy: '仅限测试明确确认',
+      config: { projectRoot: repo, adapter: join(repo, 'a.txt'), integrationBranch: 'auto/plan-x', reviewer: 'test', conversationRef: 'test-session', envPassthrough: '-', verification: [{ argv: ['project-verification'], timeoutMs: 1000 }] },
+      missions: [{ missionId }],
+    });
+    const anchor = git(repo, 'rev-parse', 'HEAD');
+    const finalize = () => machine
+      ? platform.finalizeMissionByMachine(missionId, { projectRoot: 'ignored', integrationBranch: 'master', verification: [] })
+      : platform.finalizeMissionByReviewer(missionId, { verdict: 'merge', reviewerId: 'test', confirmedBy: '仅限测试签字', reasons: ['测试逐条验收'] });
+    assert.equal((await finalize()).status, 'awaiting_review');
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), anchor);
+    assert.deepEqual(runner.seen, [['project-verification']]);
+    assert.equal((await finalize()).status, 'completed');
+    assert.deepEqual(runner.seen, [['project-verification'], ['project-verification']]);
+    assert.notEqual(git(repo, 'rev-parse', 'HEAD'), anchor);
+  }
+});
+
 describe('机器 L3 放行', () => {
+  test('交卷附真实改动源码度量告警，告警不阻拦机器终审并安全删除已合入分支', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-metrics-wt-'));
+    dirs.push(wt);
+    const { platform } = await readyForReview(repo, wt, 'M-metrics', scriptedRunner([0]), {
+      metricsSource: 'export function wide(a,b,c,d,e) { return a; }',
+    });
+    const before = await platform.getMissionView('M-metrics');
+    assert.ok(before.result?.attachments?.codeMetrics?.warnings.some((warning) => warning.kind === 'parameters'));
+    const result = await platform.finalizeMissionByMachine('M-metrics', { integrationBranch: 'auto/plan-x', verification: VERIFY, projectRoot: repo });
+    assert.equal(result.status, 'completed');
+    assert.equal(git(repo, 'branch', '--list', 'mission/M-metrics'), '');
+    assert.equal(git(repo, 'log', '-1', '--format=%s'), 'merge(mission): M-metrics 修 X');
+  });
   test('集成验证通过 → completed，权威是 machine 且指向那份报告', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(wt);
     const runner = scriptedRunner([0]);
     const { platform, reports } = await readyForReview(repo, wt, 'M1', runner);
+
+    // 平台自动附件：合并之前就得在 result 上看得见全量测试、diff 和工单映射。
+    const before = await platform.getMissionView('M1');
+    assert.equal(
+      before.result?.attachments?.lastFullTest?.resultLine,
+      'tests 1 / pass 1 / fail 0 / skipped 0',
+    );
+    assert.deepEqual(before.result?.attachments?.diffStats, {
+      files: 1,
+      insertions: 1,
+      deletions: 1,
+    });
+    assert.deepEqual(
+      before.result?.attachments?.criterionWorkItems,
+      [{ index: 1, workItemIds: [before.workItems[0]!.id] }],
+    );
 
     const result = await platform.finalizeMissionByMachine('M1', {
       integrationBranch: 'auto/plan-x',
@@ -207,6 +297,85 @@ describe('机器 L3 放行', () => {
     assert.equal(saved?.passed, true);
     // 验证确实跑在项目仓（合并结果）上，不是 Mission worktree。
     assert.deepEqual(runner.seen, [['node', '--test']]);
+  });
+
+  /**
+   * 另一条高层关键场景：criteria 没达成（unverified），机器一步都不许往前走。
+   * 不合、不验、不留一个没授权的提交，但要留一张答得上的卡给人。
+   */
+  test('验收标准 unverified → 不合不验、留在 awaiting_review 并留一张可答复的升级卡', async () => {
+    const repo = tempRepoOnIntegration('auto/plan-x');
+    const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
+    dirs.push(wt);
+    const runner = scriptedRunner([0]);
+    const { platform, deliveries, workItemId } = await readyForReview(repo, wt, 'M1', runner, {
+      criterionStatus: 'unverified',
+    });
+    const head = git(repo, 'rev-parse', 'HEAD');
+
+    const result = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+
+    assert.equal(result.status, 'awaiting_review', '没达成就不合');
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), head, '集成分支逐字没动');
+    assert.equal(git(repo, 'show', 'HEAD:a.txt'), 'base', '内容也还是基线');
+    assert.deepEqual(runner.seen, [], '连验证都不该跑');
+
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.status, 'awaiting_review');
+    assert.equal(view.waitReason, 'waiting_l3');
+    assert.equal(view.finalReview, undefined, '没放行就不该有 finalReview');
+    assert.match(view.waitDetail ?? '', /unverified/);
+    // 附件照旧：criteria 没达成不等于这次没跑到，事实还得看得见。
+    assert.equal(
+      view.result?.attachments?.lastFullTest?.resultLine,
+      'tests 1 / pass 1 / fail 0 / skipped 0',
+    );
+    assert.deepEqual(view.result?.attachments?.criterionWorkItems, [
+      { index: 1, workItemIds: [workItemId] },
+    ]);
+
+    const escalation = view.openEscalations[0];
+    assert.ok(escalation, '要留一张未答复的升级卡');
+    assert.match(escalation.question, /#1/);
+    assert.match(escalation.question, /unverified/);
+    assert.equal(
+      await deliveries.pending().then((rows) => rows.filter((r) => r.outcome === 'escalated').length),
+      1,
+      '升级进了收件箱，不是只在平台里写了一行',
+    );
+
+    // 再跑一次：同一张卡还没答复，不该再投一封。
+    await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+    const again = await platform.getMissionView('M1');
+    assert.equal(again.openEscalations.length, 1, '未答复的同一张卡不重复投递');
+    assert.equal(
+      await deliveries.listForMission('M1').then(
+        (rows) => rows.filter((r) => r.outcome === 'escalated').length,
+      ),
+      1,
+    );
+
+    // 答得上来：答复走的是既有公开入口。
+    const answered = await platform.answerEscalation('M1', '退回协调者补齐这条标准的证据');
+    assert.match(answered.question, /#1/);
+
+    // 答复不等于 criteria 变成 pass：再看一次仍然不合。
+    const afterAnswer = await platform.finalizeMissionByMachine('M1', {
+      integrationBranch: 'auto/plan-x',
+      verification: VERIFY,
+      projectRoot: repo,
+    });
+    assert.equal(afterAnswer.status, 'awaiting_review', '答复了也不自动合');
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), head);
+    assert.deepEqual(runner.seen, [], '答复之后照样不该跑验证');
   });
 
   test('集成验证的输出尾部先脱敏再截尾：key 被截尾点切开也不留半截', async () => {
@@ -498,12 +667,13 @@ describe('方案放弃失败的 Mission', () => {
 });
 
 describe('机器 L3 与项目记忆', () => {
-  test('协调者提议的 Living Spec 跟代码同一次合进集成分支——人工放行怎么落，机器放行也怎么落', async () => {
+  test('机器合入代码后文档提议仍独立待批，不自动覆盖规格', async () => {
     const repo = tempRepoOnIntegration('auto/plan-x');
     const wt = mkdtempSync(join(tmpdir(), 'coagent-wt-'));
     dirs.push(wt);
     const { platform } = await readyForReview(repo, wt, 'M1', scriptedRunner([0]), {
-      memoryDelta: [{ kind: 'living_spec', slug: 'demo-capability', title: 'Demo', body: '# Demo\n\n机器放行也要落这份。' }],
+      memoryDelta: [{ kind: 'living_spec', slug: 'demo-capability', title: 'Demo', body: '# Demo\n\n机器放行也要落这份。' },
+        { kind: 'living_spec', slug: '../outside', title: '无效差异', body: '不能越界' }],
     });
 
     const result = await platform.finalizeMissionByMachine('M1', {
@@ -513,9 +683,11 @@ describe('机器 L3 与项目记忆', () => {
     });
 
     assert.equal(result.status, 'completed');
-    // 以前只合了代码：这份提议被悄悄丢掉，没有事件、没有提示。
-    assert.match(git(repo, 'show', 'HEAD:.coagent/specs/demo-capability.md'), /机器放行也要落这份/);
-    assert.match(git(repo, 'show', 'HEAD:VIBE.md'), /demo-capability/);
+    assert.equal(existsSync(join(repo, '.coagent/specs/demo-capability.md')), false);
+    const proposals = await platform.listDocumentProposals('P');
+    assert.equal(proposals.length, 2); assert.equal(proposals[0].state, 'proposed');
+    assert.equal(proposals[1].state, 'needs_revision', '坏文档不阻止已验证代码完成');
+    assert.equal(proposals[0].proposed.includes('机器放行也要落这份'), true);
   });
 });
 

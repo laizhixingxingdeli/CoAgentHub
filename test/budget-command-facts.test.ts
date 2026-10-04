@@ -8,7 +8,7 @@
 
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
@@ -35,6 +35,23 @@ import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+
+function collectPlatformSrc(): string {
+  const parts: string[] = [];
+  parts.push(readFileSync(join(root, 'src', 'application', 'platform.ts'), 'utf8'));
+  const dir = join(root, 'src', 'application', 'platform');
+  if (existsSync(dir)) {
+    const walk = (d: string): void => {
+      for (const ent of readdirSync(d, { withFileTypes: true })) {
+        const full = join(d, ent.name);
+        if (ent.isDirectory()) walk(full);
+        else if (ent.isFile() && ent.name.endsWith('.ts')) parts.push(readFileSync(full, 'utf8'));
+      }
+    };
+    walk(dir);
+  }
+  return parts.join('\n');
+}
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -726,7 +743,7 @@ describe('BUDGET-001-S4 no public write surface', () => {
   test('no HTTP route, agent tool, or caller-authored ActivityEvent input for command facts', () => {
     const serverSrc = readFileSync(join(root, 'src', 'api', 'server.ts'), 'utf8');
     const webSrc = readFileSync(join(root, 'src', 'api', 'web.ts'), 'utf8');
-    const platformSrc = readFileSync(join(root, 'src', 'application', 'platform.ts'), 'utf8');
+    const platformSrc = collectPlatformSrc();
     const orchSrc = readFileSync(join(root, 'src', 'application', 'orchestrator.ts'), 'utf8');
     const querySrc = readFileSync(join(root, 'src', 'application', 'query-run.ts'), 'utf8');
 

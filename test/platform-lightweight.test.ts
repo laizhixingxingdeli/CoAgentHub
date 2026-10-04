@@ -45,7 +45,6 @@ import type {
 } from '../src/application/ports.ts';
 import type {
   MissionContract,
-  ReviewAuthority,
   ValidationReport,
   WorkOrder,
 } from '../src/kernel/index.ts';
@@ -585,7 +584,7 @@ describe('Lightweight executor path → submitted', () => {
 });
 
 describe('Platform.validateAndAcceptLightweightWorkItem', () => {
-  test('validator pass：真实 ValidationEngine；save 完成后才 review accepted；ReviewRecord 无 attemptId', async () => {
+  test('validator pass：真实 ValidationEngine；报告先 save；机器过了工作项仍 submitted 无 review', async () => {
     const runner = fakeRunner(async () => ({
       exitCode: 0,
       timedOut: false,
@@ -664,8 +663,8 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
     });
 
     assert.equal(out.passed, true);
-    assert.equal(out.status, 'accepted');
-    assert.equal(acceptedBeforeSave, false, '不得在 save 之前 accept');
+    assert.equal(out.status, 'submitted');
+    assert.equal(acceptedBeforeSave, false, '机器不得替协调者 accept');
     assert.equal(itemStatusAtSave, 'submitted');
     assert.equal(reports.saves.length, 1);
     assert.equal(runner.calls.length, 1);
@@ -679,22 +678,8 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
     assert.equal(stored.attemptId, exec);
 
     const { item, mission } = await liveItem(projectsRef, 'P', missionId, workItemId);
-    assert.equal(item.status, 'accepted');
-    assert.equal(item.reviews.length, 1);
-    const review = item.reviews[0]!;
-    assert.equal(review.verdict, 'accept');
-    assert.equal(review.attemptId, undefined, 'validator ReviewRecord 不得伪造 coordinator attemptId');
-    assert.equal(review.submittedAttemptId, exec);
-    assert.ok(review.authority);
-    assert.equal(review.authority!.kind, 'validator');
-    assert.equal(
-      (review.authority as Extract<ReviewAuthority, { kind: 'validator' }>).reportId,
-      out.reportId,
-    );
-    assert.equal(
-      (review.authority as Extract<ReviewAuthority, { kind: 'validator' }>).policyRevision,
-      VALIDATION_POLICY_REVISION,
-    );
+    assert.equal(item.status, 'submitted', '机器验证过了也留给协调者验收');
+    assert.equal(item.reviews.length, 0);
     assert.equal(mission.coordinatorAttempts.length, 0);
 
     const events = await activity.list(missionId);
@@ -710,11 +695,11 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
       { reportId: out.reportId, passed: true, submittedAttemptId: exec },
     );
     assert.equal(events.filter((e) => e.kind === 'validation.completed').length, 0);
-    const reviewed = events.filter((e) => e.kind === 'review.recorded');
-    assert.equal(reviewed.length, 1);
-    assert.equal(reviewed[0]?.attemptId, undefined);
-    assert.equal((reviewed[0]?.data as { authority: string }).authority, 'validator');
-    assert.equal((reviewed[0]?.data as { reportId: string }).reportId, out.reportId);
+    assert.equal(
+      events.filter((e) => e.kind === 'review.recorded').length,
+      0,
+      '机器不得发 validator review.recorded',
+    );
   });
 
   test('failed validation：report 可 get，item submitted，无 reviews/accept', async () => {
@@ -824,7 +809,7 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
       cwd: '/cwd',
     });
     assert.equal(ok.passed, true);
-    assert.equal(ok.status, 'accepted');
+    assert.equal(ok.status, 'submitted');
     const okReport = await legacy.validation!.reports.get(ok.reportId);
     assert.equal(okReport?.checks.some((c) => c.kind === 'forbidden-paths'), false);
     assert.equal(okReport?.checks.some((c) => c.kind === 'diff-size'), false);
@@ -855,7 +840,7 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
       cwd: '/cwd',
     });
     assert.equal(out.passed, true);
-    assert.equal(out.status, 'accepted');
+    assert.equal(out.status, 'submitted');
     const report = await h.validation!.reports.get(out.reportId);
     const ds = report?.checks.find((c) => c.kind === 'diff-size');
     assert.equal(ds?.passed, true);
@@ -882,7 +867,7 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
       });
 
       assert.equal(out.passed, true);
-      assert.equal(out.status, 'accepted');
+      assert.equal(out.status, 'submitted');
       // no command checks were requested
       assert.equal(
         runner.calls.filter((c) => c.cwd === '/trusted/cwd').length,
@@ -898,10 +883,8 @@ describe('Platform.validateAndAcceptLightweightWorkItem', () => {
       assert.equal(stored.checks.filter((c) => c.kind === 'command').length, 0);
 
       const { item, mission } = await liveItem(h.projects, projectId, missionId, workItemId);
-      assert.equal(item.status, 'accepted');
-      assert.equal(item.reviews.length, 1);
-      assert.equal(item.reviews[0]?.attemptId, undefined);
-      assert.equal(item.reviews[0]?.submittedAttemptId, exec);
+      assert.equal(item.status, 'submitted');
+      assert.equal(item.reviews.length, 0);
       assert.equal(mission.coordinatorAttempts.length, 0);
     }
   });
@@ -1415,7 +1398,7 @@ describe('Platform.promoteLightweightAfterValidation（§4.3 接线）', () => {
     assert.equal(promotion.triggerCode, 'top_level_modules_gt_2');
   });
 
-  test('规模内且通过：照旧由 validator accept，不带 held', async () => {
+  test('规模内且通过：留在 submitted 等协调者，不带 held', async () => {
     const h = harness({ paths: fakePaths(['src/foo.ts']) });
     const s = await upToSubmittedLightweight(h);
     const out = await h.platform.validateAndAcceptLightweightWorkItem({
@@ -1423,7 +1406,7 @@ describe('Platform.promoteLightweightAfterValidation（§4.3 接线）', () => {
       workItemId: s.workItemId,
       cwd: '/cwd',
     });
-    assert.equal(out.status, 'accepted');
+    assert.equal(out.status, 'submitted');
     assert.equal(out.held, undefined);
   });
 

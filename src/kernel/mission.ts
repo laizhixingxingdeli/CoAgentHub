@@ -96,7 +96,12 @@ export interface MissionInit {
   complexityAssessment?: ComplexityAssessment;
   /** 可选执行预算上限；缺省/非法 -> undefined。无 setter、不填默认预算。 */
   executionBudget?: ExecutionBudget;
+  /** 票级费用上限（美元）。Standard 新 Mission 默认 10；其余默认 undefined；恢复快照时以快照为准。 */
+  costCap?: number;
 }
+
+/** toSnapshot/restore 在不改动 snapshot.ts 的前提下附带票级费用上限。 */
+type MissionSnapshotWithCostCap = MissionSnapshot & { readonly costCap?: number };
 
 /**
  * 一个 Mission。只能通过 `Project.createMission()` 创建，初始状态 `investigating`。
@@ -135,6 +140,7 @@ export class Mission {
   #runKind: RunKind;
   #complexityAssessment: Readonly<ComplexityAssessment> | undefined;
   #executionBudget: Readonly<ExecutionBudget> | undefined;
+  #costCap: number | undefined;
   #promotions: Readonly<PromotionRecord>[] = [];
 
   constructor(init: MissionInit) {
@@ -147,6 +153,11 @@ export class Mission {
       init.complexityAssessment,
     );
     this.#executionBudget = Mission.#normalizeExecutionBudget(init.executionBudget);
+    // Standard 新 Mission 默认 $10 票级费用上限；其余模式不设。恢复快照时此处结果会被 restore 覆盖。
+    this.#costCap =
+      this.#executionMode === 'standard'
+        ? Mission.#normalizeCostCapValue(init.costCap) ?? 10
+        : undefined;
     if (init.origin) {
       this.#origin = freezePayload({ ...init.origin });
     }
@@ -186,6 +197,27 @@ export class Mission {
   /** 可选执行预算上限；只读。缺省/非法为 undefined，禁止填默认预算。 */
   get executionBudget(): Readonly<ExecutionBudget> | undefined {
     return this.#executionBudget;
+  }
+
+  /** 票级费用上限（美元）；Standard 新 Mission 默认 10，其余默认 undefined。只读。 */
+  get costCap(): number | undefined {
+    return this.#costCap;
+  }
+
+  /**
+   * 提升本 Mission 的票级费用上限，返回新上限。
+   * `by` 必须是有限正数；当前未设上限时以 10 为起点（与新建 Standard 一致）。
+   */
+  raiseCostCap(by: number): number {
+    if (!Number.isFinite(by) || by <= 0) {
+      throw new InvariantViolationError(
+        'INVALID_COST_CAP_DELTA',
+        `raiseCostCap 收到非有限正数增量: ${by}`,
+      );
+    }
+    const base = this.#costCap ?? 10;
+    this.#costCap = base + by;
+    return this.#costCap;
   }
 
   /** Lightweight→Standard 升级历史；只读副本。本阶段最多一条。 */
@@ -767,7 +799,7 @@ export class Mission {
   /* --------------------------- 快照 --------------------------- */
 
   toSnapshot(): MissionSnapshot {
-    return {
+    const snapshot: MissionSnapshot & { readonly costCap?: number } = {
       id: this.#id,
       projectId: this.#projectId,
       status: this.#status,
@@ -791,6 +823,7 @@ export class Mission {
       runKind: this.#runKind,
       complexityAssessment: this.#complexityAssessment,
       executionBudget: this.#executionBudget,
+      costCap: this.#costCap,
       // fail-closed：只序列化 normalize 后的可信 promotion；禁止 raw fallback 第二写路径。
       promotions: this.#promotions.flatMap((p) => {
         const copied = Mission.#normalizePromotionRecord(p, undefined);
@@ -813,6 +846,7 @@ export class Mission {
           }
         : undefined,
     };
+    return snapshot;
   }
 
   /** 直接装配历史状态，不重放动作、不重新校验流转。 */
@@ -876,6 +910,10 @@ export class Mission {
       snapshot.promotions,
       mission.#executionMode,
     );
+    // 旧快照没有 costCap 字段 -> undefined（不迁移）；新快照带值则校验恢复。
+    mission.#costCap = Mission.#normalizeCostCapValue(
+      (snapshot as MissionSnapshotWithCostCap).costCap,
+    );
     return mission;
   }
 
@@ -884,6 +922,14 @@ export class Mission {
       return value;
     }
     return 'standard';
+  }
+
+  /** 仅接受有限正数费用上限；其余（undefined/0/负/NaN/非数）一律归为 undefined。 */
+  static #normalizeCostCapValue(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+    return undefined;
   }
 
   static #normalizeRunKind(value: unknown): RunKind {

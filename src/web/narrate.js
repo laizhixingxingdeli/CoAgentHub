@@ -296,6 +296,10 @@ export const WAIT_REASON = {
   cancelled_by_user: '被叫停了',
   runaway_suspected: '一跳跑太久，已停下来等人看',
   execution_budget_exceeded: '执行预算硬上限已耗尽',
+  // 票级费用独立门禁：单 Mission 累计花费到上限，不是内核 ExecutionBudget 硬维度。
+  mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
+  // 工作项开到检查点（默认第 15 个），等检视者判断是否拆票。
+  work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
 };
 
 /**
@@ -378,6 +382,10 @@ const sameAsEscalated = (event) => ({
 
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
+  'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
+  'mission.queued': () => ({ badge: 'L3', action: '确认任务入队', detail: '按项目顺序与依赖推进' }),
+  'mission.queue_started': () => ({ badge: '平台', action: '启动队列任务', detail: '执行配置已固定' }),
+  'mission.queue_failed': (event) => ({ badge: '平台', action: '队列任务暂停', detail: event.data?.reason || '等待检视者处理' }),
   'mission.created': (event, ctx) => ({
     badge: 'L3 → L2',
     action: '发起任务',
@@ -514,6 +522,21 @@ const EVENT_TABLE = {
     badge: 'L3',
     action: '放行并落地',
     detail: or(event && event.data && event.data.mergedInto, '改动已经落到目标分支'),
+  }),
+
+  'reviewer.todo_decided': (event) => ({
+    badge: 'L3', action: '检视者处理待办',
+    detail: `${or(event.data?.reviewer, '检视者')}：${or(event.data?.action, '处理')}；${or(event.data?.reason, '未提供理由')}`,
+  }),
+  'document.proposal_changed': (event) => ({
+    badge: 'L3', action: '文档提议更新', detail: `${text(event.data?.title)}；${text(event.data?.state)}；版本 ${num(event.data?.revision)}`,
+  }),
+  'reviewer.duty_changed': (event) => ({
+    badge: 'L3', action: '项目值守变更',
+    detail: `${or(event.data?.owner, '未指定会话')}，代次 ${num(event.data?.generation)}；${or(event.data?.action, '更新')}`,
+  }),
+  'workspace.branch_cleanup_failed': (event) => ({
+    badge: 'L3', action: '合入后保留 Mission 分支', detail: text(event?.data?.reason),
   }),
 
   'mission.waiting': (event) => {
@@ -777,6 +800,30 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '预算过线',
       detail: data.threshold === undefined || data.threshold === null ? dim : `${dim} · 阈值 ${data.threshold}`,
+    };
+  },
+
+  // 票级费用上限被提高：data.by 这次追加了多少美元，data.costCap 是新的上限。
+  // 缺字段不抛——界面回显空位比崩了好。
+  'mission.cost_cap.raised': (event) => {
+    const data = (event && event.data) || {};
+    const by = data.by === undefined || data.by === null ? '' : ` +$${data.by}`;
+    const cap = data.costCap === undefined || data.costCap === null ? '' : ` · 新上限 $${data.costCap}`;
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '票级费用上限提高',
+      detail: `${or(data.missionId, '本票')}${by}${cap}` || '票级费用已达上限',
+    };
+  },
+
+  // 工作项检查点被批准继续：data.threshold 是批准的第几个检查点。
+  'mission.work_item_checkpoint.approved': (event) => {
+    const data = (event && event.data) || {};
+    const at = data.threshold === undefined || data.threshold === null ? '' : `（第 ${num(data.threshold)} 个检查点）`;
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '检查点放行',
+      detail: `检视者已批准继续${at}`,
     };
   },
 

@@ -6,7 +6,7 @@
 
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -526,9 +526,26 @@ describe('ValidationEngine — report shape, authority, immutability', () => {
 });
 
 describe('static isolation', () => {
-  test('orchestrator.ts / platform.ts 无 ValidationEngine production import', () => {
+  test('orchestrator.ts / platform.ts(+platform/ 全部实际 .ts) 无 ValidationEngine production import', () => {
     const orch = readFileSync(join(srcRoot, 'application/orchestrator.ts'), 'utf8');
-    const plat = readFileSync(join(srcRoot, 'application/platform.ts'), 'utf8');
+    // 入口源码 + platform/ 全部实际 .ts（含递归子目录）；目录不存在只读入口，存在则递归读取，文件读取错误直接抛出不吞。
+    let plat = readFileSync(join(srcRoot, 'application/platform.ts'), 'utf8');
+    const platDir = join(srcRoot, 'application/platform');
+    if (existsSync(platDir)) {
+      const walk = (d: string): void => {
+        for (const entry of readdirSync(d, { withFileTypes: true }).sort((a, b) =>
+          a.name.localeCompare(b.name),
+        )) {
+          const full = join(d, entry.name);
+          if (entry.isDirectory()) {
+            walk(full);
+          } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+            plat += '\n' + readFileSync(full, 'utf8');
+          }
+        }
+      };
+      walk(platDir);
+    }
     assert.doesNotMatch(orch, /ValidationEngine/);
     assert.doesNotMatch(orch, /application\/validation/);
     assert.doesNotMatch(plat, /ValidationEngine/);

@@ -1,19 +1,7 @@
 /**
- * L3 的命令行入口：取件、检视、放行/打回/放弃。
- *
- *   node src/l3.ts inbox [--recipient X]
- *   node src/l3.ts show <missionId>
- *   node src/l3.ts merge <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
- *   node src/l3.ts send-back <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
- *   node src/l3.ts abandon <missionId> --reason "..." [--as <检视者> --confirmed-by <确认人>]
- *   node src/l3.ts ack <deliveryId>
- *   node src/l3.ts plan [--run <方案运行记录>]
- *   node src/l3.ts plan decide <E-n> --action <动作> --reason "..." [--drop F7,F8] --as <检视者>
- *   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."]
- *
- * 文件模式主状态写命令先探测本机写者：活着的同状态服务持锁时回环转发给
- * 唯一写者；无锁时沿用独占装配。其他锁状态 fail-closed，不离线再写一份。
- * PG 不走文件锁探测。plan decide/approve 只写方案运行记录，不碰主锁。
+ * L3 的命令行入口：取件、检视、放行/打回/放弃、票级费用增额。完整用法见文件末尾那一屏。
+ * 文件模式主状态写命令先探测本机写者：活着的同状态服务持锁时回环转发给唯一写者，无锁时沿用独占装配；
+ * 其他锁状态 fail-closed，不离线再写一份。PG 不走文件锁探测，plan 只写方案运行记录。
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -43,6 +31,8 @@ const MAIN_STATE_WRITES = new Set([
   'rerun',
   'ack',
   'candidate',
+  'budget',
+  'checkpoint',
 ]);
 
 function arg(name: string): string | undefined {
@@ -50,20 +40,61 @@ function arg(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+/**
+ * checkpoint approve 先验阈值用的检查点间隔。与 Platform 的 WORK_ITEM_CHECKPOINT_INTERVAL
+ * 同一个 15，这里不 import：CLI 先验只是挡住明显坏值，规则本身只有 Platform 一份。
+ */
+const CHECKPOINT_THRESHOLD_INTERVAL = 15;
+
 type ReviewerSignature =
   | { readonly mode: 'human' }
   | { readonly mode: 'reviewer'; readonly reviewerId: string; readonly confirmedBy: string };
 
-/**
- * 终审三命令专用：下一个是另一个 `--` 开头的参数也算缺值。
- * 别的命令继续用 `arg()`——`rerun --as` 与 `plan decide --as` 的原义不能动。
- */
+/** 终审三命令专用（别的命令继续用 `arg()`：`rerun --as` 与 `plan decide --as` 的原义不能动）。 */
 function reviewFlag(name: string): { present: boolean; value?: string } {
   const index = process.argv.indexOf(name);
   if (index < 0) return { present: false };
   const next = process.argv[index + 1];
   if (next === undefined || next.startsWith('--')) return { present: true };
   return { present: true, value: next };
+}
+
+/** budget raise 的 `--by`：缺省 10；显式缺值 / 非有限 / 非正先验失败（取完整 Number，不截前缀）。 */
+function budgetRaiseBy(): number {
+  const index = process.argv.indexOf('--by');
+  if (index < 0) return 10; // 没给 --by 就用 10，与 Platform 的默认一致
+  const raw = process.argv[index + 1];
+  const by = raw === undefined || raw.startsWith('--') ? Number.NaN : Number(raw);
+  if (!Number.isFinite(by) || by <= 0) throw new Error(`--by 需要一个有限正数（美元）：${raw ?? '（缺值）'}`);
+  return by;
+}
+
+/**
+ * checkpoint approve 的签名与阈值：`--threshold <15 的倍数> --as <检视者> --reason "…"`。
+ *
+ * 三个都必须是显式值：下一项是 `--` 不算值（否则 `--as --reason x` 会把 `--reason` 当成检视者名字，
+ * 签名就变了个人）。threshold 取完整 Number，不截前缀——「30abc」不能当成 30。
+ * 这里的校验只是「先验」：真正的到达/历史门禁/禁止跳级仍只有 Platform 一份。
+ */
+function checkpointApproval(): { threshold: number; reviewer: string; reason: string } {
+  const thresholdFlag = reviewFlag('--threshold');
+  const asFlag = reviewFlag('--as');
+  const reasonFlag = reviewFlag('--reason');
+  if (!thresholdFlag.present) throw new Error('需要 --threshold <15 的正整数倍>：只批准你写明的那一个检查点。');
+  if (thresholdFlag.value === undefined) throw new Error('--threshold 缺参数值：要写成 --threshold 15。');
+  const threshold = Number(thresholdFlag.value);
+  if (!Number.isInteger(threshold) || threshold <= 0 || threshold % CHECKPOINT_THRESHOLD_INTERVAL !== 0) {
+    throw new Error(`--threshold 必须是 ${CHECKPOINT_THRESHOLD_INTERVAL} 的正整数倍，收到 ${thresholdFlag.value}`);
+  }
+  if (!asFlag.present) throw new Error('需要 --as <检视者>：批准要签名，不写是谁批的不算数。');
+  if (asFlag.value === undefined) throw new Error('--as 缺参数值：要写成 --as <检视者>。');
+  const reviewer = asFlag.value.trim();
+  if (reviewer.length === 0) throw new Error('--as 的值不能只是空白。');
+  if (!reasonFlag.present) throw new Error('需要 --reason "..."：批准要留一句为什么。');
+  if (reasonFlag.value === undefined) throw new Error('--reason 缺参数值：要写成 --reason "..."。');
+  const reason = reasonFlag.value.trim();
+  if (reason.length === 0) throw new Error('--reason 的值不能只是空白。');
+  return { threshold, reviewer, reason };
 }
 
 function parseReviewerSignature(): ReviewerSignature {
@@ -195,6 +226,18 @@ function assertWriteArgs(command: string, target: string | undefined): void {
     if (!profileId || profileId.startsWith('--')) throw new Error('需要 profileId');
     if (!arg('--reason')?.trim()) throw new Error('candidate reset 必须提供非空 --reason。');
   }
+  if (command === 'budget') {
+    // missionId 取 argv[4] —— target 是子命令 raise，不是 id。--by 越早验越好：坏值不得触发探测/装配。
+    const missionId = process.argv[4];
+    if (target !== 'raise' || !missionId || missionId.startsWith('--')) throw new Error('需要 missionId：budget raise <missionId> [--by <美元>]。');
+    budgetRaiseBy();
+  }
+  if (command === 'checkpoint') {
+    // 与 budget 同构的两个前缀排列：target 是子命令 approve，missionId 在 argv[4]。
+    const missionId = process.argv[4];
+    if (target !== 'approve' || !missionId || missionId.startsWith('--')) throw new Error('需要 missionId：checkpoint approve <missionId> --threshold <15 的倍数> --as <检视者> --reason "..."。');
+    checkpointApproval();
+  }
 }
 
 async function forwardWriteCommand(holder: LockInfo, command: string, target: string): Promise<void> {
@@ -212,6 +255,26 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
     const state = result.circuit.state;
     if (state !== 'closed') throw new Error(`候选 ${profileId} 复位失败：状态 ${state}`);
     console.log(`候选 ${profileId} 已复位（closed）`);
+    return;
+  }
+
+  if (command === 'budget') {
+    const missionId = process.argv[4]!;
+    // 与本地持锁路径同一个 Platform 用例：增额规则只有一份，这里不改写也不兜底。
+    const result = (await post(`/api/missions/${encodeURIComponent(missionId)}/budget/raise`, { by: budgetRaiseBy() })) as { costCap: number };
+    console.log(`Mission ${missionId} 费用上限 → $${result.costCap}`);
+    return;
+  }
+
+  if (command === 'checkpoint') {
+    const missionId = process.argv[4]!;
+    // 同一个 Platform 用例（approveWorkItemCheckpoint）：批准规则只有一份，这里只搬手感签名。
+    const result = (await post(`/api/missions/${encodeURIComponent(missionId)}/checkpoint/approve`, checkpointApproval())) as {
+      threshold: number;
+      approved: boolean;
+      alreadyApproved: boolean;
+    };
+    console.log(`Mission ${missionId} 检查点 ${result.threshold} 已批准${result.alreadyApproved ? '（此前已批准，未改任何东西）' : ''}`);
     return;
   }
 
@@ -331,19 +394,15 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
     console.log('契约一字没改。原来那条的记录一点没动 —— 重跑的意义就是两份都留着好比。');
     if (result.sourceAlreadyLanded) {
       console.log(
-        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：\n` +
-          '  答案就摆在项目工作区里，agent 读一眼就有 —— 实测上一次对照就是这么毁的\n' +
-          '  （它 read 了主仓库里的成品文件、还 git show 了那次交付的提交，不是在解题是在抄）。\n' +
+        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：答案就摆在项目工作区里，\n` +
+          '  agent 读一眼就有 —— 实测上一次对照就是这么毁的（它 read 了成品文件、git show 了那次交付）。\n' +
           '  要做对照，用一个**还没合并**的任务，两臂都跑完再决定合哪个。',
       );
     }
     if (result.baseRevision) {
       console.log(`起点钉在 ${result.baseRevision.slice(0, 8)}（与源头同一个版本），两次才可比。`);
     } else {
-      console.log(
-        '⚠ 源头没记过工作区，起点无法钉住 —— 这一跑会从目标分支当前的 HEAD 分叉，\n' +
-          '  和源头不是同一个起点，**跑出来的数不能和它对比**。要比就用 --base <版本> 指定。',
-      );
+      console.log('⚠ 源头没记过工作区，起点无法钉住：这一跑从目标分支当前 HEAD 分叉，**跑出来的数不能和它对比**；要比就用 --base <版本> 指定。');
     }
     console.log(`\n下一步：node src/run-mission.ts <mission.json> --cwd <repo>  # missionId 用 ${result.missionId}`);
     console.log(`跑完用 node src/l3.ts runs ${result.missionId} 横着看。`);
@@ -367,13 +426,11 @@ async function forwardWriteCommand(holder: LockInfo, command: string, target: st
 async function main() {
   const [, , command, target] = process.argv;
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
-  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show/runs 是常态。plan（含 decide）只写方案
-  // 运行记录那份独立文件，主状态同样只读——run-plan 整夜握着主状态锁。
+  // 只读命令不抢锁：一边跑 Mission 一边 inbox/show/runs 是常态；plan 只写方案运行记录那份独立文件。
   const isMainStateWrite = MAIN_STATE_WRITES.has(command ?? '');
   const readOnly = !isMainStateWrite;
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
-  // 终审三命令的 --as / --confirmed-by 必须在构建平台之前成对校验：
-  // 构建会拿排他锁并跑启动收敛，可能改状态文件。校验失败时状态字节不能动。
+  // 终审签名与 budget raise 的 --by 都要在构建平台（拿排他锁、跑启动收敛，可能改状态文件）之前校验。
   const reviewerSignature =
     command === 'merge' || command === 'send-back' || command === 'abandon'
       ? parseReviewerSignature()
@@ -394,12 +451,10 @@ async function main() {
   let built;
   try {
     built = usePg
-      ? // L3 从不接手在途 attempt —— 它只放行/打回。所以**不做启动收敛**：
-        // 一个只看结果的命令没有立场判定别的进程死了。PG 不走文件锁假探测。
+      ? // L3 只放行/打回、从不接手在途 attempt：只看结果的命令没有立场判定别的进程死了。
         await buildPgPlatform()
       : await buildPersistentPlatform(statePath, {
           exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
-          // 只看结果的命令没有立场判定别的进程死了——见 PersistentOptions.reconcile。
           reconcile: !readOnly,
         });
   } catch (error) {
@@ -451,8 +506,7 @@ async function main() {
     console.log(line('='));
     console.log(
       `Mission ${view.missionId}   ${view.status}${view.isMutating ? '（占着改动名额）' : ''}` +
-        // 「谁挡着我」。没有这一格时，撞上 project_busy 的人只能挨个 Mission
-        // 去翻谁还没结束 —— 实测挡住 P2 的是一条早就跑死的测量跑。
+        // 「谁挡着我」：没这一格，撞上 project_busy 的人只能挨个翻谁还没结束（实测挡住 P2 的是早跑死的测量跑）。
         (view.blockedByMission ? `\n           ⚠ ${view.blockedByMission} 正占着本项目的改动名额，这条派发不了` : ''),
     );
     console.log(line('='));
@@ -493,13 +547,11 @@ async function main() {
         .map((l) => `  ${l}`)
         .join('\n'),
     );
-    // 上面那份 diff **不含**记忆文件：它们是 merge 那一刻才写进 worktree 的。
-    // 不在这里点破，L3 就会把这份清单当成"将要落地的全部"——实测 P1 因此
-    // 落了三个没人看过的文件。
+    // 上面那份 diff **不含**记忆文件：它们 merge 那一刻才写进 worktree，不点破 L3 就会当成本次落地的全部。
     if (diff.pendingMemory.length > 0) {
       console.log(`\n  ⚠ 另有 ${diff.pendingMemory.length} 个文件会随本次落地一并写入项目：`);
       for (const file of diff.pendingMemory) console.log(`      ${file}`);
-      console.log('      （正文见下面的「记忆」；VIBE.md 是由它们生成的索引）');
+      console.log('      （文档另行审批，代码合入不自动写；VIBE.md 在批准文档后生成）');
     }
 
     if (view.result) {
@@ -507,12 +559,11 @@ async function main() {
       console.log(`  ${view.result.summary}`);
       for (const item of view.result.acceptanceEvidence) console.log(`  证据 · ${item}`);
       for (const item of view.result.openRisks) console.log(`  遗留 · ${item}`);
-      // 记忆增量跟着落地那次 merge 一起写进项目。**签字之前必须看得见正文**——
-      // 只印一行 [object Object] 等于让 L3 盲签，而这些内容会长期影响
-      // 后续每一条 Mission 的判断。
+      // 差异与旧正文都显示，文档独立批准；不能让缺省 body 的新交卷读面崩溃。
       for (const item of view.result.memoryDelta) {
         console.log(`\n  记忆 · [${item.kind}] ${item.slug} —— ${item.title}`);
-        for (const line of item.body.split('\n')) console.log(`      ${line}`);
+        const detail = item.changes ? JSON.stringify(item.changes, null, 2) : item.body ?? '（差异无效，需修订）';
+        for (const line of detail.split('\n')) console.log(`      ${line}`);
       }
     }
 
@@ -700,22 +751,36 @@ async function main() {
     if (result.sourceAlreadyLanded) {
       // 隔离做不到（agent 用绝对路径就能越出 worktree），所以至少要说出来。
       console.log(
-        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：\n` +
-          '  答案就摆在项目工作区里，agent 读一眼就有 —— 实测上一次对照就是这么毁的\n' +
-          '  （它 read 了主仓库里的成品文件、还 git show 了那次交付的提交，不是在解题是在抄）。\n' +
+        `\n⚠ ${result.rerunOf} 的产出**已经落地进项目了**，这一跑不是干净的对照：答案就摆在项目工作区里，\n` +
+          '  agent 读一眼就有 —— 实测上一次对照就是这么毁的（它 read 了成品文件、git show 了那次交付）。\n' +
           '  要做对照，用一个**还没合并**的任务，两臂都跑完再决定合哪个。',
       );
     }
     if (result.baseRevision) {
       console.log(`起点钉在 ${result.baseRevision.slice(0, 8)}（与源头同一个版本），两次才可比。`);
     } else {
-      console.log(
-        '⚠ 源头没记过工作区，起点无法钉住 —— 这一跑会从目标分支当前的 HEAD 分叉，\n' +
-          '  和源头不是同一个起点，**跑出来的数不能和它对比**。要比就用 --base <版本> 指定。',
-      );
+      console.log('⚠ 源头没记过工作区，起点无法钉住：这一跑从目标分支当前 HEAD 分叉，**跑出来的数不能和它对比**；要比就用 --base <版本> 指定。');
     }
     console.log(`\n下一步：node src/run-mission.ts <mission.json> --cwd <repo>  # missionId 用 ${result.missionId}`);
     console.log(`跑完用 node src/l3.ts runs ${result.missionId} 横着看。`);
+    return;
+  }
+
+  if (command === 'budget') {
+    const missionId = process.argv[4]!;
+    const { costCap } = await platform.raiseMissionCostCap(missionId, budgetRaiseBy());
+    await persist();
+    console.log(`Mission ${missionId} 费用上限 → $${costCap}`);
+    return;
+  }
+
+  if (command === 'checkpoint') {
+    const missionId = process.argv[4]!;
+    const approval = checkpointApproval();
+    const result = await platform.approveWorkItemCheckpoint(missionId, approval);
+    await persist();
+    // 打印批准阈值：重复批准同样成功（alreadyApproved）——幂等才敢重试，不必先查状态。
+    console.log(`Mission ${missionId} 检查点 ${result.threshold} 已批准${result.alreadyApproved ? '（此前已批准，未改任何东西）' : ''}`);
     return;
   }
 
@@ -758,9 +823,7 @@ async function main() {
     if (bases.size > 1) {
       console.log('⚠ 这些运行存在多个 baseRevision；起点不同，不能把差异直接归因给 Fast Lane。');
     }
-    // A/B 表没有「结束原因」列，但自掐和候选挂掉读法完全不同：前者要改工单或调
-    // 策略，换候选只会把同一件事再烧一遍。所以只在真的发生过自掐时才提示，并带上
-    // 是哪几条——否则这行就是在解释一个不存在的列。
+    // A/B 表没有「结束原因」列，但自掐和候选挂掉读法完全不同：前者要改工单或调策略，换候选只会把同一件事再烧一遍；只在真的发生过自掐时才提示并带上哪几条。
     const selfKilled = runs
       .map((r) => ({
         missionId: r.missionId,
@@ -899,6 +962,8 @@ async function main() {
   node src/l3.ts runs <missionId>             同一任务的历次运行横着比：lane/token/时延/打回/升级
   node src/l3.ts ack <deliveryId>             确认收到
   node src/l3.ts candidate reset <profileId> --reason "..."  人工复位候选熔断
+  node src/l3.ts budget raise <missionId> [--by <美元>]  提升票级费用上限（缺省 +$10）
+  node src/l3.ts checkpoint approve <missionId> --threshold <15 的倍数> --as <检视者> --reason "..."  签名批准工作项检查点（重复调用幂等）
   node src/l3.ts plan [--run <记录>]          方案运行交接面：✓ 已合入 / ⏸ 挂起等你 / ⊘ 检视者跳过 / ○ 没轮到
   node src/l3.ts plan decide <E-n> --action <rerun_isolated|skip|rescope|stop> --reason "..." [--drop F7,F8] --as <检视者>
   node src/l3.ts plan decide <E-n> --action answer --answer "..." --as <检视者> [--reason "..."] [--run <记录>]
@@ -926,10 +991,8 @@ function latestPlanRun(dir: string): string | undefined {
 }
 
 /**
- * 这一晚花了多少：各条 Mission 报上来的，加上现做分类的只读会话。
- *
- * 没报的**不当 0**：单独计数，交接面上写「另有 N 条没报」——把未知当 0，
- * 用户拿首行去校准阈值时就会低估。
+ * 这一晚花了多少：各条 Mission 报上来的，加上现做分类的只读会话。没报的**不当 0**：
+ * 单独计数，交接面上写「另有 N 条没报」——把未知当 0，用户就会低估。
  */
 async function planCosts(
   run: PlanRun,

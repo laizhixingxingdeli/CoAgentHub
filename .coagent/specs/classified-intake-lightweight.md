@@ -27,8 +27,8 @@ Orchestrator Fast Lane 只调 Platform trusted 方法（不暴露 HTTP/tools）�
 
 1. `createLightweightWorkItem` — 零 Coordinator、恰好一 WorkItem；不占 mutation slot。
 2. `dispatchLightweightWorkItem` — 与 Standard 同序：mutation-slot → PRE_DISPATCH shadow → dispatch。
-3. Executor hop → submitted 后 `validateAndAcceptLightweightWorkItem`（先持久化 ValidationReport，再 validator accept）。
-4. `submitLightweightMissionForReview` → `awaiting_review`（**不 complete**）。
+3. Executor hop → submitted 后 `validateAndAcceptLightweightWorkItem`（历史方法名保留）：持久化 ValidationReport，机器通过仍保持 submitted，不写 validator accept。
+4. 机器报告通过且未超轻量规模后，唤醒一跳协调者逐条 L2；accept 保留 Lightweight，平台 `submitLightweightMissionForReview` → `awaiting_review`（**不 complete**）。协调者只交审查结论，平台派生交卷。reject 在同一 attempt 晋升 Standard 并允许立即规划；重启读取 durable report，不能因恢复漏掉 L2 或重复机器验收。
 5. 仍须 **L3 `finalizeMission`** 才能 completed / merge（见 ADR-0004）。
 
 校验没过，或改动超出轻量规模被扣下：`promoteLightweightAfterValidation` 以那份 ValidationReport 为凭据升级 Standard，交协调者接手；升级也失败才 stalled，并把两件事都说出来。执行者 blocked 时不回退协调者，走下面的 L3 升级。trusted 方法名不得出现在 `api/` 或 tool 面（`source-constraints` 钉死）。

@@ -68,6 +68,10 @@ function tempRepo(): string {
   return dir;
 }
 
+/**
+ * 铺到「机器验收通过」为止：工作项停在 submitted，不交卷——
+ * 这一段的验证目标是 builder 有没有把 validation 装配进去，不需要走 L2。
+ */
 async function seedLightweightAcceptedPath(
   platform: import('../src/application/platform.ts').Platform,
   projects: { ensure(id: string): Promise<import('../src/kernel/index.ts').Project>; save(p: import('../src/kernel/index.ts').Project): Promise<void> },
@@ -178,7 +182,8 @@ describe('builder validation composition', () => {
       cwd: repo,
     });
     assert.equal(out.passed, true);
-    assert.equal(out.status, 'accepted');
+    // 机器过了不 accept：验收结论归协调者，工作项留在 submitted 等 L2 这一跳。
+    assert.equal(out.status, 'submitted');
     assert.match(out.reportId, /^VR-/);
   });
 
@@ -205,7 +210,7 @@ describe('builder validation composition', () => {
       cwd: repo,
     });
     assert.equal(out.passed, true);
-    assert.equal(out.status, 'accepted');
+    assert.equal(out.status, 'submitted');
     built.persist();
   });
 });

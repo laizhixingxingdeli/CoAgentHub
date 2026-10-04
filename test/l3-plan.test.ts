@@ -36,8 +36,15 @@ import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
 import type { AgentRunSpec } from '../src/application/ports.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { buildPersistentPlatform, startServer } from '../src/main.ts';
+import { DEFAULT_TEST_AGENT_POOL } from './helpers/agent-pool.ts';
+import { buildPersistentPlatform, startServer as startServerCore } from '../src/main.ts';
 import { ScriptedRuntime, type ScriptTable } from '../src/runtime/scripted.ts';
+
+/** 历史方案恢复回归显式使用隔离的兼容装配，生产默认入口已退役。 */
+async function startServer(...args: Parameters<typeof startServerCore>) {
+  return startServerCore(args[0], args[1], { ...args[2], legacyPlanRunsForTests: !!args[2]?.runtime });
+}
+
 
 const L3 = fileURLToPath(new URL('../src/l3.ts', import.meta.url));
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -1562,6 +1569,9 @@ function deliverScripts(workItemId = 'W-1'): ScriptTable {
           body: {
             outcome: 'delivered',
             summary: '交付',
+            // W-441：交卷闸门按契约要求显式逐条判 criteria；缺 criteria 就一直等 L3，
+            // 这两条合入场景会走到超时取消而不是它们要测的合入面。
+            criteria: [{ index: 1, status: 'pass', evidence: '测试替身：逐条核过' }],
             acceptanceEvidence: [],
             memoryDelta: [],
             openRisks: [],
@@ -1604,7 +1614,11 @@ function escalateThenDeliverScripts(workItemId = 'W-1'): ScriptTable {
 async function emptyPlanState(): Promise<{ dir: string; statePath: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'coagent-l3-plan-hosted-'));
   dirs.push(dir);
-  return { dir, statePath: join(dir, 'state.json') };
+  const statePath = join(dir, 'state.json');
+  const fixture = await buildPersistentPlatform(statePath, { reconcile: false });
+  for (const candidate of DEFAULT_TEST_AGENT_POOL) await fixture.agentPool.add(candidate);
+  await fixture.persist();
+  return { dir, statePath };
 }
 
 async function closeServer(server: Server): Promise<void> {

@@ -19,3 +19,7 @@
 - 源：`src/application/query-run.ts`；晋升：`src/application/query-promotion.ts`；runtime opt-in：`src/runtime/pi-query.ts`
 - 测试：`test/query-run.test.ts`、`test/query-promotion.test.ts`、`test/pi-query-runtime.test.ts`
 - 取舍：ADR-0003（QueryRun 不是 Mission）
+
+## 分类角色池（UI1，2026-10-04）
+
+三种平台装配均从 classifier 池读取启用候选；每次查询重新读取，输入 profile 不覆盖管理配置。空池或全部熔断拒绝，不借协调者候选。仅确定的上游失败按顺序换候选；额度、身份、故障与探针沿用候选熔断仓储。QueryRun 保存实际 profileId/runtimeKind，健康视图聚合查询用量；旧记录缺这些字段仍可读取。直接构造未管理 QueryRunner 的测试/嵌入用例保留显式 profile 接口。

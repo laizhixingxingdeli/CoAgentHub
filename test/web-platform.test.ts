@@ -25,8 +25,8 @@ describe('平台页的文件形状', () => {
     const html = read('index.html');
     assert.match(html, /<link rel="modulepreload" href="\/platform\.js" \/>/);
     assert.equal(/<script[^>]+src="\/platform\.js"/.test(html), false, 'platform.js 被写成会执行的 script');
-    assert.match(html, /data-route="platform"/);
-    assert.match(html, /href="#\/platform"/);
+    assert.doesNotMatch(html, /data-route="platform"/, '兼容页面不占主导航');
+    assert.match(html, /href="#\/"[^>]*data-route="home"/, '首页为主入口');
     const shell = read('app.js');
     assert.match(shell, /from '\.\/platform\.js'/);
     assert.match(shell, /\/platform/);

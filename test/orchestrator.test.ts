@@ -29,7 +29,7 @@ import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { FileCandidateCircuitRepository, FileStateStore } from '../src/application/file-store.ts';
-import type { AgentRuntime, CandidateCircuitRepository, QueuedHopCapacityRepository } from '../src/application/ports.ts';
+import type { AgentRuntime, CandidateCircuitRepository, QueuedHopCapacityRepository, ExecutionProfile } from '../src/application/ports.ts';
 import type { CandidateCircuit } from '../src/application/candidate-circuit.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
@@ -90,7 +90,7 @@ async function harness(
   candidateCircuits?: CandidateCircuitRepository,
   attemptWallClockMs?: number,
   workspace?: WorkspaceManager,
-  options?: { usageReader?: () => Promise<unknown>; provider?: string },
+  options?: { usageReader?: () => Promise<unknown>; provider?: string; loadExecutorCandidates?: () => Promise<readonly ExecutionProfile[]> },
 ) {
   const workspaceManager = workspace ?? new InPlaceWorkspaceManager();
   const clock = new FixedClock();
@@ -118,6 +118,7 @@ async function harness(
     },
     executor: {
       runtime: runtimes.executor,
+      loadCandidates: options?.loadExecutorCandidates,
       candidates: [
         { endpoint: 'local' as const, profileId: 'exec-a', facts: [{ key: 'provider', value: options?.provider ?? 'scripted' }] },
         { endpoint: 'local' as const, profileId: 'exec-b' },
@@ -266,6 +267,38 @@ const EXECUTOR_HAPPY: ScriptTable = {
 };
 
 describe('调度器：整条 Mission 自己走完', () => {
+  test('下一跳读取新角色配置，在途跳次仍持有启动身份', async () => {
+    let candidates: readonly ExecutionProfile[] = [{ profileId: 'exec-a', endpoint: 'local' }];
+    const seen: string[] = [];
+    const coordinatorInner = new ScriptedRuntime(COORDINATOR_HAPPY);
+    const executorInner = new ScriptedRuntime(EXECUTOR_HAPPY);
+    const coordinator: AgentRuntime = {
+      kind: coordinatorInner.kind,
+      start: async (spec) => {
+        const run = await coordinatorInner.start(spec);
+        candidates = [{ profileId: 'exec-new', endpoint: 'local', facts: [{ key: 'reasoning', value: 'high' }] }];
+        return run;
+      },
+    };
+    const executor: AgentRuntime = {
+      kind: executorInner.kind,
+      start: async (spec) => {
+        seen.push(spec.profile.profileId);
+        assert.equal(spec.profile.facts?.[0].value, 'high');
+        candidates = [];
+        const run = await executorInner.start(spec);
+        assert.equal(spec.profile.profileId, 'exec-new');
+        return run;
+      },
+    };
+    const h = await harness({ coordinator, executor }, undefined, undefined, undefined,
+      { loadExecutorCandidates: async () => candidates });
+    await h.platform.createMission({ projectId: 'P-live', missionId: 'M-live', contract: CONTRACT });
+    await h.makeRunner().run('M-live', { projectRoot: '.', maxRounds: 8 });
+    assert.deepEqual(seen, ['exec-new']);
+    candidates = [];
+    assert.deepEqual(await h.makeRunner().roleCooldownSnapshot('executor'), []);
+  });
   test('冲突期间只运行新解决单，冲突解除后恢复旧派单', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-conflict-'));
     const coordinator = new ScriptedRuntime({

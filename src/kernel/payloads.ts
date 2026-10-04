@@ -99,7 +99,8 @@ export type PromotionTriggerCode =
   | 'validator_failure_unrepairable'
   | 'permission_expansion'
   | 'budget_exceeded'
-  | 'diff_intent_unprovable';
+  | 'diff_intent_unprovable'
+  | 'coordinator_rejected';
 
 /** 权威触发码表；kernel / platform 共用，禁止各写一份。 */
 export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
@@ -115,6 +116,7 @@ export const PROMOTION_TRIGGER_CODES: readonly PromotionTriggerCode[] = [
   'permission_expansion',
   'budget_exceeded',
   'diff_intent_unprovable',
+  'coordinator_rejected',
 ] as const;
 
 export function isPromotionTriggerCode(value: unknown): value is PromotionTriggerCode {
@@ -273,6 +275,11 @@ export interface WorkOrder {
    * 在既有号上 +1。它随 `order` 一起进入快照，故快照恢复后修订号一致。
    */
   readonly orderRevision?: string;
+  /**
+   * 本工单覆盖的 Mission acceptance 序号，1-based。
+   * 缺省 = 旧工单（尚未投影），校验必须按「无关联」处理而不是判错，否则存量工单全废。
+   */
+  readonly criteria?: number[];
 }
 
 export type ExecutionOutcome = 'completed' | 'partial';
@@ -560,7 +567,49 @@ export interface MemoryDeltaProposal {
   /** Living Spec 用稳定的 Capability 名，不要用 Mission 名或日期。 */
   readonly slug: string;
   readonly title: string;
-  readonly body: string;
+  /** 旧记录兼容；新交卷给精确差异，整份正文也必须独立审批。 */
+  readonly body?: string;
+  readonly changes?: readonly { readonly before: string; readonly after: string }[];
+}
+
+/**
+ * 一条验收标准的结论。
+ *
+ * 契约验收标准是**有序定长**的列表，所以行项自带 `index`（从 1 起）而不是靠
+ * 数组位置：少一条、重一条、顺序乱了都能被引擎查出来，不会静默错位。
+ */
+export interface MissionResultCriterion {
+  readonly index: number;
+  /** `not_applicable` 必须带理由，否则等于一句话把标准划掉。 */
+  readonly status: 'pass' | 'fail' | 'unverified' | 'not_applicable';
+  readonly evidence: string;
+}
+
+/**
+ * 平台自己生成的交卷附件。
+ *
+ * 和 criteria **分开**放着：criteria 是协调者逐条打的结论，这些是平台从集成
+ * 验证、 diff、 pi 记录里原样搬来的事实。混进 criteria 里就会让"谁说的"变
+ * 模糊——协调者的判断和机器的输出不承担同样的责任。
+ *
+ * 全部 nullable：缺了是"这次没跑到"，不是"结果是空的"，两者不能合并成""。
+ */
+export interface MissionResultPlatformAttachments {
+  readonly codeMetrics?: {
+    readonly warnings: readonly { readonly path: string; readonly line: number; readonly kind: string; readonly value: number; readonly limit: number; readonly detail: string }[];
+    readonly unanalyzed: readonly string[];
+  } | null;
+  readonly lastFullTest: { readonly resultLine: string; readonly source: string } | null;
+  readonly diffStats:
+    | { readonly files: number; readonly insertions: number; readonly deletions: number }
+    | null;
+  /** 每条标准对应哪些 WorkItem——一条标准常常要几个工单合起来才成立。 */
+  readonly criterionWorkItems: readonly {
+    readonly index: number;
+    readonly workItemIds: readonly string[];
+  }[];
+  /** 想附但拿不到的东西，比如集成验证根本没跑过。写清楚为什么缺。 */
+  readonly unavailable: readonly string[];
 }
 
 export interface MissionResultBody {
@@ -570,6 +619,15 @@ export interface MissionResultBody {
   /** 本次该沉淀的长期知识。**没有就空数组**——不是每次改动都该留永久文档。 */
   readonly memoryDelta: readonly MemoryDeltaProposal[];
   readonly openRisks: readonly string[];
+  /**
+   * 逐条验收标准的结论。
+   *
+   * **可选**：早先交卷的结果里没有这个字段（`acceptanceEvidence` 是自由文
+   * 本），历史 Mission 必须还能读回来，不能因为缺它就解析失败。
+   */
+  readonly criteria?: readonly MissionResultCriterion[];
+  /** 平台自动附加的机器产出，写 side-channel 而非挤进 summary。 */
+  readonly attachments?: MissionResultPlatformAttachments;
 }
 
 /**
@@ -609,7 +667,11 @@ export type WaitReason =
    * 与 pool `attempt_limit_reached` / 启发式轮次上限分开：这是 Mission 上
    * persist 的 budget 经可信用量求值后的硬闸，不是候选池或 for 循环默认。
    */
-  | 'execution_budget_exceeded';
+  | 'execution_budget_exceeded'
+  /** 票级费用上限（独立门禁）已触及；与 ExecutionBudget 硬维度分开。 */
+  | 'mission_cost_cap_reached'
+  /** 工作项已到达待人工/平台确认的检查点。 */
+  | 'work_item_checkpoint';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。
@@ -697,6 +759,14 @@ export interface EscalationBody {
    */
   readonly answer?: string;
   readonly answeredAt?: string;
+  /**
+   * 平台可信门禁载荷：供平台侧做票级/检查点门禁，不进入 L3 人工决策。
+   * `threshold` 是该门禁触发的阈值（如费用上限金额或检查点序号）。
+   */
+  readonly platformGate?: {
+    readonly kind: 'cost_cap' | 'work_item_checkpoint';
+    readonly threshold: number;
+  };
 }
 
 /**

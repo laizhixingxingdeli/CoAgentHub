@@ -78,20 +78,25 @@ test('no-status-code upstream temp faults classify as upstream_5xx; local adapte
 test('upstream billing and credit signals classify as quota; 403 or forbidden alone do not', () => {
   const quota = { failureClass: 'quota', failover: true };
   const unknown = { failureClass: 'unknown', failover: false };
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'xai API error (403): You have run out of credits or need a Grok subscription'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'CREDITS exhausted'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'Need a Subscription'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'BILLING hold'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'spending limit reached'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'usage limit exceeded'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'usage_limit exceeded'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'insufficient balance'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'insufficient_quota'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', '余额不足'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', '欠费'), quota);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', '403'), unknown);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'forbidden'), unknown);
-  assert.deepEqual(classifyCandidateFailure('upstream_failure', 'HTTP 403 Forbidden'), unknown);
+  for (const message of [
+    "xai API error (403): You have run out of credits or need a Grok subscription",
+    "CREDITS exhausted",
+    "Need a Subscription",
+    "BILLING hold",
+    "spending limit reached",
+    "usage limit exceeded",
+    "usage_limit exceeded",
+    "insufficient balance",
+    "insufficient_quota",
+    "余额不足",
+    "欠费"
+  ]) assert.deepEqual(classifyCandidateFailure('upstream_failure', message), quota, message);
+  for (const message of [
+    "403",
+    "forbidden",
+    "HTTP 403 Forbidden"
+  ]) assert.deepEqual(classifyCandidateFailure('upstream_failure', message), unknown, message);
+
 });
 
 test('missing circuit is represented as closed', () => {

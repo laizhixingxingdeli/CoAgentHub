@@ -51,7 +51,7 @@ import type {
   AgentPoolRow,
   AgentPoolSnapshot,
 } from './agent-pool.ts';
-import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd } from './agent-pool.ts';
+import { agentPoolSnapshot, toAgentPoolCandidate, validateAgentPoolAdd, replaceAgentPoolRole, type AgentPoolReplaceInput } from './agent-pool.ts';
 import type { QueryRunRecord, QueryRunRepository } from './query-run.ts';
 import { claimHop, claimHopWithCandidate, cloneQueuedHop, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, reportHopFailure, validateEnqueueHop } from './durable-scheduler.ts';
 import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
@@ -719,6 +719,15 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     if (!project) throw new Error(`不可归档：Project 不存在：${projectId}`);
     const mission = project.missions.find((row) => row.id === missionId);
     if (!mission) throw new Error(`不可归档：Mission 不存在：${key}`);
+    const documents = new Map<string, { state: string }>();
+    for (const event of this.#state.events) {
+      if (event.missionId === missionId && event.kind === 'document.proposal_changed') {
+        const data = event.data as { id: string; state: string }; documents.set(data.id, data);
+      }
+    }
+    if ([...documents.values()].some((row) => !['committed', 'withdrawn'].includes(row.state))) {
+      throw new Error(`不可归档：Mission 尚有未处理的文档提议：${key}`);
+    }
 
     if (mission.isPaused) {
       throw new Error(`不可归档：Mission 已暂停：${key}`);
@@ -1237,6 +1246,16 @@ export class FileAgentPoolRepository implements AgentPoolRepository {
   async list(): Promise<AgentPoolSnapshot> {
     this.#store.refreshIfChanged();
     return agentPoolSnapshot(this.#rows());
+  }
+
+  async replaceRole(input: AgentPoolReplaceInput): Promise<AgentPoolSnapshot> {
+    return this.#store.run(async () => {
+      this.#store.refreshIfChanged();
+      const rows = replaceAgentPoolRole(input, this.#rows());
+      this.#store.raw().agentPool = rows;
+      this.#store.flush();
+      return agentPoolSnapshot(rows);
+    });
   }
 
   async add(input: AgentPoolAddInput): Promise<AgentPoolCandidate> {
