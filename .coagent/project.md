@@ -109,7 +109,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 检视者、协调者和平台操作时遵守。
 
 - 只按显式路径 `git add` / commit，不用 `git add -A`、`git add .`。否则会把用户的未跟踪文件（IDE 配置、本地方案文件、实验输出）卷进提交。
-- 主工作区就是集成分支 `auto/harness-remaining` 的检出。Mission 在跑时，集成分支上不许有任何新提交（文档、手工改动、别的会话的改动都算），主工作区也不许留未提交的改动。否则平台合不进这个 Mission：合入要求目标 HEAD 等于 Mission 开工时的提交、且工作区干净（REF1 就因此只能手动合入）。手工或别的会话的改动在单独的 worktree / 分支上做，两个 Mission 之间由检视者合入。
+- Mission 的目标集成分支与 projectRoot 以 workspaceRef 为准，不从主工作区当前分支推断；2026-10-04 主工作区为 master，通信优化使用独立 codex/communication-integration worktree。Mission 在跑时，目标集成分支上不许有任何新提交（文档、手工改动、别的会话的改动都算），目标集成工作区也不许留未提交的改动。否则平台合不进这个 Mission：合入要求目标 HEAD 等于 Mission 开工时的提交、且工作区干净（REF1 就因此只能手动合入）。手工或别的会话的改动在单独的 worktree / 分支上做，两个 Mission 之间由检视者合入。
 - 验证在独立 worktree（`.coagent-worktrees/` 下）里跑，不在用户的主工作区里跑。否则主工作区里用户开着的 IDE、未跟踪文件会被算进改动，或被验证过程改坏。
 - 冻结票和验收时不要求穷举测试；协调者验收不得要求超出契约点名的测试。否则测试越写越多，便宜的执行者反复返工。
 - 前端换框架的判据：需要虚拟滚动 / 拖拽 / 富文本这类复杂组件，或页面数超过 8。在那之前，「换成 React 会更好写」不是理由。
@@ -117,3 +117,10 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 ## 已确认 Mission 的连续运行（2026-10-04）
 
 基本单位仍是 Mission；用户确认冻结清单后通过项目 mission-queue 入队，执行目录、适配器、检视者与集成验证属于项目 execution-config。队列只提供顺序和依赖，门禁、费用、失败和最终审查按 Mission 处理。配置变化仅影响未启动任务；人工签字也必须跑项目集成验证，失败回滚并留待审查。使用步骤见 reviewer-runbook 的 Mission 队列节；生产旧 run-plan 已退役，历史记录保留恢复兼容。
+
+
+## AC4 收尾记录（2026-10-04）
+
+AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-20261004 经执行者证据、协调者逐条 L2 与 L3 最终审查 completed，通过插件合入 codex/communication-integration（a756fc5）。全量 2365 tests / 2358 pass / 0 fail / 7 既有 HAOFF1 skip；报告见 docs/ac4-platform-closeout-20261004.md。3101 常驻服务托管了本收尾任务，但本票未另跑真实 lightweight Mission 作端到端验证。
+
+历史 PLAN-harness-remaining-20261003-0307-AC4 保留 parked、未 completed，历史 PlanRun 已 stopped；它已有部分 WorkItem accepted 成果与 L2 记录，缺的是整份 Mission 的最终交卷与验收，不能把独立收尾结论补造为历史记录，也不能把未整票完成写成所有历史工作项均无验收。此次文档及收尾仅合入独立集成分支，master 仍待用户另行授权。
