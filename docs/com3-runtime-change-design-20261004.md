@@ -508,72 +508,144 @@ new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'f
 - **CLI 只读直接 state 不是权威运行查询**：`l3.ts:430` 起，`isMainStateWrite = MAIN_STATE_WRITES.has(command)`；**只读命令不抢锁**、直接读 state 文件，与写命令转发到活写者不同。只读直接读文件**绕过了活写者的实时状态**，因此**不是**权威运行查询，也**不能**替代 §4.0 的"唯一服务暴露"。
 - **两条禁令**：(a) **不能误说硬编码 3101**（本跳已核实非硬编码，端口来自 lock）；(b) **不能用只读 CLI 直读 state 冒充权威查询**。
 
-### 4.2 工单草案 A：VR 只读小修（优先，无大协议依赖）
+### 4.2 工单草案 A：VR 权威读取（拆 A1 / A2 两个可分开冻结的范围）
 
-- **目标**：新增只读工具 `coagent_get_validation_report({ workItemId, reportId? })`。
-- **范围**：`src/api/server.ts` 工具表（工具定义在 `:850` 起、控制面 VR 读在 `:1630–1648`）；`src/application/platform/validation-report-views.ts`（来源映射）；`src/application/platform.ts:1938 getValidationReport`（已存在，直接复用）。
-- **真实接口/数据流**：
-  - 入参 `{ workItemId, reportId? }`；
-  - **只允许 coordinator run 身份推 Mission**（身份来自 run token，不信 body 自述——同现有 `coagent_get_work_item` 的 fail-closed 写法）；
-  - 若带 `reportId` 走 `Platform.getValidationReport(missionId, reportId)`（`validation-report-views.ts:7`，内含 `report.missionId !== missionId → undefined`，即**跨归属 fail-closed**）；
-  - 若不带，按 `validation.reported` 与**当前 `submittedAttemptId`** 匹配（`validation-report-views.ts` 的 `validationReportKey` + 归属检查：`report.missionId`、`report.workItemId`、`report.attemptId` 三处都要对，否则 `continue`）。
-- **依赖**：`PlatformDeps.validation.reports`（缺则抛 `VALIDATION_DEPS_REQUIRED`，已有）。
-- **安全边界**：`pi tools/roles 注册不借 control`——只经 `roles.ts` / `tools.ts` 的现有工具注册面，**不**新增控制面动作，**不**借用 `POLICY_ACTION` 的 control 格（VR 读本身在控制面已用 `missionRead`，`src/api/server.ts:1630`）。
-- **已有测试接缝**：`test/validation-report-repository.test.ts`。
+> 拆成两张单的理由：Hub 侧新增是「工具真实实现 + 归属/来源校验」，pi 侧新增是「工具注册面」。两者目录不同、可分别冻结、可分别回滚；合成一张会让 pi 注册被迫跟随 Hub 合入节奏。
+
+#### 4.2-A1 草案 A1：Hub `coagent_get_validation_report` 只读 API 工具（run-token 身份）
+
+- **目录范围**：`src/api/server.ts`（agent 工具表 `agentTools` 起点 `:892`；`AGENT_TOOL_ACTION` 映射在 `src/application/policy-engine.ts:226`）；`src/application/platform/validation-report-views.ts`；复用已存在的 `src/application/platform.ts:1938 getValidationReport`。
+- **真实接口 / 数据流**：
+  - 拟议工具（**proposed**）：`coagent_get_validation_report({ workItemId, reportId? })`。
+  - **身份与 Mission 推导**：只用 `requireRun(req)`（`src/api/server.ts:783`）解析出的 `RunContext`（`src/api/run-tokens.ts:11`，含 `missionId` / `attemptId` / `role` / 可选 `workItemId`）。`missionId` **由 run token 推出**，不读请求体自述——对齐 `coagent_get_work_item` 的 fail-closed 写法（`server.ts:896`）。
+  - **只限 coordinator**：`run.role !== 'coordinator'` → 403；只经 `AGENT_TOOL_ACTION` 的 agent 只读格，**不借**控制面 `missionRead` 之外的控制动作。
+  - **显式 `reportId` 也必须过来源与归属校验**：`getValidationReport(ctx, missionId, reportId)`（`validation-report-views.ts:7-20`）**只保证 `report.missionId === missionId`**，即只保证 Mission 归属；它**不保证** `report.workItemId` / `report.attemptId` 对得上「本次请求的工作项与当前 submittedAttempt」。因此在 `reportId` 路径上还要补三处：
+    - `report.workItemId === workItemId`；
+    - `report.attemptId === item.submittedAttemptId`（当前提交 Attempt）；
+    - 该 `reportId` 出现在 `validation.reported` 事件里、且该事件匹配**当前** `submittedAttemptId`（键 = `validationReportKey(workItemId, submittedAttemptId)`，`src/application/platform/agent-view-helpers.ts:269`）。
+    - 任一处不匹配 → 一律「未找到」（fail-closed），不回显是哪一处不符，避免跨归属探测 `reportId`。
+  - **不带 `reportId`** 时：走 `workItemValidationReportViews` 的同一套三处 `continue` 归属检查（`validation-report-views.ts:23-64`）。
+- **缺证据语义（必须写死，不是顺手 reject）**：报告缺失 / 来源对不上时，**不得**据此直接判 reject 或替 L2 下结论；应**先升级**（工作项保留 `submitted` 态，不 reject），把「缺哪份证据」交回 L2/L3。只有拿到对得上的证据、再经正常验收路径，才谈 accept。理由：`getValidationReport` 是**只读查询**，不是验收权威；把一次读不到当 reject 依据，会把「查询通道缺证据」误伤成「执行者没做」。
+- **依赖**：`PlatformDeps.validation.reports`（`src/application/platform/types.ts:78` / `context.ts:61`）。缺注入时 `getValidationReport` 已抛 `VALIDATION_DEPS_REQUIRED`（`validation-report-views.ts:11-14`，已有），**不新增依赖**；不引入第三方依赖（红线：只在 `pg-store.ts` 用第三方）。
+- **真实既有测试接缝（必须有 API run 身份 fixture，不能只用 VR repository）**：
+  - 身份接缝：`test/api.test.ts` 的现成 fixture——开 Mission → `POST /api/missions/<id>/coordinator-attempts` 拿 coordToken → 带 token 调 `/api/agent/<tool>`（协调者 run 见 `test/api.test.ts:266-320`；同文件另有「执行者 token 调协调者工具被挡」与「请求体自述身份不被采信」两条可直接照抄）。
+  - 归属/来源接缝：`test/validation-report-repository.test.ts:45 sampleReport` 只提供 `ValidationReport` 形状；**只测仓储不够**——Mission 归属与三处来源校验必须在 API run 身份下用真实 HTTP 受审。
 - **最少关键测试（1–2 条）**：
-  1. 跨归属：`report.missionId`/`workItemId`/`attemptId` 任一不匹配 → 返回未找到（fail-closed）。
-  2. 身份：非 coordinator run 调 → 拒绝。
-- **优先级**：最高。它无大协议依赖、可独立合入。
+  1. 「API run 身份 + 跨归属 fail-closed」：协调者 token 拿 A 工作项的 `reportId` 去查 B 工作项 → 未找到；`reportId` 存在但 `attemptId` 不是当前 `submittedAttemptId` → 未找到。
+  2. 「身份」：执行者 token 调 → 拒绝（沿用现有 agent 工具错误形状）。
+- **优先级**：最高。Hub 侧无大协议依赖，可先于 pi 与闭环独立合入。
 
-### 4.3 工单草案 B：Hub 持久 amendment + impact 监督 + 收件/receipt + 最新验收恢复
+#### 4.2-A2 草案 A2：pi 侧 `coagent_get_validation_report` 注册
 
-- **范围（目录/函数）**：
-  - 新增持久变更模型（建议落在 `src/application/` 下与 `delivery.ts` 同层，或扩展现有仓储接口 `src/application/ports.ts`）；
-  - `src/application/orchestrator.ts`：run.wait（`:2076`）期间的同 writer 监督入口、impact hop 的限权 token 发放（对比 `:1889`）；
-  - `src/application/durable-scheduler.ts:587 hopIdempotencyKey`/`:615 nextLogicalHopCycle`：加 `purpose`/`changeId` 维度；
-  - `src/kernel/mission.ts:521 startCoordinatorAttempt`：复用不变量，不改；
-  - `src/application/platform/executor-submissions.ts:26` / `work-item-review.ts:8` / `validation-report-views.ts`：验收恢复与来源匹配。
-- **调用及数据流**：L3 确认 → Hub 落 `saved` → 同 writer 监督生成明确差异 → 唯一 L2 impact Attempt（只读/判断）→ 下发 → 回执分层 → 最新有效契约验收。
-- **依赖**：无第三方依赖（红线：只在 `pg-store.ts` 用第三方）。
-- **已有测试接缝**：`test/orchestrator.test.ts`、`test/orchestrator-standard-validation.test.ts`、`test/durable-scheduler-capacity.test.ts`、`test/durable-scheduler-fencing.test.ts`、`test/run-token-lifecycle.test.ts`、`test/validation-report-repository.test.ts`（**只读参考，本票不运行**）。
-- **最少关键测试（1–2 条）**：
-  1. 幂等/异内容拒绝：同 `changeId` 同内容 → 一条；同 id 异内容 → 拒绝。
-  2. 限权：impact hop 的 token 调派发/验收类动作 → 拒绝（普通 L2 的验收路径不为本能力开门）。
-- **不派发/不验收/不合入的强制**：impact Attempt 只能产 `diff`，`policy-engine.ts` 的 `POLICY_ACTION` 授权集合须剔除 `workItemDispatch` / `workItemReview` / `finalize*`。
+- **目录范围**：`C:/program1/coagent-pi/.coagent-worktrees/integration/src/tools.ts`（`coordinator` 的 SPECS，工具名清单见 `:94-268`；`coagentTools` `:519`、`coagentToolNames` `:559`）。**不改** `roles.ts` 的角色集合——`coordinator` 已在 `Role` 联合里，`toolAllowlist` 自动带出。
+- **真实接口 / 数据流**：新增一个 `ToolSpec`（**proposed**），`execute` 里与其它工具一样走 `client.call(spec.name, body)`（`tools.ts:534`）→ `PlatformClient.call`（`platform-client.ts:56`）→ `POST /api/agent/coagent_get_validation_report`。pi 侧**不做**归属/角色判断（规则只有 Hub 一份）。
+- **不借 control**：不进 `REVIEWER_TOOL_NAMES`、不碰 `reviewer-tools.ts`，只进 `coagent_*` 工具面。
+- **依赖**：无新增（`typebox` 已在用）。
+- **真实既有测试接缝**：`tools.test.ts`（工具注册面）、`platform-client.test.ts`（HTTP 调用形状）。
+- **最少关键测试（1–2 条）**：`coagentToolNames('coordinator')` 含该名、`coagentToolNames('executor')` 不含；失败时平台文案原样回给模型。
+- **依赖关系**：A2 需要 A1 端点在线才可用；但**注册可独立冻结/合入**（A1 未部署时调用得 404，不会静默放行）。
 
-### 4.4 工单草案 C：pi SDK 轮询 ACK + 安全边界
+### 4.3 工单草案 B：Hub 闭环的四张可分开冻结的草案（B1–B4）
 
-- **范围**：
-  - `C:/program1/coagent-pi/.coagent-worktrees/integration/src/runtime.ts:833`（`session.prompt` 期间起轮询）；
-  - 命中即 `session.steer(...)`（`agent-session.d.ts` 声明）；
-  - ACK 上报（`adapter_received/queued` / `session_consumed` / `executor_started`）；
-  - 安全边界沿用 `src/extension.ts` 的拦截与 `src/runtime.ts` 的 EOF 语义（`agent-entry.ts:25`）。
-- **数据流**：Hub inbox ← 轮询 → steer → SDK 队列 → 消费事件 → ACK → Hub receipt。
-- **依赖**：`@earendil-works/pi-coding-agent@0.87.1`（本地锁定）。
-- **已有测试接缝**：`src/runtime.test.ts`、`src/extension.test.ts`、`src/platform-client.test.ts`（只读参考）。
-- **最少关键测试（1–2 条）**：
-  1. 无变更时轮询**不改变**正常一跳行为。
-  2. 命中变更时调用 `steer` 且 ACK 分层正确（`queued` ≠ `consumed` ≠ `started`）。
+> 四块**依赖是一条链**（模型 ← impact ← 收件 ← 验收恢复），但可**分别冻结、分别实现、分别测试**。合成一张「巨单」会让冻结评审分不清哪块先跑。每块列：目录 / 实际函数 / proposed 新增接口 / 调用数据流 / 依赖 / 真实既有 fixture / 1–2 关键测试。
+
+#### 4.3-B1 草案 B1：持久 amendment 模型与幂等（无上游依赖，先做）
+
+- **目录范围**：新增持久变更模型，建议落在 `src/application/` 下与 `src/application/delivery.ts` 同层；仓储形状按现有风格扩进 `src/application/platform/types.ts` 的 `PlatformDeps`。
+- **实际函数（既有，只参照不改语义）**：`src/application/delivery.ts` 的收件箱 v1（`:7` 注释：`pending → acknowledged`，**没有租约、没有死信、没有重投**）——只借形状，不复用其语义；持久读写风格参照 `src/application/file-store.ts`（文件版零依赖）。
+- **拟议新增接口（proposed）**：`ChangeRecordRepository.append(change)` / `get(changeId)` / `listByRun(target)`；幂等键 = `changeId` + 内容 hash；`seq` 单调。
+- **调用数据流**：L3 确认 → `append` 落 `saved`；同 `changeId` 同内容 → 幂等返回既有；异内容 → 抛 `PlatformRuleError` 拒绝。
+- **依赖**：无（不依赖 impact / 收件 / 验收）。
+- **真实既有 fixture**：`test/validation-report-repository.test.ts`（`sampleReport` `:45`，以及 append-only / 幂等 / conflict / 跨重启 / legacy 缺键断言）是**同类持久仓储测试的现成模板**（只读参考，本票不运行）。
+- **最少关键测试（1–2 条）**：同 `changeId` 同内容 → 一条；同 `changeId` 异内容 → 拒绝；文件仓储跨重启仍幂等。
+
+#### 4.3-B2 草案 B2：impact 监督——purpose/changeId 唯一槽 + 限权 + 租约/容量/预算（依赖 B1）
+
+- **目录范围**：`src/application/durable-scheduler.ts`；`src/application/orchestrator.ts`；`src/api/run-tokens.ts`。
+- **实际函数（既有，必须保持语义）**：
+  - 唯一槽：`hopIdempotencyKey()`（`durable-scheduler.ts:587`）与 `nextLogicalHopCycle()`（`:615`）——**并列追加** `purpose` / `changeId` 维度，**不改**现有字段含义（否则污染普通 hop 幂等）；未完成逻辑 hop 复用同一 open 行，只有 `completed` 释放槽位。
+  - 领取与租约：`#claimEnqueuedHopWithCapacity()`（`orchestrator.ts:2458`）/ `#trustedQueueClaim()`（`:2683`，只抄 id/owner/代次）/ `#renewHopLease()`（`:2567`，用 `claimGeneration` 判活租约，同毫秒续租是 no-op）。
+  - 容量与公平：`CAPACITY_DIMENSIONS`（`durable-scheduler.ts:226`，五维 `global/project/role/runtime/profile`）、`decideCapacityClaim()`、`#capacityEligible()`（`orchestrator.ts:2529`）——impact hop 必须走**同一套**五维容量，**不得**退回单 id claim 绕过上限。
+  - 预算：`#enforceAuthoritativeBudget()`（`orchestrator.ts:1619`，PRE/POST 合一入口）不变。
+  - kernel 不变量：`startCoordinatorAttempt()`（`src/kernel/mission.ts:521`）「同一 Mission 同时只一个 in_progress coordinator」**复用不改**。
+- **拟议新增接口（proposed）**：impact hop 的 `purpose='impact'` + `changeId` 维度；**限权 token**——`RunTokenRegistry.issue`（`src/api/run-tokens.ts:28`）发的 claim 冻结不变，但按 impact 身份把 `AGENT_TOOL_ACTION` / `POLICY_ACTION` 里的 `workItemDispatch` / `workItemReview` / `finalize*` 从授权面剔除。
+- **调用数据流**：B1 落 `saved` → 同 writer 起 impact hop（唯一槽）→ 唯一 L2 impact Attempt（只读/判断）→ 产出明确 `diff`。
+- **依赖**：B1（模型与 `changeId`）。
+- **真实既有 fixture**：`test/durable-scheduler-capacity.test.ts`（`hop` `:33` / `active` `:51` / `limits` `:64` / `eligible` `:68` / `memoryCapacityRepo` `:72`，file claimAvailable 五维断言）、`test/durable-scheduler-fencing.test.ts`（`queuedHop` `:40` / `claimedHop` `:59`，陈旧 generation 拒写）、`test/run-token-lifecycle.test.ts`（`:29` issue 冻结 claim，调用方事后改对象不影响已发卡）、`test/orchestrator.test.ts`（`harness` `:88`、`trackExecAStarts` `:162`）。**只读参考，本票不运行。**
+- **最少关键测试（1–2 条）**：同 `changeId` 只有一个 in_progress impact 槽（重入复用同一 open 行）；impact token 调派发/验收类动作被拒（普通 L2 路径不为本能力开门）；陈旧 `claimGeneration` 不得消费变更。
+
+#### 4.3-B3 草案 B3：收件 / receipt 的 HTTP 身份与 generation 校验（依赖 B1、B2）
+
+- **目录范围**：Hub 侧新增收件端点（`src/api/server.ts`）；receipt 持久形状（`src/application/`，与 B1 同层）。
+- **实际函数（既有，复用）**：`requireRun`（`server.ts:783`）解 run token；`#renewHopLease`（`orchestrator.ts:2567`）的 `claimGeneration` 判据同源。
+- **拟议新增接口（proposed）**：pi 轮询用的收件端点；receipt 分层字段 `saved` / `adapter_received` / `session_consumed` / `executor_started` / `verified`（§3.5）。
+- **调用数据流**：pi 轮询 → 收件端点；身份**只从 run token** 解出，**不读 body**；投递内容比对 `targetAttemptId` + `claimGeneration`；generation 落后 → 拒绝/隔离，不静默处理。
+- **依赖**：B1（变更记录）、B2（run token 与 generation 来源）。
+- **真实既有 fixture**：`test/run-token-lifecycle.test.ts`（issue 冻结 claim / revoke 只吊该 Attempt）、`test/orchestrator.test.ts:1040` 起「平台守卫在真实 HTTP 上生效」的真实 HTTP 接缝。
+- **最少关键测试（1–2 条）**：无活 token / 陈旧 generation 的收件请求被拒；收到 ACK 只写到 `adapter_received`，**不得**写成 `verified`。
+
+#### 4.3-B4 草案 B4：提交 snapshot 与最新验收恢复（依赖 B1、B3）
+
+- **目录范围**：`src/application/platform/executor-submissions.ts`、`src/application/platform/work-item-review.ts`、`src/application/platform/validation-report-views.ts`。
+- **实际函数（既有，扩事件字段，不新造事件种类）**：
+  - `submitExecutionResult()`（`executor-submissions.ts:26`）——已把 `executionResult` 绑到**实际提交它的** executor Attempt；扩展记录实际 snapshot hash（**proposed**）。
+  - `reviewExecutionResult()`（`work-item-review.ts:8`）——accept/reject 语义与 `contractRevision` 记录不变；变更场景对齐**最新有效契约**。
+  - `workItemValidationReportViews()`（`validation-report-views.ts:23`）——保留旧 `submittedAttemptId` 记录，不覆写；靠 `validationReportKey` 区分来源。
+- **调用数据流**：执行者提交记实际 snapshot hash → L2 按最新有效契约验收 → 旧 `submitted` 保留为可区分记录。
+- **依赖**：B1（模型）、B3（receipt）。
+- **真实既有 fixture**：`test/orchestrator-standard-validation.test.ts`（`harness` `:179`、`runStandardChain` `:250`、`liveItem` `:267`）、`test/orchestrator.test.ts:352`「成功 executor 使用冻结 WorkOrder.allowedScope 检查点」、`test/validation-report-repository.test.ts`。
+- **最少关键测试（1–2 条）**：提交 snapshot hash 与当前契约/工单对不上时不静默套用；旧 `submittedAttemptId` 的报告在收到新提交后仍可区分、不被覆写。
+
+**B 段共同红线**：impact Attempt 只能产 `diff`，**不派发、不验收、不合入**；普通 L2 的验收/合入路径不为本能力开门；单写者语义（`src/application/lock.ts`）不引入第二写者。
+
+### 4.4 工单草案 C：pi 运行期 poll/steer + ACK（含 platform-client / runtime / extension 实际范围）
+
+- **目录范围（实际文件与函数）**：
+  - `src/runtime.ts`：轮询在 `session.prompt(spec.instruction)`（`:833`）**运行期间**起；命中即 `session.steer(...)`。既有观测 `session.subscribe`（`:758`）与 `createAgentSession`（`:705`）不改语义；EOF 入口 `src/agent-entry.ts:25` 原样保留。现有 PI-END1 补救轮（`runtime.ts:844` 第二次 `session.prompt(reminder)`）**不是**可驱动的新输入通道，不并入本能力。
+  - `src/platform-client.ts`：收件/ACK 必须走 `PlatformClient.get`（`:43`，适配层取上下文）或 `PlatformClient.call`（`:56`，工具调用）——**这是 adapter↔Hub 的唯一耦合点**，轮询**不得**另开裸 `fetch`。
+  - `src/extension.ts`：安全边界由既有 `createCoagentExtension`（`:82`）承担——`pi.registerTool`（`:94`）、`pi.on('tool_call')`（`:128`，Policy Gate）、`pi.on('tool_execution_end')`（`:165`）。本草案**只新增轮询/steer/ACK**，不放宽这些拦截。
+- **数据流**：Hub 收件端点 ← `PlatformClient` 轮询 → `session.steer` → SDK 队列 → 消费事件（`subscribe`）→ ACK 分层 → Hub receipt。
+- **安全边界（保留）**：写越界 / 危险 git 拦截、policy 门禁不因本能力放宽；ACK 只写自己那一层。
+- **ACK 不能证明应用（必须写死）**：`adapter_received` / `queued`（steer 入队）与 `session_consumed`（SDK 消费 `message_start`）**都不等于**执行者已按新差异行动；`executor_started` 是模型自述，仍非应用证据；只有独立证据（`verified`）才认。依据：`steer` 返回 `Promise<void>`，只承诺「已入队 / 已受理」（§1.6 / §1.10.6）。
+- **依赖**：`@earendil-works/pi-coding-agent@0.87.1`（本地锁定）；Hub 收件端点（B3）。
+- **真实既有 fixture**：`src/runtime.test.ts`、`src/platform-client.test.ts`、`src/extension.test.ts`（只读参考，本票不运行）。
+- **最少关键测试（1–2 条）**：无变更时轮询**不改变**正常一跳行为；命中变更时调用 `steer` 且 ACK 逐层分开（`queued` ≠ `consumed` ≠ `started`，且都不冒充 `verified`）。
 - **红线**：**不新增第二写者**——pi 只经 HTTP 唯一 Hub 读/ACK。
 
-### 4.5 工单草案 D：独立 L3 插件 endpoint binding（另列的必要草案，本票不执行）
+### 4.5 工单草案 D：L3 插件 binding + reviewer-tools 权威 HTTP read 消费者（另列的必要草案，本票不执行）
 
-- **背景**：§4.0 的"未来唯一服务暴露独立状态 + binding"需要显式 `endpoint` / `stateId` / `instanceId` / `apiVersion`。
-- **范围**：`coagent-pi` 的 `reviewer-extension.ts`（配置读取 `:76`）与新增 binding 校验；**不**改 `reviewer-tools.ts` 的 CLI 转发语义。
-- **依赖**：无。
-- **已有测试接缝**：`reviewer-extension` 相关测试（如 `extension.test.ts`）。
-- **最少关键测试（1–2 条）**：binding 缺失/版本不符 → fail-closed；空档冻结期间操作 → 拒绝。
-- **状态**：**本票仅列必要草案**，不实现、不部署。
+> **不能排除 `reviewer-tools.ts`**：现有 CLI 直读 state 只是本地排查，**不是**权威运行查询（§4.1）。要让独立状态流程接上「唯一持状态服务」，必须**同时**改 `reviewer-extension.ts` 的配置/握手与 `reviewer-tools.ts` 的工具消费者。
 
-### 4.6 向后兼容能力协商与空档部署顺序
+- **D1 配置 / 握手 binding（`reviewer-extension.ts`）**：
+  - 实际：`REVIEWER_ENV`（`:31`）、`reviewerConfigFromEnv`（`:71`）、`parseReviewerConfig`（`reviewer-tools.ts:174`）。现有 `hub` / `projectRepo` 是 **repo 路径 / 工作目录**语义，**不是 endpoint**——**不得偷换其含义**。
+  - **拟议新增（proposed）**：为 HTTP 连接**另起配置名**（如 `COAGENT_REVIEWER_ENDPOINT` / `..._STATE_ID` / `..._INSTANCE_ID` / `..._API_VERSION`），与既有 `hub` / `state` 并存；握手校验 `endpoint` / `stateId` / `instanceId` / `apiVersion` 齐全且 `apiVersion` 相符，缺失或版本不符 → **fail-closed**（对照 `src/l3.ts:145 requireLiveIdentity` 与 `src/api/server.ts:74 API_VERSION`）。
+- **D2 权威 HTTP read 工具消费者（`reviewer-tools.ts`）**：
+  - 实际：`L3_SCRIPT`（`:29`）/ `RUN_MISSION_SCRIPT`（`:30`）、`nodeCommand`（`:238`）、`runL3`（`:349`）、`createReviewerTools`（`:378`）、注入面 `ReviewerProcessRuntime`（`:79`）/ `createDefaultReviewerRuntime`（`:196`）。现状这些工具**全走 CLI**（如 `coagent_get_inbox` → `l3 inbox`）。
+  - **拟议新增（proposed）**：只读工具新增一条**HTTP 消费者**，连**唯一持状态服务**并校验上面四元 binding；**无 CLI 文件 fallback**——拿不到 HTTP 能力时**显式报错 / 停住**，绝不回退到直读 state 文件（那正是 §4.1 禁止的「冒充权威查询」）。
+  - **HTTP 能力缺失标待实现**：pi 侧 HTTP read 通路**尚不存在**，本草案标注 **【待实现】/ 现状 unsupported**，由 L3 冻结后才实施。
+- **测试接缝（复用，不写错 fixture）**：
+  - `reviewer-tools.test.ts:36 sampleInput` / `:47 recordingRuntime`——把 `runSync` 替身换成**本地 HTTP 桩**（**不得**指向真平台仓）。
+  - `reviewer-extension.test.ts:42 sampleInput` / `:55 recordingRuntime`、`createReviewerExtension`（`reviewer-extension.ts:160`）、`ReviewerClock`（`reviewer-extension.ts:51`）。
+  - **不要**把 `extension.test.ts`（托管 agent 扩展，`createCoagentExtension`）误当 reviewer fixture——两者是不同工具面（`roles.ts` 的 `Role` vs `ReviewerRole`）。
+- **依赖**：无第三方新增。
+- **最少关键测试（1–2 条）**：binding 缺失 / `apiVersion` 不符 → fail-closed；HTTP 能力不可用时**不得**回退到 CLI 文件读。
+- **运维约束（保留）**：独立状态**不迁 3101、不开第二 writer、本票不启动服务**；运维顺序（唯一服务暴露 + 空档冻结）**仅列为未来冻结草案**，本票不执行。
 
-- **能力协商**：适配器**显式声明**支持"轮询 + steer + ACK"；未声明 → 变更显式 pending（§3.3）。风格对齐现有 `runtime.capabilities` 事件（`src/runtime/spawn.ts` 的 `commandActivityClassification: 'v1'`，只接受**精确** v1，否则丢弃）。
-- **空档部署顺序（必须全部就绪才启用闭环）**：
-  1. 先上 **Hub 兼容能力 + VR（草案 A/B 的只读部分）**——Hub 侧先能落变更、能协商；
-  2. 再上 **pi（草案 C）**——适配器具备轮询/ACK；
-  3. **启用闭环需全部就绪**：Hub、pi、限权与 receipt 都在位后才允许"变更下发到在途"。
-- **不热改当前 Attempt**：部署**不改变**已经在跑的 Attempt（不重启、不替换其 spec）；现有在途运行继续按旧契约跑完，闭环只对**新起**的 hop 生效。
-- **部署前需空档冻结**：涉及独立服务/binding 的操作（草案 D）需在无在途操作的空档进行。
+### 4.6 依赖顺序与空档部署
+
+- **依赖链（与 §4.3 的 B1–B4 对齐）**：
+  1. **B1**（持久 amendment 模型 + 幂等）——无上游依赖，先做。
+  2. **A1**（Hub VR 只读工具）——与 B1 并行；Hub 侧只读，无大协议依赖。
+  3. **B2**（impact 监督：唯一槽 + 限权 + 容量/租约/预算）——依赖 B1。
+  4. **A2**（pi VR 工具注册）——依赖 A1 端点存在（可先冻结；端点未上则 404，不静默放行）。
+  5. **B3**（收件 / receipt 身份与 generation 校验）——依赖 B1、B2。
+  6. **C**（pi poll/steer + ACK）——依赖 B3 端点。
+  7. **B4**（提交 snapshot + 最新验收恢复）——依赖 B1、B3。
+  8. **D1/D2**（L3 插件 binding + reviewer-tools HTTP read）——依赖「未来唯一服务暴露」，最后且仅草案。
+- **能力协商**：适配器**显式声明**「轮询 + steer + ACK」；未声明 → 变更显式 pending（§3.3）。对齐 `runtime.capabilities` 的精确 `'v1'` 风格（`src/runtime/spawn.ts` 的 `commandActivityClassification: 'v1'`，只接受精确 v1，否则丢弃）。
+- **全部就绪才启用闭环**：Hub（B1–B4）+ pi（C）+ 限权与 receipt **都在位**后，才允许「变更下发到在途」；任一块缺失，闭环保持 **unsupported / 不启用**。
+- **不热改当前 Attempt**：部署**不改变**已在跑的 Attempt（不重启、不替换其 spec）；现有在途运行继续按旧契约跑完，闭环只对**新起**的 hop 生效。
+- **空档部署**：涉及独立服务 / binding（D1/D2）的操作须在**无在途操作的空档**冻结后进行（§4.0）；本票只列顺序，不执行。
 
 ---
 
