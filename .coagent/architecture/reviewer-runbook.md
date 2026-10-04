@@ -100,3 +100,9 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 服务持有唯一写者并驱动队列；前项等待门禁或 L3 终审时后项不启动。依赖仅在关联 Mission completed 后放行。启动时固定项目配置，后续改配置不影响在途任务和续跑工作区。失败停靠为 Mission 暂停与诊断待办，查明原因后走 resume；费用升级、检查点、挂起、放弃、重试及最终审查继续使用 Mission 入口。standard 由真实检视者签字并执行项目集成验证；lightweight 也须逐条验收和集成验证才完成。
 
 生产 run-plan 控制入口已退役返回410，离线执行不再创建平台或 PlanRun。历史 PlanRun 查询、决定与测试恢复逻辑保留；不要重新启动历史 Plan 运行。实际 AC4 仍保留原状态与基线，本次直接实施不伪造其平台交卷。前端另行设计，master 仍待用户说“合”。
+
+## 2026-10-04 插件值守与验证补充
+当前会话平台操作只经 v5 L3 插件，不沿用上文历史 HTTP/CLI 写操作。协调者先让执行者跑定向自测，由工单 validation.commands 对实际交付提交执行全量；L3读取完整 ValidationReport，核对 argv/cwd、退出码、计数及提交来源。固定七处 HAOFF1 源码未变且全量 skipped=7 时，不为收集名称重复全量；代码变化、失败、缺失证据或平台对新提交来源的必需验证仍须执行。
+协调者当前 get_mission/get_work_item 只提供验证摘要，不能取得完整报告。缺报告先升级索取，保留 submitted；不得仅因读取缺口先 reject。已 rejected 不能直接 accept，必须在合法状态修订后重新派发、提交，再独立验收；不编辑状态，不伪造提交来源。COM2 的实际恢复保留原代码和定向证据，通过新 Attempt 的平台全量重新验证，完整历史保留。
+插件 pause 只限制后续调度，不保证打断运行中的 agent；当前没有已验证的在途追加指令/安全中止插件入口。恢复前查真实 hosted 退出状态与 activeLeases，不能把暂停当成已退出。
+独立 AC4-platform-closeout-20261004 已完成并合入 a756fc5；原历史 AC4 仍 parked、历史 PlanRun stopped，二者不得混称。COM1 b52973a、文档 e69aa30 和 COM2 36971f0 已合入 codex/communication-integration；服务仍运行 master d4f39c8，这些新改动尚未加载。
