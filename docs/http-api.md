@@ -863,6 +863,8 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ## agent 工具接口
 
+impact Run（`purpose='impact'` 的 run token）是只读身份：只放行 `GET /api/run/brief` 与映射到 missionRead / attemptGetBrief / attemptGetContext / workItemGetAgentDetail 的 `/api/agent/*` 读工具（如 get_mission、get_contract、get_project_context、get_work_item、get_validation_report），其余一切入口（含 finish、两种终审、控制写与未知工具）一律 403 `ACTION_DENIED`，且在被拒前不读 body、不落盘。绑定、来源与角色门禁对放行的读继续生效（例如 get_context 仍按实际来源门禁执行，impact 不解锁它）。purpose/changeId/role 只由可信调用方在发牌时配对写入，HTTP 没有签发端点，body 自述一律不采信；本阶段尚未启动 impact 运行监督。
+
 ### GET /api/run/brief
 
 鉴权：run token。参数：x-coagent-run必填。绑定本次运行的开跑简报，包含契约/工单与角色需要的上下文。

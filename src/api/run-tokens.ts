@@ -23,12 +23,22 @@ export interface RunContext {
     readonly owner: string;
     readonly claimGeneration: number;
   };
+  /**
+   * 发牌目的。'impact' 表示这张牌只做影响判断：HTTP 面把它当只读身份处理。
+   * 与 changeId 严格配对——少了 changeId 就分不清是哪一次变更的判断。
+   * 这个字段只由可信调用方在 issue 时给，**永远不从请求体读**。
+   */
+  readonly purpose?: 'impact';
+  readonly changeId?: string;
 }
 
 export class RunTokenRegistry {
   #byToken = new Map<string, RunContext>();
 
   issue(input: Omit<RunContext, 'token'>): RunContext {
+    // 校验必须在 randomUUID / 写入 Map 之前：非法输入不该消耗一个 token，
+    // 也不该在表里留下半张牌。
+    const purpose = validatePurpose(input);
     const token = randomUUID();
     const claim = input.claim
       ? Object.freeze({
@@ -43,6 +53,7 @@ export class RunTokenRegistry {
       role: input.role,
       ...(input.workItemId !== undefined ? { workItemId: input.workItemId } : {}),
       ...(claim ? { claim } : {}),
+      ...(purpose ? { purpose: purpose.purpose, changeId: purpose.changeId } : {}),
       token,
     });
     this.#byToken.set(token, context);
@@ -71,4 +82,36 @@ export class RunTokenRegistry {
       }
     }
   }
+}
+
+/**
+ * purpose / changeId 的可信配对校验。只有 issue 会调它。
+ *
+ * 这两个字段必须严格配对且只由可信调用方给出：给一半（有 changeId 无 purpose、
+ * 或有 purpose 无 changeId）都会让「哪张牌算 impact」变得含糊，而含糊的边界
+ * 在 HTTP 面就是「我记得我是只读」。没有完整 claim 的 impact 牌同样不签——
+ * 它要带着队列身份去过 fence，否则和其它 Queue Claim 门禁不一致。
+ */
+function validatePurpose(
+  input: Omit<RunContext, 'token'>,
+): { readonly purpose: 'impact'; readonly changeId: string } | undefined {
+  // 缺省即普通牌：旧调用方一行都不用改。
+  if (input.purpose === undefined && input.changeId === undefined) return undefined;
+  if (input.purpose !== 'impact' || input.changeId === undefined) {
+    throw new Error('purpose 与 changeId 必须同时给出，且 purpose 只能是 impact');
+  }
+  if (input.changeId.trim().length === 0) {
+    throw new Error('changeId 必须是 trim 后非空字符串');
+  }
+  if (input.role !== 'coordinator') {
+    throw new Error('impact 牌只能发给 coordinator');
+  }
+  if (!input.claim) throw new Error('impact 牌必须带队列领取身份');
+  if (input.claim.id.trim().length === 0 || input.claim.owner.trim().length === 0) {
+    throw new Error('impact 牌的 claim id / owner 必须是 trim 后非空字符串');
+  }
+  if (!Number.isSafeInteger(input.claim.claimGeneration) || input.claim.claimGeneration <= 0) {
+    throw new Error('impact 牌的 claimGeneration 必须是正整数');
+  }
+  return { purpose: 'impact', changeId: input.changeId };
 }
