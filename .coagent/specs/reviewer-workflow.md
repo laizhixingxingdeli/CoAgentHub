@@ -18,3 +18,5 @@ MCP 补充工具仅经本机 HTTP，stdio 采用逐行 JSON-RPC、初始化握�
 
 ## Codex L3 插件托管入口（2026-10-04）
 coagenthub-codex 0.2.2 经 POST /api/missions 创建 Standard Mission，经 POST /api/control/run-mission 启动服务托管运行。Contract 由平台保存并在启动时读取，Delivery 接收方来自真实会话绑定或显式 recipient；start 不能覆盖合同。GET /api/platform/status 仅返回持锁身份和运行观测，不让适配器访问状态文件。插件消费 NDJSON 长流并提供进程内有界观测；HTTP受理、启动确认、退出和业务交卷是不同状态，断流未知不自动重试。当前未实现跨 MCP 实例的启动去重，应先核实真实 runner；Delivery 仍由原桥接器实际投递后确认。
+
+插件值守补充 coagenthub_get_pools/get_pool_config/configure_role_pool，经既有候选健康和整角色配置接口处理，携带实际 revision，保留未相关配置；不读取凭据。文档经 coagenthub_get_document_proposals/decide_document 独立读取与裁决，approve/edit/withdraw 保留平台 revision/baseHash 和空档提交门禁。
