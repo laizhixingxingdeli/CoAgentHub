@@ -27,6 +27,13 @@ export interface QueuedHop {
    */
   readonly runtimeKind?: string;
   readonly profileId?: string;
+  /**
+   * Marks the hop as one impact-analysis follow-up. Only meaningful together with
+   * `changeId`, and only for the coordinator role: that pair is what separates two
+   * concurrent changes of the same work item, so each change gets its own slot.
+   */
+  readonly purpose?: 'impact';
+  readonly changeId?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -62,11 +69,45 @@ function timestamp(value: unknown, name: string): asserts value is string {
   }
 }
 
+/**
+ * Both fields or neither: an impact hop without a changeId would collapse every
+ * change onto one slot, and a changeId on a normal hop would silently split the
+ * ordinary scheduler slot away from its historical key.
+ */
+export type HopIdentity = {
+  readonly missionId: string;
+  readonly role: HopRole;
+  readonly workItemId: string;
+  readonly contractRevision: number;
+  readonly purpose?: 'impact';
+  readonly changeId?: string;
+};
+
+function isImpactIdentity(input: HopIdentity): boolean {
+  return input.purpose !== undefined || input.changeId !== undefined;
+}
+
+function validateHopIdentity(input: HopIdentity): void {
+  if (!isImpactIdentity(input)) return;
+  if (input.purpose !== 'impact') throw new Error('purpose must be impact when changeId is set');
+  if (typeof input.changeId !== 'string' || input.changeId.trim().length === 0) {
+    throw new Error('changeId must be a non-empty string when purpose is impact');
+  }
+  if (input.role !== 'coordinator') throw new Error('impact hops must use the coordinator role');
+}
+
+function validateHopCycle(value: unknown): asserts value is number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('attemptCycle must be a non-negative safe integer');
+  }
+}
+
 export function validateEnqueueHop(input: EnqueueHopInput): void {
   const runtimeInput = input as EnqueueHopInput & Record<string, unknown>;
   for (const field of ['status', 'owner', 'leaseUntil', 'claimGeneration', 'runtimeKind', 'profileId', 'lastFailure']) {
     if (Object.hasOwn(runtimeInput, field)) throw new Error(`${field} cannot be set when enqueueing`);
   }
+  validateHopIdentity(input);
   identity(input.projectId, 'projectId');
   identity(input.missionId, 'missionId');
   identity(input.workItemId, 'workItemId');
@@ -584,22 +625,23 @@ export function claimHopWithCandidate(
   return { ...claimed, runtimeKind: candidate.runtimeKind, profileId: candidate.profileId };
 }
 
-export function hopIdempotencyKey(input: {
-  readonly missionId: string;
-  readonly role: HopRole;
-  readonly workItemId: string;
-  readonly contractRevision: number;
+export function hopIdempotencyKey(input: HopIdentity & {
   readonly attemptCycle: number;
 }): string {
+  validateHopIdentity(input);
+  validateHopCycle(input.attemptCycle);
+  // JSON.stringify, not bare `:`-joining: a changeId carrying the separator would
+  // otherwise forge another change's key (e.g. 'a:b' vs 'a' + ':b').
+  if (isImpactIdentity(input)) {
+    return `impact:${JSON.stringify([input.missionId, input.role, input.workItemId, input.contractRevision, input.changeId])}:n${input.attemptCycle}`;
+  }
   return `${input.missionId}:${input.role}:${input.workItemId}:r${input.contractRevision}:n${input.attemptCycle}`;
 }
 
-function hopKeyPrefix(input: {
-  readonly missionId: string;
-  readonly role: HopRole;
-  readonly workItemId: string;
-  readonly contractRevision: number;
-}): string {
+function hopKeyPrefix(input: HopIdentity): string {
+  if (isImpactIdentity(input)) {
+    return `impact:${JSON.stringify([input.missionId, input.role, input.workItemId, input.contractRevision, input.changeId])}:n`;
+  }
   return `${input.missionId}:${input.role}:${input.workItemId}:r${input.contractRevision}:n`;
 }
 
@@ -614,13 +656,9 @@ function hopKeyPrefix(input: {
  */
 export function nextLogicalHopCycle(
   rows: readonly QueuedHop[],
-  input: {
-    readonly missionId: string;
-    readonly role: HopRole;
-    readonly workItemId: string;
-    readonly contractRevision: number;
-  },
+  input: HopIdentity,
 ): number {
+  validateHopIdentity(input);
   const prefix = hopKeyPrefix(input);
   const cycleOf = (key: string): number | undefined => {
     if (!key.startsWith(prefix)) return undefined;
