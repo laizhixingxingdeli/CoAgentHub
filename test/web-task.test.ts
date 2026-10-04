@@ -564,7 +564,7 @@ describe('环节分组', () => {
       { at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'coord-9', data: {} },
     ];
     const html = stageListHtml(rows, null, null, W4_CTX);
-    assert.ok(html.includes('这一跳还没结束，用量要等它收尾'), html);
+    assert.ok(html.includes('进行中 · 用量暂未上报'), html);
     assert.equal(html.includes('<span class="stage-usage">—</span>'), false);
     assert.equal(/undefined|NaN/.test(html), false, html);
   });
@@ -620,7 +620,7 @@ describe('环节分组', () => {
     assert.ok(html.includes('L3 检视者'), html);
     const l3 = html.slice(html.lastIndexOf('class="stage '));
     assert.equal(l3.includes('mission.waiting') || l3.includes('blocked.reported'), false, l3);
-    assert.equal(l3.includes('这一跳还没结束'), true, '未终态 L3 仍说在途');
+    assert.equal(l3.includes('事件记录 · 不单独计量'), true, '检视记录不冒充运行尝试');
   });
 
   test('命令族不逐条上屏：环节头汇总、清单可折叠、callId 去重、文本转义', async () => {
@@ -667,7 +667,7 @@ describe('环节分组', () => {
     assert.ok(running.includes('跑了 20 条命令'), running);
     assert.ok(running.includes('>平台<'), running);
     assert.ok(running.includes('L3 检视者'), running);
-    assert.ok(running.includes('这一跳还没结束，用量要等它收尾'), running);
+    assert.ok(running.includes('进行中 · 用量暂未上报'), running);
     assert.equal(running.includes('runtime.command.started'), false, running);
     assert.equal(running.includes('runtime.command_tracking'), false, running);
 
@@ -1084,7 +1084,7 @@ describe('实时输出', () => {
     });
     assert.ok(withUsage.includes('第一行'));
     assert.equal(withUsage.includes('undefined'), false, 'usage chunk 被当终端行拼进来了');
-    assert.match(withUsage, /tokens 1,234/);
+    assert.match(withUsage, /词元 1,234/);
     assert.match(liveLinesHtml([{ kind: 'tool', text: 'read a.ts' }]), /▸ read a\.ts/);
   });
 
@@ -1163,7 +1163,7 @@ describe('上下文采集指标', () => {
     assert.equal(html.includes('0 字节'), false, html);
     assert.equal(html.includes('简报'), false, html);
     const list = stageListHtml([ended()], null, null, {});
-    assert.ok(list.includes('这一跳没有上报上下文指标'), list);
+    assert.equal(list.includes('这一跳没有上报上下文指标'), false, '时间线不重复缺失指标说明');
     assert.equal(list.includes('简报 0'), false, list);
   });
 });
@@ -1616,7 +1616,7 @@ describe('真 API 字段喂真渲染函数', () => {
     }
     // 终端里没有 usage chunk 的形状。
     assert.equal(liveHtml.includes('undefined'), false);
-    assert.match(liveHtml, /tokens 14/);
+    assert.match(liveHtml, /词元 14/);
   });
 
   test('任务表点进去的那条 id 与路由要读的是同一个键', async () => {

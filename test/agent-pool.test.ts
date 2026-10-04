@@ -1162,7 +1162,7 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.equal(errorText(null, 500), 'HTTP 500', '拿不到 JSON 时也要说得出是哪个状态码');
   });
 
-  test('文件形状：pool.js 是可服务的扁平小写名，外壳接到 #/pool', () => {
+  test('文件形状：pool.js 是可服务的扁平小写名，兼容 #/pool，主导航使用角色与模型', () => {
     assert.ok(existsSync(join(webRoot, 'pool.js')), '缺 src/web/pool.js');
     assert.match(
       'pool.js',
@@ -1174,8 +1174,8 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(html, /<link rel="modulepreload" href="\/pool\.js" \/>/);
     // app.js 会 import 它；再写一个会执行的 <script> 就是执行两遍、监听注册两次。
     assert.equal(/<script[^>]+src="\/pool\.js"/.test(html), false, 'pool.js 被写成会执行的 script');
-    assert.match(html, /href="#\/pool"[^>]*data-route="pool"/);
-    assert.ok(html.includes('>资源池</a>'), '可见文字仍是「资源池」');
+    assert.match(html, /href="#\/agents"[^>]*data-route="agents"/);
+    assert.ok(html.includes('角色与模型</a>'), '主导航为角色与模型');
     assert.equal(existsSync(join(webRoot, 'pool.css')), false, '不另起 pool.css');
 
     const shell = readWeb('app.js');

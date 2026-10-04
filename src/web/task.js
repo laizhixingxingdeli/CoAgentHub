@@ -6,8 +6,8 @@
  * 测试里，而"字段名读错了"这类错在页面上是没有声音的——那一格永远是 —，
  * 页面照样跑。纯函数才能在 node 里把真 JSON 喂进去把它抓出来。
  *
- * 呈现层的形状：左边一条**按环节折叠**的进度视图（一个环节 = 同一个 attemptId
- * 下的一跳），右上是这一跳实际传递给下一跳的正文，右下常驻实时输出。
+ * 呈现层是一条运行时间线（一个环节 = 同一个 attemptId 下的一跳），
+ * 选中环节的沟通与用量独立呈现，当前实时输出始终可见。
  * 事件流不再平铺：一条跑完的任务有三十几条事件，摊开之后人找不到
  * 「现在走到哪一段、这一跳花了多少、上一个 agent 到底说了什么」。
  *
@@ -341,7 +341,7 @@ function stageUsageLine(events, group, ctx) {
   const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
   const ended = rows.find((e) => e && e.kind === 'attempt.ended');
   const usage = ended && ended.data && ended.data.usage;
-  if (usage) return usageLine(usage);
+  if (usage && usage.quality !== 'unknown') return usageLine(usage);
   if (ended) return '这一跳没有上报用量';
   const reviewTail = !(group && group.attemptId) && (role === 'reviewer' || role === 'platform');
   if (ctx && isTerminal(ctx.status)) {
@@ -350,7 +350,10 @@ function stageUsageLine(events, group, ctx) {
     if (reviewTail) return finalReviewSummary(ctx.finalReview);
     return '这一跳没有上报用量';
   }
-  return '这一跳还没结束，用量要等它收尾';
+  if (!group?.attemptId) return '事件记录 · 不单独计量';
+  const provisional = ctx?.usageByAttempt?.[group.attemptId];
+  if (provisional && provisional.quality !== 'unknown') return '暂计 · ' + usageLine(provisional);
+  return '进行中 · 用量暂未上报';
 }
 
 /* ===================== 顶部：独立用量卡 ===================== */
@@ -479,7 +482,10 @@ function eventRowHtml(event, index, selectedKey, ctx) {
  * 不传（首屏）时一个 open 都不写。
  */
 export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, expandedIds) {
-  const groups = groupActivity(activity);
+  const groups = groupActivity(activity).sort((a, b) => {
+    const left = Date.parse(firstAt(a.events)), right = Date.parse(firstAt(b.events));
+    return Number.isFinite(left) && Number.isFinite(right) ? left - right : 0;
+  });
   if (groups.length === 0) return '<div class="empty">还没有事件。这条任务刚开始。</div>';
   const context = ctx || {};
   const expanded = new Set(expandedIds || []);
@@ -512,14 +518,15 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
         + '<summary class="stage-head" data-stage-select>'
         +   '<span class="stage-name">' + esc(name) + '</span>'
         +   '<span class="chip ' + esc(tone) + '">' + esc(badge) + '</span>'
+        +   '<span class="stage-clock mono">' + esc(formatClock(firstAt(g.events))) + ' → ' + esc(g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) ? '进行中' : formatClock(lastAt(g.events))) + '</span>'
         +   '<span class="stage-dur mono">'
-        +     esc(formatDuration(firstAt(g.events), lastAt(g.events))) + '</span>'
+        +     esc(formatDuration(firstAt(g.events), g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) && context.nowIso ? context.nowIso : lastAt(g.events))) + '</span>'
         +   '<span class="stage-usage">' + esc(stageUsageLine(g.events, g, context)) + '</span>'
         +   (cmds.length > 0
           ? '<span class="stage-cmds">' + esc('跑了 ' + commandCountLabel(cmds.length)) + '</span>'
           : '')
         +   (summary ? '<span class="stage-summary">' + esc(summary) + '</span>' : '')
-        +   contextMetricsCompactHtml(g.events)
+        +   (contextMetricsFromEvents(g.events) ? contextMetricsCompactHtml(g.events) : '')
         + '</summary>'
         + '<ul class="evt-list">' + rows + '</ul>'
         + commandFoldHtml(g.events)
@@ -561,7 +568,7 @@ const workItemOf = (ctx, workItemId) => {
 /** 协调者调查规划：plan 的五块正文。 */
 function planBlock(plan) {
   const p = plan || {};
-  return section('调查与规划结论', '<dl class="fields">'
+  return section('调查与规划结论（当前版本）', '<dl class="fields">'
     + field('发现', txt(p.findings))
     + field('根因', p.rootCause === undefined || p.rootCause === null ? '没有单独记根因' : p.rootCause)
     + '</dl>'
@@ -635,14 +642,18 @@ function evidenceListHtml(evidence) {
 function executorBlock(ctx, events, attempt) {
   const carrier = (events || []).find((e) => e && e.workItemId);
   const item = workItemOf(ctx, carrier && carrier.workItemId);
-  const result = item && item.executionResult;
-  const parts = [result
+  const historical = item?.attemptIds?.length && attempt?.attemptId && item.attemptIds.at(-1) !== attempt.attemptId;
+  const result = historical ? null : item && item.executionResult;
+  const parts = [item?.order ? '<div class="field-label">协调者 → 执行者 · 工单（当前版本）</div>'
+    + '<dl class="fields">' + field('目标', txt(item.order.objective)) + field('要求', txt(item.order.requiredBehaviour)) + '</dl>'
+    + '<div class="field-label">验收标准</div>' + listField(item.order.acceptance) : ''];
+  parts.push(result
     ? '<dl class="fields">'
       +   field('结果', txt(result.summary))
       +   field('遗留说明', result.notes && String(result.notes).trim() ? result.notes : '没有写遗留问题')
       + '</dl>'
       + '<div class="field-label">改动的文件</div>' + listField(result.changedFiles)
-    : '<div class="note">这一跳还没有执行者交回结果。</div>'];
+    : '<div class="note">' + (historical ? '本次历史交回正文未保留，请查看本环节输出与证据。' : '这一跳还没有执行者交回结果。') + '</div>');
   parts.push('<div class="field-label">证据</div>' + evidenceListHtml(attempt && attempt.evidence));
   return section('执行者交回的正文', parts.join(''));
 }
@@ -658,7 +669,7 @@ function reviewBlock(ctx, events) {
   if (ids.length === 0) {
     return section('技术验收', '<div class="note">这一跳没有写验收的是哪个工作项。</div>');
   }
-  return section('技术验收', ids
+  return section('技术验收（当前记录）', ids
     .map((id) => {
       const item = workItemOf(ctx, id);
       const review = item && item.lastReview;
@@ -798,7 +809,8 @@ export function stageDetailHtml(group, ctx, attempt) {
   }
   const causation = (events.find((e) => e && e.causationId) || {}).causationId;
   const endedUsageEvent = [...events].reverse().find((e) => e && e.kind === 'attempt.ended' && e.data && e.data.usage);
-  const stepTokens = endedUsageEvent ? formatUsage(endedUsageEvent.data.usage).total : null;
+  const observedUsage = endedUsageEvent?.data.usage || attempt?.usage;
+  const stepTokens = observedUsage && observedUsage.quality !== 'unknown' ? formatUsage(observedUsage).total : null;
   // 非 L3 的无 attemptId 不能套 L3 那句「自己动手」——那是谎。
   // 不新写叙事：就用 formatAttemptId 对空 id 的已有说明。
   const attemptShown = group.attemptId
@@ -819,9 +831,11 @@ export function stageDetailHtml(group, ctx, attempt) {
     +   (workItemIds.length ? ' · ' + esc(fieldLabel('WorkItem')) + ' ' + esc(workItemIds.join('、')) : '')
     +   (causation ? ' · ' + esc(fieldLabel('causationId')) + ' ' + esc(causation) : '')
     + '</div>'
-    + '<div class="detail-step-token"><span>本步骤 Token</span><strong class="mono">' + (stepTokens === null ? (isTerminal(context.status) ? '未上报' : '进行中') : esc(num(stepTokens))) + '</strong></div>'
-    + contextMetricsBlockHtml(events)
-    + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>');
+    + '<div class="detail-step-token"><span>本步骤词元</span><strong class="mono">' + (stepTokens === null ? '未上报' : esc(num(stepTokens))) + '</strong></div>'
+    + usageFieldsHtml(observedUsage)
+    + (contextMetricsFromEvents(events) ? contextMetricsBlockHtml(events) : '')
+    + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>')
+    + (attempt?.output ? '<details class="detail-block"><summary>本环节输出</summary><pre class="term">' + esc(String(attempt.output).slice(-20000)) + '</pre></details>' : '');
 }
 
 /* ===================== 上下文采集（attempt.ended.contextMetrics） ===================== */
@@ -1093,7 +1107,7 @@ export function liveMetaHtml(live) {
   const lines = (live && live.lines) || [];
   const count = lines.filter((c) => c && c.kind !== 'usage' && c.kind !== 'note').length;
   return '<span class="muted">' + esc(num(count)) + ' 行</span>'
-    + (live && live.usage ? '<span class="mono muted">tokens ' + esc(num(live.usage.total)) + '</span>' : '');
+    + (live && live.usage ? '<span class="mono muted">词元 ' + esc(num(live.usage.total)) + '</span>' : '');
 }
 
 /**
@@ -1182,7 +1196,7 @@ const liveStates = new Map();
 function liveStateOf(missionId) {
   let s = liveStates.get(missionId);
   if (!s) {
-    s = { cursor: 0, lines: [], usage: null };
+    s = { cursor: 0, lines: [], usage: null, usageByAttempt: {} };
     liveStates.set(missionId, s);
   }
   return s;
@@ -1199,24 +1213,11 @@ let epoch = 0;
  * 实时输出不再有 tab，所以它的外框**始终在**——每切一次环节都不该把它重建掉。
  */
 export function skeletonHtml() {
-  return '<div class="task">'
+  return '<div class="task mission-process">'
     + '<header class="card task-head" id="task-head"><div class="note">加载中…</div></header>'
-    + '<section class="card usage-card" id="task-usage"><div class="note">用量读取中…</div></section>'
-    + '<div class="task-cols">'
-    +   '<section class="task-left">'
-    +     '<div class="tabs task-main-tabs"><span class="tab" data-active="1">任务时间线</span><span class="tab">任务概览</span><span class="tab">相关文件</span><span class="tab">子任务</span></div>'
-    +     '<div class="stage-list" id="task-stages"><div class="empty">加载中…</div></div>'
-    +   '</section>'
-    +   '<section class="task-right">'
-    +     '<div class="card task-side-card">'
-    +       '<div class="task-panel-tabs"><button type="button" class="task-panel-tab active" data-task-panel-tab="detail">当前详情</button><button type="button" class="task-panel-tab" data-task-panel-tab="events">执行事件</button><button type="button" class="task-panel-tab" data-task-panel-tab="files">修改的文件</button></div>'
-    +       '<div data-task-panel="detail" id="task-detail"><div class="note">加载中…</div></div>'
-    +       '<div data-task-panel="events" hidden><div class="pane-title">实时输出</div><div id="task-live"><div class="note">输出读取中…</div></div></div>'
-    +       '<div data-task-panel="files" hidden id="task-changes"><div class="note">' + esc(changesLoadingText()) + '</div></div>'
-    +     '</div>'
-    +   '</section>'
-    + '</div>'
-    + '</div>';
+    + '<section class="card timeline-panel"><div class="timeline-toolbar"><h2>运行时间线</h2><button data-stage-collapse>收起历史</button><button data-stage-current>定位当前</button></div><div class="stage-list" id="task-stages"></div></section>'
+    + '<div class="task-cols"><section class="card current-output"><h2>当前实时输出</h2><div id="task-live"></div></section>'
+    + '<section class="task-right"><div class="card task-side-card"><div class="task-panel-tabs"><button class="task-panel-tab active" data-task-panel-tab="detail">环节沟通与用量</button><button class="task-panel-tab" data-task-panel-tab="files">修改的文件</button></div><div data-task-panel="detail" id="task-detail"></div><div data-task-panel="files" hidden id="task-changes"></div></div></section></div><details class="card" id="mission-usage-summary"><summary>任务累计用量</summary><section id="task-usage"></section></details><details class="card"><summary>完整任务契约</summary><pre id="task-contract"></pre></details></div>';
 }
 
 /**
@@ -1296,6 +1297,8 @@ function paintHead(st) {
   if (!st.view) return;
   // 当前时间是 DOM 层的事；纯函数只收字符串。
   st.els.head.innerHTML = headerHtml(st.view, st.activity, new Date().toISOString());
+  const contract = st.container.querySelector('#task-contract');
+  if (contract) contract.textContent = JSON.stringify(st.view.contract || {}, null, 2);
 }
 
 function paintUsage(st) {
@@ -1319,6 +1322,8 @@ function detailCtx(st) {
     escalationLog: v.escalationLog || [],
     finalReview: v.finalReview,
     status: v.status,
+    nowIso: new Date().toISOString(),
+    usageByAttempt: st.live.usageByAttempt,
   };
 }
 
@@ -1346,45 +1351,41 @@ function collectExpanded(st) {
  * 落到 DOM 上（点击的默认行为在事件派发之后才跑），此刻从 DOM 收会收到
  * 「还没展开」，重画反而把刚点开的那一组折回去。
  */
-function timelineLeadHtml(st) {
-  const v = st.view || {};
-  const intent = v.contract && v.contract.intent ? String(v.contract.intent) : '（没有契约）';
-  const workItems = Array.isArray(v.workItems) ? v.workItems : [];
-  const statusText = (status) => status === 'accepted' ? '已完成'
-    : status === 'submitted' ? '待验收'
-    : status === 'dispatched' || status === 'in_progress' ? '执行中'
-    : status === 'rejected' ? '需重做'
-    : status === 'retired' ? '已作废' : '等待中';
-  const tone = (status) => status === 'accepted' ? 'done'
-    : status === 'rejected' ? 'failed'
-    : status === 'submitted' ? 'unconfirmed'
-    : status === 'dispatched' || status === 'in_progress' ? 'running' : 'queued';
-  const requirement = '<div class="timeline-requirement">'
-    + '<div class="row-sub">用户需求</div><div class="row-title">' + esc(intent) + '</div>'
-    + '<div class="row-sub">任务进入 CoAgentHub 后，由检视 / 协调 / 执行链路继续处理。</div></div>';
-  if (workItems.length === 0) return requirement;
-  const rows = workItems.map((item, index) => {
-    const tokens = (st.activity || []).reduce((sum, event) => {
-      if (!event || event.kind !== 'attempt.ended' || event.workItemId !== item.id || !event.data?.usage) return sum;
-      return sum + formatUsage(event.data.usage).total;
-    }, 0);
-    return '<div class="timeline-subtask"><span class="subtask-index">' + (index + 1) + '</span>'
-      + '<span class="subtask-name">' + esc(item.title || item.id) + '</span>'
-      + '<span class="chip ' + tone(item.status) + '">' + statusText(item.status) + '</span>'
-      + '<span class="mono muted">' + (tokens ? esc(num(tokens)) + ' tokens' : '') + '</span></div>';
-  }).join('');
-  return requirement + '<div class="timeline-subtasks"><div class="pane-title">子任务 · ' + workItems.length + '</div>' + rows + '</div>';
-}
-
 function paintStages(st, expanded) {
   st.expanded = expanded === undefined ? collectExpanded(st) : expanded;
-  st.els.stages.innerHTML = timelineLeadHtml(st) + stageListHtml(
+  const scroll = st.els.stages.scrollLeft;
+  st.els.stages.innerHTML = stageListHtml(
     st.activity, st.selectedAttemptId, st.selectedKey, detailCtx(st), st.expanded,
   );
+  st.els.stages.scrollLeft = scroll;
+  const groups = groupActivity(st.activity);
+  for (const node of st.els.stages.querySelectorAll('.stage')) {
+    const group = groups.find(g => stageKey(g) === node.dataset.attemptId);
+    node.hidden = Boolean(st.hideHistory && group?.events.some(e => e.kind === 'attempt.ended') && node.dataset.attemptId !== st.selectedAttemptId);
+  }
+}
+
+/** 只更新在途数字，不重建时间线，保留用户展开与横向位置。 */
+function refreshStageSignals(st) {
+  const ctx = detailCtx(st);
+  for (const group of groupActivity(st.activity)) {
+    if (!group.attemptId || group.events.some(e => e.kind === 'attempt.ended')) continue;
+    const node = [...st.els.stages.querySelectorAll('.stage')].find(n => n.dataset.attemptId === stageKey(group));
+    if (!node) continue;
+    const duration = node.querySelector('.stage-dur');
+    const usage = node.querySelector('.stage-usage');
+    if (duration && !isTerminal(ctx.status)) duration.textContent = formatDuration(firstAt(group.events), ctx.nowIso);
+    if (usage) usage.textContent = stageUsageLine(group.events, group, ctx);
+  }
 }
 
 function paintDetail(st) {
-  st.els.detail.innerHTML = stageDetailHtml(selectedGroup(st), detailCtx(st), st.attempt);
+  const group = selectedGroup(st);
+  const provisional = st.live.usageByAttempt?.[st.selectedAttemptId];
+  const ended = group?.events.some(event => event.kind === 'attempt.ended');
+  const attempt = !ended && provisional ? { ...st.attempt, usage: provisional } : st.attempt;
+  st.els.detail.innerHTML = stageDetailHtml(group, detailCtx(st), attempt)
+    + (!ended && provisional ? '<div class="note">已上报暂计用量</div>' : '');
 }
 
 function paintChanges(st) {
@@ -1439,9 +1440,7 @@ function paintLive(st) {
     Object.assign({
       autoScroll: st.autoScroll,
       running: stillRunning(st),
-      historicalOutput: liveTextLines(st.live && st.live.lines).length
-        ? ''
-        : attemptOutputText(st.attempt),
+      historicalOutput: '',
     }, st.live),
   );
   const term = st.els.live.querySelector('[data-term]');
@@ -1611,6 +1610,7 @@ async function pollLive(st) {
     for (const c of chunks) {
       if (c && c.kind === 'usage') {
         st.live.usage = c.usage || st.live.usage;
+        if (c.attemptId && c.usage) st.live.usageByAttempt[c.attemptId] = c.usage;
         continue;
       }
       st.live.lines.push({ at: c && c.at, kind: (c && c.kind) || 'text', text: (c && c.text) || '' });
@@ -1621,7 +1621,7 @@ async function pollLive(st) {
     const cursor = Number(body && body.cursor);
     if (Number.isFinite(cursor)) st.live.cursor = cursor;
     // 常驻终端：不再判 tab，有新行就写。
-    if (chunks.length) pushLive(st);
+    if (chunks.length) { pushLive(st); paintDetail(st); refreshStageSignals(st); }
   } catch {
     // 轮询失败不动界面：下一次心跳自然会补上。把它写成一条错误行，
     // 会让"后端重启了一次"看起来像任务挂了。
@@ -1650,9 +1650,9 @@ function pullView(st) {
     const unchanged = !first && sameJson(st.view, view) && sameJson(st.activity, rows);
     st.view = view;
     st.activity = rows;
-    if (first && st.selectedAttemptId === null) {
+    if (first && !groupActivity(rows).some(g => stageKey(g) === st.selectedAttemptId)) {
       const groups = groupActivity(rows);
-      const latest = groups.length ? groups[groups.length - 1] : null;
+      const latest = groups.filter(g => g.attemptId && !g.events.some(e => e.kind === 'attempt.ended')).at(-1) || groups.at(-1);
       if (latest) st.selectedAttemptId = stageKey(latest);
     }
     if (first) {
@@ -1678,6 +1678,7 @@ function pullView(st) {
       paintDetail(st);
       void pullMissionChanges(st);
     }
+    if (unchanged) refreshStageSignals(st);
     syncRefresh(st);
   }).catch((err) => {
     if (st.epoch !== started) return;
@@ -1698,14 +1699,30 @@ function pullView(st) {
   return st.viewInflight;
 }
 
-function selectStage(st, attemptId, expanded) {
+function selectStage(st, attemptId, expanded, updateRoute = true) {
   st.selectedAttemptId = attemptId;
   st.selectedKey = null;
+  if (updateRoute && typeof location !== 'undefined') location.hash = '#/missions/' + encodeURIComponent(st.missionId) + '?step=' + encodeURIComponent(attemptId);
   paintStages(st, expanded);
   void loadAttempt(st, attemptId);
 }
 
 function bind(st) {
+  st.container.addEventListener('click', event => {
+    if (event.target.closest('[data-stage-collapse]')) {
+      st.hideHistory = !st.hideHistory;
+      event.target.textContent = st.hideHistory ? '展开历史' : '收起历史';
+      paintStages(st, new Set()); return;
+    }
+    if (event.target.closest('[data-stage-current]')) {
+      const groups = groupActivity(st.activity);
+      const current = groups.filter(g => g.attemptId && !g.events.some(e => e.kind === 'attempt.ended')).at(-1) || groups.at(-1);
+      if (current) {
+        selectStage(st, stageKey(current), st.expanded);
+        [...st.els.stages.querySelectorAll('.stage')].find(node => node.dataset.attemptId === stageKey(current))?.scrollIntoView({ block: 'nearest', inline: 'center' });
+      }
+    }
+  });
   const side = st.container.querySelector('.task-side-card');
   if (side) {
     side.addEventListener('click', (ev) => {
@@ -1789,13 +1806,20 @@ function stop(st) {
  * 同一个容器、同一条 Mission、节点还挂在树上 —— 不重建。重建会把轮询定时器
  * 清掉重开（一次点两下就是两心跳），而实时输出的行是攒在页面里的，清掉就丢。
  */
-export async function renderTaskPage(container, missionId) {
+export async function renderTaskPage(container, missionId, selectedStep = null) {
   const same = mounted
     && mounted.container === container
     && mounted.missionId === missionId
     && mounted.els.head
     && mounted.els.head.isConnected;
-  if (same) return;
+  if (same) {
+    setCrumbs(mounted);
+    const groups = groupActivity(mounted.activity);
+    const key = selectedStep !== null && groups.some(g => stageKey(g) === selectedStep) ? selectedStep
+      : stageKey(groups.filter(g => g.attemptId && !g.events.some(e => e.kind === 'attempt.ended')).at(-1) || groups.at(-1) || { role: 'platform' });
+    if (key !== mounted.selectedAttemptId) selectStage(mounted, key, mounted.expanded, false);
+    return;
+  }
 
   if (mounted) stop(mounted);
   epoch += 1;
@@ -1819,11 +1843,12 @@ export async function renderTaskPage(container, missionId) {
     changesInflight: null,
     // 环节与事件的选中态分两个键：环节决定详情取哪一份正文、去不去拉证据；
     // 事件只决定事件流里哪一行高亮。
-    selectedAttemptId: null,
+    selectedAttemptId: selectedStep,
     selectedKey: null,
     // 用户展开过的环节。首屏是空的：默认全部收起。
     expanded: new Set(),
     attempt: null,
+    hideHistory: false,
     autoScroll: true,
     live: liveStateOf(missionId),
     polling: false,
@@ -1840,4 +1865,14 @@ export async function renderTaskPage(container, missionId) {
     document.addEventListener('visibilitychange', st.onVisibility);
   }
   await pullView(st);
+}
+
+export function usageFieldsHtml(usage) {
+  const fields = [['input', '输入'], ['output', '输出'], ['cacheRead', '缓存读取'], ['cacheWrite', '缓存写入'], ['total', '总词元'], ['cost', '费用']];
+  if (usage?.quality === 'unknown') usage = null;
+  return '<dl class="step-usage-grid">' + fields.map(([key, label]) => {
+    const value = usage?.[key];
+    const text = typeof value === 'number' && Number.isFinite(value) ? (key === 'cost' ? '$' + value.toFixed(4) : num(value)) : '未知';
+    return '<div><dt>' + label + '</dt><dd class="mono">' + esc(text) + '</dd></div>';
+  }).join('') + '</dl>';
 }
