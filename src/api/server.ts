@@ -32,6 +32,11 @@ import type {
 } from '../application/agent-pool.ts';
 import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
+import {
+  IMPACT_READ_ONLY_MESSAGE,
+  isImpactAllowedAction,
+  isImpactRun,
+} from './impact-run-policy.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
 import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage, type UsageRow } from '../application/runtime-catalog.ts';
@@ -847,10 +852,41 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
+   * impact Run 在整个 HTTP 面的入口白名单。
+   *
+   * 只看 path + method + 已解析 token：请求体在这一步还没读，也不会被读——
+   * 读 body 才能让 body 影响判定，而 body 是对方填的。
+   * agent 工具走 /api/agent/<已有 handler>，且它的映射动作必须在只读白名单里；
+   * 其余一切入口（包括将来新加的路由）默认拒绝。
+   */
+  const rejectImpactRunOutsideAllowlist = (req: IncomingMessage): void => {
+    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (!path.startsWith('/api/')) return;
+    const header = req.headers['x-coagent-run'];
+    const token = Array.isArray(header) ? header[0] : header;
+    // 未解析出 impact 牌（无 token / 普通牌）完全按原路径走：这里不改任何旧行为。
+    if (!isImpactRun(tokens.resolve(token))) return;
+    const method = req.method ?? 'GET';
+    const allowed =
+      (method === 'GET' && path === '/api/run/brief') ||
+      (method === 'POST' &&
+        path.startsWith('/api/agent/') &&
+        Object.hasOwn(agentTools, path.slice('/api/agent/'.length)) &&
+        isImpactAllowedAction(AGENT_TOOL_ACTION[path.slice('/api/agent/'.length)]));
+    if (!allowed) throw new HttpError(403, 'ACTION_DENIED', IMPACT_READ_ONLY_MESSAGE);
+  };
+
+  /**
    * agent 工具在 Run Token 解析之后求策略。角色对错仍让 Platform 抛出原
    * WRONG_ROLE 文案（除作废工单这条本来就在 HTTP 层）。绑定不匹配在这里挡。
    */
   const enforceAgentPolicy = (run: RunContext, action: PolicyAction): void => {
+    // impact 牌只允许白名单里的读动作。放在 evaluatePolicy 之前：协调者的通用
+    // 矩阵里写动作占了绝大多数，让 impact 牌落下去的话 ACTION_DENIED 会顺着
+    // 下面那条「交回 Platform 抛 WRONG_ROLE」的旧兼容回退变成放行。
+    if (isImpactRun(run) && !isImpactAllowedAction(action)) {
+      throw new HttpError(403, 'ACTION_DENIED', IMPACT_READ_ONLY_MESSAGE);
+    }
     const verdict = evaluatePolicy({
       principal: principalFromRun(run),
       action,
@@ -1242,6 +1278,11 @@ export function createApi(deps: ApiDeps): Server {
   }
 
   async function handleWithReviewerFence(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // impact 牌的 fail-closed 门禁必须在**一切之前**：reviewer fence、beforeRead、
+    // readJson、具体 handler、onMutation 都可能在拒绝之前就动到状态。
+    // 身份只从 x-coagent-run 解析，绝不看请求体——否则 body 里写一句
+    // purpose: 'impact' 就能自称只读、写一句 role: 'coordinator' 就能自称可写。
+    rejectImpactRunOutsideAllowlist(req);
     if (req.method !== 'POST') return handle(req, res);
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
     const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
