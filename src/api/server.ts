@@ -910,6 +910,34 @@ export function createApi(deps: ApiDeps): Server {
       return platform.getAgentWorkItem(run.missionId, workItemId);
     },
 
+    async coagent_get_validation_report(run, body) {
+      // 完整机器验证报告只给协调者：enforceAgentPolicy 对 coordinator 之外的角色保留
+      // 「交回 Platform 抛 WRONG_ROLE」的旧兼容回退，那条回退在这里会落到放行，
+      // 所以显式按 run.role 挡一次，fail-closed。
+      if (run.role !== 'coordinator') {
+        throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取完整验证报告。');
+      }
+      const { workItemId, reportId } = body as unknown as { workItemId: unknown; reportId?: unknown };
+      if (typeof workItemId !== 'string' || workItemId.length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
+      }
+      if (reportId !== undefined && (typeof reportId !== 'string' || reportId.length === 0)) {
+        throw new HttpError(400, 'BAD_REQUEST', 'reportId 必须是非空字符串。');
+      }
+      // 身份只取 run.missionId：请求体里的 missionId / attemptId / role 一律不采信。
+      // 采信的话，执行者只要在 body 里写一句 role: 'coordinator' 就能读别人的报告。
+      const report = await platform.getAgentValidationReport(
+        run.missionId,
+        workItemId,
+        reportId,
+      );
+      if (!report) {
+        // 文案不提归属：说「这份属于别的 Mission / 工单」等于给了探测归属的接口。
+        throw new HttpError(404, 'VALIDATION_REPORT_NOT_FOUND', '没有这份验证报告');
+      }
+      return report;
+    },
+
     async coagent_get_contract(run) {
       return platform.getContract(run.missionId);
     },

@@ -917,6 +917,41 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 }
 ```
 
+### POST /api/agent/coagent_get_validation_report
+
+鉴权：run token。参数：body 见请求示例，workItemId 必填且为非空字符串，reportId 可选、给出时必须是非空字符串；Mission/Attempt/角色只从 x-coagent-run 取，body 里带 missionId / attemptId / role 一律不采信，也不能借 L3 控制面身份。返回 完整 ValidationReport（checks 含 command.argv/cwd/exitCode/outputTail，成功项与长输出都不裁剪）；以 Platform 领域类型为准。仅协调者可读，执行者/查询者/独立检视者与无 run 的运行一律拒绝；不是 L3 控制面。默认取同一 WorkItem 当前 submittedAttemptId 最新一条 validation.reported 所引用的报告，显式 reportId 也须被当前提交的引用事件认下，且报告自身 missionId / workItemId / attemptId 与当前提交一致。不存在 / 跨 Mission / 跨工单 / 旧来源 / 无来源统一 404 VALIDATION_REPORT_NOT_FOUND，文案不泄露归属；读取不产生事件与状态转移。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"workItemId":"W-1"}' 'http://127.0.0.1:3101/api/agent/coagent_get_validation_report'
+```
+
+响应结构摘录：
+
+```json
+{
+  "id": "VR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "attemptId": "AT-1",
+  "passed": true,
+  "checks": [
+    {
+      "kind": "command",
+      "passed": true,
+      "summary": "command exited 0",
+      "command": {
+        "argv": ["node", "--test"],
+        "cwd": "/proj",
+        "exitCode": 0,
+        "outputTail": "tests 1 / pass 1 / fail 0\\n"
+      }
+    }
+  ]
+}
+```
+
 ### POST /api/agent/coagent_get_contract
 
 鉴权：run token。参数：body见请求示例；Mission/Attempt/WorkItem身份来自x-coagent-run。返回 MissionContract；以Platform领域类型为准。协调者/执行者/独立检视者权限隔离，越权拒绝；不是L3控制面。

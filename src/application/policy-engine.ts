@@ -241,6 +241,9 @@ export const AGENT_TOOL_ACTION: Readonly<Record<string, PolicyAction>> = {
   coagent_submit_mission_result: POLICY_ACTION.attemptSubmitMissionResult,
   coagent_get_work_order: POLICY_ACTION.workItemGetOrder,
   coagent_get_work_item: POLICY_ACTION.workItemGetAgentDetail,
+  // 完整机器验证报告与工作项详情同属「协调者才看得的执行细节」，
+  // 复用同一格：不另开授权，也不给执行者额外的读面。
+  coagent_get_validation_report: POLICY_ACTION.workItemGetAgentDetail,
   coagent_get_context: POLICY_ACTION.attemptGetContext,
   coagent_submit_evidence: POLICY_ACTION.attemptSubmitEvidence,
   coagent_submit_execution_result: POLICY_ACTION.attemptSubmitExecutionResult,

@@ -34,6 +34,7 @@ import {
   SequentialIds,
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
+import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
 import { PlanRun } from '../src/application/plan-run.ts';
 import { FilePlanRunStore } from '../src/application/plan-run-store.ts';
@@ -51,6 +52,7 @@ import {
 import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
 import type { ControlPrincipal, ControlPrincipalResolver } from '../src/api/control-auth.ts';
 import type { ClaimFence } from '../src/application/durable-scheduler.ts';
+import type { ValidationReport } from '../src/kernel/index.ts';
 import {
   PgActivityLog,
   PgDeliveryRepository,
@@ -3878,3 +3880,249 @@ describe('只读平台状态与候选健康',
     );
   },
 );
+
+describe('HTTP agent 完整验证报告读取', () => {
+  /** 真实生命周期走到 submitted：submittedAttemptId 必须由平台自己生成，不能手填。 */
+  async function seedSubmittedWorkItem(
+    base: string,
+    missionId: string,
+    projectId: string,
+  ): Promise<{ workItemId: string; coordToken: string; execToken: string; submittedAttemptId: string }> {
+    const created = await request(base, '/api/missions', {
+      projectId,
+      missionId,
+      contract: CONTRACT,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    const coord = await request(base, `/api/missions/${missionId}/coordinator-attempts`, {});
+    assert.equal(coord.status, 201, JSON.stringify(coord.json));
+    const coordToken = coord.json.token as string;
+    const planned = await postJson(
+      base,
+      '/api/agent/coagent_update_plan',
+      { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+      coordToken,
+    );
+    assert.equal(planned.status, 200, JSON.stringify(planned.json));
+    const wi = await postJson(base, '/api/agent/coagent_create_work_item', { title: 'W', ...ORDER }, coordToken);
+    assert.equal(wi.status, 200, JSON.stringify(wi.json));
+    const workItemId = (wi.json as { workItemId: string }).workItemId;
+    const checked = await postJson(
+      base,
+      '/api/agent/coagent_submit_contract_check',
+      { verdict: 'ok', summary: '测试契约已核对' },
+      coordToken,
+    );
+    assert.equal(checked.status, 200, JSON.stringify(checked.json));
+    const dispatched = await postJson(
+      base,
+      '/api/agent/coagent_dispatch_work_item',
+      { workItemIds: [workItemId] },
+      coordToken,
+    );
+    assert.equal(dispatched.status, 200, JSON.stringify(dispatched.json));
+    const exec = await request(base, `/api/missions/${missionId}/work-items/${workItemId}/executor-attempts`, {});
+    assert.equal(exec.status, 201, JSON.stringify(exec.json));
+    const execToken = exec.json.token as string;
+    const submittedAttemptId = exec.json.attemptId as string;
+    // completed 必须有证据撑着（S11.1），否则平台在工具层就挡回来。
+    const evidence = await postJson(
+      base,
+      '/api/agent/coagent_submit_evidence',
+      { kind: 'test', summary: 'ok', command: 'node --test', exitCode: 0 },
+      execToken,
+    );
+    assert.equal(evidence.status, 200, JSON.stringify(evidence.json));
+    const submitted = await postJson(
+      base,
+      '/api/agent/coagent_submit_execution_result',
+      { outcome: 'completed', summary: 's', changedFiles: [], evidenceIds: [], notes: '' },
+      execToken,
+    );
+    assert.equal(submitted.status, 200, JSON.stringify(submitted.json));
+    return { workItemId, coordToken, execToken, submittedAttemptId };
+  }
+
+  test('协调者按当前提交读完整报告：默认与显式成功、身份只认 run token、越权与无来源统一 404', async () => {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const activity = new InMemoryActivityLog(clock);
+    const projects = new InMemoryProjectRepository();
+    const reports = new InMemoryValidationReportRepository();
+    const platform = new Platform({
+      projects,
+      deliveries,
+      activity,
+      clock,
+      ids,
+      // engine 是被测路径之外的东西：它被调用，说明读报告顺手重跑了机器验证。
+      validation: { engine: { validate: () => { throw new Error('不应触发 engine.validate'); } }, reports },
+    });
+    const tokens = new RunTokenRegistry();
+    const server = createApi({ platform, tokens, deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+      const missionId = 'M-vr';
+      const { workItemId, coordToken, execToken, submittedAttemptId } =
+        await seedSubmittedWorkItem(base, missionId, 'P-vr');
+      // 第二个 Mission 另开 Project：同一 Project 的 mutation slot 会挡住第二次派发。
+      const second = await seedSubmittedWorkItem(base, 'M-vr2', 'P-vr2');
+
+      const longTail = 'y'.repeat(1200);
+      const sample: ValidationReport = {
+        id: 'VR-vr',
+        policyRevision: 1,
+        missionId,
+        workItemId,
+        attemptId: submittedAttemptId,
+        startedAt: '2026-06-01T12:00:00.000Z',
+        endedAt: '2026-06-01T12:00:01.000Z',
+        passed: true,
+        checks: [
+          {
+            kind: 'command',
+            passed: true,
+            startedAt: '2026-06-01T12:00:00.000Z',
+            endedAt: '2026-06-01T12:00:00.500Z',
+            summary: 'command exited 0',
+            command: {
+              argv: ['node', '--test'],
+              cwd: '/proj',
+              exitCode: 0,
+              timedOut: false,
+              durationMs: 42,
+              outputTail: longTail,
+            },
+          },
+        ],
+      };
+      await reports.save(sample);
+      // 与真实 standard-validation 一致：attemptId 留空，归属落在 workItemId + data 上。
+      await activity.append({
+        projectId: 'P-vr',
+        missionId,
+        workItemId,
+        kind: 'validation.reported',
+        data: { reportId: sample.id, passed: true, submittedAttemptId },
+      });
+
+      const tool = '/api/agent/coagent_get_validation_report';
+      const ok = await postJson(base, tool, { workItemId }, coordToken);
+      assert.equal(ok.status, 200, JSON.stringify(ok.json));
+      const full = ok.json as unknown as ValidationReport;
+      assert.deepEqual(full.checks, sample.checks, '完整 checks 原样返回');
+      assert.equal(full.checks[0]?.command?.outputTail?.length ?? 0, 1200, '长 outputTail 不裁剪');
+
+      // body 里自述的身份一律不采信：换成别人的 Mission / attempt / 角色，仍只看 run token。
+      const stolen = await postJson(
+        base,
+        tool,
+        { workItemId, missionId: 'M-vr2', attemptId: 'AT-fake', role: 'executor' },
+        coordToken,
+      );
+      assert.equal(stolen.status, 200, JSON.stringify(stolen.json));
+
+      const explicit = await postJson(base, tool, { workItemId, reportId: sample.id }, coordToken);
+      assert.equal(explicit.status, 200, JSON.stringify(explicit.json));
+      assert.deepEqual((explicit.json as unknown as ValidationReport).checks, sample.checks);
+
+      const execFetch = await postJson(base, tool, { workItemId }, execToken);
+      assert.equal(execFetch.status, 403);
+      assert.equal(execFetch.json.error, 'ACTION_DENIED');
+
+      const reviewer = tokens.issue({ missionId, attemptId: 'AT-ir', role: 'independent_reviewer' });
+      const irFetch = await postJson(base, tool, { workItemId }, reviewer.token);
+      assert.equal(irFetch.status, 403);
+      assert.equal(irFetch.json.error, 'ACTION_DENIED');
+
+      // 运行时可能出现的未知角色（query）只在测试里用类型转换模拟：一律拒绝。
+      const query = tokens.issue({
+        missionId,
+        attemptId: 'AT-query',
+        role: 'query' as unknown as 'coordinator',
+      });
+      const queryFetch = await postJson(base, tool, { workItemId }, query.token);
+      assert.notEqual(queryFetch.status, 200, '未知角色不得读到报告');
+      assert.ok(queryFetch.json.error, JSON.stringify(queryFetch.json));
+
+      const noRun = await postJson(base, tool, { workItemId });
+      assert.equal(noRun.status, 401);
+
+      // 跨 Mission：M-vr2 的协调者拿自己的牌来读 M-vr 的报告。
+      const crossMission = await postJson(base, tool, { workItemId }, second.coordToken);
+      assert.equal(crossMission.status, 404);
+      assert.deepEqual(crossMission.json, {
+        error: 'VALIDATION_REPORT_NOT_FOUND',
+        message: '没有这份验证报告',
+      });
+
+      // 旧提交事件：事件和报告都在，但当前提交没有来源——不许回退到旧那份。
+      const stale: ValidationReport = { ...sample, id: 'VR-old', attemptId: 'AT-old' };
+      await reports.save(stale);
+      await activity.append({
+        projectId: 'P-vr',
+        missionId,
+        workItemId,
+        kind: 'validation.reported',
+        data: { reportId: stale.id, passed: true, submittedAttemptId: 'AT-old' },
+      });
+      // 来源事件对得上、报告自身字段错：两边都对上才算成对。
+      const mismatched: ValidationReport = { ...sample, id: 'VR-bad', workItemId: second.workItemId };
+      await reports.save(mismatched);
+      await activity.append({
+        projectId: 'P-vr',
+        missionId,
+        workItemId,
+        kind: 'validation.reported',
+        data: { reportId: mismatched.id, passed: true, submittedAttemptId },
+      });
+      // 报告在库里但没有任何引用事件：无来源即无归属。
+      const orphan: ValidationReport = { ...sample, id: 'VR-orphan' };
+      await reports.save(orphan);
+
+      const snapshot = async () => ({
+        mission: JSON.stringify((await projects.get('P-vr'))?.missions.map((m) => m.toSnapshot())),
+        events: (await activity.list(missionId)).length,
+      });
+      const before = await snapshot();
+
+      const notFound: { label: string; body: Record<string, unknown> }[] = [
+        { label: '跨工单', body: { workItemId: second.workItemId } },
+        { label: '未知工单', body: { workItemId: 'WI-none' } },
+        { label: '未知 id', body: { workItemId, reportId: 'VR-none' } },
+        { label: '旧 attempt 来源', body: { workItemId, reportId: 'VR-old' } },
+        { label: '报告自身归属错', body: { workItemId, reportId: 'VR-bad' } },
+        { label: '无来源引用', body: { workItemId, reportId: 'VR-orphan' } },
+      ];
+      for (const row of notFound) {
+        const res = await postJson(base, tool, row.body, coordToken);
+        assert.equal(res.status, 404, row.label);
+        assert.deepEqual(
+          res.json,
+          { error: 'VALIDATION_REPORT_NOT_FOUND', message: '没有这份验证报告' },
+          row.label,
+        );
+      }
+
+      const badBody = await postJson(base, tool, {}, coordToken);
+      assert.equal(badBody.status, 400);
+      assert.equal(badBody.json.error, 'BAD_REQUEST');
+      const badReportId = await postJson(base, tool, { workItemId, reportId: '' }, coordToken);
+      assert.equal(badReportId.status, 400);
+      assert.equal(badReportId.json.error, 'BAD_REQUEST');
+
+      assert.deepEqual(await snapshot(), before, '读报告不改状态、不记事件');
+
+      // 既有 control 接口照旧返回完整报告。
+      const control = await fetch(`${base}/api/missions/${missionId}/validation-reports/${sample.id}`);
+      assert.equal(control.status, 200);
+      const controlJson = (await control.json()) as unknown as ValidationReport;
+      assert.deepEqual(controlJson.checks, sample.checks);
+    } finally {
+      await closeServer(server);
+    }
+  });
+});
