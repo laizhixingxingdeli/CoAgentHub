@@ -142,13 +142,23 @@ reviseContract(
   ctx: PlatformContext,
   answerEscalation: AnswerEscalation,
   missionId: 'M-PLACEHOLDER',
-  contract: { /* MissionContract，例：{ goal: '…', criteria: [...] } */ },
+  contract: { /* MissionContract，脱敏结构示例见下 */ },
 ): Promise<{ contractRevision: number }>
+
+// contract 入参的真实形状：src/kernel/payloads.ts:200-206（MissionContract，恰为 5 个 readonly 字段）
+{
+  intent: '（本次要达成什么，字符串）',
+  acceptance: ['（验收点 1）', '（验收点 2）'],
+  constraints: ['（约束 1）'],
+  nonGoals: ['（明确不做什么）'],
+  guardrails: ['（硬红线）'],
+}
 
 // return 形状（同函数 `return { contractRevision }`）
 { contractRevision: 3 }   // 数字，来自 kernel `#contractRevision += 1`
 ```
 
+- 上面的 contract 字段名逐字取自 `src/kernel/payloads.ts:200-206`：`MissionContract` 只有 `intent` / `acceptance` / `constraints` / `nonGoals` / `guardrails` 五个 `readonly` 字段，**没有 `goal` 也没有 `criteria`**——本票只校正示例形状，未改动任何契约定义（§1.10 不新增事实）。
 - 平台侧可观测的只有两条：`mission.reviseContract()` 改了字段；同函数内 `ctx.event(mission, 'contract.revised', { contractRevision, status })`。
 - **它不返回、也不携带任何「在途 run 是否收到」的信息。** 见 §1.1、§1.9。
 
@@ -263,7 +273,7 @@ child.stdin?.end(JSON.stringify(spec));   // spawn.ts:321 —— 写完整份 sp
 
 #### 1.10.6 当前 SDK（`@earendil-works/pi-coding-agent@0.87.1`）的 prompt / steer / subscribe
 
-引用位置（本地只读，无网络）：`C:/program1/coagent-pi/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:152-163`（`PromptOptions`）、`:305`（`subscribe`）、`:417`（`prompt`）、`:427-437`（`steer` 注释与签名）；`dist/core/agent-session.js:1245`（streaming 未指定 behavior 时抛错）、`:1415`（`steer` → `_queueUserInput(..., "steer", ...)`）。适配器侧本节未改：`…/integration/src/runtime.ts:705`（`createAgentSession`）/ `:758`（`session.subscribe`）/ `:833`（`session.prompt(spec.instruction)`）。
+引用位置（本地只读，无网络）：`C:/program1/coagent-pi/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:152-163`（`PromptOptions`）、`:305`（`subscribe`）、`:417`（`prompt`）、`:427-437`（`steer` 注释与签名）；`dist/core/agent-session.js:1207`（`prompt` 主体）、`:1216-1224`（extension 命令提前 return）、`:1230-1234`（`_runInputHandlers` 返回 falsy 时提前 return）、`:1245`（streaming 未指定 behavior 时抛错）、`:1247-1255`（入队后 return）、`:1331`（非 streaming 走 `await this._runAgentPrompt(messages)`）、`:1416`（`steer` → `_queueUserInput(..., "steer", ...)`）。适配器侧本节未改：`…/integration/src/runtime.ts:705`（`createAgentSession`）/ `:758`（`session.subscribe`）/ `:833`（`session.prompt(spec.instruction)`）。
 
 ```ts
 // 源码结构示例，非实际调用记录 —— agent-session.d.ts
@@ -280,7 +290,12 @@ subscribe(listener: AgentSessionEventListener): () => void                      
 new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.")
 ```
 
-- **返回语义按字面读：** `prompt` / `steer` 都返回 `Promise<void>`——**只承诺「已入队 / 已受理」，不返回任何「模型已读 / 已应用」的凭据**。`steer` 的注释（`agent-session.d.ts:427-437`）是 "Delivered after the current assistant turn finishes executing its tool calls, before the next LLM call."，即排队 + 在下一个 LLM 调用前消费。
+- **返回语义不能一句「只承诺入队」概括，要分三条路径读（`agent-session.js:1207-1332`）：**
+  - **非 streaming 的正常 prompt 是「等待执行」而非「入队」**：走到 `:1331 await this._runAgentPrompt(messages)`，即 `prompt()` 的 resolve 意味着这一轮 prompt 已跑完，而不是「刚放进队列」。
+  - **streaming（`isStreaming`）时才排队，且必须显式指定 `streamingBehavior`**：`:1245` 未指定即抛 `new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.")`；指定后由 `_queueSteer` / `_queueFollowUp` 入队并 `return`（`:1247-1255`）——只有这条路径是「已入队」。
+  - **extension 拦截也可能提前返回、不进 `_runAgentPrompt`**：`:1216-1224` extension 命令自管 LLM 交互、`:1230-1234 _runInputHandlers` 返回 falsy 时，都在 `preflightResult?.(true)` 后直接 `return`。
+- **`steer` 是排队语义**：`:1416` → `_queueUserInput(..., "steer", ...)`；注释（`agent-session.d.ts:427-437`）为 "Delivered after the current assistant turn finishes executing its tool calls, before the next LLM call."，即排队 + 在下一个 LLM 调用前消费。
+- **`Promise<void>` 本身只表示「无返回值」**：三条路径都不返回任何「模型已读 / 已应用」的凭据——入队不是应用，非 streaming 的「等待返回」同样不等于执行者已按新差异行动（§1.6 / §1.9）。
 - **`subscribe` 是观测**：适配器 `…/integration/src/runtime.ts:758` 用它把事件转成 stdout 行，**不是注入**。
 - 现状对照：适配器从不调用 `steer`（§1.5，`grep steer` 在集成 worktree 零命中）。**SDK 的排队承诺 ≠ 应用**（§1.6 / §1.9）。
 
