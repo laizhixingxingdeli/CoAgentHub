@@ -94,10 +94,10 @@ describe('外壳的文件形状', () => {
   test('外壳有新版主导航、设置入口和面包屑容器', () => {
     const html = read('index.html');
     assert.match(html, /CoAgentHub/);
-    for (const label of ['任务收件箱', '项目', '智能体', '方案运行', '资源池', '平台', '设置']) {
+    for (const label of ['首页', '项目任务列表', '角色与模型']) {
       assert.ok(html.includes(label), `导航缺 ${label}`);
     }
-    for (const href of ['#/inbox', '#/projects', '#/agents', '#/settings']) {
+    for (const href of ['#/', '#/projects', '#/agents']) {
       assert.ok(html.includes(`href="${href}"`), `导航缺 ${href}`);
     }
     assert.equal(/>用户</.test(html), false, '用户占位还在');
@@ -108,7 +108,7 @@ describe('外壳的文件形状', () => {
     const html = read('index.html');
     const nav = /<nav[\s\S]*?<\/nav>/.exec(html);
     assert.ok(nav, '找不到导航');
-    assert.ok((nav[0].match(/class="nav-glyph"/g) || []).length >= 7, '新版导航入口都要有 glyph');
+    assert.ok((nav[0].match(/class="nav-glyph"/g) || []).length === 3, '三项导航都有 glyph');
     assert.equal(/<img/.test(nav[0]), false, '导航不引外链图片');
   });
 
@@ -143,8 +143,8 @@ describe('外壳的文件形状', () => {
       assert.ok(projects.includes(`#${id}`) && projects.includes(`id="${id}"`), `骨架里缺 #${id}`);
     }
     assert.match(html, /class="item"[^>]*data-route="projects"/);
-    assert.match(html, /class="item"[^>]*data-route="pool"/);
-    assert.match(html, /class="item"[^>]*data-route="platform"/);
+    assert.match(html, /class="item"[^>]*data-route="agents"/);
+    assert.match(html, /class="item"[^>]*data-route="home"/);
   });
 
   test('外壳不靠内置观测面', () => {

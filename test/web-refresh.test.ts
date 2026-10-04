@@ -426,7 +426,7 @@ describe('任务页刷新：请求、间隔、终态、可见性', () => {
     await renderTaskPage(box, 'M-run');
     await settle();
 
-    assert.deepEqual(kinds('M-run'), ['view', 'activity', 'live']);
+    assert.deepEqual(kinds('M-run'), ['view', 'activity', 'attempt', 'live']);
     const head = box.querySelector('#task-head');
     assert.ok(head && head.innerHTML.includes('刷新 M-run'), head?.innerHTML);
 
@@ -462,7 +462,7 @@ describe('任务页刷新：请求、间隔、终态、可见性', () => {
     const box = mount('M-done');
     await renderTaskPage(box, 'M-done');
     await settle();
-    assert.deepEqual(kinds('M-done'), ['view', 'activity']);
+    assert.deepEqual(kinds('M-done'), ['view', 'activity', 'attempt']);
     assert.equal(intervals.size, 0);
     requests.length = 0;
     tick(1000);
@@ -476,7 +476,7 @@ describe('任务页刷新：请求、间隔、终态、可见性', () => {
     const box = mount('M-block');
     await renderTaskPage(box, 'M-block');
     await settle();
-    assert.deepEqual(kinds('M-block'), ['view', 'activity']);
+    assert.deepEqual(kinds('M-block'), ['view', 'activity', 'attempt']);
     assert.equal(intervals.size, 0);
   });
 

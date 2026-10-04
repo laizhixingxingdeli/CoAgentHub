@@ -59,8 +59,8 @@ describe('方案运行页的文件形状', () => {
     const html = read('index.html');
     assert.match(html, /<link rel="modulepreload" href="\/plan-run\.js" \/>/);
     assert.equal(/<script[^>]+src="\/plan-run\.js"/.test(html), false, 'plan-run.js 被写成会执行的 script');
-    assert.match(html, /data-route="plan-runs"/);
-    assert.match(html, /href="#\/plan-runs"/);
+    assert.doesNotMatch(html, /data-route="plan-runs"/, '兼容页面不占主导航');
+    assert.match(html, /href="#\/"[^>]*data-route="home"/, '首页为主入口');
     const shell = read('app.js');
     assert.match(shell, /from '\.\/plan-run\.js'/);
     assert.match(shell, /\/plan-runs\//);
