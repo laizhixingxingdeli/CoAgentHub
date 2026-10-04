@@ -196,6 +196,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   2026-10-03 直接实施：RV1–RV5 后端与可选 MCP 补充入口。公开 HTTP 契约见 `docs/http-api.md`；不包含前端界面设计。
 - **run-token-lifecycle** — Run Token 生命周期（RECON-002A）
   Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 获得 mission / attempt / role / workItem 上下文，不接受请求体自述身份。
+- **runtime-change** — 运行中变更
+  Application 的 ChangeRequestRepository 提供 append/get/listByMission；内存与 File 实现保存 L3 确认的原始请求。记录字段为 changeId、missionId、revi
 - **runtime-observability** — 运行时状态路径、实时输出与模型清单
   直接执行 `node src/main.ts` 且未设 `COAGENT_STATE` 时，状态文件缺省为该 `src/main.ts` 所在仓库根的 `.coagent-state.json`，与调用时的 cwd 无关。缺省路径不存在则拒
 - **spawn-env-filter** — 子进程环境过滤（Spawn env filter）
