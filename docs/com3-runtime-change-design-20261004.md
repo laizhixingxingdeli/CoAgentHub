@@ -125,6 +125,191 @@
 4. SDK **有能力**（steer/queue），**适配器没用**（1.5/1.6）；且即便用上，也只证明排队/消费。
 5. 因此："**写入修订** → **runtime 送达** → **执行者开始按更新运行**"是三个**必须分开陈述、分开取证**的阶段，绝不可以用第一个冒充第三个。
 
+### 1.10 接口输入输出结构示例（源码形状，非调用记录）
+
+> 本节**不新增任何事实**，只把 §1.1–§1.7 已核实的签名落到可复制的结构上，供实施票直接引用。
+> **下面每一段都是「源码结构示例，非实际调用记录」**：`id` / `hash` / `endpoint` / `token` 一律占位；本票
+> **没有**发起任何真实调用，也没有任何生产运行证据。凡标 **【proposed】** 的是本设计新造的协议形状，平台与
+> SDK 目前都不存在它——**不得**与上面已核实的源码结构混读。
+
+#### 1.10.1 `reviseContract`：入参契约 + 返回新修订号
+
+引用位置：`src/application/platform/mission-lifecycle.ts:5-25`（签名与 return）、`src/kernel/mission.ts:722`（真正的字段改写与 `#contractRevision += 1`）。
+
+```ts
+// 源码结构示例，非实际调用记录 —— mission-lifecycle.ts:5
+reviseContract(
+  ctx: PlatformContext,
+  answerEscalation: AnswerEscalation,
+  missionId: 'M-PLACEHOLDER',
+  contract: { /* MissionContract，例：{ goal: '…', criteria: [...] } */ },
+): Promise<{ contractRevision: number }>
+
+// return 形状（同函数 `return { contractRevision }`）
+{ contractRevision: 3 }   // 数字，来自 kernel `#contractRevision += 1`
+```
+
+- 平台侧可观测的只有两条：`mission.reviseContract()` 改了字段；同函数内 `ctx.event(mission, 'contract.revised', { contractRevision, status })`。
+- **它不返回、也不携带任何「在途 run 是否收到」的信息。** 见 §1.1、§1.9。
+
+#### 1.10.2 `reviseWorkOrder`：dispatched 时的错误形状
+
+引用位置：`src/application/platform/work-orders.ts:42-108`（函数体）、`src/application/platform/work-order-helpers.ts:10-15`（`REVISE_BLOCKED_HINT`）、`src/kernel/work-item.ts:250`（kernel 侧第二道）。
+
+```ts
+// 源码结构示例，非实际调用记录 —— work-orders.ts:42
+reviseWorkOrder(
+  ctx, missionId: 'M-PLACEHOLDER', attemptId: 'A-PLACEHOLDER',
+  workItemId: 'W-PLACEHOLDER', order: { /* WorkOrder，占位 */ },
+): Promise<{ workItemId: string; revision: string; changedFields: readonly string[]; warnings: readonly WorkOrderStandardWarning[] }>
+
+// 成功形状（直接调用不带 viaCoordinatorTool 时无 warnings 键）
+{ workItemId: 'W-PLACEHOLDER', revision: 'r2', changedFields: ['acceptance'] }
+
+// dispatched 时的失败：先撞 REVISE_BLOCKED_HINT，抛 PlatformRuleError
+throw new PlatformRuleError(
+  'WORK_ITEM_NOT_REVISABLE',
+  `工作项 W-PLACEHOLDER 正在执行中，改不了：等执行者交卷（或报告卡住）后再修订，或先作废重建。`,
+)
+```
+
+- hint 文案逐字取自 `work-order-helpers.ts` 的 `REVISE_BLOCKED_HINT.dispatched`；`revision` 由 kernel `nextOrderRevision()` 机械递增（`r1 → r2 …`），不是协调者填的。
+- 即便绕过用例层，kernel `reviseOrder()` 也只在 `created | rejected | blocked` 放行（§1.2）。两道门合起来就是「冻结工单不能在途 revise」的字面形状。
+
+#### 1.10.3 `AgentRunSpec` 与 `start()` 返回的 Run
+
+引用位置：`src/application/ports.ts:130`（`AgentRuntime`）、`:140`（`start`）、`:143-176`（`AgentRunSpec`）、`:196-201`（`AgentRun`）。
+
+```ts
+// 源码结构示例，非实际调用记录 —— ports.ts:140
+start(spec: AgentRunSpec): Promise<AgentRun>
+
+// AgentRunSpec 形状（ports.ts:143-176；endpoint / instruction 是重点）
+{
+  role: 'executor',                    // 'coordinator' | 'executor' | 'independent_reviewer' | 'query'
+  attemptId: 'A-PLACEHOLDER',
+  missionId: 'M-PLACEHOLDER',
+  workItemId: 'W-PLACEHOLDER',         // 可选
+  cwd: '…/worktrees/PLACEHOLDER',
+  profile: { endpoint: 'https://profile-endpoint.invalid', profileId: 'profile-PLACEHOLDER' },
+  instruction: '【已渲染好的首轮输入】（简报正文，占位）',
+  tools: ['read', 'grep', 'bash'],
+  endpoint: { baseUrl: 'https://hub.invalid', token: 'TOKEN-PLACEHOLDER' },
+  // resumeRef?: string（续跑句柄，可选）
+}
+```
+
+- `instruction` 是**一次性字符串**：平台没有「替换 instruction 后重发」的接口（§1.3 / §1.7）。
+- `endpoint` 指唯一 Hub，运行时只拿到 token、**不自述身份**（`ports.ts` 该字段注释）。
+
+```ts
+// AgentRun 形状（ports.ts:196-201）—— start 解析出来的 Run
+{
+  resumeRef: undefined,                              // string | undefined
+  on(handler: (event: RuntimeEvent) => void): () => void,
+  abort(reason: string): Promise<void>,
+  wait(): Promise<RuntimeOutcome>,
+}
+```
+
+- **没有 `steer`、没有 `send`、没有第二输入通道**——这是 §1.3 结论的字面形状。
+
+#### 1.10.4 `on` 的 `RuntimeEvent` 与 `wait` 的 `RuntimeOutcome`
+
+引用位置：`src/application/ports.ts:204-234`（`RuntimeEvent` 联合）、`:287-326`（`RuntimeOutcome`）。
+
+```ts
+// 源码结构示例，非实际调用记录 —— on(handler) 收到的 RuntimeEvent（单向观测）
+{ kind: 'output', text: '…' }
+{ kind: 'runtime.capabilities', commandActivityClassification: 'v1' }
+{ kind: 'tool.started', name: 'bash', callId: 'call-PLACEHOLDER', detail: 'node --test …', activityClass: 'command' }
+{ kind: 'tool.completed', name: 'bash', callId: 'call-PLACEHOLDER' }
+{ kind: 'usage', usage: { /* TokenUsage，占位 */ } }
+// 没有 kind 表示「平台下行注入」——on 只往外发，不能往里写。
+
+// wait() 的 RuntimeOutcome（ports.ts:287-326）
+{
+  endedBy: 'completed',                // AttemptEndReason：上游失败与「没交结构化结果」分开
+  usage: { /* TokenUsage，占位 */ },
+  resumeRef: 'resume-PLACEHOLDER',     // 可选
+  failureMessage: undefined,           // 仅 endedBy === 'upstream_failure' 时的原文
+  output: '…尾部输出…',                // 可选，Timeline 第三层用
+  toolCalls: ['read', 'bash'],         // 可选，Timeline 第二层用
+  resolvedProfile: { revision: 'rev-PLACEHOLDER', resolved: [{ key: 'k', value: 'v' }] }, // 可选
+}
+```
+
+- **`RuntimeOutcome` 里没有「契约已变」这类信号**——这正是 §2.2 所说的、编排这一跳阻塞在 `run.wait()` 时拿不到变更的原因。
+- `RuntimeEvent` 是**单向观测**、不是双向；平台没有下行通道（§1.3）。
+
+#### 1.10.5 `SpawnRuntime.start`：stdin 一次写入后立即 EOF
+
+引用位置：`src/runtime/spawn.ts:291`（`start`）、`:321`（`child.stdin?.end(...)`）。
+
+```ts
+// 源码结构示例，非实际调用记录
+const child = spawn(options.command, [...options.args], {
+  cwd: options.cwd,
+  env: filterSpawnEnv(envSource, envPassthrough),
+  stdio: ['pipe', 'pipe', 'pipe'],
+  shell: process.platform === 'win32',
+  detached: process.platform !== 'win32',
+});
+child.stdin?.end(JSON.stringify(spec));   // spawn.ts:321 —— 写完整份 spec 立刻 end()
+```
+
+- 配对侧：coagent-pi `…/integration/src/agent-entry.ts:18`（`readStdin()`）/ `:25`（`await readStdin()`）读到 **EOF** 才解析 spec 并启动。
+- 因此**运行期平台无法再往子进程 stdin 写一个字节**（§1.4）。
+
+#### 1.10.6 当前 SDK（`@earendil-works/pi-coding-agent@0.87.1`）的 prompt / steer / subscribe
+
+引用位置（本地只读，无网络）：`C:/program1/coagent-pi/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:152-163`（`PromptOptions`）、`:305`（`subscribe`）、`:417`（`prompt`）、`:427-437`（`steer` 注释与签名）；`dist/core/agent-session.js:1245`（streaming 未指定 behavior 时抛错）、`:1415`（`steer` → `_queueUserInput(..., "steer", ...)`）。适配器侧本节未改：`…/integration/src/runtime.ts:705`（`createAgentSession`）/ `:758`（`session.subscribe`）/ `:833`（`session.prompt(spec.instruction)`）。
+
+```ts
+// 源码结构示例，非实际调用记录 —— agent-session.d.ts
+prompt(text: string, options?: PromptOptions): Promise<void>                       // :417
+// PromptOptions（:152）
+{ expandPromptTemplates?: boolean; images?: ImageContent[];
+  streamingBehavior?: 'steer' | 'followUp'; source?: InputSource }
+
+steer(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void>   // :435
+
+subscribe(listener: AgentSessionEventListener): () => void                         // :305，返回解绑函数
+
+// 运行中（isStreaming）不指定 streamingBehavior → 抛（agent-session.js:1245）
+new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.")
+```
+
+- **返回语义按字面读：** `prompt` / `steer` 都返回 `Promise<void>`——**只承诺「已入队 / 已受理」，不返回任何「模型已读 / 已应用」的凭据**。`steer` 的注释（`agent-session.d.ts:427-437`）是 "Delivered after the current assistant turn finishes executing its tool calls, before the next LLM call."，即排队 + 在下一个 LLM 调用前消费。
+- **`subscribe` 是观测**：适配器 `…/integration/src/runtime.ts:758` 用它把事件转成 stdout 行，**不是注入**。
+- 现状对照：适配器从不调用 `steer`（§1.5，`grep steer` 在集成 worktree 零命中）。**SDK 的排队承诺 ≠ 应用**（§1.6 / §1.9）。
+
+#### 1.10.7 【proposed】本设计新增的协议形状（当前不存在）
+
+> 以下**不是**源码事实，是本设计**建议**的、平台与 SDK 现在都没有的形状；单列在此以便与上面已核实结构区分，**须由 L3 冻结后才可实施**。
+
+```ts
+// 【proposed｜待实现】ChangeRecord —— §3.1 的形状（字段名未经 L3 冻结）
+{
+  changeId: 'CH-PLACEHOLDER', purpose: 'impact',
+  missionId: 'M-PLACEHOLDER', workItemId: 'W-PLACEHOLDER',
+  targetAttemptId: 'A-PLACEHOLDER', claimGeneration: 7, seq: 12,
+  source: 'L3 确认',
+  baseSnapshotHash: 'HASH-PLACEHOLDER', targetSnapshotHash: 'HASH-PLACEHOLDER2',
+  diff: '（L2 形成的明确工单差异正文）',
+  receipt: {
+    saved: true,                 // 平台保存
+    adapter_received: false,     // runtime 送达（弱证据）
+    session_consumed: false,     // SDK 消费（≠ 应用）
+    executor_started: false,     // 执行者开始按更新运行（自述）
+    verified: false,             // 独立证据
+  },
+}
+```
+
+- receipt 分层见 §2.6 / §3.5：`adapter_received` ≠ `session_consumed` ≠ `executor_started` ≠ `verified`，每层只承认自己的证据。
+- **不得**把 `receipt.saved`、SDK 的排队承诺、或一次 Delivery ACK 当作「已应用」；更不得用只读查询（如 `coagent_get_validation_report` 这类读路径）反过来证明变更已在在途 run 上生效。
+
 ---
 
 ## 2. 最小方案
