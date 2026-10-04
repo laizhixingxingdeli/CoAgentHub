@@ -30,6 +30,7 @@ import {
 import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
 import type { ValidationReport } from '../kernel/index.ts';
+import type { ChangeRequest } from './change-request.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
 import type {
   ActivityEvent,
@@ -114,6 +115,10 @@ interface StateFile {
    * 旧文件缺键补 []，不 bump StateFile.version。
    */
   validationReports: ValidationReport[];
+  /**
+   * L3 确认的原始变更（append-only）。旧文件缺键补 []，不 bump StateFile.version。
+   */
+  changeRequests: ChangeRequest[];
   queuedHops: QueuedHop[];
   candidateCircuits: CandidateCircuit[];
   candidateCircuitResetEvents?: Array<{ profileId: string; actor: string; at: string; reason: string }>;
@@ -175,6 +180,7 @@ function emptyState(): StateFile {
     archivedMissions: [],
     queryRuns: [],
     validationReports: [],
+    changeRequests: [],
     queuedHops: [],
     candidateCircuits: [],
   };
@@ -225,6 +231,7 @@ interface OpenTransaction {
   readonly deliveries: Delivery[];
   readonly queryRuns: QueryRunRecord[];
   readonly validationReports: ValidationReport[];
+  readonly changeRequests: ChangeRequest[];
   readonly agentPool: AgentPoolRow[];
   readonly archivedMissions: ArchivedMissionRef[];
   readonly queuedHops: QueuedHop[];
@@ -451,6 +458,7 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
       if (!Array.isArray(state.validationReports)) state.validationReports = [];
+      if (!Array.isArray(state.changeRequests)) state.changeRequests = [];
       if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
       if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
       // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
@@ -551,6 +559,7 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
       deliveries: [...s.deliveries],
       queryRuns: [...s.queryRuns],
       validationReports: [...s.validationReports],
+      changeRequests: [...s.changeRequests],
       agentPool: [...s.agentPool],
       archivedMissions: [...s.archivedMissions],
       queuedHops: [...s.queuedHops],
@@ -580,6 +589,7 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     s.deliveries = tx.deliveries;
     s.queryRuns = tx.queryRuns;
     s.validationReports = tx.validationReports;
+    s.changeRequests = tx.changeRequests;
     s.agentPool = tx.agentPool;
     s.archivedMissions = tx.archivedMissions;
     s.queuedHops = tx.queuedHops;
