@@ -297,26 +297,58 @@ function coordinatorBody(view: {
   workItems: { id: string; status: string }[];
   promotions?: readonly { triggerRule: string }[];
 }): string {
+  // 本跳简报优先。
+  //
+  // 开跑简报（/api/run/brief）已经带着契约、规划、工作项索引与上一跳增量——
+  // 每一跳都先 coagent_get_mission 等于把同一份状态再买一遍。协调者轮次是整条
+  // Mission 开销的主项（一条走到六轮的，协调者一个人占 74%），所以默认不查。
+  const briefFirst =
+    '这一跳要用的状态已经在开跑简报里（契约、规划、工作项索引、上一跳增量）。' +
+    '直接照它开工，不要先 coagent_get_mission 再取一遍。';
+  // 「按需查询」必须点名哪个缺口用哪个工具。不点名的话它会退化成「每次都查
+  // mission」——而全量索引正是这几份里最贵的那一份，等于什么都没省。
+  const queryWhenNeeded =
+    '只有在这三种情况下才查：' +
+    '(1) 简报缺你要用的必要详情——缺某张工单的正文 / 证据 / 评审用 coagent_get_work_item，' +
+    '缺验收标准原文用 coagent_get_contract，确实需要全量工作项索引才用 coagent_get_mission；' +
+    '(2) 发现并发变化——简报是这一跳开始时拍的，之后有人改过就不作数；' +
+    '(3) 平台拒绝了你的调用，要按错误提示补信息。';
+  // 派发前的交接。执行者没有协调者的权限：让它自己去翻它拿不到的契约，结果
+  // 只能是 report_blocked，或者凭猜测补一条——两种情况都白花一整跳。
+  const acceptanceHandoff =
+    '**派发前交接**：工单要求引用上层 Contract 的验收标准时，必须在 requiredBehaviour ' +
+    '或 contextRefs 里给出相关验收的原文（或完整的对应表）。执行者无需、也不应自行寻找' +
+    '它无权限取得的契约；只带与这张工单相关的条目，不要把整份契约背景重复搬进工单。';
+  // 共用段落每个分支都带：交接提示漏掉一个分支，从那个分支派出去的工单就缺验收
+  // 原文，而补那一跳的代价远大于多说这三段。
+  const shared = [briefFirst, queryWhenNeeded, '', acceptanceHandoff];
   const answered = view.escalationLog.filter((item) => item.answer).at(-1);
   if (view.finalReview?.verdict === 'send_back') {
     const reasons = view.finalReview.reasons.map((reason) => `  - ${reason}`).join('\n');
-    // 打回时最常见的浪费：为同一条意见另开新工作项。实测过一次——
-    // 一条"注释里少写一句"的意见滚出了三个工作项、七跳、$2.31。
-    // 所以这里要明确说「先改已有的」，并把已验收的 id 列出来降低门槛。
-    const reusable = view.workItems.filter((item) => item.status === 'accepted');
+    // 补修顺序由平台说了算，不由「优先改原项」这句口号说了算：accepted 与 dispatched
+    // 都不可修订（协调者 Node 实验里两个状态的 revise 都是 ILLEGAL_TRANSITION）。
+    // 所以先把工作项分成可修订与已验收两类，各给一条走得通的顺序——照一句做不到的
+    // 指令撞两次 409，实测就是三个工作项、七跳、$2.31。
+    const revisable = view.workItems.filter(
+      (item) => item.status === 'created' || item.status === 'rejected' || item.status === 'blocked',
+    );
+    // 已验收的历史留着：那件事做过、也被验过，抹掉它等于改写记录。补修是另开一张
+    // 引用它的工单，不是把它改掉。
+    const accepted = view.workItems.filter((item) => item.status === 'accepted');
+    const list = (items: readonly { id: string }[]): string =>
+      items.map((item) => item.id).join('、') || '无';
     return [
       'L3 把这个 Mission 打回了，理由：',
       reasons,
       '',
-      '先 coagent_get_mission 看当前状态，按这些理由重新规划。',
+      `**可修订的**（${list(revisable)}，状态 created / rejected / blocked）：` +
+        '先 coagent_revise_work_order 把工单改对，再派发。派发之后同样改不了，顺序不能反。',
+      `**已验收的**（${list(accepted)}）：accepted 不能修订。` +
+        '保留它已验收过的历史，另建一张补修工单——正文里引用原工作项 id 与 L3 指出的差距——再派发那张新的。',
+      '一条差距一张补修单：为同一条意见另开多张，实测滚出三个工作项、七跳、$2.31。',
+      '重新派发或新建的工单必须与上一版有可见差异——逐字相同的工单不算数。',
       '',
-      '**优先修正已有的工作项，不要为同一条意见另开新的。**',
-      reusable.length > 0
-        ? `已验收的工作项：${reusable.map((item) => item.id).join('、')}。` +
-          '要继续改它们就直接重新派发，把「这次要避开什么」写进工单正文。'
-        : '',
-      '只有当 L3 的意见确实指向一件此前没做过的**独立**工作时，才新建工作项。',
-      '重新派发的工单必须与上一版有可见差异——逐字相同的工单不算数。',
+      ...shared,
     ]
       .filter(Boolean)
       .join('\n');
@@ -326,8 +358,9 @@ function coordinatorBody(view: {
       'L3 答复了你的升级。',
       `问题：${answered.question}`,
       `答复：${answered.answer}`,
+      '按这个答复继续。',
       '',
-      '先 coagent_get_mission 看当前状态，按这个答复继续。',
+      ...shared,
     ].join('\n');
   }
   const blocked = view.workItems.filter((item) => item.status === 'blocked');
@@ -335,13 +368,19 @@ function coordinatorBody(view: {
     // 只提 blocked，**不提 retired**：作废掉的那些已经不用管了，而且现在也
     // 不再拦着交卷。早先两者同一个状态，这句话只好含糊地说"可能是执行者报的、
     // 也可能是 L3 作废的"，然后让协调者自己去猜该不该管。
-    return (
-      `执行者报了 ${blocked.length} 个工作项不成立（${blocked.map((i) => i.id).join('、')}）。` +
-      '先 coagent_get_mission 看它们说了什么，然后二选一：' +
-      '**确实还要做**就把工单改对再重新派发；' +
-      '**已经不用做了**就 coagent_retire_work_item 作废掉并写清理由。' +
-      '别把它晾在那儿——blocked 会一直拦着这条 Mission 交卷。'
-    );
+    return [
+      `执行者报了 ${blocked.length} 个工作项不成立（${blocked.map((i) => i.id).join('、')}）。`,
+      // 执行者的 blocked 报告本来就是「相关事实 / 缺什么决定 / 建议怎么办」三段，
+      // 协调者的处置要把这三段并起来说——只回一句「不成立」，下一次还是同一个人
+      // 在同一处卡住。
+      '它的报告里已经带着相关事实、缺什么决定、建议怎么办；缺原记录就用 coagent_get_work_item 取详情，' +
+        '判断之后二选一：',
+      '**确实还要做**就先 coagent_revise_work_order 把工单改对（blocked 可修订），再派发；',
+      '**已经不用做了**就 coagent_retire_work_item 作废，理由里把相关事实、缺的决定、建议一次写清。',
+      '别把它晾在那儿——blocked 会一直拦着这条 Mission 交卷。',
+      '',
+      ...shared,
+    ].join('\n');
   }
   const submitted = view.workItems.filter((item) => item.status === 'submitted');
   if (submitted.length > 0) {
@@ -355,18 +394,25 @@ function coordinatorBody(view: {
     const origin = promoted
       ? `这条 Mission 是从 Lightweight 升级上来的，原因：${promoted.triggerRule}\n\n`
       : '';
-    return (
+    return [
       origin +
-      `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
-      '先 coagent_get_mission 看当前状态，然后**在这一轮里把它们全部验收完**。\n\n' +
+        `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
+        '**在这一轮里把它们全部验收完**——每交还一次控制权就是一轮全新的协调者会话。',
+      // 逐项验收与打回都用现有字段：acceptanceResults 逐条给结论；reject 的
+      // requiredChanges 写清验收项 / 实际 / 预期 / 怎么复验——只给一句「没过」，
+      // 执行者只能猜差在哪，下一轮多半原样交回来。
+      '验收用 coagent_review_execution_result：accept 要逐条给 acceptanceResults；' +
+        '打回用 requiredChanges，每条写清**验收项 / 实际 / 预期 / 怎么复验**，不要另造字段。',
       '验完之后如果还有下一批要做的，同样**一次派完**——' +
-      'coagent_dispatch_work_item 的 workItemIds 是数组，互不依赖的放在同一次调用里。'
-    );
+        'coagent_dispatch_work_item 的 workItemIds 是数组，互不依赖的放在同一次调用里。',
+      '',
+      ...shared,
+    ].join('\n');
   }
   if (view.planRevision > 0) {
-    return '平台唤醒你。先 coagent_get_mission 看当前状态，然后决定下一步。';
+    return ['平台唤醒你。按简报决定下一步。', '', ...shared].join('\n');
   }
-  return '开始这个 Mission。先 coagent_get_mission。';
+  return ['开始这个 Mission。', '', ...shared].join('\n');
 }
 
 /**
