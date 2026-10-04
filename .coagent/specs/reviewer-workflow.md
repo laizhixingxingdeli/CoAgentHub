@@ -15,3 +15,6 @@ MCP 补充工具仅经本机 HTTP，stdio 采用逐行 JSON-RPC、初始化握�
 排队中可编辑、撤回；编辑递增版本并取消旧批准。批准核对已审阅的 revision/baseHash，原文变化必须重新编辑、重审。匹配统一 LF，before 唯一匹配，新文档空 before，不做模糊合并。未改条款保持不动。
 
 空档提交要求项目没有未结束且未 park 的 Mission，没有 in_progress Attempt，目标为干净集成分支。文档和生成 VIBE.md 在隔离 worktree 提交，再核对 root HEAD/分支/干净状态并 fast-forward 落地；不改 root 未提交文件或索引。禁止路径遍历、符号链接和 Windows 设备名。Git 成功/队列确认丢失可凭提交标记及目标内容恢复，不重复提交；未处理文档阻止源 Mission 归档。
+
+## Codex L3 插件托管入口（2026-10-04）
+coagenthub-codex 0.2.2 经 POST /api/missions 创建 Standard Mission，经 POST /api/control/run-mission 启动服务托管运行。Contract 由平台保存并在启动时读取，Delivery 接收方来自真实会话绑定或显式 recipient；start 不能覆盖合同。GET /api/platform/status 仅返回持锁身份和运行观测，不让适配器访问状态文件。插件消费 NDJSON 长流并提供进程内有界观测；HTTP受理、启动确认、退出和业务交卷是不同状态，断流未知不自动重试。当前未实现跨 MCP 实例的启动去重，应先核实真实 runner；Delivery 仍由原桥接器实际投递后确认。
