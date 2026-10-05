@@ -863,7 +863,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ## agent 工具接口
 
-impact Run（`purpose='impact'` 的 run token）是限权身份：只放行 `GET /api/run/brief`、映射到 missionRead / attemptGetBrief / attemptGetContext / workItemGetAgentDetail 的 `/api/agent/*` 读工具（如 get_mission、get_contract、get_project_context、get_work_item、get_validation_report），以及两个按**精确工具名**点名的专属工具 `coagent_get_change_request`（body 必须为空）与 `coagent_submit_change_impact`（body 只接受 decision/workOrderDiff/affectedAcceptance/reason）。这两个工具不入策略矩阵、不复用任何宽泛写别名，只在 impact 牌上放行；普通协调者/执行者/独立检视者牌对它们一律 403 `ACTION_DENIED`。其余一切入口（含 finish、两种终审、控制写与未知工具）一律 403 `ACTION_DENIED`，且在被拒前不读 body、不落盘。绑定、来源与角色门禁对放行的读继续生效（例如 get_context 仍按实际来源门禁执行，impact 不解锁它）。purpose/changeId/role 只由可信调用方在发牌时配对写入，HTTP 没有签发端点，body 自述一律不采信。
+impact Run（`purpose='impact'` 的 run token）是限权身份：只放行 `GET /api/run/brief`、映射到 missionRead / attemptGetBrief / attemptGetContext / workItemGetAgentDetail 的 `/api/agent/*` 读工具（如 get_mission、get_contract、get_project_context、get_work_item、get_validation_report），以及两个按**精确工具名**点名的专属工具 `coagent_get_change_request`（body 必须为空）与 `coagent_submit_change_impact`（body 只接受 decision/workOrderDiff/affectedAcceptance/reason）。这两个工具不入策略矩阵、不复用任何宽泛写别名，只在 impact 牌上放行，且另要求 role=coordinator、changeId 与目标 workItemId 非空、claim 三元组完整；请求指向的工作项与牌上目标不一致时 403。普通协调者/执行者/独立检视者牌对它们一律 403 `ACTION_DENIED`。同一个 changeId 上重复提交相同业务内容按幂等返回原记录，内容不同回 409 `CHANGE_IMPACT_CONFLICT` 且不覆盖。其余一切入口（含 finish、两种终审、控制写与未知工具）一律 403 `ACTION_DENIED`，且在被拒前不读 body、不落盘。绑定、来源与角色门禁对放行的读继续生效（例如 get_context 仍按实际来源门禁执行，impact 不解锁它）。purpose/changeId/role 只由可信调用方在发牌时配对写入，HTTP 没有签发端点，body 自述一律不采信。
 
 影响判断只是**判断**，不是应用：提交 decision 不触发重派 / 取消，也不把任何状态标成 applied / verified；原冻结工单不改。本阶段尚未启动 impact 运行监督。
 
@@ -1323,7 +1323,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 
 ### POST /api/agent/coagent_get_change_request
 
-鉴权：run token，且必须是 purpose=impact、绑定了 changeId 的**影响判断牌**。参数：body必须为空；Mission/Attempt/WorkItem/changeId身份全部来自x-coagent-run。返回 本次要判断的那条已确认变更（ChangeRequest）；以Platform领域类型为准。普通协调者/执行者/独立检视者牌一律403 ACTION_DENIED；body不接受任何字段，changeId不受理。
+鉴权：run token，且必须是 role=coordinator、purpose=impact、changeId 与目标 workItemId 均非空、并带完整 claim 三元组的**影响判断牌**。参数：body必须为空；Mission/Attempt/WorkItem/changeId身份全部来自x-coagent-run。返回 本次要判断的那条已确认变更（ChangeRequest）；以Platform领域类型为准。该请求指向的工作项必须与牌上钉死的目标一致，否则403 ACTION_DENIED。普通协调者/执行者/独立检视者牌一律403 ACTION_DENIED；body不接受任何字段，changeId不受理。目标那一侧的租约/代次/Attempt 已失效时由Platform回409（如 CLAIM_FENCE_REJECTED / UNKNOWN_ATTEMPT）；平台未装配变更仓储与队列槽时回409 CHANGE_IMPACT_UNSUPPORTED（不降级成放行）。
 
 请求示例及本机curl：
 
@@ -1346,7 +1346,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 
 ### POST /api/agent/coagent_submit_change_impact
 
-鉴权：run token，且必须是 purpose=impact、绑定了 changeId 的**影响判断牌**。参数：body仅接受decision/workOrderDiff/affectedAcceptance/reason；Mission/Attempt/WorkItem/changeId身份全部来自x-coagent-run。返回 已保存的影响判断（ChangeImpact）；以Platform领域类型为准。普通协调者/执行者/独立检视者牌一律403 ACTION_DENIED；body里任何身份字段一律400。
+鉴权：run token，且必须是 role=coordinator、purpose=impact、changeId 与目标 workItemId 均非空、并带完整 claim 三元组的**影响判断牌**。参数：body仅接受decision（compatible 兼容照跑｜replan 需重排｜cancel_replace 需取消替换）/workOrderDiff/affectedAcceptance/reason；Mission/Attempt/WorkItem/changeId身份全部来自x-coagent-run。返回 已保存的影响判断（ChangeImpact）；以Platform领域类型为准。提交前先读一次请求核目标：目标与牌不一致时403 ACTION_DENIED；目标不满足时由Platform回409（CLAIM_FENCE_REJECTED / UNKNOWN_ATTEMPT / UNKNOWN_CHANGE_REQUEST）。普通协调者/执行者/独立检视者牌一律403 ACTION_DENIED；body里任何身份字段一律400。同一个changeId上重复提交相同业务内容按幂等返回原记录（不再发事件），内容不同回409 CHANGE_IMPACT_CONFLICT且不覆盖原记录。
 
 **这只是「判断」，不是「应用」**：decision=replan / cancel_replace 都不会触发重派或取消，也不把任何状态标成 applied / verified。
 

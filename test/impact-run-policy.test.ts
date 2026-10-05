@@ -292,6 +292,20 @@ describe('impact Run 发牌与 HTTP 只读边界', () => {
       assert.equal(mutations, 0, '被拒绝的 POST 不得触发 onMutation');
       assert.equal(tokens.resolve(impact.token)?.changeId, 'chg-1', '拒绝不得吊销牌');
 
+      // 两个专属工具只认 impact 牌：普通协调者 / 执行者 / 独立检视者一律 403，
+      // 而且不看 body——body 里写满 purpose / changeId / claim 也换不来授权。
+      for (const [who, token] of [
+        ['普通协调者', coord.token],
+        ['执行者', executor.token],
+        ['独立检视者', reviewer.token],
+      ] as const) {
+        for (const tool of ['coagent_get_change_request', 'coagent_submit_change_impact']) {
+          const res = await postJson(base, `/api/agent/${tool}`, selfClaimed, token);
+          assert.equal(res.status, 403, `${who} 调 ${tool} 必须 403，实际 ${res.status}`);
+          assert.equal(res.json.error, 'ACTION_DENIED', `${who} 调 ${tool}`);
+        }
+      }
+
       // —— 普通牌不受影响：body 自称 impact 也不改变它的写行为 ——
       const plainWrite = await postJson(
         base,

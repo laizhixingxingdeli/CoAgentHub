@@ -23,6 +23,7 @@ import {
   type PlanRunListItem,
 } from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
+import { ChangeImpactConflictError } from '../application/change-impact.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import type {
   AgentPoolAddInput,
@@ -939,20 +940,56 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
-   * 两个 impact 专属工具的门禁：只有 purpose=impact 且绑了 changeId 的牌能过。
+   * 两个 impact 专属工具的门禁：只有 role=coordinator、purpose=impact、changeId /
+   * workItemId 非空、且带完整 claim 三元组的牌能过。
    *
    * 普通 coordinator / executor / independent_reviewer 牌一律 403，而且**不看
    * body**——body 是对方填的，拿它判断身份等于把门禁交给调用方。
+   *
+   * 为什么这里把 role / workItemId / claim 也逐个再验一遍（发牌时已经验过）：
+   * 门禁是 fail-closed 的那一层，它只能依赖 RunContext 自身的形状，不能依赖
+   * 「发牌方一定按规矩填了」。少了任一条，一张缺目标或缺领取身份的牌就会带着
+   * 半截身份走进 Platform，而 Platform 那边只会按它拿到的那半截去核对。
    */
   const requireImpactChangeId = (run: RunContext): string => {
-    if (run.purpose !== 'impact' || !run.changeId) {
+    const claim = run.claim;
+    const complete =
+      run.role === 'coordinator' &&
+      run.purpose === 'impact' &&
+      typeof run.changeId === 'string' &&
+      run.changeId.trim().length > 0 &&
+      typeof run.workItemId === 'string' &&
+      run.workItemId.trim().length > 0 &&
+      claim !== undefined &&
+      claim.id.trim().length > 0 &&
+      claim.owner.trim().length > 0 &&
+      Number.isSafeInteger(claim.claimGeneration) &&
+      claim.claimGeneration > 0;
+    if (!complete) {
       throw new HttpError(
         403,
         'ACTION_DENIED',
-        '只有 impact 目的牌能调用这个工具；普通协调者 / 执行者 / 独立检视者一律拒绝。',
+        '只有 impact 目的牌能调用这个工具；普通协调者 / 执行者 / 独立检视者，以及缺 changeId / 目标 / 领取身份的牌一律拒绝。',
       );
     }
-    return run.changeId;
+    return run.changeId as string;
+  };
+
+  /**
+   * 牌上钉死的目标工作项必须与这次要动的那条变更指向的工作项一致。
+   *
+   * Platform 核的是「变更 → 队列槽 → 目标执行」那一侧；这里补的是「牌 → 变更」
+   * 这一侧。少了它，一张绑着 A 工单的 impact 牌可以读到并判断 B 工单的变更，
+   * 而 Platform 只会看到「这条变更确实归这个 Mission」——它不知道牌上写的是谁。
+   */
+  const requireImpactTarget = (run: RunContext, workItemId: string): void => {
+    if (run.workItemId !== workItemId) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '这张 impact 牌绑的目标工作项不是这条变更指向的工作项，拒绝。',
+      );
+    }
   };
 
   /**
@@ -1038,7 +1075,9 @@ export function createApi(deps: ApiDeps): Server {
         );
       }
       const changeId = requireImpactChangeId(run);
-      return platform.getChangeRequest(run.missionId, run.attemptId, changeId, run.claim);
+      const request = await platform.getChangeRequest(run.missionId, run.attemptId, changeId, run.claim);
+      requireImpactTarget(run, request.workItemId);
+      return request;
     },
 
     /**
@@ -1051,6 +1090,11 @@ export function createApi(deps: ApiDeps): Server {
     async coagent_submit_change_impact(run, body) {
       const changeId = requireImpactChangeId(run);
       const business = requireImpactDecisionBody(body);
+      // 先读一次核目标再写：只核 body 的话「判断的是哪条变更」全靠牌的 self-report，
+      // 而牌上钉的目标是不是这条变更写的那个，只有仓储里的请求记录说了算。
+      // 这次读也顺带把 Platform 的归属 / 代次 / claim 校核跑一遍——不通过就轮不到写。
+      const request = await platform.getChangeRequest(run.missionId, run.attemptId, changeId, run.claim);
+      requireImpactTarget(run, request.workItemId);
       return platform.submitChangeImpact(
         run.missionId,
         run.attemptId,
@@ -1264,6 +1308,11 @@ export function createApi(deps: ApiDeps): Server {
       } else if (error instanceof PlatformRuleError) {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
+      } else if (error instanceof ChangeImpactConflictError) {
+        // 影响判断是 append-only 事实：同一个 changeId 上「结论不同」是业务冲突，
+        // 不是服务端故障。落到下面那个 500 分支的话，调用方会以为是自己把服务打挂了，
+        // 而真正该做的是换新 changeId 重算。
         writeJson(res, 409, { error: error.code, message: error.message }, identity);
       } else if (error instanceof Error && /^DOCUMENT_(?:PATH_FORBIDDEN|SYMLINK_FORBIDDEN|CHANGES_REQUIRED|CHANGE_INVALID|EMPTY_ANCHOR|ANCHOR_NOT_UNIQUE)$/.test(error.message)) {
         writeJson(res, 400, { error: error.message, message: '文档路径或精确差异无效，请刷新原文并重新提交' }, identity);
