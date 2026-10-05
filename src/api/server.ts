@@ -852,12 +852,25 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
+   * impact 牌专属的两个工具。
+   *
+   * 按**精确工具名**写死，不入 AGENT_TOOL_ACTION、也不复用任何宽泛的写别名：
+   * 走别名的话，将来给协调者加一条新写就顺带把限权身份的那条也开了，而这里
+   * 要的是「多一个都不行」。所以这两个名字不在策略矩阵里，门禁写在下面两层。
+   */
+  const IMPACT_EXCLUSIVE_TOOLS = new Set([
+    'coagent_get_change_request',
+    'coagent_submit_change_impact',
+  ]);
+
+  /**
    * impact Run 在整个 HTTP 面的入口白名单。
    *
    * 只看 path + method + 已解析 token：请求体在这一步还没读，也不会被读——
    * 读 body 才能让 body 影响判定，而 body 是对方填的。
-   * agent 工具走 /api/agent/<已有 handler>，且它的映射动作必须在只读白名单里；
-   * 其余一切入口（包括将来新加的路由）默认拒绝。
+   * agent 工具走 /api/agent/<已有 handler>，且要么映射到一个只读白名单动作、
+   * 要么是上面那两个显式点名的专属工具；其余一切入口（包括将来新加的路由）
+   * 默认拒绝。
    */
   const rejectImpactRunOutsideAllowlist = (req: IncomingMessage): void => {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
@@ -867,12 +880,13 @@ export function createApi(deps: ApiDeps): Server {
     // 未解析出 impact 牌（无 token / 普通牌）完全按原路径走：这里不改任何旧行为。
     if (!isImpactRun(tokens.resolve(token))) return;
     const method = req.method ?? 'GET';
+    const tool = path.startsWith('/api/agent/') ? path.slice('/api/agent/'.length) : undefined;
+    const known = tool !== undefined && Object.hasOwn(agentTools, tool);
     const allowed =
       (method === 'GET' && path === '/api/run/brief') ||
       (method === 'POST' &&
-        path.startsWith('/api/agent/') &&
-        Object.hasOwn(agentTools, path.slice('/api/agent/'.length)) &&
-        isImpactAllowedAction(AGENT_TOOL_ACTION[path.slice('/api/agent/'.length)]));
+        known &&
+        (isImpactAllowedAction(AGENT_TOOL_ACTION[tool!]) || IMPACT_EXCLUSIVE_TOOLS.has(tool!)));
     if (!allowed) throw new HttpError(403, 'ACTION_DENIED', IMPACT_READ_ONLY_MESSAGE);
   };
 
@@ -924,6 +938,41 @@ export function createApi(deps: ApiDeps): Server {
     return run.workItemId;
   };
 
+  /**
+   * 两个 impact 专属工具的门禁：只有 purpose=impact 且绑了 changeId 的牌能过。
+   *
+   * 普通 coordinator / executor / independent_reviewer 牌一律 403，而且**不看
+   * body**——body 是对方填的，拿它判断身份等于把门禁交给调用方。
+   */
+  const requireImpactChangeId = (run: RunContext): string => {
+    if (run.purpose !== 'impact' || !run.changeId) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有 impact 目的牌能调用这个工具；普通协调者 / 执行者 / 独立检视者一律拒绝。',
+      );
+    }
+    return run.changeId;
+  };
+
+  /**
+   * 业务体只认四个字段：多一个（尤其是任何 changeId / missionId / claim 之类的
+   * 身份字段）就 400——身份来自牌与请求记录，调用方补一个就是自己签自己的来源。
+   */
+  const requireImpactDecisionBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const known = new Set(['decision', 'workOrderDiff', 'affectedAcceptance', 'reason']);
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `影响判断只接受 decision / workOrderDiff / affectedAcceptance / reason：${key} 不受理`,
+        );
+      }
+    }
+    return { ...body };
+  };
+
   /** 每个工具一个 handler。handler 里没有规则，规则都在 Platform。 */
   const agentTools: Record<
     string,
@@ -972,6 +1021,43 @@ export function createApi(deps: ApiDeps): Server {
         throw new HttpError(404, 'VALIDATION_REPORT_NOT_FOUND', '没有这份验证报告');
       }
       return report;
+    },
+
+    /**
+     * 读这一次要判断的已确认变更。
+     *
+     * body 必须是空的：changeId 只来自牌上冻住的那一条。收 body changeId 等于
+     * 让限权身份自己挑「我要判断哪条变更」，而它能挑的那批里有一条是别人的。
+     */
+    async coagent_get_change_request(run, body) {
+      if (Object.keys(body).length > 0) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          'coagent_get_change_request 不接受请求体：变更身份只来自本次运行的凭据。',
+        );
+      }
+      const changeId = requireImpactChangeId(run);
+      return platform.getChangeRequest(run.missionId, run.attemptId, changeId, run.claim);
+    },
+
+    /**
+     * 提交这一次的影响判断。
+     *
+     * body 只认四业务字段：decision / workOrderDiff / affectedAcceptance / reason。
+     * 身份字段一个都不收——它们由 Platform 从请求记录与队列槽补齐，允许调用方补
+     * 就等于允许自己签自己的来源。
+     */
+    async coagent_submit_change_impact(run, body) {
+      const changeId = requireImpactChangeId(run);
+      const business = requireImpactDecisionBody(body);
+      return platform.submitChangeImpact(
+        run.missionId,
+        run.attemptId,
+        changeId,
+        business,
+        run.claim,
+      );
     },
 
     async coagent_get_contract(run) {
@@ -1662,6 +1748,15 @@ export function createApi(deps: ApiDeps): Server {
       const handler = agentTools[tool];
       if (!handler) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
       const run = requireRun(req);
+      // 两个 impact 专属工具在**普通 AGENT_TOOL_ACTION 流程之前**分流：
+      // 它们故意不在策略矩阵里，走普通流程会落到 UNKNOWN_TOOL，而真正要说清的
+      // 是「你这张牌不是 impact 牌」；放到前面，门禁就只由 requireImpactChangeId
+      // 一处说了算，也不会被任何将来新增的宽泛写别名顺带放行。
+      if (IMPACT_EXCLUSIVE_TOOLS.has(tool)) {
+        requireImpactChangeId(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
       const action = AGENT_TOOL_ACTION[tool];
       if (!action) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
       enforceAgentPolicy(run, action);

@@ -33,6 +33,8 @@ import { InMemoryAgentPoolRepository, loadRoleProfiles } from './application/age
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
+import { FileChangeImpactRepository } from './application/change-impact-repository.ts';
+import { FileChangeRequestRepository } from './application/change-request-repository.ts';
 import {
   FileActivityLog,
   FileAgentPoolRepository,
@@ -308,6 +310,12 @@ export async function buildPersistentPlatform(
     // 单事务命令（C2）：交卷与升级的状态、事件、投递一次写完。
     transaction: store,
     live,
+    // 影响判断三件套与上面的 recurrence 共用同一个 store：多一个 FileStateStore
+    // 实例就多一份内存副本，彼此互相盖。PG 装配**不**注入这一组——那里目前
+    // 没有对应的 PG 仓储，注入文件版等于把两份存储焊在一起。
+    changeRequests: new FileChangeRequestRepository(store),
+    changeImpacts: new FileChangeImpactRepository(store),
+    queuedHops,
   });
   const agentPool = new FileAgentPoolRepository(store);
   const tokens = new RunTokenRegistry();
@@ -525,6 +533,34 @@ export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTok
         role: 'executor',
         workItemId,
         ...(claim ? { claim } : {}),
+      });
+      return { attemptId, token: run.token };
+    },
+    /**
+     * 影响判断专属发牌：可选能力。
+     *
+     * 缺装配 / 缺 claim 一律 unsupported，**不回退到普通 startCoordinator**——
+     * 回退会发出一张看起来是 coordinator、实际没有 changeId 绑定的牌，而后面
+     * 的专属动作靠 changeId 校核，那张牌既过不了校核也说不清自己在判断哪条变更。
+     */
+    async startImpactCoordinator(missionId, changeId, profile, claim) {
+      if (!platform.supportsChangeImpact() || !claim) {
+        throw new Error('CHANGE_IMPACT_UNSUPPORTED：当前装配不支持影响判断发牌。');
+      }
+      const { attemptId, workItemId } = await platform.startImpactCoordinatorAttempt(
+        missionId,
+        changeId,
+        profile,
+        claim,
+      );
+      const run = tokens.issue({
+        missionId,
+        attemptId,
+        role: 'coordinator',
+        workItemId,
+        claim,
+        purpose: 'impact',
+        changeId,
       });
       return { attemptId, token: run.token };
     },

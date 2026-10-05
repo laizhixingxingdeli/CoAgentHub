@@ -380,6 +380,13 @@ const sameAsEscalated = (event) => ({
   detail: or(event && event.data && event.data.question, '（没有写问题）'),
 });
 
+/** 三种影响结论的人话。认不出就原样回显：编一个说法等于替调用方下结论。 */
+const DECISION_CN = {
+  compatible: '兼容，照跑',
+  replan: '需重排',
+  cancel_replace: '取消并替换',
+};
+
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
   'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
@@ -871,6 +878,21 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '交卷后影子评估',
       detail: or(data.quality, '只记不改审查级别'),
+    };
+  },
+
+  // 运行中变更的影响判断。**只是判断，不是应用**：文案里不许出现「已处理 /
+  // 已应用 / 已重排」——那条判断落地是另一条链路，写成已完成会让人拿它当已处理。
+  'change.impact_decided': (event) => {
+    const data = (event && event.data) || {};
+    const decision = DECISION_CN[text(data.decision)];
+    const acceptance = Array.isArray(data.affectedAcceptance) ? data.affectedAcceptance : [];
+    const count = acceptance.length;
+    const scope = count === 0 ? '没有点名受影响的验收' : `受影响验收 ${acceptance.join('、')}`;
+    return {
+      badge: 'L2 协调',
+      action: `影响判断：${decision}`,
+      detail: `${or(data.changeId, '（没有变更编号）')} · ${scope}`,
     };
   },
 };

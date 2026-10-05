@@ -28,5 +28,22 @@ export interface RunTokenIssuer {
     candidates?: readonly { profileId: string; endpoint: string; reasoning?: string }[],
     claim?: QueueClaimIdentity,
   ): Promise<{ attemptId: string; token: string; profileId: string }>;
+  /**
+   * 影响判断专属发牌（可选能力）。
+   *
+   * 只为一条已确认变更开一次 coordinator Attempt，并把 purpose=impact /
+   * changeId / workItemId / claim 一起冻进牌里。changeId 只来自这里——
+   * 它是牌上身份的一部分，不是调用方可以补填的字段。
+   *
+   * 未装配这个能力时**整个方法缺省**，而不是返回一个普通 coordinator 牌：
+   * 普通牌没有 changeId 绑定，拿它去调专属动作会过不了校核，于是调用方
+   * 会以为「平台坏了」而不是「这里没装配」。缺省让调用方能先问再调。
+   */
+  startImpactCoordinator?(
+    missionId: string,
+    changeId: string,
+    profile?: { profileId: string; endpoint: string; reasoning?: string },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ attemptId: string; token: string }>;
   revoke(token: string): void;
 }
