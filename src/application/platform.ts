@@ -64,8 +64,6 @@ import {
   InvariantViolationError,
   isPromotionTriggerCode,
 } from '../kernel/index.ts';
-import type { ChangeRequest } from './change-request.ts';
-import type { ChangeImpact } from './change-impact.ts';
 import type {
   AcceptanceResult,
   ComplexityAssessment,

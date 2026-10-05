@@ -6,6 +6,7 @@ import type { WorkspaceManager } from '../workspace.ts';
 import { InlineArtifactStore, type ArtifactStore } from '../artifact-store.ts';
 import type { LiveOutput } from '../live.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
+import type { QueuedHopRepository } from '../ports.ts';
 import type { ChangeImpactRepository } from '../change-impact.ts';
 import type { ChangeRequestRepository } from '../change-request.ts';
 import type { QueueClaimIdentity, PlatformDeps, PlatformValidationDeps } from '../platform.ts';
