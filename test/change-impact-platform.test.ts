@@ -266,6 +266,78 @@ function onDisk(statePath: string): { changeImpacts: unknown[]; events: { kind: 
   return JSON.parse(readFileSync(statePath, 'utf8'));
 }
 
+/** 盘文件完整字节：拒绝必须逐字节不改（读/拒都不能顺手落一条快照）。 */
+function diskBytes(statePath: string): string {
+  return readFileSync(statePath, 'utf8');
+}
+
+/**
+ * 断言一次拒绝：错误码对、且**盘文件字节 / 决定数 / 事件数**全不变。
+ *
+ * 只查错误码会漏掉「先写一半再抛」：事务回滚没盖全的那种写法，错误码看起来
+ * 完全正确，盘上却多了一条决定或事件。
+ */
+async function assertRejectedNoSideEffect(
+  h: Harness,
+  missionId: string,
+  code: string,
+  run: () => Promise<unknown>,
+): Promise<void> {
+  const before = diskBytes(h.statePath);
+  const decisions = onDisk(h.statePath).changeImpacts.length;
+  const events = (await eventsOf(h, missionId, 'change.impact_decided')).length;
+  assert.equal(await rejectCode(run()), code);
+  assert.equal(diskBytes(h.statePath), before, '拒绝不得改动盘文件字节');
+  assert.equal(onDisk(h.statePath).changeImpacts.length, decisions, '决定数不变');
+  assert.equal((await eventsOf(h, missionId, 'change.impact_decided')).length, events, '事件数不变');
+}
+
+/**
+ * 直接改真实 File 仓储里的队列行。
+ *
+ * 为什么改数据行而不是改 kernel：要验的是「仓储里这条 hop 说自己是别的目标时，
+ * 读写会不会放行」，不是「kernel 能不能构造出这种行」。改 kernel 只是把测例
+ * 想验的坏形状搬进生产代码。
+ */
+function rewriteHopRow(h: Harness, id: string, patch: Partial<QueuedHop>): void {
+  const state = h.store.raw() as { queuedHops: QueuedHop[] };
+  const row = state.queuedHops.find((item) => item.id === id);
+  assert.ok(row, `hop ${id} 应在盘上`);
+  Object.assign(row, patch);
+  h.store.flush();
+}
+
+interface OpenImpact {
+  readonly live: Awaited<ReturnType<typeof runningExecutor>>;
+  readonly impactClaim: QueueClaimIdentity;
+  readonly attemptId: string;
+}
+
+/** 新 harness：执行者在跑、没有别的 coordinator 占位，并开一次 impact 判断（未保存）。 */
+async function openImpact(h: Harness): Promise<OpenImpact> {
+  const live = await runningExecutor(h);
+  await h.requests.append(request({ changeId: 'CR-1', attemptId: live.executorAttemptId }));
+  const impactClaim = await claim(
+    h,
+    {
+      id: 'h-impact',
+      role: 'coordinator',
+      missionId: live.missionId,
+      workItemId: live.workItemId,
+      purpose: 'impact',
+      changeId: 'CR-1',
+    },
+    IMPACT_LEASE_MS,
+  );
+  const started = await h.platform.startImpactCoordinatorAttempt(
+    live.missionId,
+    'CR-1',
+    undefined,
+    impactClaim,
+  );
+  return { live, impactClaim, attemptId: started.attemptId };
+}
+
 /* ==================== 1. 合法双 claim 路径 ==================== */
 
 test('合法 impact claim 开唯一 L2、读绑定请求、保存带正确来源的决定；重试只一事件、冲突与额外身份拒绝、冻结工单不变且重开恢复', async () => {
@@ -288,22 +360,20 @@ test('合法 impact claim 开唯一 L2、读绑定请求、保存带正确来源
     IMPACT_LEASE_MS,
   );
   h.clock.advance(IMPACT_LEASE_MS + 1000);
+  // 成功重领后不把时钟拨回去：回拨会给过期租约续命，也会掩盖「一切都按单调时钟走向」。
   const impactClaim = await reClaim(h, 'h-impact', IMPACT_LEASE_MS);
-  h.clock.advance(-(IMPACT_LEASE_MS + 1000));
   assert.equal(impactClaim.claimGeneration, 2, 'impact 代次与执行者代次互不相干');
   assert.equal(live.executorClaim.claimGeneration, 1);
   assert.notEqual(impactClaim.id, live.executorClaim.id);
 
   // 普通 coordinator 正在跑：impact 不得抢占（不变量 B 由 Mission 守着）。
   const busy = await h.platform.startCoordinatorAttempt(live.missionId);
-  assert.equal(
-    await rejectCode(h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-1', undefined, impactClaim)),
-    'CONCURRENT_COORDINATOR_ATTEMPT',
+  await assertRejectedNoSideEffect(h, live.missionId, 'CONCURRENT_COORDINATOR_ATTEMPT', () =>
+    h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-1', undefined, impactClaim),
   );
   // 同一个在跑的普通 coordinator 也借不到这条读：它没有 impact 关联标记。
-  assert.equal(
-    await rejectCode(h.platform.getChangeRequest(live.missionId, busy.attemptId, 'CR-1', impactClaim)),
-    'WRONG_ROLE',
+  await assertRejectedNoSideEffect(h, live.missionId, 'WRONG_ROLE', () =>
+    h.platform.getChangeRequest(live.missionId, busy.attemptId, 'CR-1', impactClaim),
   );
   await h.platform.finishAttempt(live.missionId, busy.attemptId, { endedBy: 'structured_submit' });
 
@@ -408,9 +478,8 @@ test('合法 impact claim 开唯一 L2、读绑定请求、保存带正确来源
     },
     IMPACT_LEASE_MS,
   );
-  assert.equal(
-    await rejectCode(h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', other)),
-    'CLAIM_FENCE_REJECTED',
+  await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+    h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', other),
   );
 
   // body 里任何身份字段一律拒：身份只来自 claim 与请求记录。
@@ -448,301 +517,342 @@ test('合法 impact claim 开唯一 L2、读绑定请求、保存带正确来源
 /* ==================== 2. 拒绝与回滚 ==================== */
 
 test('跨任务/变更/claim、旧代次、过期租约与非当前目标一律无副作用拒绝；事件写失败回滚决定且可重试', async () => {
-  const h = harness();
-  const live = await runningExecutor(h);
-  await h.requests.append(request({ changeId: 'CR-1', attemptId: live.executorAttemptId }));
-  const impactClaim = await claim(
-    h,
-    {
-      id: 'h-impact',
-      role: 'coordinator',
-      missionId: live.missionId,
-      workItemId: live.workItemId,
-      purpose: 'impact',
-      changeId: 'CR-1',
-    },
-    IMPACT_LEASE_MS,
-  );
+  /* ---- A. 身份 / 归属拒绝：全部被挡下，盘上不留痕迹 ---- */
+  {
+    const h = harness();
+    const live = await runningExecutor(h);
+    await h.requests.append(request({ changeId: 'CR-1', attemptId: live.executorAttemptId }));
+    const impactClaim = await claim(
+      h,
+      {
+        id: 'h-impact',
+        role: 'coordinator',
+        missionId: live.missionId,
+        workItemId: live.workItemId,
+        purpose: 'impact',
+        changeId: 'CR-1',
+      },
+      IMPACT_LEASE_MS,
+    );
 
-  // 别的 Mission 的变更：拿 A 任务的变更去卡 B 任务。
-  await h.platform.createMission({ projectId: 'P', missionId: 'M2', contract: CONTRACT, origin: ORIGIN });
-  await h.requests.append(request({ changeId: 'CR-2', missionId: 'M2' }));
-  assert.equal(
-    await rejectCode(h.platform.startImpactCoordinatorAttempt('M', 'CR-2', undefined, impactClaim)),
-    'UNKNOWN_CHANGE_REQUEST',
-  );
+    // 别的 Mission 的变更：拿 A 任务的变更去卡 B 任务。
+    await h.platform.createMission({
+      projectId: 'P',
+      missionId: 'M2',
+      contract: CONTRACT,
+      origin: ORIGIN,
+    });
+    await h.requests.append(request({ changeId: 'CR-2', missionId: 'M2' }));
+    await assertRejectedNoSideEffect(h, live.missionId, 'UNKNOWN_CHANGE_REQUEST', () =>
+      h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-2', undefined, impactClaim),
+    );
 
-  // impact 牌绑的是 CR-1，却要开 CR-3 的判断：purpose/changeId 是钉死的一对。
-  // CR-3 指向另一代执行：它会在 pending 里被目标过滤掉，而不是全停。
-  await h.requests.append(request({ changeId: 'CR-3', attemptId: 'W-1.exec-9' }));
-  assert.equal(
-    await rejectCode(h.platform.startImpactCoordinatorAttempt('M', 'CR-3', undefined, impactClaim)),
-    'CLAIM_FENCE_REJECTED',
-  );
+    // impact 牌绑的是 CR-1，却要开 CR-3 的判断：purpose/changeId 是钉死的一对。
+    await h.requests.append(request({ changeId: 'CR-3', attemptId: 'W-1.exec-9' }));
+    await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-3', undefined, impactClaim),
+    );
 
-  const started = await h.platform.startImpactCoordinatorAttempt(
-    live.missionId,
-    'CR-1',
-    undefined,
-    impactClaim,
-  );
-
-  // 旧代次：换代前的旧牌不能接着写。
-  const stale: QueueClaimIdentity = { ...impactClaim, claimGeneration: 0 };
-  assert.equal(
-    await rejectCode(h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', stale)),
-    'CLAIM_FENCE_REJECTED',
-  );
-
-  // 过期租约：时钟越过 impact 的 leaseUntil（执行者租约还长），活租约等于没有租约。
-  h.clock.advance(120_000);
-  assert.equal(
-    await rejectCode(h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', impactClaim)),
-    'CLAIM_FENCE_REJECTED',
-  );
-  h.clock.advance(-120_000);
-
-  // 另一张 impact 牌：与发牌时钉下的 claim 三元组不一致。
-  const other = await claim(
-    h,
-    {
-      id: 'h-impact-2',
-      role: 'coordinator',
-      missionId: live.missionId,
-      workItemId: live.workItemId,
-      purpose: 'impact',
-      changeId: 'CR-1',
-    },
-    IMPACT_LEASE_MS,
-  );
-  assert.equal(
-    await rejectCode(h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', other)),
-    'CLAIM_FENCE_REJECTED',
-  );
-
-  /* ---- pending 筛选：已有 coordinator 不抢占、暂停不报、按目标过滤 ---- */
-  assert.deepEqual(
-    await h.platform.listPendingChangeRequests(
+    const started = await h.platform.startImpactCoordinatorAttempt(
       live.missionId,
-      live.workItemId,
-      live.executorAttemptId,
-      live.executorClaim,
-    ),
-    [],
-    '已有 impact coordinator 在跑，不再给未决项',
-  );
-  await h.platform.pauseMission(live.missionId);
-  assert.deepEqual(
-    await h.platform.listPendingChangeRequests(
-      live.missionId,
-      live.workItemId,
-      live.executorAttemptId,
-      live.executorClaim,
-    ),
-    [],
-    '暂停的 Mission 不报未决项',
-  );
-  // 暂停中也不能开新的 impact：那是在「先别动它」的命令下偷偷动它。
-  await assert.rejects(
-    h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-1', undefined, impactClaim),
-    (error: unknown) =>
-      error instanceof PlatformRuleError && error.code === 'MISSION_NOT_STARTABLE',
-    '暂停中不开新的 impact 判断',
-  );
-  await h.platform.resumeMission(live.missionId);
-  await h.platform.finishAttempt(
-    live.missionId,
-    started.attemptId,
-    { endedBy: 'structured_submit' },
-    impactClaim,
-  );
-  assert.deepEqual(
-    (
+      'CR-1',
+      undefined,
+      impactClaim,
+    );
+
+    // 旧代次：换代前的旧牌不能接着写。
+    const stale: QueueClaimIdentity = { ...impactClaim, claimGeneration: 0 };
+    await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', stale),
+    );
+
+    // 另一张 impact 牌：与发牌时钉下的 claim 三元组不一致。
+    const other = await claim(
+      h,
+      {
+        id: 'h-impact-2',
+        role: 'coordinator',
+        missionId: live.missionId,
+        workItemId: live.workItemId,
+        purpose: 'impact',
+        changeId: 'CR-1',
+      },
+      IMPACT_LEASE_MS,
+    );
+    await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', other),
+    );
+
+    // 过期租约：时钟越过 impact 的 leaseUntil（执行者租约还长），活租约等于没有租约。
+    h.clock.advance(120_000);
+    await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', impactClaim),
+    );
+  }
+
+  /* ---- B. pending 过滤 / 暂停：已有 coordinator 不抢占、按当前目标过滤 ---- */
+  {
+    const h = harness();
+    const open = await openImpact(h);
+
+    assert.deepEqual(
       await h.platform.listPendingChangeRequests(
-        live.missionId,
-        live.workItemId,
-        live.executorAttemptId,
-        live.executorClaim,
-      )
-    ).map((row) => row.changeId),
-    ['CR-1'],
-    '让出 coordinator 位后按目标给出未决项',
-  );
-  // 一条 attemptId 就是点名那一次、代次也对的请求，但正在跑的是**另一次**执行：
-  // 仓储过滤会把它选出来，所以必须由「最新 running attempt」这一层挡掉。
-  await h.requests.append(
-    request({ changeId: 'CR-9', attemptId: 'W-1.exec-9', claimGeneration: live.executorClaim.claimGeneration }),
-  );
-  assert.deepEqual(
-    await h.platform.listPendingChangeRequests(
+        open.live.missionId,
+        open.live.workItemId,
+        open.live.executorAttemptId,
+        open.live.executorClaim,
+      ),
+      [],
+      '已有 impact coordinator 在跑，不再给未决项',
+    );
+    await h.platform.pauseMission(open.live.missionId);
+    assert.deepEqual(
+      await h.platform.listPendingChangeRequests(
+        open.live.missionId,
+        open.live.workItemId,
+        open.live.executorAttemptId,
+        open.live.executorClaim,
+      ),
+      [],
+      '暂停的 Mission 不报未决项',
+    );
+    // 暂停中也不能开新的 impact：那是在「先别动它」的命令下偷偷动它。
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'MISSION_NOT_STARTABLE', () =>
+      h.platform.startImpactCoordinatorAttempt(open.live.missionId, 'CR-1', undefined, open.impactClaim),
+    );
+    await h.platform.resumeMission(open.live.missionId);
+    await h.platform.finishAttempt(
+      open.live.missionId,
+      open.attemptId,
+      { endedBy: 'structured_submit' },
+      open.impactClaim,
+    );
+    assert.deepEqual(
+      (
+        await h.platform.listPendingChangeRequests(
+          open.live.missionId,
+          open.live.workItemId,
+          open.live.executorAttemptId,
+          open.live.executorClaim,
+        )
+      ).map((row) => row.changeId),
+      ['CR-1'],
+      '让出 coordinator 位后按目标给出未决项',
+    );
+    // 一条 attemptId 就是点名那一次、代次也对的请求，但正在跑的是**另一次**执行：
+    // 仓储过滤会把它选出来，所以必须由「最新 running attempt」这一层挡掉。
+    await h.requests.append(
+      request({
+        changeId: 'CR-9',
+        attemptId: 'W-1.exec-9',
+        claimGeneration: open.live.executorClaim.claimGeneration,
+      }),
+    );
+    assert.deepEqual(
+      await h.platform.listPendingChangeRequests(
+        open.live.missionId,
+        open.live.workItemId,
+        'W-1.exec-9',
+        open.live.executorClaim,
+      ),
+      [],
+      '点名的 attempt 不是正在跑的那一次 → 空',
+    );
+  }
+
+  /* ---- C. 目标已结束、executor 租约仍活：get/submit 都拒 UNKNOWN_ATTEMPT ---- */
+  {
+    const h = harness();
+    const open = await openImpact(h);
+    // 结束目标执行，但**不让它的队列租约过期**：只靠 started 事件与 executor 租约的
+    // 旧校验会在这里放行，新校验必须看「最新 attempt 是否还在跑」。
+    await h.platform.finishAttempt(
+      open.live.missionId,
+      open.live.executorAttemptId,
+      { endedBy: 'no_structured_result' },
+      open.live.executorClaim,
+    );
+    const execHop = (await h.hops.list()).find((hop) => hop.id === 'h-exec');
+    assert.ok(
+      execHop &&
+        execHop.status === 'claimed' &&
+        Date.parse(execHop.leaseUntil!) > Date.parse(h.clock.now().toISOString()),
+      'executor 租约仍活，拒绝不能靠租约过期',
+    );
+
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'UNKNOWN_ATTEMPT', () =>
+      h.platform.getChangeRequest(open.live.missionId, open.attemptId, 'CR-1', open.impactClaim),
+    );
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'UNKNOWN_ATTEMPT', () =>
+      h.platform.submitChangeImpact(
+        open.live.missionId,
+        open.attemptId,
+        'CR-1',
+        IMPACT_BODY,
+        open.impactClaim,
+      ),
+    );
+    // 开局也不放行。
+    await h.platform.finishAttempt(
+      open.live.missionId,
+      open.attemptId,
+      { endedBy: 'structured_submit' },
+      open.impactClaim,
+    );
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'UNKNOWN_ATTEMPT', () =>
+      h.platform.startImpactCoordinatorAttempt(open.live.missionId, 'CR-1', undefined, open.impactClaim),
+    );
+  }
+
+  /* ---- D. executor hop 真实到期换代：request 保留真实原代，get/submit 拒绝 ---- */
+  {
+    const h = harness();
+    const live = await runningExecutor(h);
+    await h.requests.append(request({ changeId: 'CR-1', attemptId: live.executorAttemptId }));
+    // impact 租约给得比 executor 到期时间更长，换代后它仍是活的——拒绝不能靠
+    // 「impact 自己也过期了」蒙混过去。
+    const impactClaim = await claim(
+      h,
+      {
+        id: 'h-impact',
+        role: 'coordinator',
+        missionId: live.missionId,
+        workItemId: live.workItemId,
+        purpose: 'impact',
+        changeId: 'CR-1',
+      },
+      EXEC_LEASE_MS * 2,
+    );
+    const started = await h.platform.startImpactCoordinatorAttempt(
       live.missionId,
-      live.workItemId,
-      'W-1.exec-9',
-      live.executorClaim,
-    ),
-    [],
-    '点名的 attempt 不是正在跑的那一次 → 空',
-  );
+      'CR-1',
+      undefined,
+      impactClaim,
+    );
 
-  /* ---- 目标 attempt 已结束：拒绝，且不留记录 / 事件 ---- */
-  await h.platform.finishAttempt(
-    live.missionId,
-    live.executorAttemptId,
-    { endedBy: 'no_structured_result' },
-    live.executorClaim,
-  );
-  assert.equal(
-    await rejectCode(h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-1', undefined, impactClaim)),
-    'UNKNOWN_ATTEMPT',
-  );
-  assert.equal(await h.impacts.get('CR-1'), undefined);
-  assert.equal((await eventsOf(h, live.missionId, 'change.impact_decided')).length, 0);
-  assert.equal(
-    (await eventsOf(h, live.missionId, 'attempt.started')).filter(
-      (event) => (event.data as { purpose?: string }).purpose === 'impact',
-    ).length,
-    1,
-    '被拒的开局不留 impact started 事件',
-  );
+    // 同一个 executor hop 真实到期后重新领取：同一目标、同一角色的**新一代**活租约。
+    h.clock.advance(EXEC_LEASE_MS + 1000);
+    const gen2 = await reClaim(h, 'h-exec', EXEC_LEASE_MS);
+    assert.equal(gen2.claimGeneration, live.executorClaim.claimGeneration + 1, 'executor hop 真实换代');
+    // request 钉的是真实原代（不是编出来的 99）；盘上也只有这一条同目标 executor hop。
+    assert.equal(
+      (await h.requests.get('CR-1'))?.claimGeneration,
+      live.executorClaim.claimGeneration,
+      'request 保留真实原代',
+    );
+    const sameTarget = (await h.hops.list()).filter(
+      (hop) =>
+        hop.missionId === live.missionId &&
+        hop.workItemId === live.workItemId &&
+        hop.role === 'executor',
+    );
+    assert.equal(sameTarget.length, 1, '没有第二条同目标旧代活 hop 可以冒充');
 
-  // 旧代次的请求（没有对应活着的 executor 租约）开不出 impact。
-  await h.requests.append(request({ changeId: 'CR-5', claimGeneration: 99 }));
-  assert.equal(
-    await rejectCode(h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-5', undefined, impactClaim)),
-    'CLAIM_FENCE_REJECTED',
-  );
+    await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.getChangeRequest(live.missionId, started.attemptId, 'CR-1', impactClaim),
+    );
+    await assertRejectedNoSideEffect(h, live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.submitChangeImpact(
+        live.missionId,
+        started.attemptId,
+        'CR-1',
+        IMPACT_BODY,
+        impactClaim,
+      ),
+    );
+  }
 
-  /* ---- 缺仓储 / 缺 fence：明确 unsupported，不退化成不校验直接写 ---- */
-  const bare = new Platform({
-    projects: new FileProjectRepository(h.store),
-    deliveries: new FileDeliveryRepository(h.store, h.clock, new PersistentIds(h.store)),
-    activity: h.gate,
-    clock: h.clock,
-    ids: new PersistentIds(h.store),
-  });
-  assert.equal(bare.supportsChangeImpact(), false);
-  assert.equal(
-    await rejectCode(bare.startImpactCoordinatorAttempt(live.missionId, 'CR-1', undefined, impactClaim)),
-    'CHANGE_IMPACT_UNSUPPORTED',
-  );
+  /* ---- E. claim 活、started 绑定保持，impact hop 目标错：start/get/submit 都拒 ---- */
+  {
+    const h = harness();
+    const open = await openImpact(h);
+    // 直接改真实 File 仓储里的那一行：把 impact hop 的目标工作项改成别处，
+    // 租约 / 代次 / owner 保持原样。改的是数据行，不是 kernel。
+    rewriteHopRow(h, 'h-impact', { workItemId: 'W-other' });
 
-  /* ---- 事件写失败：保存 + 事件同事务，决定随 File 事务回滚，重开后可重试 ---- */
-  // 换一代执行者，让目标重新在跑。
-  const nextClaim = await claim(
-    h,
-    { id: 'h-exec-2', role: 'executor', missionId: live.missionId, workItemId: live.workItemId },
-    EXEC_LEASE_MS,
-  );
-  const next = await h.platform.startExecutorAttempt(
-    live.missionId,
-    live.workItemId,
-    undefined,
-    nextClaim,
-  );
-  await h.requests.append(request({ changeId: 'CR-4', attemptId: next.attemptId }));
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.getChangeRequest(open.live.missionId, open.attemptId, 'CR-1', open.impactClaim),
+    );
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.submitChangeImpact(
+        open.live.missionId,
+        open.attemptId,
+        'CR-1',
+        IMPACT_BODY,
+        open.impactClaim,
+      ),
+    );
+    // 让出 coordinator 位后再开：impact hop 目标不对，开局也不放行。
+    await h.platform.finishAttempt(
+      open.live.missionId,
+      open.attemptId,
+      { endedBy: 'structured_submit' },
+      open.impactClaim,
+    );
+    await assertRejectedNoSideEffect(h, open.live.missionId, 'CLAIM_FENCE_REJECTED', () =>
+      h.platform.startImpactCoordinatorAttempt(open.live.missionId, 'CR-1', undefined, open.impactClaim),
+    );
+  }
 
+  /* ---- F. 缺仓储 / 缺 fence：明确 unsupported；事件写失败：决定随事务回滚、可重试 ---- */
+  {
+    const h = harness();
+    const live = await runningExecutor(h);
+    await h.requests.append(request({ changeId: 'CR-4', attemptId: live.executorAttemptId }));
+    const impact4 = await claim(
+      h,
+      {
+        id: 'h-impact-4',
+        role: 'coordinator',
+        missionId: live.missionId,
+        workItemId: live.workItemId,
+        purpose: 'impact',
+        changeId: 'CR-4',
+      },
+      IMPACT_LEASE_MS,
+    );
 
-  const impact4 = await claim(
-    h,
-    {
-      id: 'h-impact-4',
-      role: 'coordinator',
-      missionId: live.missionId,
-      workItemId: live.workItemId,
-      purpose: 'impact',
-      changeId: 'CR-4',
-    },
-    IMPACT_LEASE_MS,
-  );
+    // 缺仓储 / 缺 fence：明确 unsupported，不退化成不校验直接写。
+    const bare = new Platform({
+      projects: new FileProjectRepository(h.store),
+      deliveries: new FileDeliveryRepository(h.store, h.clock, new PersistentIds(h.store)),
+      activity: h.gate,
+      clock: h.clock,
+      ids: new PersistentIds(h.store),
+    });
+    assert.equal(bare.supportsChangeImpact(), false);
+    assert.equal(
+      await rejectCode(bare.startImpactCoordinatorAttempt(live.missionId, 'CR-1', undefined, impact4)),
+      'CHANGE_IMPACT_UNSUPPORTED',
+    );
 
-  const fresh = await h.platform.startImpactCoordinatorAttempt(
-    live.missionId,
-    'CR-4',
-    undefined,
-    impact4,
-  );
-  h.gate.fail = true;
-  await assert.rejects(
-    h.platform.submitChangeImpact(live.missionId, fresh.attemptId, 'CR-4', IMPACT_BODY, impact4),
-    /decided 事件写失败/,
-  );
-  h.gate.fail = false;
-  // 回滚：盘上没有这条决定，也没有它的事件。
-  const afterFail = onDisk(h.statePath);
-  assert.equal(afterFail.changeImpacts.length, 0);
-  assert.equal(afterFail.events.filter((event) => event.kind === 'change.impact_decided').length, 0);
+    const fresh = await h.platform.startImpactCoordinatorAttempt(
+      live.missionId,
+      'CR-4',
+      undefined,
+      impact4,
+    );
+    h.gate.fail = true;
+    await assert.rejects(
+      h.platform.submitChangeImpact(live.missionId, fresh.attemptId, 'CR-4', IMPACT_BODY, impact4),
+      /decided 事件写失败/,
+    );
+    h.gate.fail = false;
+    // 回滚：盘上没有这条决定，也没有它的事件。
+    const afterFail = onDisk(h.statePath);
+    assert.equal(afterFail.changeImpacts.length, 0);
+    assert.equal(afterFail.events.filter((event) => event.kind === 'change.impact_decided').length, 0);
 
-  // 重新尝试可成功：事件真的发出去了（说明上一次确实没落库，否则这里会是幂等返回）。
-  const decided = await h.platform.submitChangeImpact(
-    live.missionId,
-    fresh.attemptId,
-    'CR-4',
-    IMPACT_BODY,
-    impact4,
-  );
-  assert.equal(decided.changeId, 'CR-4');
-  assert.equal((await eventsOf(h, live.missionId, 'change.impact_decided')).length, 1);
-  assert.equal(onDisk(h.statePath).changeImpacts.length, 1);
-
-  /* ---- 代次是「哪次执行」的轴：续租换代后旧代次的请求开不出 impact ---- */
-  await h.platform.finishAttempt(live.missionId, fresh.attemptId, { endedBy: 'structured_submit' }, impact4);
-  // 执行者租约到期后被重新领取：同一条 hop 换代，第 1 代那次执行不再「正在被持有」。
-  h.clock.advance(EXEC_LEASE_MS + 1000);
-  const gen2 = await reClaim(h, nextClaim.id, EXEC_LEASE_MS);
-  h.clock.advance(-(EXEC_LEASE_MS + 1000));
-  assert.equal(gen2.claimGeneration, nextClaim.claimGeneration + 1, '重新领取换代');
-
-  // 钉在第 1 代：那一代租约已经不在（h-exec-2 现在是第 2 代），旧请求开不出。
-  await h.requests.append(request({ changeId: 'CR-6', attemptId: next.attemptId, claimGeneration: 99 }));
-  const impact6 = await claim(
-    h,
-    {
-      id: 'h-impact-6',
-      role: 'coordinator',
-      missionId: live.missionId,
-      workItemId: live.workItemId,
-      purpose: 'impact',
-      changeId: 'CR-6',
-    },
-    IMPACT_LEASE_MS,
-  );
-  await assert.rejects(
-    h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-6', undefined, impact6),
-    (error: unknown) =>
-      error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
-    'request 钉的代次已经换代 → 拒绝',
-  );
-
-  // pending 也按「正在跑的那一次」过滤：点名新一代 attempt 时，挂在旧 attempt
-  // 上的请求不能再报未决——报了也没有人在跑。
-  await h.requests.append(
-    request({
-      changeId: 'CR-8',
-      attemptId: next.attemptId,
-      claimGeneration: gen2.claimGeneration,
-    }),
-  );
-  const later = await h.platform
-    .listPendingChangeRequests(live.missionId, live.workItemId, next.attemptId, gen2)
-    .then((rows) => rows.map((row) => row.changeId));
-  assert.ok(later.includes('CR-8'), '当前代的未决项被报出');
-  assert.ok(!later.includes('CR-6'), '钉在不存在代次的请求不报未决');
-
-  await h.requests.append(
-    request({ changeId: 'CR-7', attemptId: next.attemptId, claimGeneration: gen2.claimGeneration }),
-  );
-  const impact7 = await claim(
-    h,
-    {
-      id: 'h-impact-7',
-      role: 'coordinator',
-      missionId: live.missionId,
-      workItemId: live.workItemId,
-      purpose: 'impact',
-      changeId: 'CR-7',
-    },
-    IMPACT_LEASE_MS,
-  );
-  const gen7 = await h.platform.startImpactCoordinatorAttempt(live.missionId, 'CR-7', undefined, impact7);
-  assert.equal(gen7.workItemId, live.workItemId, '当前代次的请求能开');
+    // 重新尝试可成功：事件真的发出去了（说明上一次确实没落库，否则这里会是幂等返回）。
+    const decided = await h.platform.submitChangeImpact(
+      live.missionId,
+      fresh.attemptId,
+      'CR-4',
+      IMPACT_BODY,
+      impact4,
+    );
+    assert.equal(decided.changeId, 'CR-4');
+    assert.equal((await eventsOf(h, live.missionId, 'change.impact_decided')).length, 1);
+    assert.equal(onDisk(h.statePath).changeImpacts.length, 1);
+  }
 });

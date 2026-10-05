@@ -16,7 +16,7 @@
  */
 
 import { InvariantViolationError } from '../../kernel/index.ts';
-import type { Attempt, Mission, UsedProfile } from '../../kernel/index.ts';
+import type { Attempt, Mission, UsedProfile, WorkItem } from '../../kernel/index.ts';
 import {
   ChangeImpactConflictError,
   validateChangeImpactBody,
@@ -173,16 +173,19 @@ async function requireLiveExecutorHop(
 }
 
 /**
- * impact hop 自身：role=coordinator / purpose=impact / changeId 与本次请求一致、
+ * impact hop 自身：role=coordinator / purpose=impact / changeId 与请求一致、
  * mission 与工作项准确、租约活着。
  *
- * 不查这些的话，任意一张活着的 coordinator 牌都能自称`我在做影响判断」，
- * 而 purpose / changeId 正是发牌时钉死的那两件事。
+ * 为什么身份只从**仓储里的 request** 取而不是从 body：request 是已确认的持久事实，
+ * body 是调用方这一次带上来的话。用 body 里的 mission/workItem 去比对 hop，等于让
+ * 调用方自己声明「我这张牌是给这个目标的」，错目标的 impact 牌就能自称对齐。
+ *
+ * 不查这些的话，任意一张活着的 coordinator 牌都能自称`我在做影响判断」,
+ * 而 purpose / changeId / 目标工作项正是发牌时钉死的那几件事。
  */
 async function requireLiveImpactHop(
   hops: QueuedHopRepository,
-  missionId: string,
-  changeId: string,
+  request: ChangeRequest,
   claim: QueueClaimIdentity,
   now: string,
 ): Promise<void> {
@@ -191,14 +194,48 @@ async function requireLiveImpactHop(
     hop !== undefined &&
     hop.role === 'coordinator' &&
     hop.purpose === CHANGE_IMPACT_PURPOSE &&
-    hop.changeId === changeId &&
-    hop.missionId === missionId;
+    hop.changeId === request.changeId &&
+    hop.missionId === request.missionId &&
+    hop.workItemId === request.workItemId;
   if (!aligned || !isLiveClaim(hop, claim, now)) {
     throw new PlatformRuleError(
       'CLAIM_FENCE_REJECTED',
-      '这次调用没有持有本条变更的 impact 活租约，拒绝。',
+      '这次调用没有持有本条变更的 impact 活租约，或租约绑的目标不是这条变更指向的工作项，拒绝。',
     );
   }
+}
+
+/**
+ * 同事务里把「impact 牌 + 目标执行 + 目标 attempt」一次性校完。
+ *
+ * 只在 started 事件上校绑定是不够的：事件刻的是**发牌那一刻**的关联，它不证明
+ * 现在这张 hop/workItem 还对、也不证明那次 executor attempt 还在跑。三条都要现查：
+ *   1. impact hop：role/purpose/changeId/mission/workItem 与仓储 request 对齐、租约活；
+ *   2. executor hop：request 指向的那一代仍有活租约（换代即失配）；
+ *   3. 目标最新 executor attempt：还是 request.attemptId 且 in_progress。
+ *
+ * 为什么取「最新 executor attempt」而不是 `find(in_progress)`：find 会在历史里
+ * 捞到任意一条在跑的，哪怕目标早就换了另一次执行。取最后一条才对应「现在这一次」。
+ */
+async function requireCurrentImpactTarget(
+  ctx: PlatformContext,
+  request: ChangeRequest,
+  claim: QueueClaimIdentity,
+  now: string,
+): Promise<{ mission: Mission; item: WorkItem }> {
+  const hops = ctx.queuedHops!;
+  await requireLiveImpactHop(hops, request, claim, now);
+  await requireLiveExecutorHop(hops, request, now);
+  const { mission, item } = await ctx.locateItem(request.missionId, request.workItemId);
+  const executorAttempts = item.attempts.filter((attempt) => attempt.kind === 'executor');
+  const latest = executorAttempts[executorAttempts.length - 1];
+  if (!latest || latest.id !== request.attemptId || latest.status !== 'in_progress') {
+    throw new PlatformRuleError(
+      'UNKNOWN_ATTEMPT',
+      `已确认变更指向的 executor attempt ${request.attemptId} 已不在跑。`,
+    );
+  }
+  return { mission, item };
 }
 
 /**
@@ -375,7 +412,6 @@ export async function startImpactCoordinatorAttempt(
 ): Promise<{ attemptId: string; workItemId: string }> {
   requireAssembled(ctx, claim);
   const requests = ctx.changeRequests!;
-  const hops = ctx.queuedHops!;
   const impact = claim!;
   return ctx.txFenced(impact, async () => {
     // 时钟只从 ctx 取，且要取在事务里：事务外的预取时间可以用`这一刻还没过期」
@@ -383,22 +419,9 @@ export async function startImpactCoordinatorAttempt(
     const now = ctx.clock.now().toISOString();
     const request = requireRequest(await requests.get(changeId), changeId);
     requireSameMission(request, missionId, changeId);
-    // impact hop：role=coordinator / purpose=impact / changeId 与请求一致、
-    // mission / 工作项准确、租约活着。
-    await requireLiveImpactHop(hops, missionId, changeId, impact, now);
-    // executor hop 独立查，不借 impact 的 claim：判断的对象是`那次执行」是否在跑。
-    await requireLiveExecutorHop(hops, request, now);
-    const { mission, item } = await ctx.locateItem(missionId, request.workItemId);
+    // impact 牌、executor 租约、目标 attempt 三条在同一事务里一次校完，都在才谈开局。
+    const { mission } = await requireCurrentImpactTarget(ctx, request, impact, now);
     requireStartable(mission);
-    // 目标 attempt 必须还是 in_progress：已经交卷的执行谈不上`改了会不会打到它」。
-    const running = item.attempts.find((attempt) => attempt.status === 'in_progress');
-    if (!running || running.id !== request.attemptId) {
-      throw new PlatformRuleError(
-        'UNKNOWN_ATTEMPT',
-        `已确认变更指向的 executor attempt ${request.attemptId} 已不在跑。`,
-      );
-    }
-    // 复用 Mission 唯一的 coordinator 规矩（不变量 B）：不改 Mission.status，
     // 也不给这条 Attempt 任何额外权限。普通 coordinator 正在跑时这里抛
     // CONCURRENT_COORDINATOR_ATTEMPT——impact 不抢占在跑的判断。
     const started = startImpactAttempt(mission);
@@ -424,13 +447,12 @@ export async function getChangeRequest(
 ): Promise<ChangeRequest> {
   requireAssembled(ctx, claim);
   const requests = ctx.changeRequests!;
-  const hops = ctx.queuedHops!;
   return ctx.attemptWrite(missionId, coordinatorAttemptId, claim, async () => {
     const now = ctx.clock.now().toISOString();
     const request = requireRequest(await requests.get(changeId), changeId);
     requireSameMission(request, missionId, changeId);
     await requireImpactAttempt(ctx, missionId, coordinatorAttemptId, request, claim!);
-    await requireLiveExecutorHop(hops, request, now);
+    await requireCurrentImpactTarget(ctx, request, claim!, now);
     return request;
   });
 }
@@ -453,7 +475,6 @@ export async function submitChangeImpact(
   requireAssembled(ctx, claim);
   const requests = ctx.changeRequests!;
   const impacts = ctx.changeImpacts!;
-  const hops = ctx.queuedHops!;
   const business = readImpactBody(body);
   return ctx.attemptWrite(missionId, coordinatorAttemptId, claim, async () => {
     const now = ctx.clock.now().toISOString();
@@ -466,7 +487,9 @@ export async function submitChangeImpact(
       request,
       claim!,
     );
-    await requireLiveExecutorHop(hops, request, now);
+    // 读/写都在同一回调里现校 impact 归属与当前 running executor 目标：
+    // 只验 started 事件会让「目标已结束、租约却还活着」的窗口可写。
+    await requireCurrentImpactTarget(ctx, request, claim!, now);
     const candidate: ChangeImpact = {
       changeId,
       missionId,
