@@ -1792,6 +1792,42 @@ describe('hosted Mission 入口与 CLI 回环转发', () => {
     assert.equal(view2.workItems.length, 1);
   });
 
+  test('hosted 发牌沿用 built.issuer：可选 startImpactCoordinator 原样透传，不退回 built.tokens', async () => {
+    const { ctx } = await hostedDeps();
+    const inner = ctx.built.tokens;
+    assert.equal(typeof inner.startImpactCoordinator, 'function', 'makeIssuer 的牌口带可选 impact 方法');
+    const startedWithIssuer: string[] = [];
+    const issuer: RunTokenIssuer = {
+      ...inner,
+      async startCoordinator(missionId, profile, claim) {
+        startedWithIssuer.push(missionId);
+        return inner.startCoordinator(missionId, profile, claim);
+      },
+    };
+    // 哨兵 built.tokens：若 hosted 没有用 built.issuer，任何发牌都会在这里炸。
+    const sentinel: RunTokenIssuer = {
+      async startCoordinator() {
+        throw new Error('hosted 必须用 built.issuer，不得退回 built.tokens');
+      },
+      async startExecutor() {
+        throw new Error('hosted 必须用 built.issuer，不得退回 built.tokens');
+      },
+      revoke() {},
+    };
+    const code = await runHostedMission(
+      hostedBody({ inPlace: true }),
+      {
+        ...ctx,
+        built: { ...ctx.built, issuer, tokens: sentinel },
+        runtime: new ScriptedRuntime({ ...COORDINATOR_HAPPY, ...EXECUTOR_HAPPY }),
+      },
+      () => {},
+    );
+    assert.equal(code, 0);
+    assert.ok(startedWithIssuer.length >= 2, '协调者两跳都经 built.issuer 发牌');
+    assert.equal(typeof issuer.startImpactCoordinator, 'function', '透传的牌口没有被换成吞掉可选方法的新对象');
+  });
+
   test('live 锁 CLI 原样转发参数与 env 声明，边印 stdout/stderr 并设置退出码', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'run-mission-fwd-'));
     temps.push(dir);
