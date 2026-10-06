@@ -24,9 +24,14 @@ export interface RunContext {
     readonly claimGeneration: number;
   };
   /**
-   * 发牌目的。'impact' 表示这张牌只做影响判断：HTTP 面把它当只读身份处理。
+   * 发牌目的。'impact' 表示这张牌只做影响判断：HTTP 面把它当只读身份处理，
+   * 只允许两个专属工具（读请求 / 提交判断），其余一切入口照旧拒绝。
    * 与 changeId 严格配对——少了 changeId 就分不清是哪一次变更的判断。
    * 这个字段只由可信调用方在 issue 时给，**永远不从请求体读**。
+   *
+   * 一条限权写就够了：impact 牌唯一的写是把这次判断的事实落库。再开一格
+   * 写（哪怕「看起来是同类」）都会让「只读身份」这个说法失去意义。
+   * 签发**没有** HTTP 入口——body 里自称什么也换不来这张牌。
    */
   readonly purpose?: 'impact';
   readonly changeId?: string;

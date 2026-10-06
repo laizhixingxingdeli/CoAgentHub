@@ -67,6 +67,9 @@ import type { WorkspaceManager } from '../workspace.ts';
 import type { ArtifactStore } from '../artifact-store.ts';
 import type { CommandRunner } from '../validation/ports.ts';
 import type { LiveOutput } from '../live.ts';
+import type { ChangeImpactRepository } from '../change-impact.ts';
+import type { ChangeRequestRepository } from '../change-request.ts';
+import type { QueuedHopRepository } from '../ports.ts';
 import type { ClassificationResult } from '../task-classifier.ts';
 import type { BoundWorkItem, ContractCheck, ContextBundle, WorkItemIndexEntry } from '../context-builder.ts';
 import type { StandardAutoRedispatchReason, StandardAutoRedispatchSkipReason } from '../platform.ts';
@@ -200,6 +203,16 @@ export interface PlatformDeps {
    * 测试注入 HA 授权文件绝对路径。生产只读 COAGENT_HA_AUTHORITY_FILE，每次现读。
    */
   haAuthorityFile?: string;
+  /**
+   * 运行中变更的已确认请求 / 影响判断仓储，以及队列槽仓储。
+   *
+   * 三样**成组可选**：缺任一样就不装配影响判断能力，专属动作返回
+   * CHANGE_IMPACT_UNSUPPORTED，而不是退化成「不校验直接写」。分开注入会出现
+   * 读得到请求、校不了租约的半截能力——那正是最容易被当成完整能力的一种。
+   */
+  changeRequests?: ChangeRequestRepository;
+  changeImpacts?: ChangeImpactRepository;
+  queuedHops?: QueuedHopRepository;
   /**
    * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
    * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。

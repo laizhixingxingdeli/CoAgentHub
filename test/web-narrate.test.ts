@@ -469,6 +469,50 @@ describe('事件翻译表：逐条对契约', () => {
     }
   });
 
+  test('change.impact_decided：三结论都只是判断、未应用；cancel_replace 说的是「需取消替换」；未知结论安全退回', () => {
+    const data = { changeId: 'CR-1', workItemId: 'W-465', attemptId: 'W-465.exec-1', affectedAcceptance: [1] };
+    const cases = [
+      { decision: 'compatible', label: '兼容照跑' },
+      { decision: 'replan', label: '需重排' },
+      { decision: 'cancel_replace', label: '需取消替换' },
+    ];
+    for (const c of cases) {
+      const out = narrateEvent(
+        { kind: 'change.impact_decided', data: { ...data, decision: c.decision } },
+        CTX,
+      );
+      assert.equal(out.untranslated, false);
+      assert.equal(out.badge, 'L2 协调');
+      assert.ok(out.action.includes(c.label), `action 该说「${c.label}」：${out.action}`);
+      assert.ok(out.detail.includes('CR-1'), out.detail);
+      // 只是判断：不许出现「已取消 / 已重排 / 已应用 / 已处理」这种落地说法。
+      assert.ok(/只是判断/.test(out.detail), out.detail);
+      assert.ok(/尚未应用/.test(out.detail), out.detail);
+      assert.ok(
+        !/已(?:取消|重排|应用|处理)/.test(`${out.badge}${out.action}${out.detail}`),
+        `不许把判断写成已落地：${out.action} / ${out.detail}`,
+      );
+    }
+
+    // 认不出的结论：原样带回、仍标只是判断，不替调用方编一个说法。
+    const unknown = narrateEvent(
+      { kind: 'change.impact_decided', data: { ...data, decision: 'no_such_decision', affectedAcceptance: [] } },
+      CTX,
+    );
+    assert.equal(unknown.untranslated, false);
+    assert.ok(unknown.action.includes('no_such_decision'), unknown.action);
+    assert.ok(/只是判断/.test(unknown.detail), unknown.detail);
+    for (const field of ['badge', 'action', 'detail']) {
+      assert.notEqual(unknown[field].trim(), '', `${field} 不能空白`);
+      assert.ok(!/undefined|null/.test(unknown[field]), `${field} 漏了机器值：${unknown[field]}`);
+    }
+
+    // 连结论字段都没有：退回「没有结论」，仍不空、仍只是判断。
+    const missing = narrateEvent({ kind: 'change.impact_decided', data: {} }, CTX);
+    assert.ok(missing.action.includes('没有结论'), missing.action);
+    assert.ok(/只是判断/.test(missing.detail), missing.detail);
+  });
+
   test('整体：已翻译结果的 badge+action+detail 里不出现任何机器事件名', () => {
     const rendered = CASES.map((c) => {
       const out = narrateEvent(c.event, CTX);

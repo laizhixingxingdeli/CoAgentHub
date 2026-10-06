@@ -380,6 +380,24 @@ const sameAsEscalated = (event) => ({
   detail: or(event && event.data && event.data.question, '（没有写问题）'),
 });
 
+/**
+ * 三种影响结论的人话。
+ *
+ * 三条都说「只是判断，尚未应用」：这条事件是 L2 判断落了库，**不是**已经取消 /
+ * 重排 / 应用。cancel_replace 尤其要写成「需取消替换」而不是「已取消替换」——
+ * 写成已取消，看板就成了「这事儿已经处理完」的证明，而执行侧其实一步都没动。
+ *
+ * 认不出的结论原样回显：编一个说法等于替调用方下结论。
+ */
+const DECISION_CN = {
+  compatible: '兼容照跑',
+  replan: '需重排',
+  cancel_replace: '需取消替换',
+};
+
+/** 三条结论共用的尾注：这条判断只是判断，不代表任何东西已经落地。 */
+const IMPACT_PENDING_NOTE = '只是判断，尚未应用：不触发取消、重排或应用';
+
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
   'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
@@ -871,6 +889,22 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '交卷后影子评估',
       detail: or(data.quality, '只记不改审查级别'),
+    };
+  },
+
+  // 运行中变更的影响判断。**只是判断，不是应用**：文案里不许出现「已处理 /
+  // 已应用 / 已重排」——那条判断落地是另一条链路，写成已完成会让人拿它当已处理。
+  'change.impact_decided': (event) => {
+    const data = (event && event.data) || {};
+    const decision = text(data.decision);
+    const label = DECISION_CN[decision] || `未识别结论（${decision || '没有结论'}）`;
+    const acceptance = Array.isArray(data.affectedAcceptance) ? data.affectedAcceptance : [];
+    const count = acceptance.length;
+    const scope = count === 0 ? '没有点名受影响的验收' : `受影响验收 ${acceptance.join('、')}`;
+    return {
+      badge: 'L2 协调',
+      action: `影响判断：${label}`,
+      detail: `${or(data.changeId, '（没有变更编号）')} · ${scope} · ${IMPACT_PENDING_NOTE}`,
     };
   },
 };

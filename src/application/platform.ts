@@ -35,6 +35,7 @@ import * as startupBrief from './platform/startup-brief.ts';
 import * as views from './platform/views.ts';
 import * as independentReview from './platform/independent-review.ts';
 import * as attempts from './platform/attempts.ts';
+import * as changeImpact from './platform/change-impact.ts';
 import { queuedAttemptStartedData } from './platform/attempts.ts';
 import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
@@ -47,6 +48,8 @@ import { criteriaFailureStopFor, priorGuidanceForWorkItem, coordinatorStartupSou
 export { criteriaFailureStopFor } from './platform/agent-view-helpers.ts';
 import { REVISE_BLOCKED_HINT, orderChangedFields, checkWorkOrderCriteria, checkWorkOrderStandard, checkAcceptanceResults } from './platform/work-order-helpers.ts';
 import { sanitizeAttemptContextMetrics, activityDataHasContextMetrics, keepTrueOrUnknownLeaves } from './platform/context-metrics.ts';
+import type { ChangeRequest } from './change-request.ts';
+import type { ChangeImpact } from './change-impact.ts';
 import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 import { PlatformContext, PlatformRuleError, PROTOCOL_VERSION, ATTEMPT_STARTED_KIND } from './platform/context.ts';
@@ -540,6 +543,112 @@ export class Platform {
    */
   async attemptRequiresQueueClaim(missionId: string, attemptId: string): Promise<boolean> {
     return this.#attemptHasQueueMark(missionId, attemptId);
+  }
+
+  /* ===================== 运行中变更的影响判断（限权） ===================== */
+
+  /**
+   * 当前装配是否支持影响判断。
+   *
+   * 不是「大概可以用」：三样仓储 + 事务 fence 缺任一样都不算。给调用方一个能问的
+   * 口子，它就不会用 try/catch 去猜——猜出来的「不支持」会被当成「这次先算了」。
+   */
+  supportsChangeImpact(): boolean {
+    return changeImpact.supportsChangeImpact(this.#context);
+  }
+
+  /**
+   * 为一条已确认变更开一次限权 coordinator Attempt。
+   *
+   * changeId 是这次 Attempt 唯一要判断的变更，由发牌那一刻钉死；后面读写都拿它校核，
+   * 普通 coordinator Attempt 借用不了这几个专属动作。
+   */
+  startImpactCoordinatorAttempt(
+    missionId: string,
+    changeId: string,
+    profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ attemptId: string; workItemId: string }> {
+    return changeImpact.startImpactCoordinatorAttempt(
+      this.#context,
+      missionId,
+      changeId,
+      profile,
+      claim,
+    );
+  }
+
+  getChangeRequest(
+    missionId: string,
+    coordinatorAttemptId: string,
+    changeId: string,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeRequest> {
+    return changeImpact.getChangeRequest(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      changeId,
+      claim,
+    );
+  }
+
+  submitChangeImpact(
+    missionId: string,
+    coordinatorAttemptId: string,
+    changeId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeImpact> {
+    return changeImpact.submitChangeImpact(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      changeId,
+      body,
+      claim,
+    );
+  }
+
+  /**
+   * 某个 executor 视角下还没有影响判断的变更请求。只读，不落新事实。
+   *
+   * 参数里没有任何 changeId：它是「还有哪些没判断」而不是「某一条怎么样」，
+   * 带 changeId 的版本会退化成一个可反复探测的单条查询。
+   */
+  listPendingChangeRequests(
+    missionId: string,
+    workItemId: string,
+    executorAttemptId: string,
+    executorClaim?: QueueClaimIdentity,
+  ): Promise<readonly ChangeRequest[]> {
+    return changeImpact.listPendingChangeRequests(
+      this.#context,
+      missionId,
+      workItemId,
+      executorAttemptId,
+      executorClaim,
+    );
+  }
+
+  /**
+   * 失租的旧 impact Attempt 的可信收尾：只关那一条 Attempt，不写判断。
+   *
+   * 只给运行期接线用（调度器在 finally 里撞到 CLAIM_FENCE_REJECTED 之后）：
+   * 身份全从已持久化的 started 事件读回，调用方只能点名「哪条 Attempt」。
+   * HTTP 面不转发这一条——能从外面调用的收尾就等于没有围栏。
+   */
+  finishLostImpactAttempt(
+    missionId: string,
+    coordinatorAttemptId: string,
+    outcome: Parameters<Platform['finishAttempt']>[2],
+  ): Promise<void> {
+    return changeImpact.finishLostImpactAttempt(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      outcome,
+    );
   }
 
   async submitIndependentReview(
