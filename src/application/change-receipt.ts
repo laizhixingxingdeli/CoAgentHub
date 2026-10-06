@@ -38,8 +38,35 @@ export interface ChangeReceipt {
   readonly contentHash?: string;
 }
 
+/**
+ * 平台（验收侧）写下的 verified 回执。
+ *
+ * 为什么不是 ChangeReceipt 的第 4 层：回执只记「接收侧收到」，验收通过是另一件
+ * 事，让写回执的动作能证明质量，就会有人拿「有回执」当「已通过验收」。所以它独
+ * 立成形、且只能由平台在 accept 时写；执行侧 append / ack 一律写不进来。
+ */
+export interface VerifiedChangeRecord {
+  readonly changeId: string;
+  readonly missionId: string;
+  readonly workItemId: string;
+  /** 被验收的那次提交：写回执的人（平台）不是跑它的人，两者必须分开记。 */
+  readonly attemptId: string;
+  readonly claimGeneration: number;
+  readonly layer: 'verified';
+  readonly at: string;
+  readonly contentHash: string;
+  /** 验收结论来自哪次执行：与 attemptId 一起说明「谁跑的、谁判的」。 */
+  readonly sourceAttemptId: string;
+  readonly reportId: string;
+}
+
 export interface ChangeReceiptRepository {
   append(receipt: ChangeReceipt): Promise<void>;
+  /**
+   * 写一条 verified 回执。true = 新写入；false = 同内容幂等（不发事件）。
+   * 内容不同则抛：回执是事实，覆盖上一次的验收结论等于篡改历史。
+   */
+  recordVerified(record: VerifiedChangeRecord): Promise<boolean>;
   get(changeId: string, layer: ChangeReceiptLayer): Promise<ChangeReceipt | undefined>;
   listByChange(changeId: string): Promise<readonly ChangeReceipt[]>;
   listByMission(missionId: string): Promise<readonly ChangeReceipt[]>;
@@ -69,7 +96,72 @@ export function diffContentHash(workOrderDiff: string): string {
   return createHash('sha256').update(workOrderDiff, 'utf8').digest('hex');
 }
 
-const LAYERS: readonly string[] = ['adapter_received', 'session_consumed', 'executor_started'];
+export interface UncoveredChangeQuery {
+  readonly impacts: readonly {
+    readonly changeId: string;
+    readonly workItemId: string;
+    readonly attemptId: string;
+    readonly claimGeneration: number;
+    readonly decision: string;
+    readonly workOrderDiff: string;
+  }[];
+  readonly receipts: readonly {
+    readonly changeId: string;
+    readonly workItemId: string;
+    readonly attemptId: string;
+    readonly claimGeneration: number;
+    readonly layer: string;
+    readonly contentHash?: string;
+  }[];
+  readonly workItemId: string;
+  readonly submittedAttemptId: string;
+}
+
+/** 这一条 impact 有没有被本次提交的 executor_started 覆盖。 */
+function coveredBy(
+  impact: UncoveredChangeQuery['impacts'][number],
+  receipts: UncoveredChangeQuery['receipts'],
+  submittedAttemptId: string,
+): boolean {
+  const hash = diffContentHash(impact.workOrderDiff);
+  return receipts.some(
+    (row) =>
+      row.changeId === impact.changeId &&
+      row.attemptId === submittedAttemptId &&
+      row.layer === 'executor_started' &&
+      row.contentHash === hash &&
+      // 本次提交的 impact：代次必须相同，同 Attempt 不同代次是另一趟领取。
+      // 旧 Attempt 留下的 impact 只能由新代次覆盖，所以不比代次，只比对工作项。
+      (impact.attemptId === submittedAttemptId
+        ? row.claimGeneration === impact.claimGeneration
+        : row.workItemId === impact.workItemId),
+  );
+}
+
+/**
+ * 本次提交没覆盖到的 compatible 变更（changeId 升序、去重）。
+ *
+ * 不 import Platform：这是纯数据判定，门禁与测试都要拿它单独算一遍。
+ */
+export function uncoveredCompatibleChangeIds(query: UncoveredChangeQuery): readonly string[] {
+  const out = new Set<string>();
+  for (const impact of query.impacts) {
+    if (impact.workItemId !== query.workItemId) continue;
+    if (impact.decision !== 'compatible') continue;
+    if (coveredBy(impact, query.receipts, query.submittedAttemptId)) continue;
+    out.add(impact.changeId);
+  }
+  return Object.freeze([...out].sort());
+}
+
+/** 只有这三层算「回执层」：verified 是验收记录，不是接收侧的一层。 */
+export const RECEIPT_LAYERS: readonly ChangeReceiptLayer[] = [
+  'adapter_received',
+  'session_consumed',
+  'executor_started',
+];
+
+const LAYERS: readonly string[] = RECEIPT_LAYERS;
 
 const IDENTITY_STRING_FIELDS: readonly string[] = [
   'changeId',
