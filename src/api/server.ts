@@ -24,6 +24,7 @@ import {
 } from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
 import { ChangeImpactConflictError } from '../application/change-impact.ts';
+import { ChangeReceiptConflictError } from '../application/change-receipt.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import type {
   AgentPoolAddInput,
@@ -865,6 +866,18 @@ export function createApi(deps: ApiDeps): Server {
   ]);
 
   /**
+   * 回执专属的两个工具：只有**执行者自己的牌**能调。
+   *
+   * 与上面那组 impact 工具刻意分开：两组是两条链的两端（判断 / 接收），身份来源
+   * 不同（impact hop / 执行者自己的 hop）、代次互不相干。混进同一个集合的话，
+   * 将来「给 impact 多开一格」会顺手把执行者回执也开给限权身份。
+   */
+  const RECEIPT_EXCLUSIVE_TOOLS = new Set([
+    'coagent_get_change_deliveries',
+    'coagent_ack_change_receipt',
+  ]);
+
+  /**
    * impact Run 在整个 HTTP 面的入口白名单。
    *
    * 只看 path + method + 已解析 token：请求体在这一步还没读，也不会被读——
@@ -973,6 +986,92 @@ export function createApi(deps: ApiDeps): Server {
       );
     }
     return run.changeId as string;
+  };
+
+  /**
+   * 两个回执专属工具的门禁：只有 role=executor、**不是** impact 牌、workItemId /
+   * attemptId 非空、且带完整 claim 三元组的牌能过。
+   *
+   * 为什么专门排掉 purpose='impact'：impact 牌是只读的限权身份，让它签回执等于
+   * 拿「只做判断」的牌去写接收侧事实。它不在 IMPACT_EXCLUSIVE_TOOLS 里，所以会
+   * 在 rejectImpactRunOutsideAllowlist 处、读 body 之前就 403。
+   *
+   * 同样**不看 body**：执行者的目标与代次只能来自牌，body 里自称什么都是对方填的。
+   */
+  const requireExecutorReceiptRun = (run: RunContext): void => {
+    const claim = run.claim;
+    const complete =
+      run.role === 'executor' &&
+      run.purpose !== 'impact' &&
+      typeof run.workItemId === 'string' &&
+      run.workItemId.trim().length > 0 &&
+      typeof run.attemptId === 'string' &&
+      run.attemptId.trim().length > 0 &&
+      claim !== undefined &&
+      claim.id.trim().length > 0 &&
+      claim.owner.trim().length > 0 &&
+      Number.isSafeInteger(claim.claimGeneration) &&
+      claim.claimGeneration > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有执行者自己的牌能调用这个工具；impact 牌、协调者 / 独立检视者，以及缺目标 / 领取身份的牌一律拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 回执体只认 changeId / layer，layer=executor_started 还要 contentHash。
+   *
+   * 其余字段一律 400，尤其 attemptId / missionId / workItemId / role / claim /
+   * claimGeneration / at / verified：它们全由牌与已持久的影响判断补齐，允许调用
+   * 方补一个就是自己签自己的来源，回执链不再是事实。
+   */
+  const requireReceiptAckBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const layer = body.layer;
+    const known = new Set<string>(
+      layer === 'executor_started' ? ['changeId', 'layer', 'contentHash'] : ['changeId', 'layer'],
+    );
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `回执只接受 changeId / layer${layer === 'executor_started' ? ' / contentHash' : ''}：${key} 不受理`,
+        );
+      }
+    }
+    if (typeof body.changeId !== 'string' || body.changeId.trim().length === 0) {
+      throw new HttpError(400, 'BAD_REQUEST', 'changeId 必须是非空字符串。');
+    }
+    if (
+      layer !== 'adapter_received' &&
+      layer !== 'session_consumed' &&
+      layer !== 'executor_started'
+    ) {
+      throw new HttpError(
+        400,
+        'BAD_REQUEST',
+        `layer 必须是 adapter_received | session_consumed | executor_started 之一：${String(layer)}` +
+          '（verified 不是可写层：回执只记收到，验收通过是另一件事）',
+      );
+    }
+    if (layer === 'executor_started') {
+      const hash = body.contentHash;
+      if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          'executor_started 的 contentHash 必须是 64 位小写 hex（sha256）。',
+        );
+      }
+    }
+    return {
+      changeId: body.changeId,
+      layer,
+      ...(layer === 'executor_started' ? { contentHash: body.contentHash as string } : {}),
+    };
   };
 
   /**
@@ -1099,6 +1198,48 @@ export function createApi(deps: ApiDeps): Server {
         run.missionId,
         run.attemptId,
         changeId,
+        business,
+        run.claim,
+      );
+    },
+
+    /**
+     * 执行者读发给自己的差异。
+     *
+     * body 必须为空：目标工作项 / Attempt / 代次全在牌上，收 body 等于让调用方自己
+     * 挑「我要读哪一趟执行的差异」。
+     */
+    async coagent_get_change_deliveries(run, body) {
+      if (Object.keys(body).length > 0) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          'coagent_get_change_deliveries 不接受请求体：目标与代次只来自本次运行的凭据。',
+        );
+      }
+      return {
+        deliveries: await platform.listChangeDeliveries(
+          run.missionId,
+          run.workItemId!,
+          run.attemptId,
+          run.claim,
+        )
+      };
+    },
+
+    /**
+     * 执行者按层回执。
+     *
+     * 只透传 changeId / layer /（executor_started 的 contentHash）；身份与 at 由
+     * Platform 从围栏、已持久的影响判断与平台时钟现取。回执只记「我收到了」，
+     * 不是已应用 / 已验收。
+     */
+    async coagent_ack_change_receipt(run, body) {
+      const business = requireReceiptAckBody(body);
+      return platform.ackChangeReceipt(
+        run.missionId,
+        run.workItemId!,
+        run.attemptId,
         business,
         run.claim,
       );
@@ -1313,6 +1454,10 @@ export function createApi(deps: ApiDeps): Server {
         // 影响判断是 append-only 事实：同一个 changeId 上「结论不同」是业务冲突，
         // 不是服务端故障。落到下面那个 500 分支的话，调用方会以为是自己把服务打挂了，
         // 而真正该做的是换新 changeId 重算。
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
+      } else if (error instanceof ChangeReceiptConflictError) {
+        // 回执与影响判断同构：同一 changeId + layer 上「内容不同」是 append-only
+        // 事实冲突，不是服务端故障。落到 500 的话调用方会以为是自己把服务打挂了。
         writeJson(res, 409, { error: error.code, message: error.message }, identity);
       } else if (error instanceof Error && /^DOCUMENT_(?:PATH_FORBIDDEN|SYMLINK_FORBIDDEN|CHANGES_REQUIRED|CHANGE_INVALID|EMPTY_ANCHOR|ANCHOR_NOT_UNIQUE)$/.test(error.message)) {
         writeJson(res, 400, { error: error.message, message: '文档路径或精确差异无效，请刷新原文并重新提交' }, identity);
@@ -1803,6 +1948,14 @@ export function createApi(deps: ApiDeps): Server {
       // 一处说了算，也不会被任何将来新增的宽泛写别名顺带放行。
       if (IMPACT_EXCLUSIVE_TOOLS.has(tool)) {
         requireImpactChangeId(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
+      // 回执组同样在普通 AGENT_TOOL_ACTION 之前分流：它们不在策略矩阵里，走普通
+      // 流程会落到 UNKNOWN_TOOL，而要说清的是「你这张牌不是这一趟执行自己的牌」。
+      // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定。
+      if (RECEIPT_EXCLUSIVE_TOOLS.has(tool)) {
+        requireExecutorReceiptRun(run);
         const body = redactSecretsDeep(await readJson(req));
         return send(res, 200, await handler(run, body as Record<string, never>));
       }

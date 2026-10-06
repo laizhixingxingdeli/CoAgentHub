@@ -1367,6 +1367,60 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 }
 ```
 
+### POST /api/agent/coagent_get_change_deliveries
+
+鉴权：run token，且必须是 role=executor、**不是** impact 牌、attemptId 与 workItemId 非空、并带完整 claim 三元组的**执行者自己的牌**。参数：body 必须是空对象 `{}`——目标 Mission / Attempt / WorkItem / 代次全部来自 x-coagent-run。返回 `{ deliveries: [...] }`，其中每项含 changeId / workOrderDiff / affectedAcceptance / diffHash / receipts（已录到的层）；以 Platform 领域类型为准。只有结论为 compatible、且 attemptId 与代次都对得上这一趟执行的差异会出现：replan 与 cancel_replace 不由执行者自己决定照跑，跨 Attempt 的差异交回来会被当成这一趟的。没有符合的差异时返回空数组，不是错误。coordinator / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`（impact 牌因不在白名单里、在读 body 之前就被拒）；body 里多任何字段一律 400 `BAD_REQUEST`；租约失效或代次不符回 409（`CLAIM_FENCE_REJECTED` / `UNKNOWN_ATTEMPT`）。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{}' 'http://127.0.0.1:3101/api/agent/coagent_get_change_deliveries'
+```
+
+响应结构摘录：
+
+```json
+{
+  "deliveries": [
+    {
+      "changeId": "CR-1",
+      "workOrderDiff": "把 step 2 换成 step 2b",
+      "affectedAcceptance": [1],
+      "diffHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241",
+      "receipts": []
+    }
+  ]
+}
+```
+
+### POST /api/agent/coagent_ack_change_receipt
+
+鉴权：同上（执行者自己的牌）。参数：body 只接受 changeId / layer（layer=executor_started 时还必须带 contentHash，即 workOrderDiff 的 sha256 小写 hex）；Mission / Attempt / WorkItem / role / claim / claimGeneration / at / verified 一律不受理——多一个身份字段就 400，身份全部由牌与已持久的影响判断补齐。layer 取 adapter_received（执行侧已收到）｜ session_consumed（已进入会话）｜ executor_started（执行者自述已按差异继续）；verified 不是可写层。返回写下的那一层回执（ChangeReceipt）；以 Platform 领域类型为准。
+
+只有发给这趟执行的 compatible 差异可回执：replan / cancel_replace 与跨 Attempt 的差异回 409 `CHANGE_NOT_DELIVERABLE`；低层没落就写高层、或已录高层再写低层回 409 `RECEIPT_LAYER_ORDER`；executor_started 的 contentHash 与实际 diff 不符回 409 `RECEIPT_HASH_MISMATCH`；租约失效或代次不符回 409 `CLAIM_FENCE_REJECTED`；同一层重复回执相同内容按幂等返回原记录（不再发事件），内容不同回 409 `CHANGE_RECEIPT_CONFLICT` 且不覆盖。coordinator / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`；body 多字段或 layer 不合法一律 400 `BAD_REQUEST`。所有拒绝要么在读 body 之前、要么在同一个事务内回滚，盘上逐字节不变。
+
+**回执（ACK）不等于已应用或已验证**：它只记「接收侧承认收到了」，回执链全程没有 verified 层；也不等于执行结果通过验收、不等于这份 diff 已经合进产线。写回执的动作不能用来证明质量。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"changeId":"CR-1","layer":"executor_started","contentHash":"9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"}' 'http://127.0.0.1:3101/api/agent/coagent_ack_change_receipt'
+```
+
+响应结构摘录：
+
+```json
+{
+  "changeId": "CR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "attemptId": "W-1.exec-1",
+  "claimGeneration": 1,
+  "layer": "executor_started",
+  "contentHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"
+}
+```
+
 ## 控制面
 
 ### POST /api/missions/:missionId/coordinator-attempts
