@@ -10,6 +10,7 @@ import {
   diffContentHash,
   findCoveringReceipt,
   uncoveredCompatibleChangeIds,
+  workOrderContentHash,
   type VerifiedChangeRecord,
 } from '../change-receipt.ts';
 
@@ -166,12 +167,73 @@ async function requireCoveredChanges(ctx: PlatformContext, mission: Mission, ite
     workItemId: item.id,
     submittedAttemptId,
   });
-  if (uncovered.length > 0) {
-    throw new PlatformRuleError(
-      'ACCEPT_CHANGES_UNCOVERED',
-      `有 compatible 变更这次提交没覆盖，不能 accept：${uncovered.join(', ')}`,
-    );
+  if (uncovered.length === 0) return;
+  // 没装配覆盖仓储就只看回执：这一支必须与 B4 逐字一致，不能因为多了一种
+  // 覆盖来源而放宽。
+  if (!ctx.changeCoverages) {
+    throw uncoveredError(uncovered);
   }
+  const covered = await coveredBySnapshotChangeIds(ctx, mission, item, submittedAttemptId);
+  const still = uncovered.filter((changeId) => !covered.has(changeId));
+  if (still.length > 0) throw uncoveredError(still);
+}
+
+function uncoveredError(changeIds: readonly string[]): PlatformRuleError {
+  return new PlatformRuleError(
+    'ACCEPT_CHANGES_UNCOVERED',
+    `有 compatible 变更这次提交没覆盖，不能 accept：${changeIds.join(', ')}`,
+  );
+}
+
+/**
+ * 本次交卷快照里记的工单修订号。
+ *
+ * 为什么不读 item.order.orderRevision：那只是**当前**修订号，协调者可以在交卷后
+ * 再修订一次，于是「照旧工单交的结果」会被当成「照新工单跑过」。事件是当时写的，
+ * 只有它回答这次提交跑的是哪一轮。
+ */
+async function submittedOrderRevision(
+  ctx: PlatformContext,
+  mission: Mission,
+  submittedAttemptId: string,
+): Promise<string | undefined> {
+  const events = await ctx.activity.list(mission.id);
+  const submitted = events.find(
+    (row) => row.kind === 'execution_result.submitted' && row.attemptId === submittedAttemptId,
+  );
+  const data: unknown = submitted?.data;
+  // data 是 unknown：不收窄就取字段，会把交卷以外的事件形状也算成有修订号。
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  const revision = (data as { orderRevision?: unknown }).orderRevision;
+  return typeof revision === 'string' ? revision : undefined;
+}
+
+/**
+ * 本次交卷快照已经覆盖掉的 changeId。门禁与写 verified 共用这一个判定：
+ * 两边各写一套，迟早在「哪些算覆盖」上分岔，然后门禁放行、写入却什么都不写。
+ *
+ * 两条都得对：修订号对上说明「跑的是那一轮」，内容哈希对上说明「那一轮的正文
+ * 就是现在这份」。缺任一条都不算覆盖——没有匹配记录一律当没覆盖，不猜。
+ */
+async function coveredBySnapshotChangeIds(
+  ctx: PlatformContext,
+  mission: Mission,
+  item: WorkItem,
+  submittedAttemptId: string,
+): Promise<ReadonlySet<string>> {
+  if (!ctx.changeCoverages || !item.order) return new Set<string>();
+  const revision = await submittedOrderRevision(ctx, mission, submittedAttemptId);
+  if (revision === undefined || revision !== item.order.orderRevision) return new Set<string>();
+  const rows = await ctx.changeCoverages.listByMission(mission.id);
+  const hash = workOrderContentHash(item.order);
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (row.workItemId !== item.id) continue;
+    if (row.orderRevision !== revision) continue;
+    if (row.workOrderHash !== hash) continue;
+    out.add(row.changeId);
+  }
+  return out;
 }
 
 /**
@@ -197,17 +259,29 @@ async function recordVerifiedReceipts(
   const mine = impacts
     .filter((row) => row.workItemId === item.id && row.decision === 'compatible')
     .sort((a, b) => (a.changeId < b.changeId ? -1 : a.changeId > b.changeId ? 1 : 0));
+  // 快照覆盖只在回执没命中时才可能补上缺的那一条；回执命中的照旧，多余的查询就免了。
+  let coveredBySnapshot: ReadonlySet<string> | undefined;
   for (const impact of mine) {
     const hash = diffContentHash(impact.workOrderDiff);
     // 用覆盖用的那条回执的代次：verified 记的是「这一代照这份 diff 跑过并被验收」。
     const cover = findCoveringReceipt(impact, receipts, submittedAttemptId);
-    if (!cover) continue;
+    // 覆盖来源：回执 = 执行者 ack 说照跑了；coverage = 协调者声明这一轮正文里已经有了。
+    // 回执优先——它证明的是「跑过」，coverage 只证明「正文里有」。两者不可互换，
+    // 写进事件就是为了事后能看出这份 verified 依据的是哪一种。
+    let coverageSource: 'receipt' | 'coverage' = 'receipt';
+    if (!cover) {
+      coveredBySnapshot ??= await coveredBySnapshotChangeIds(ctx, mission, item, submittedAttemptId);
+      if (!coveredBySnapshot.has(impact.changeId)) continue;
+      coverageSource = 'coverage';
+    }
     const record: VerifiedChangeRecord = {
       changeId: impact.changeId,
       missionId: mission.id,
       workItemId: item.id,
       attemptId: submittedAttemptId,
-      claimGeneration: cover.claimGeneration,
+      // 快照路径拿不到回执行：改用这条 impact 自己的代次，写 0 或新执行者的代次
+      // 都会让「哪一代认过这份 diff」答不上来。
+      claimGeneration: cover ? cover.claimGeneration : impact.claimGeneration,
       layer: 'verified',
       at: ctx.clock.now().toISOString(),
       contentHash: hash,
@@ -227,6 +301,9 @@ async function recordVerifiedReceipts(
         sourceAttemptId: reviewAttemptId,
         reportId: report.id,
         contentHash: hash,
+        // 只有 coverage 路径多这一格：回执路径的事件 data 被既有 observed-deepEqual
+        // 钉住了，加一格就会把「这一份是照回执写的」谎报成一个新形状。
+        ...(coverageSource === 'coverage' ? { coverageSource } : {}),
       },
       item.id,
       submittedAttemptId,
