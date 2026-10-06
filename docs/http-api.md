@@ -1421,6 +1421,32 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 }
 ```
 
+### POST /api/agent/coagent_record_change_coverage
+
+鉴权：普通 coordinator run token（L2 声明这条差异已经落到哪一轮工单上），**不是** impact 牌。参数：body 只接受 changeId / orderRevision / workOrderHash（workOrderHash 是修订后工单内容的 sha256 小写 hex，64 位）；missionId / attemptId / workItemId / role / claim / claimGeneration / at / verified / applied 一律不受理——多一个就 400，身份全由牌补齐。executor / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`（在读 body 之前就拒）；body 多字段、字段为空或 workOrderHash 不是 64 位小写 hex 一律 400 `BAD_REQUEST`。返回写下的那条 ChangeCoverage；以 Platform 领域类型为准。
+
+**这是 L2 的一条声明，不是已应用、也不是已验证**：它说的是「指向旧 Attempt 的那份兼容差异，已经写进修订后的工单」，平台核对属实后才成立。执行还没发生，验收也没发生；这条记录本身不构成执行结果通过验收的证据，也不代表差异已经合进产线。后续提交只要在交卷快照里带上与这里一致的工单修订号与 workOrderHash，就算覆盖了这条变更。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"changeId":"CR-1","orderRevision":"r2","workOrderHash":"9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"}' 'http://127.0.0.1:3101/api/agent/coagent_record_change_coverage'
+```
+
+响应结构摘录：
+
+```json
+{
+  "changeId": "CR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "attemptId": "W-1.exec-1",
+  "claimGeneration": 1,
+  "orderRevision": "r2",
+  "workOrderHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"
+}
+```
+
 ## 控制面
 
 ### POST /api/missions/:missionId/coordinator-attempts

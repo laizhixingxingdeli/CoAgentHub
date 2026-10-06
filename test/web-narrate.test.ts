@@ -583,6 +583,35 @@ describe('事件翻译表：逐条对契约', () => {
     assert.ok(/不等于已应用或已验证/.test(unknown.detail), unknown.detail);
   });
 
+  test('change.coverage_recorded：L2 声明差异已并入修订后的工单，不是已应用也不是已验证', () => {
+    const out = narrateEvent(
+      {
+        kind: 'change.coverage_recorded',
+        data: { changeId: 'CR-1', workItemId: 'W-1', orderRevision: 'r2' },
+      },
+      CTX,
+    );
+    assert.equal(out.untranslated, false);
+    assert.ok(out.action.includes('并入修订后的工单'), out.action);
+    assert.ok(out.detail.includes('CR-1'), out.detail);
+    // 扣掉那句明确否定之后再扫：否定句本身含「已应用 / 已验证」四个字，
+    // 不扣的话这条断言永远只能写在纸面上——那才是把门槛降没了。
+    const claims = `${out.badge}${out.action}${out.detail}`.replace(
+      /不是已应用、也不是已验证/g,
+      '',
+    );
+    assert.ok(!/已(?:应用|验证)/.test(claims), `不许把声明写成已落地：${out.action} / ${out.detail}`);
+    assert.ok(/不是已应用/.test(out.detail), `尾注必须显式否掉已应用：${out.detail}`);
+    assert.ok(
+      !`${out.badge}${out.action}${out.detail}`.includes('coverage_recorded'),
+      `漏出了机器事件名：${out.badge} / ${out.action} / ${out.detail}`,
+    );
+    for (const field of ['badge', 'action', 'detail']) {
+      assert.notEqual(out[field].trim(), '', `${field} 不能空白`);
+      assert.ok(!/undefined|null/.test(out[field]), `${field} 漏了机器值：${out[field]}`);
+    }
+  });
+
   test('execution_result.submitted：缺快照字段说「快照未知」，有就说已记录', () => {
     const bare = narrateEvent({ kind: 'execution_result.submitted', data: { outcome: 'completed' } }, CTX);
     assert.ok(bare.detail.includes('快照未知'), bare.detail);
