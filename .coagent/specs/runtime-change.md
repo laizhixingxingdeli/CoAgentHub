@@ -43,3 +43,17 @@ B4 在 B3 之上，不新造事件种类。execution_result.submitted 追加 app
 L2 accept 之前，若已装配变更能力且存在指向该工作项的 compatible ChangeImpact，平台在同一次验收事务里要求覆盖：指向本次提交 Attempt 的必须已有 executor_started，且 contentHash 等于差异正文哈希；指向本工作项旧 Attempt 的 compatible 变更，这次提交没有覆盖，同样不许 accept。拒绝码 ACCEPT_CHANGES_UNCOVERED，原因列出未覆盖的 changeId，无副作用。reject 不受影响。没有任何变更判断，或没有装配变更能力时，验收与原先一致。
 
 accept 成功，且本次 submittedAttemptId 有平台通过的验证报告时，平台经独立入口 recordVerified 为本次提交覆盖的每条 compatible 变更写一条 verified 记录。字段含 changeId、missionId、workItemId、attemptId（被验收的提交）、claimGeneration、layer=verified、at、contentHash、sourceAttemptId（做验收的 coordinator Attempt）、reportId。事件仍是 change.receipt_recorded。同内容重放幂等且不重复发事件。执行侧 append 与 HTTP 回执继续拒绝 verified；list/get 仍只返回三层执行侧回执。未验收时记录里不出现 verified 字段或空占位。旧的 submitted 与报告按 submittedAttemptId 保留，不被覆写。叙事：layer=verified 的动作是「变更回执：平台已确认」，detail 说明是平台依据 L2 验收与验证报告确认。三种执行侧层的叙事不变。不接 pi，不启用生产闭环，不新增 WaitReason。
+
+## 重派后的工单覆盖声明
+
+COM4-C 在 B4 之上增加 append-only ChangeCoverage。它只声明「旧 Attempt 的 compatible 差异已并入修订后的工单」，不是已应用，也不是 verified。不自动清理或改写旧 ChangeImpact 与旧回执。不启用生产闭环，不接 pi 工具注册，不新增 WaitReason。
+
+记录字段为 changeId、missionId、workItemId、orderRevision、workOrderHash、coordinatorAttemptId、at（平台时钟）。幂等键是 changeId + orderRevision；同键同内容重试幂等，且不重复发 change.coverage_recorded；同键异内容冲突不覆盖。at 不参与等值。missionId、workItemId、coordinatorAttemptId、at 由可信入口补齐，不信请求体。请求体只收 changeId、orderRevision、workOrderHash。
+
+内存与同一 FileStateStore 仓储。File 沿用同一事务快照，legacy 缺 changeCoverages 按 [] 读取，不升版本、不另开写者。未装配与 PG 模式明确 unsupported，不隐式回退。
+
+Platform recordChangeCoverage 与 HTTP 工具 coagent_record_change_coverage：按精确工具名在普通 AGENT_TOOL_ACTION 之前分流，不改 policy-engine。身份只来自 run token，必须是当前普通协调者 Attempt，且不是 impact 牌；executor、independent_reviewer 与 impact 牌 403；多出字段 400。同一围栏事务校验：对应 ChangeImpact 存在、decision=compatible、属于这个工作项；工作项处于 created / rejected / blocked；orderRevision 与 workOrderHash 等于该工作项当前工单，哈希用 workOrderContentHash。任一不符拒绝且无副作用。成功写 change.coverage_recorded。叙事动作是「变更覆盖：L2 声明差异已并入修订后的工单」，detail 写明不是已应用、也不是已验证。
+
+requireCoveredChanges 增加并列判定。一条 compatible 变更，有本次提交的 executor_started 覆盖回执，或有一条 ChangeCoverage 同时满足：orderRevision 等于本次 execution_result.submitted 的 orderRevision、且等于当前工单修订号，workOrderHash 等于当前工单的 workOrderContentHash，才算覆盖。交卷事件不另存 workOrderHash。两者都没有仍抛 ACCEPT_CHANGES_UNCOVERED 且无副作用。未装配 changeCoverages 时不读覆盖仓储，门禁与 B4 完全一致。没有匹配记录不得当成已覆盖。
+
+accept 且本次验证报告通过时仍写 verified。回执覆盖优先，事件 data 保持 B4 原样。只有回执未覆盖且 coverage 命中时才写，claimGeneration 取 impact.claimGeneration，事件 data 多 coverageSource='coverage'。执行侧仍写不到 verified。
