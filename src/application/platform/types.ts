@@ -68,6 +68,7 @@ import type { ArtifactStore } from '../artifact-store.ts';
 import type { CommandRunner } from '../validation/ports.ts';
 import type { LiveOutput } from '../live.ts';
 import type { ChangeImpactRepository } from '../change-impact.ts';
+import type { ChangeReceiptRepository } from '../change-receipt.ts';
 import type { ChangeRequestRepository } from '../change-request.ts';
 import type { QueuedHopRepository } from '../ports.ts';
 import type { ClassificationResult } from '../task-classifier.ts';
@@ -213,6 +214,12 @@ export interface PlatformDeps {
   changeRequests?: ChangeRequestRepository;
   changeImpacts?: ChangeImpactRepository;
   queuedHops?: QueuedHopRepository;
+  /**
+   * 接收侧回执仓储。**单独可选**，不与上面三件套绑死：回执这一侧只认已持久的
+   * 影响判断、不读变更请求，硬并进那一组会让「能判断」与「能回执」互相绑死。
+   * 缺它时专属动作返回 CHANGE_RECEIPT_UNSUPPORTED，不退化成「跳过校验直接写」。
+   */
+  changeReceipts?: ChangeReceiptRepository;
   /**
    * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
    * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。

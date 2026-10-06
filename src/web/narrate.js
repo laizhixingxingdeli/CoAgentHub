@@ -398,6 +398,22 @@ const DECISION_CN = {
 /** 三条结论共用的尾注：这条判断只是判断，不代表任何东西已经落地。 */
 const IMPACT_PENDING_NOTE = '只是判断，尚未应用：不触发取消、重排或应用';
 
+/**
+ * 三层回执的人话。
+ *
+ * 三条都只说「收到了」这一步：adapter 收到、进了会话、执行者自述照着跑了。
+ * 不许写成「已应用 / 已处理 / 已验证」——回执没有验收层，写成已验证等于让一条
+ * 自述记录当验收通过的证据。
+ */
+const RECEIPT_LAYER_CN = {
+  adapter_received: '执行侧已收到',
+  session_consumed: '已进入会话',
+  executor_started: '执行者自述已按差异继续',
+};
+
+/** 三层共用的尾注：回执是承认收到，不是验收结论。 */
+const RECEIPT_PENDING_NOTE = '只是接收侧承认收到，不等于已应用或已验证';
+
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
   'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
@@ -905,6 +921,21 @@ const EVENT_TABLE = {
       badge: 'L2 协调',
       action: `影响判断：${label}`,
       detail: `${or(data.changeId, '（没有变更编号）')} · ${scope} · ${IMPACT_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * 执行侧回执。**只是「收到了」，不等于已应用或已验证**：回执没有验收层，
+   * 把 ACK 写成已应用 / 已验证，看板就会拿「有回执」当「改好了」的证据。
+   */
+  'change.receipt_recorded': (event) => {
+    const data = (event && event.data) || {};
+    const layer = text(data.layer);
+    const label = RECEIPT_LAYER_CN[layer] || `未识别层（${layer || '没有层'}）`;
+    return {
+      badge: 'L1 执行',
+      action: `变更回执：${label}`,
+      detail: `${or(data.changeId, '（没有变更编号）')} · ${RECEIPT_PENDING_NOTE}`,
     };
   },
 };

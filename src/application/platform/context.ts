@@ -8,6 +8,7 @@ import type { LiveOutput } from '../live.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
 import type { QueuedHopRepository } from '../ports.ts';
 import type { ChangeImpactRepository } from '../change-impact.ts';
+import type { ChangeReceiptRepository } from '../change-receipt.ts';
 import type { ChangeRequestRepository } from '../change-request.ts';
 import type { QueueClaimIdentity, PlatformDeps, PlatformValidationDeps } from '../platform.ts';
 
@@ -66,6 +67,7 @@ export class PlatformContext {
   live: LiveOutput | undefined;
   changeRequests: ChangeRequestRepository | undefined;
   changeImpacts: ChangeImpactRepository | undefined;
+  changeReceipts: ChangeReceiptRepository | undefined;
   queuedHops: QueuedHopRepository | undefined;
   onProjectIdle: ((projectId: string) => Promise<unknown>) | undefined;
 
@@ -86,6 +88,7 @@ export class PlatformContext {
     this.live = deps.live;
     this.changeRequests = deps.changeRequests;
     this.changeImpacts = deps.changeImpacts;
+    this.changeReceipts = deps.changeReceipts;
     this.queuedHops = deps.queuedHops;
   }
 
