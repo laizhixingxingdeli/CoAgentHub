@@ -1440,10 +1440,10 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
   "changeId": "CR-1",
   "missionId": "M-example",
   "workItemId": "W-1",
-  "attemptId": "W-1.exec-1",
-  "claimGeneration": 1,
   "orderRevision": "r2",
-  "workOrderHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"
+  "workOrderHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241",
+  "coordinatorAttemptId": "W-1.coord-1",
+  "at": "2026-10-07T00:00:00.000Z"
 }
 ```
 
