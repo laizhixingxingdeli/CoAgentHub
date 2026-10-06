@@ -414,6 +414,15 @@ const RECEIPT_LAYER_CN = {
 /** 三层共用的尾注：回执是承认收到，不是验收结论。 */
 const RECEIPT_PENDING_NOTE = '只是接收侧承认收到，不等于已应用或已验证';
 
+/**
+ * 覆盖声明的尾注。
+ *
+ * 这条比回执更容易被读成落地：写的时候就在说「差异已并入工单」，看板上一不留神
+ * 就成了「改完了」。它是 L2 的**声明**、平台核对属实才算数，全程没有执行结果、
+ * 没有验收；所以同样的四个字（已应用 / 已验证）必须显式否掉。
+ */
+const COVERAGE_PENDING_NOTE = 'L2 声明差异已并入修订后的工单，不是已应用、也不是已验证';
+
 /** 快照哈希的形状。64 位小写 hex，别的形状一律当「没有」。 */
 const SNAPSHOT_HASH_RE = /^[0-9a-f]{64}$/;
 
@@ -960,6 +969,22 @@ const EVENT_TABLE = {
       badge: 'L1 执行',
       action: `变更回执：${label}`,
       detail: `${changeId} · ${RECEIPT_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * L2 的覆盖声明。**只是声明，不是落地**：它说的是「旧 Attempt 的差异已经写进
+   * 修订后的工单」，执行还没发生、验收也没发生。写成已应用 / 已验证，B4 的验收
+   * 门就会被一张自述通行证顶掉。
+   */
+  'change.coverage_recorded': (event) => {
+    const data = (event && event.data) || {};
+    const changeId = or(data.changeId, '（没有变更编号）');
+    const revision = or(data.orderRevision, '（没有工单修订号）');
+    return {
+      badge: 'L2 协调',
+      action: '变更覆盖：L2 声明差异已并入修订后的工单',
+      detail: `${changeId} · 工单修订 ${revision} · ${COVERAGE_PENDING_NOTE}`,
     };
   },
 };

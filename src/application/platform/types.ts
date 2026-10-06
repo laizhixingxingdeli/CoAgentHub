@@ -69,6 +69,7 @@ import type { CommandRunner } from '../validation/ports.ts';
 import type { LiveOutput } from '../live.ts';
 import type { ChangeImpactRepository } from '../change-impact.ts';
 import type { ChangeReceiptRepository } from '../change-receipt.ts';
+import type { ChangeCoverageRepository } from '../change-coverage.ts';
 import type { ChangeRequestRepository } from '../change-request.ts';
 import type { QueuedHopRepository } from '../ports.ts';
 import type { ClassificationResult } from '../task-classifier.ts';
@@ -220,6 +221,13 @@ export interface PlatformDeps {
    * 缺它时专属动作返回 CHANGE_RECEIPT_UNSUPPORTED，不退化成「跳过校验直接写」。
    */
   changeReceipts?: ChangeReceiptRepository;
+  /**
+   * 覆盖记录仓储。**单独可选**，不并进上面的影响判断三件套，也不并进回执仓储：
+   * 覆盖这一侧只认已持久的影响判断与当前工单正文，硬并进任一组都会让「能判断」
+   * 「能回执」「能记覆盖」三种能力互相绑死。缺它时专属动作返回
+   * CHANGE_COVERAGE_UNSUPPORTED，不退化成「跳过校验直接写」。
+   */
+  changeCoverages?: ChangeCoverageRepository;
   /**
    * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
    * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。

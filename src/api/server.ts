@@ -878,6 +878,17 @@ export function createApi(deps: ApiDeps): Server {
   ]);
 
   /**
+   * 覆盖声明专属工具：只有**普通协调者牌**（L2）能调。
+   *
+   * 与上面两组刻意分开：三组身份互不相同（impact hop / 执行者自己的 hop /
+   * 普通协调者 hop），合并成一组的话，将来给其中一端多开一格会顺手把另外
+   * 两端也开出去。它同样不入 AGENT_TOOL_ACTION、也不进 impact 白名单——
+   * impact 牌是只读的限权身份，让它声明覆盖等于拿「只做判断」的牌写执行侧的
+   * 恢复事实。
+   */
+  const COVERAGE_EXCLUSIVE_TOOLS = new Set(['coagent_record_change_coverage']);
+
+  /**
    * impact Run 在整个 HTTP 面的入口白名单。
    *
    * 只看 path + method + 已解析 token：请求体在这一步还没读，也不会被读——
@@ -1019,6 +1030,76 @@ export function createApi(deps: ApiDeps): Server {
         '只有执行者自己的牌能调用这个工具；impact 牌、协调者 / 独立检视者，以及缺目标 / 领取身份的牌一律拒绝。',
       );
     }
+  };
+
+  /**
+   * 覆盖声明工具的门禁：只有 role=coordinator、**不是** impact 牌、attemptId
+   * 非空、且带完整 claim 三元组的牌能过。
+   *
+   * 为什么不收 workItemId 而是 attemptId：这一条工具做的是 L2 在重派后声明
+   * 「旧 Attempt 的差异已并入修订后的工单」，说话的是协调者这一趟 hop 本身，
+   * 不是某个被派发的目标工作项；绑工作项反而会把「这一趟说了什么」和「派给
+   * 谁」混成一件。
+   *
+   * 同样**不看 body**：L2 的身份与代次只能来自牌，body 里自称什么都是对方填的。
+   */
+  const requireCoordinatorCoverageRun = (run: RunContext): void => {
+    const claim = run.claim;
+    const complete =
+      run.role === 'coordinator' &&
+      run.purpose !== 'impact' &&
+      typeof run.attemptId === 'string' &&
+      run.attemptId.trim().length > 0 &&
+      claim !== undefined &&
+      claim.id.trim().length > 0 &&
+      claim.owner.trim().length > 0 &&
+      Number.isSafeInteger(claim.claimGeneration) &&
+      claim.claimGeneration > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有普通协调者牌能调用这个工具；执行者、独立检视者与 impact 牌一律拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 覆盖声明体只认三个业务字段：changeId / orderRevision / workOrderHash。
+   *
+   * 其余字段一律 400，尤其 changeId 之外的任何身份与结论字段（missionId /
+   * attemptId / role / claim / claimGeneration / verified / applied）：它们全由
+   * 牌与平台侧的已持久事实补齐，允许调用方补一个就是自己签自己的来源。
+   */
+  const requireCoverageBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const known = new Set(['changeId', 'orderRevision', 'workOrderHash']);
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `覆盖声明只接受 changeId / orderRevision / workOrderHash：${key} 不受理`,
+        );
+      }
+    }
+    for (const key of ['changeId', 'orderRevision', 'workOrderHash']) {
+      const value = body[key];
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', `${key} 必须是非空字符串。`);
+      }
+    }
+    if (!/^[0-9a-f]{64}$/.test(body.workOrderHash as string)) {
+      throw new HttpError(
+        400,
+        'BAD_REQUEST',
+        'workOrderHash 必须是 64 位小写 hex（sha256）。',
+      );
+    }
+    return {
+      changeId: body.changeId,
+      orderRevision: body.orderRevision,
+      workOrderHash: body.workOrderHash,
+    };
   };
 
   /**
@@ -1240,6 +1321,25 @@ export function createApi(deps: ApiDeps): Server {
         run.missionId,
         run.workItemId!,
         run.attemptId,
+        business,
+        run.claim,
+      );
+    },
+
+    /**
+     * L2 声明「旧 Attempt 的那份差异已并入修订后的工单」。
+     *
+     * 只透传 changeId / orderRevision / workOrderHash；Mission / Attempt /
+     * 代次 / at 全由 Platform 从牌与平台时钟现取。这是一条**声明**，平台核对
+     * 属实才成立，本身既不是已应用、也不是已验证。
+     */
+    async coagent_record_change_coverage(run, body) {
+      const workItemId = requireWorkItem(run);
+      const business = requireCoverageBody(body);
+      return platform.recordChangeCoverage(
+        run.missionId,
+        run.attemptId,
+        workItemId,
         business,
         run.claim,
       );
@@ -1956,6 +2056,14 @@ export function createApi(deps: ApiDeps): Server {
       // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定。
       if (RECEIPT_EXCLUSIVE_TOOLS.has(tool)) {
         requireExecutorReceiptRun(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
+      // 覆盖声明同样在普通 AGENT_TOOL_ACTION 之前分流：它不在策略矩阵里，走普通
+      // 流程会落到 UNKNOWN_TOOL，而要说清的是「你这张牌不是普通协调者牌」。
+      // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定。
+      if (COVERAGE_EXCLUSIVE_TOOLS.has(tool)) {
+        requireCoordinatorCoverageRun(run);
         const body = redactSecretsDeep(await readJson(req));
         return send(res, 200, await handler(run, body as Record<string, never>));
       }

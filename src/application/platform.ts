@@ -37,6 +37,7 @@ import * as independentReview from './platform/independent-review.ts';
 import * as attempts from './platform/attempts.ts';
 import * as changeImpact from './platform/change-impact.ts';
 import * as changeReceipt from './platform/change-receipt.ts';
+import * as changeCoverage from './platform/change-coverage.ts';
 import { queuedAttemptStartedData } from './platform/attempts.ts';
 import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
@@ -52,6 +53,7 @@ import { sanitizeAttemptContextMetrics, activityDataHasContextMetrics, keepTrueO
 import type { ChangeRequest } from './change-request.ts';
 import type { ChangeImpact } from './change-impact.ts';
 import type { ChangeReceipt } from './change-receipt.ts';
+import type { ChangeCoverage } from './change-coverage.ts';
 import type { ChangeDelivery } from './platform/change-receipt.ts';
 import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
@@ -690,6 +692,23 @@ export class Platform {
   /** 回执读写是否装配：未装配时上面两条抛 CHANGE_RECEIPT_UNSUPPORTED。 */
   supportsChangeReceipt(): boolean {
     return changeReceipt.supportsChangeReceipt(this.#context);
+  }
+
+  /**
+   * 协调者声明「这条变更已写进第 N 轮工单内容」：平台核对当前工单的轮次与内容
+   * 哈希后才记下，成功才发 change.coverage_recorded。这是一条**声明**，本身既不
+   * 是已应用、也不是已验证。
+   */
+  recordChangeCoverage(
+    missionId: string,
+    coordinatorAttemptId: string,
+    workItemId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeCoverage> {
+    return changeCoverage.recordChangeCoverage(
+      this.#context, missionId, coordinatorAttemptId, workItemId, body, claim,
+    );
   }
 
   async submitIndependentReview(

@@ -33,6 +33,7 @@ import type { ValidationReport } from '../kernel/index.ts';
 import type { ChangeRequest } from './change-request.ts';
 import type { ChangeImpact } from './change-impact.ts';
 import type { ChangeReceipt } from './change-receipt.ts';
+import type { ChangeCoverage } from './change-coverage.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
 import type {
   ActivityEvent,
@@ -133,6 +134,11 @@ interface StateFile {
    * 旧文件缺键补 []，不 bump StateFile.version。
    */
   changeReceipts: ChangeReceipt[];
+  /**
+   * 变更已写进哪轮工单内容的覆盖记录（append-only）。跟着 ChangeRequest.changeId
+   * 走，按 changeId + orderRevision 各留一张。旧文件缺键补 []，不 bump。
+   */
+  changeCoverages: ChangeCoverage[];
   queuedHops: QueuedHop[];
   candidateCircuits: CandidateCircuit[];
   candidateCircuitResetEvents?: Array<{ profileId: string; actor: string; at: string; reason: string }>;
@@ -197,6 +203,7 @@ function emptyState(): StateFile {
     changeRequests: [],
     changeImpacts: [],
     changeReceipts: [],
+    changeCoverages: [],
     queuedHops: [],
     candidateCircuits: [],
   };
@@ -250,6 +257,7 @@ interface OpenTransaction {
   readonly changeRequests: ChangeRequest[];
   readonly changeImpacts: ChangeImpact[];
   readonly changeReceipts: ChangeReceipt[];
+  readonly changeCoverages: ChangeCoverage[];
   readonly agentPool: AgentPoolRow[];
   readonly archivedMissions: ArchivedMissionRef[];
   readonly queuedHops: QueuedHop[];
@@ -479,6 +487,7 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
       if (!Array.isArray(state.changeRequests)) state.changeRequests = [];
       if (!Array.isArray(state.changeImpacts)) state.changeImpacts = [];
       if (!Array.isArray(state.changeReceipts)) state.changeReceipts = [];
+      if (!Array.isArray(state.changeCoverages)) state.changeCoverages = [];
       if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
       if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
       // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
@@ -582,6 +591,7 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
       changeRequests: [...s.changeRequests],
       changeImpacts: [...s.changeImpacts],
       changeReceipts: [...s.changeReceipts],
+      changeCoverages: [...s.changeCoverages],
       agentPool: [...s.agentPool],
       archivedMissions: [...s.archivedMissions],
       queuedHops: [...s.queuedHops],
@@ -614,6 +624,7 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     s.changeRequests = tx.changeRequests;
     s.changeImpacts = tx.changeImpacts;
     s.changeReceipts = tx.changeReceipts;
+    s.changeCoverages = tx.changeCoverages;
     s.agentPool = tx.agentPool;
     s.archivedMissions = tx.archivedMissions;
     s.queuedHops = tx.queuedHops;
