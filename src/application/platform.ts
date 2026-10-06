@@ -667,18 +667,13 @@ export class Platform {
     claim?: QueueClaimIdentity,
   ): Promise<readonly ChangeDelivery[]> {
     return changeReceipt.listChangeDeliveries(
-      this.#context,
-      missionId,
-      workItemId,
-      attemptId,
-      claim,
+      this.#context, missionId, workItemId, attemptId, claim,
     );
   }
 
   /**
    * 执行者按层回执：adapter_received → session_consumed → executor_started。
-   *
-   * 回执只记「我收到了」，不是已应用 / 已验收；低层回执不得被外推成后面的层。
+   * 回执只记「我收到了」，不是已应用 / 已验收；低层不得被外推成后面的层。
    */
   ackChangeReceipt(
     missionId: string,
@@ -688,12 +683,7 @@ export class Platform {
     claim?: QueueClaimIdentity,
   ): Promise<ChangeReceipt> {
     return changeReceipt.ackChangeReceipt(
-      this.#context,
-      missionId,
-      workItemId,
-      attemptId,
-      claim,
-      body,
+      this.#context, missionId, workItemId, attemptId, claim, body,
     );
   }
 

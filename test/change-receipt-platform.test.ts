@@ -66,11 +66,9 @@ const ORDER: WorkOrder = {
 };
 
 const ORIGIN = { clientType: 'cli', conversationRef: 'me' };
-
 const DIFF = '把 step 2 换成 step 2b';
 const DIFF_HASH = '9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241';
 const IMPACT_CLAIM = { id: 'h-impact', owner: 'owner', claimGeneration: 1 };
-
 const dirs: string[] = [];
 after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
@@ -240,7 +238,6 @@ test('执行者只读到发给自己的 compatible 差异；回执逐层前进�
       claimGeneration: executorClaim.claimGeneration,
     }),
   );
-
   const list = () =>
     h.platform.listChangeDeliveries(missionId, workItemId, executorAttemptId, executorClaim);
   const ack = (body: Record<string, unknown>) =>
@@ -255,7 +252,6 @@ test('执行者只读到发给自己的 compatible 差异；回执逐层前进�
   assert.deepEqual([...delivered[0]!.affectedAcceptance], [1]);
   assert.deepEqual(delivered[0]!.receipts, [], '还没回执时 receipts 为空');
   assert.equal(delivered[0]!.workOrderDiff, DIFF);
-
   const started = (changeId: string, contentHash: string) => ({ changeId, layer: 'executor_started', contentHash });
   // 越层、hash 不符、非 compatible、跨 Attempt、body 带身份、verified 层：都拒且盘不变。
   await assertRejected(h, 'RECEIPT_LAYER_ORDER', () => ack(started('CH-1', DIFF_HASH)));
@@ -270,7 +266,6 @@ test('执行者只读到发给自己的 compatible 差异；回执逐层前进�
     ack({ changeId: 'CH-1', layer: 'adapter_received', missionId }),
   );
   await assertRejected(h, 'INVALID_CHANGE_RECEIPT', () => ack({ changeId: 'CH-1', layer: 'verified' }));
-
   // 逐层前进：adapter_received → session_consumed → executor_started。
   await ack({ changeId: 'CH-1', layer: 'adapter_received' });
   await ack({ changeId: 'CH-1', layer: 'session_consumed' });
@@ -290,7 +285,6 @@ test('执行者只读到发给自己的 compatible 差异；回执逐层前进�
   const rows = await h.receipts.listByChange('CH-1');
   assert.equal(rows.length, 3, '同层重试不得 append 第二条');
   assert.equal((await receiptEvents(h, missionId)).length, 3, '幂等重试不得发第二次事件');
-
   // 只有 executor_started 的回执链：经 Platform 补 adapter_received 是回退，必须拒。
   await h.impacts.append(
     impact({ changeId: 'CH-2', attemptId: executorAttemptId, claimGeneration: executorClaim.claimGeneration }),
@@ -312,7 +306,6 @@ test('执行者只读到发给自己的 compatible 差异；回执逐层前进�
     (await h.receipts.listByChange('CH-2')).map((row) => row.layer),
     ['executor_started'],
   );
-
   // 失租：换代之后用旧 claim 读，围栏必须拒，且不留下任何新回执 / 事件。
   const receiptsBefore = (await h.receipts.listByMission(missionId)).length;
   const eventsBefore = (await receiptEvents(h, missionId)).length;

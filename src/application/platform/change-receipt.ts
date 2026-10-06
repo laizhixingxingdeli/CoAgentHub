@@ -107,7 +107,6 @@ async function requireExecutorFence(
     throw new PlatformRuleError('CLAIM_FENCE_REJECTED', '租约失效或代次不匹配');
   }
 }
-
 /** 属于这趟执行、且结论是 compatible 的那些影响判断。replan / cancel_replace 不给。 */
 async function deliverableImpacts(
   ctx: PlatformContext,
@@ -125,7 +124,6 @@ async function deliverableImpacts(
       impact.decision === 'compatible',
   );
 }
-
 /** 已记录层按固定层序排好：消费方不该自己去猜哪一层先落。 */
 function receiptViews(rows: readonly ChangeReceipt[]): readonly ChangeReceiptLayerView[] {
   const known = new Map<ChangeReceiptLayer, ChangeReceipt>();
@@ -233,7 +231,6 @@ function readAckBody(body: unknown): AckBody {
   }
   return { changeId, layer: layer as ChangeReceiptLayer, contentHash: hash };
 }
-
 /** 目标变更必须存在、属于这趟执行、且结论是 compatible。 */
 function requireDeliverableImpact(
   impact: ChangeImpact | undefined,
@@ -258,7 +255,6 @@ function requireDeliverableImpact(
   }
   return impact;
 }
-
 /**
  * 层序：低层没落就写高层是越层，高层已落再写低层是回退。
  *
@@ -289,7 +285,6 @@ function requireLayerOrder(
     }
   }
 }
-
 /**
  * 写一层回执：同层同内容幂等返回原记录（不 append、不发事件），异内容交给仓储抛冲突。
  *
@@ -330,7 +325,6 @@ async function recordLayer(
   await ctx.changeReceipts!.append(receipt);
   return { receipt, created: true };
 }
-
 /**
  * 执行者按层回执。
  *
