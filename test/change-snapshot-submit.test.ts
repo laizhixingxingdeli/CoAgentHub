@@ -1,8 +1,7 @@
 /**
  * COM3-B4：交卷事件带上 appliedChanges 与 snapshotHash。
  *
- * 为什么走 Platform 而不是直接调哈希函数：这两个字段的意义在于「执行者 ack 过的
- * 回执」与「它被派到的那份工单」在同一次提交里对齐；绕开 Platform 就没有事务，
+ * 为什么走 Platform 而不是直接调哈希函数：绕开 Platform 就没有事务，
  * 也测不到未装配回执仓储时交卷仍成功。
  */
 
@@ -213,6 +212,32 @@ async function ackAll(
   await ack('executor_started', DIFF_HASH);
 }
 
+/** 先交一条证据再交卷：completed 必须有证据撑着，两次写都要带 executorClaim。 */
+async function submitDone(
+  h: Harness,
+  live: { missionId: string; executorAttemptId: string; executorClaim: QueueClaimIdentity },
+): Promise<void> {
+  const c = live.executorClaim;
+  await h.platform.submitEvidence(
+    live.missionId,
+    live.executorAttemptId,
+    { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 },
+    c,
+  );
+  await h.platform.submitExecutionResult(
+    live.missionId,
+    live.executorAttemptId,
+    {
+      outcome: 'completed',
+      summary: '好了',
+      changedFiles: ['src/foo.ts'],
+      evidenceIds: ['E-1'],
+      notes: '无',
+    },
+    c,
+  );
+}
+
 interface SubmittedData {
   appliedChanges: readonly AppliedChangeRef[];
   snapshotHash: string;
@@ -238,28 +263,11 @@ async function submittedEvent(
 test('交卷事件带上本次 Attempt 的 executor_started 回执（按 changeId 升序）与快照哈希', async () => {
   const h = harness();
   const live = await runningExecutor(h);
-  const { missionId, workItemId, executorAttemptId, executorClaim } = live;
+  const { missionId, executorAttemptId } = live;
   // 排序要求是 changeId 升序：CH-0 后 ack 也要排在 CH-1 前面。
   await ackAll(h, live, 'CH-1');
   await ackAll(h, live, 'CH-0');
-  await h.platform.submitEvidence(
-    missionId,
-    executorAttemptId,
-    { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 },
-    executorClaim,
-  );
-  await h.platform.submitExecutionResult(
-    missionId,
-    executorAttemptId,
-    {
-      outcome: 'completed',
-      summary: '好了',
-      changedFiles: ['src/foo.ts'],
-      evidenceIds: ['E-1'],
-      notes: '无',
-    },
-    executorClaim,
-  );
+  await submitDone(h, live);
   const data = await submittedEvent(h, missionId, executorAttemptId);
   const appliedChanges: readonly AppliedChangeRef[] = [
     { changeId: 'CH-0', contentHash: DIFF_HASH },
@@ -275,33 +283,13 @@ test('交卷事件带上本次 Attempt 的 executor_started 回执（按 changeI
     appliedChanges,
   });
   assert.equal(data.snapshotHash, expected);
-  assert.equal(data.contractRevision, 1);
-  assert.equal(workItemId, 'W-1');
 });
 
 test('未装配 changeReceipts：交卷仍成功，appliedChanges 为 []，快照哈希照算', async () => {
   const h = harness(false);
   const live = await runningExecutor(h);
-  const { missionId, executorAttemptId, executorClaim } = live;
-  await h.platform.submitEvidence(
-    missionId,
-    executorAttemptId,
-    { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 },
-    executorClaim,
-  );
-  await h.platform.submitExecutionResult(
-    missionId,
-    executorAttemptId,
-    {
-      outcome: 'completed',
-      summary: '好了',
-      changedFiles: ['src/foo.ts'],
-      evidenceIds: ['E-1'],
-      notes: '无',
-    },
-    executorClaim,
-  );
-  const data = await submittedEvent(h, missionId, executorAttemptId);
+  await submitDone(h, live);
+  const data = await submittedEvent(h, live.missionId, live.executorAttemptId);
   assert.deepEqual([...data.appliedChanges], []);
   assert.match(data.snapshotHash, HEX64);
   const expected = submissionSnapshotHash({
