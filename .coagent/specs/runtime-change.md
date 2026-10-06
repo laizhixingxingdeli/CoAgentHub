@@ -18,4 +18,8 @@ QueuedHop/EnqueueHopInput及key/逻辑周期入口支持可选purpose='impact'�
 
 impact牌在HTTP run入口实行显式只读allowlist，仅允许现有missionRead、attemptGetBrief、attemptGetContext、workItemGetAgentDetail动作；读取仍须通过原绑定与来源门禁（context不解除executor来源限制）。未知动作与全部写动作fail closed，403 ACTION_DENIED，无副作用，不进入普通协调者的旧兼容回退；普通coordinator、executor与independent_reviewer原门禁不变。
 
-当前仅交付队列身份和凭据权限基础，未接入impact调度、结论提交、run.wait并行监督、pi工具或消费/应用回执；队列行与purpose牌不表示变更已下发、消费或应用，不代表完整B2或COM3闭环已启动。
+B1/B2a 的请求持久、队列身份与 impact 只读牌仍有效。B2b 在此之上增加 append-only ChangeImpact（内存与同一 FileStateStore）：按 changeId 一份权威结果幂等，同 id 异内容冲突不覆盖；字段含 changeId、decision（compatible/replan/cancel_replace）、明确 workOrderDiff、affectedAcceptance 正整数索引、reason；来源由可信入口补齐，不信 HTTP body 身份。保存前同一事务校验原 ChangeRequest、当前目标与活租约、impact coordinator 与其活 claim 及 changeId 一致；旧代次/跨任务/重复异内容拒绝无副作用。不声称差异已应用，不改原冻结工单。未装配/PG 明确 unsupported。
+
+Platform 提供专属 startImpactCoordinatorAttempt / getChangeRequest / submitChangeImpact / listPendingChangeRequests / finishLostImpactAttempt。RunTokenIssuer 可选 startImpactCoordinator，经 main.makeIssuer / hosted issuer 签发 B2a 目的牌并绑定 changeId，缺能力 unsupported 且不回退普通牌。HTTP 工具 coagent_get_change_request / coagent_submit_change_impact 仅 impact 牌可用；B2a 只读 allowlist 仅为本专属提交增补一条限权写，原派发/验收/规划/终审仍 403。不公开 HTTP 签发 impact 牌。
+
+Orchestrator 在执行者 run.wait 未落定期间可 opt-in 查看本目标未决请求：一份变更只复用独立 impact 逻辑 hop，走原五维容量/公平、领取代次/心跳、PRE/POST 预算、候选健康/费用/用量计入和 finally 收尾吊销 token。普通协调者与 impact 互斥；等待容量或已有 L2 时保留 pending。执行者结束则先 stopAndJoin 监督再普通验收。能力默认关闭；mission-runner / 生产入口不接线。测试隔离临时状态不冒充生产启用。不向执行者投递差异，不开放 L3 变更创建入口，不改 stdin EOF 或 AgentRun 端口。仍不表示消费/应用/回执闭环或完整 COM3 已启动。
