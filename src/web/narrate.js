@@ -414,6 +414,20 @@ const RECEIPT_LAYER_CN = {
 /** 三层共用的尾注：回执是承认收到，不是验收结论。 */
 const RECEIPT_PENDING_NOTE = '只是接收侧承认收到，不等于已应用或已验证';
 
+/** 快照哈希的形状。64 位小写 hex，别的形状一律当「没有」。 */
+const SNAPSHOT_HASH_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * 交卷有没有带快照。**缺了就直说「快照未知」，不补字段**：旧结果里根本没有
+ * appliedChanges / snapshotHash，替它造一个等于把「没记录」显示成「记录了」，
+ * 而快照正是事后对账要查的东西。
+ */
+const snapshotSuffix = (data) => {
+  const d = data || {};
+  if (!Array.isArray(d.appliedChanges) || !SNAPSHOT_HASH_RE.test(text(d.snapshotHash))) return ' · 快照未知';
+  return ' · 已记录快照';
+};
+
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
   'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
@@ -499,7 +513,7 @@ const EVENT_TABLE = {
     return {
       badge: 'L1 → L2',
       action: '交回结果',
-      detail: outcomeText(data.outcome) + (count === undefined ? '' : ` · 改了 ${count} 个文件`),
+      detail: outcomeText(data.outcome) + (count === undefined ? '' : ` · 改了 ${count} 个文件`) + snapshotSuffix(data),
     };
   },
 
@@ -931,11 +945,21 @@ const EVENT_TABLE = {
   'change.receipt_recorded': (event) => {
     const data = (event && event.data) || {};
     const layer = text(data.layer);
+    const changeId = or(data.changeId, '（没有变更编号）');
+    // verified 是平台夹验收之后写的确认层，性质上已经不是「接收侧承认收到」：
+    // 走上面的三层分支会把平台确认降格成一张 ACK，走未识别分支又会把它报成乱码。
+    if (layer === 'verified') {
+      return {
+        badge: PLATFORM_ROLE_LABEL,
+        action: '变更回执：平台已确认',
+        detail: `${changeId} · 平台依据 L2 验收与验证报告确认`,
+      };
+    }
     const label = RECEIPT_LAYER_CN[layer] || `未识别层（${layer || '没有层'}）`;
     return {
       badge: 'L1 执行',
       action: `变更回执：${label}`,
-      detail: `${or(data.changeId, '（没有变更编号）')} · ${RECEIPT_PENDING_NOTE}`,
+      detail: `${changeId} · ${RECEIPT_PENDING_NOTE}`,
     };
   },
 };

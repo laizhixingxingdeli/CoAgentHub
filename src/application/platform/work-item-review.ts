@@ -4,6 +4,14 @@ import { checkAcceptanceResults } from './work-order-helpers.ts';
 import { criteriaList } from './agent-view-helpers.ts';
 import { requireLightweightReviewReport } from './lightweight-submission.ts';
 import { commitPromotionToStandard } from './promotion.ts';
+import { getAgentValidationReport } from './validation-report-views.ts';
+import { CHANGE_RECEIPT_RECORDED_KIND } from './change-receipt.ts';
+import {
+  diffContentHash,
+  findCoveringReceipt,
+  uncoveredCompatibleChangeIds,
+  type VerifiedChangeRecord,
+} from '../change-receipt.ts';
 
 export async function reviewExecutionResult(
   ctx: PlatformContext,
@@ -54,6 +62,11 @@ export async function reviewExecutionResult(
     if (fromLightweight) {
       await requireLightweightReviewReport(ctx, mission, item);
     }
+    // 门禁必须在 item.review 之前：工作项一经流转到 accepted 再发现变更没覆盖，
+    // 就只剩「撤一次验收」这条路，而验收记录是不可变事实。拒绝必须无副作用。
+    if (input.verdict === 'accept') {
+      await requireCoveredChanges(ctx, mission, item);
+    }
     const record: Omit<ReviewRecord, 'verdict'> = {
       attemptId,
       reasons: [...input.reasons],
@@ -96,6 +109,12 @@ export async function reviewExecutionResult(
       }
       await criteriaFailureStop(mission, item);
     }
+    // accept 已经落定才轮到写 verified：先有「验收过了」这个事实，再补「哪条变更
+    // 因此有了机器依据」。反过来写会让一次本该被拒的 accept 也留下回执。
+    if (input.verdict === 'accept') {
+      await recordVerifiedReceipts(ctx, mission, attemptId, item);
+    }
+
     // 快车道打回之后，去处由整条 Mission 说了算，不由工作项说了算：
     // 正常晋升会把 Mission 摆回 planning（协调者还能在同一 attempt 里接着规划），
     // 但若 AC1 已经判停，Mission 停在那个停态上——写死 planning 会把「已停」谎报成
@@ -121,4 +140,96 @@ function l2RejectRule(input: { readonly reasons: readonly string[]; readonly req
     `L2 验收打回：${reasons.join('；') || '（未给理由）'}。` +
     `要改：${changes.join('；') || '（未列改动）'}。`
   );
+}
+
+/**
+ * accept 门禁：本工作项还有 compatible 变更没被本次提交覆盖时拒。
+ *
+ * 为什么要挡：放行就等于承认一次「照着改了但跑的不是那份 diff」的提交。回执是
+ * 不可变事实，事后补一条会让人误以为当时就跑了那份工单。
+ *
+ * 为什么返回 void 而不是结果：这里只判「能不能 accept」，覆盖清单由写回执那一步
+ * 自己再算一遍——两边共用一个函数算出来的 ids，避免门禁与写入对「哪些算覆盖」
+ * 产生分歧。
+ */
+async function requireCoveredChanges(ctx: PlatformContext, mission: Mission, item: WorkItem): Promise<void> {
+  const submittedAttemptId = item.submittedAttemptId;
+  if (!ctx.changeImpacts || !ctx.changeReceipts || submittedAttemptId === undefined) return;
+  // list 已经按层滤过、字段也齐，交给纯函数换算就可以，不必再投影一遍。
+  const [impacts, receipts] = await Promise.all([
+    ctx.changeImpacts.listByMission(mission.id),
+    ctx.changeReceipts.listByMission(mission.id),
+  ]);
+  const uncovered = uncoveredCompatibleChangeIds({
+    impacts,
+    receipts,
+    workItemId: item.id,
+    submittedAttemptId,
+  });
+  if (uncovered.length > 0) {
+    throw new PlatformRuleError(
+      'ACCEPT_CHANGES_UNCOVERED',
+      `有 compatible 变更这次提交没覆盖，不能 accept：${uncovered.join(', ')}`,
+    );
+  }
+}
+
+/**
+ * accept 通过后，为已被本次提交覆盖的 compatible 变更写 verified 回执。
+ *
+ * 没有本次提交的通过报告就一条都不写、也不抛：缺机器验收不等于这次交付不合格
+ * （快车道之外本就可以人工验收），但绝不能拿一份对不上这次提交的报告当依据。
+ */
+async function recordVerifiedReceipts(
+  ctx: PlatformContext,
+  mission: Mission,
+  reviewAttemptId: string,
+  item: WorkItem,
+): Promise<void> {
+  const submittedAttemptId = item.submittedAttemptId;
+  if (!ctx.changeImpacts || !ctx.changeReceipts || submittedAttemptId === undefined) return;
+  const report = await getAgentValidationReport(ctx, mission.id, item.id);
+  if (!report || report.passed !== true) return;
+  const [impacts, receipts] = await Promise.all([
+    ctx.changeImpacts.listByMission(mission.id),
+    ctx.changeReceipts.listByMission(mission.id),
+  ]);
+  const mine = impacts
+    .filter((row) => row.workItemId === item.id && row.decision === 'compatible')
+    .sort((a, b) => (a.changeId < b.changeId ? -1 : a.changeId > b.changeId ? 1 : 0));
+  for (const impact of mine) {
+    const hash = diffContentHash(impact.workOrderDiff);
+    // 用覆盖用的那条回执的代次：verified 记的是「这一代照这份 diff 跑过并被验收」。
+    const cover = findCoveringReceipt(impact, receipts, submittedAttemptId);
+    if (!cover) continue;
+    const record: VerifiedChangeRecord = {
+      changeId: impact.changeId,
+      missionId: mission.id,
+      workItemId: item.id,
+      attemptId: submittedAttemptId,
+      claimGeneration: cover.claimGeneration,
+      layer: 'verified',
+      at: ctx.clock.now().toISOString(),
+      contentHash: hash,
+      sourceAttemptId: reviewAttemptId,
+      reportId: report.id,
+    };
+    // 幂等重放不重复发事件：事件是「记下了一条」，重复发会让回放看到两条记录。
+    if (!(await ctx.changeReceipts.recordVerified(record))) continue;
+    await ctx.event(
+      mission,
+      CHANGE_RECEIPT_RECORDED_KIND,
+      {
+        changeId: impact.changeId,
+        layer: 'verified',
+        workItemId: item.id,
+        attemptId: submittedAttemptId,
+        sourceAttemptId: reviewAttemptId,
+        reportId: report.id,
+        contentHash: hash,
+      },
+      item.id,
+      submittedAttemptId,
+    );
+  }
 }

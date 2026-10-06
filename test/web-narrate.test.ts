@@ -560,14 +560,40 @@ describe('事件翻译表：逐条对契约', () => {
       }
     }
 
-    // 认不出的层（含 verified）：仍翻译、仍不带验收结论，不替调用方下结论。
-    const unknown = narrateEvent(
+    // verified 是平台夹验收之后写的确认层，不是接收侧 ACK：说清是平台依据
+    // L2 验收与验证报告确认的，不挂「不等于已应用或已验证」那句尾注。
+    const verified = narrateEvent(
       { kind: 'change.receipt_recorded', data: { ...data, layer: 'verified' } },
       CTX,
     );
+    assert.equal(verified.untranslated, false);
+    assert.equal(verified.badge, '平台');
+    assert.ok(verified.action.includes('平台已确认'), verified.action);
+    assert.ok(verified.detail.includes('CR-1'), verified.detail);
+    assert.ok(verified.detail.includes('平台依据 L2 验收与验证报告确认'), verified.detail);
+    assert.ok(!/不等于已应用或已验证/.test(verified.detail), verified.detail);
+
+    // 认不出的层：仍翻译、仍不带验收结论，不替调用方下结论。
+    const unknown = narrateEvent(
+      { kind: 'change.receipt_recorded', data: { ...data, layer: 'nope' } },
+      CTX,
+    );
     assert.equal(unknown.untranslated, false);
-    assert.ok(unknown.action.includes('verified'), unknown.action);
+    assert.ok(unknown.action.includes('未识别层'), unknown.action);
     assert.ok(/不等于已应用或已验证/.test(unknown.detail), unknown.detail);
+  });
+
+  test('execution_result.submitted：缺快照字段说「快照未知」，有就说已记录', () => {
+    const bare = narrateEvent({ kind: 'execution_result.submitted', data: { outcome: 'completed' } }, CTX);
+    assert.ok(bare.detail.includes('快照未知'), bare.detail);
+    assert.ok(bare.detail.includes('completed'), bare.detail);
+
+    const hash = 'a'.repeat(64);
+    const full = narrateEvent(
+      { kind: 'execution_result.submitted', data: { outcome: 'completed', appliedChanges: [], snapshotHash: hash } },
+      CTX,
+    );
+    assert.ok(!full.detail.includes('快照未知'), full.detail);
   });
 
   test('整体：已翻译结果的 badge+action+detail 里不出现任何机器事件名', () => {

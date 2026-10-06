@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { WorkOrder } from '../kernel/index.ts';
 
 /** 回执的层：适配器已收到 / 会话已消费 / 执行器已开跑。**不含**验收层。 */
 export type ChangeReceiptLayer = 'adapter_received' | 'session_consumed' | 'executor_started';
@@ -37,8 +38,35 @@ export interface ChangeReceipt {
   readonly contentHash?: string;
 }
 
+/**
+ * 平台（验收侧）写下的 verified 回执。
+ *
+ * 为什么不是 ChangeReceipt 的第 4 层：回执只记「接收侧收到」，验收通过是另一件
+ * 事，让写回执的动作能证明质量，就会有人拿「有回执」当「已通过验收」。所以它独
+ * 立成形、且只能由平台在 accept 时写；执行侧 append / ack 一律写不进来。
+ */
+export interface VerifiedChangeRecord {
+  readonly changeId: string;
+  readonly missionId: string;
+  readonly workItemId: string;
+  /** 被验收的那次提交：写回执的人（平台）不是跑它的人，两者必须分开记。 */
+  readonly attemptId: string;
+  readonly claimGeneration: number;
+  readonly layer: 'verified';
+  readonly at: string;
+  readonly contentHash: string;
+  /** 验收结论来自哪次执行：与 attemptId 一起说明「谁跑的、谁判的」。 */
+  readonly sourceAttemptId: string;
+  readonly reportId: string;
+}
+
 export interface ChangeReceiptRepository {
   append(receipt: ChangeReceipt): Promise<void>;
+  /**
+   * 写一条 verified 回执。true = 新写入；false = 同内容幂等（不发事件）。
+   * 内容不同则抛：回执是事实，覆盖上一次的验收结论等于篡改历史。
+   */
+  recordVerified(record: VerifiedChangeRecord): Promise<boolean>;
   get(changeId: string, layer: ChangeReceiptLayer): Promise<ChangeReceipt | undefined>;
   listByChange(changeId: string): Promise<readonly ChangeReceipt[]>;
   listByMission(missionId: string): Promise<readonly ChangeReceipt[]>;
@@ -68,7 +96,75 @@ export function diffContentHash(workOrderDiff: string): string {
   return createHash('sha256').update(workOrderDiff, 'utf8').digest('hex');
 }
 
-const LAYERS: readonly string[] = ['adapter_received', 'session_consumed', 'executor_started'];
+export interface UncoveredChangeQuery {
+  readonly impacts: readonly {
+    readonly changeId: string;
+    readonly workItemId: string;
+    readonly attemptId: string;
+    readonly claimGeneration: number;
+    readonly decision: string;
+    readonly workOrderDiff: string;
+  }[];
+  readonly receipts: readonly {
+    readonly changeId: string;
+    readonly workItemId: string;
+    readonly attemptId: string;
+    readonly claimGeneration: number;
+    readonly layer: string;
+    readonly contentHash?: string;
+  }[];
+  readonly workItemId: string;
+  readonly submittedAttemptId: string;
+}
+
+/**
+ * 覆盖这一条 impact 的那条 executor_started 回执。门禁只要「有没有」，写 verified 还
+ * 要连代次一起用，所以返回行本身——两边各自判定一次迟早对「哪些算覆盖」产生分歧。
+ */
+export function findCoveringReceipt<T extends UncoveredChangeQuery['receipts'][number]>(
+  impact: UncoveredChangeQuery['impacts'][number],
+  receipts: readonly T[],
+  submittedAttemptId: string,
+): T | undefined {
+  const hash = diffContentHash(impact.workOrderDiff);
+  return receipts.find(
+    (row) =>
+      row.changeId === impact.changeId &&
+      row.attemptId === submittedAttemptId &&
+      row.layer === 'executor_started' &&
+      row.contentHash === hash &&
+      // 本次提交的 impact：代次必须相同，同 Attempt 不同代次是另一趟领取。
+      // 旧 Attempt 留下的 impact 只能由新代次覆盖，所以不比代次，只比对工作项。
+      (impact.attemptId === submittedAttemptId
+        ? row.claimGeneration === impact.claimGeneration
+        : row.workItemId === impact.workItemId),
+  );
+}
+
+/**
+ * 本次提交没覆盖到的 compatible 变更（changeId 升序、去重）。
+ *
+ * 不 import Platform：这是纯数据判定，门禁与测试都要拿它单独算一遍。
+ */
+export function uncoveredCompatibleChangeIds(query: UncoveredChangeQuery): readonly string[] {
+  const out = new Set<string>();
+  for (const impact of query.impacts) {
+    if (impact.workItemId !== query.workItemId) continue;
+    if (impact.decision !== 'compatible') continue;
+    if (findCoveringReceipt(impact, query.receipts, query.submittedAttemptId)) continue;
+    out.add(impact.changeId);
+  }
+  return Object.freeze([...out].sort());
+}
+
+/** 只有这三层算「回执层」：verified 是验收记录，不是接收侧的一层。 */
+export const RECEIPT_LAYERS: readonly ChangeReceiptLayer[] = [
+  'adapter_received',
+  'session_consumed',
+  'executor_started',
+];
+
+const LAYERS: readonly string[] = RECEIPT_LAYERS;
 
 const IDENTITY_STRING_FIELDS: readonly string[] = [
   'changeId',
@@ -179,6 +275,25 @@ export function cloneChangeReceipt(receipt: ChangeReceipt): ChangeReceipt {
   return validateChangeReceipt(receipt);
 }
 
+/**
+ * 规范化 JSON：对象键按字典序重排、数组保序，然后 stringify。
+ *
+ * 为什么必须有序化：键顺序变了而内容没变的两个对象，不有序化会算出两个摘要，
+ * 于是「同一份工单」会因为字段书写顺序被判成「内容变了」。
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const body = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',');
+    return `{${body}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 /** 全部业务字段全等；**不比 at**：同一事实的重放只是记的时刻不同。 */
 export function changeReceiptsEqual(a: ChangeReceipt, b: ChangeReceipt): boolean {
   if (a === b) return true;
@@ -189,4 +304,62 @@ export function changeReceiptsEqual(a: ChangeReceipt, b: ChangeReceipt): boolean
   if (a.layer !== b.layer) return false;
   if (a.contentHash !== b.contentHash) return false;
   return true;
+}
+
+/** sha256 hex。全库一处算法：两处各写一遍迟早算出不同的摘要。 */
+export function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** 交卷快照里的一条变更：只认 changeId 与它实际开跑那份 diff 的哈希。 */
+export interface AppliedChangeRef {
+  readonly changeId: string;
+  readonly contentHash: string;
+}
+
+/**
+ * 工单内容哈希。**不含 orderRevision**：修订号是「第几次派」的序号，不是工单内容。
+ * 把它算进去会怎样：同一份内容换个修订号就换摘要，快照比对就再也认不出「原样重派」。
+ */
+export function workOrderContentHash(order: WorkOrder): string {
+  return sha256Hex(
+    canonicalJson({
+      objective: order.objective,
+      allowedScope: [...order.allowedScope],
+      requiredBehaviour: order.requiredBehaviour,
+      constraints: [...order.constraints],
+      acceptance: [...order.acceptance],
+      verification: [...order.verification],
+      doNot: [...order.doNot],
+      contextRefs: order.contextRefs,
+      validation: order.validation ?? null,
+      criteria: order.criteria ?? null,
+    }),
+  );
+}
+
+/**
+ * 交卷快照哈希。
+ *
+ * appliedChanges 先按 changeId 升序：回执入库顺序取决于执行者 ack 的先后，
+ * 那不是内容的一部分。不排序的话，同一批变更换个 ack 顺序就是另一个摘要。
+ */
+export function submissionSnapshotHash(input: {
+  readonly orderRevision: string;
+  readonly contractRevision: number;
+  readonly workOrderHash: string;
+  readonly appliedChanges: readonly AppliedChangeRef[];
+}): string {
+  const appliedChanges = [...input.appliedChanges]
+    .sort((a, b) => (a.changeId < b.changeId ? -1 : a.changeId > b.changeId ? 1 : 0))
+    .map((row) => ({ changeId: row.changeId, contentHash: row.contentHash }));
+  return sha256Hex(
+    canonicalJson({
+      v: 1,
+      orderRevision: input.orderRevision,
+      contractRevision: input.contractRevision,
+      workOrderHash: input.workOrderHash,
+      appliedChanges,
+    }),
+  );
 }
