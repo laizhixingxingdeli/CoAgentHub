@@ -22,4 +22,16 @@ B1/B2a 的请求持久、队列身份与 impact 只读牌仍有效。B2b 在此�
 
 Platform 提供专属 startImpactCoordinatorAttempt / getChangeRequest / submitChangeImpact / listPendingChangeRequests / finishLostImpactAttempt。RunTokenIssuer 可选 startImpactCoordinator，经 main.makeIssuer / hosted issuer 签发 B2a 目的牌并绑定 changeId，缺能力 unsupported 且不回退普通牌。HTTP 工具 coagent_get_change_request / coagent_submit_change_impact 仅 impact 牌可用；B2a 只读 allowlist 仅为本专属提交增补一条限权写，原派发/验收/规划/终审仍 403。不公开 HTTP 签发 impact 牌。
 
-Orchestrator 在执行者 run.wait 未落定期间可 opt-in 查看本目标未决请求：一份变更只复用独立 impact 逻辑 hop，走原五维容量/公平、领取代次/心跳、PRE/POST 预算、候选健康/费用/用量计入和 finally 收尾吊销 token。普通协调者与 impact 互斥；等待容量或已有 L2 时保留 pending。执行者结束则先 stopAndJoin 监督再普通验收。能力默认关闭；mission-runner / 生产入口不接线。测试隔离临时状态不冒充生产启用。不向执行者投递差异，不开放 L3 变更创建入口，不改 stdin EOF 或 AgentRun 端口。仍不表示消费/应用/回执闭环或完整 COM3 已启动。
+Orchestrator 在执行者 run.wait 未落定期间可 opt-in 查看本目标未决请求：一份变更只复用独立 impact 逻辑 hop，走原五维容量/公平、领取代次/心跳、PRE/POST 预算、候选健康/费用/用量计入和 finally 收尾吊销 token。普通协调者与 impact 互斥；等待容量或已有 L2 时保留 pending。执行者结束则先 stopAndJoin 监督再普通验收。能力默认关闭；mission-runner / 生产入口不接线。测试隔离临时状态不冒充生产启用。B2b 不向执行者投递差异，不开放 L3 变更创建入口，不改 stdin EOF 或 AgentRun 端口。B2b 本身不表示消费、应用或回执已启用。
+
+## 执行者差异读取与分层回执
+
+B3 在已持久的 ChangeImpact 之上，让正在执行的 L1 按可信 run 身份与当前领取代次读取发给自己的明确差异，并逐层持久回执。层只有 adapter_received、session_consumed、executor_started。一条 changeId 只对应一个目标执行 Attempt，按层各记一次；同层同内容重试幂等，同层异内容冲突不覆盖。verified 不能经回执写入。记录含 changeId、missionId、workItemId、attemptId、claimGeneration、layer、平台时钟 at；executor_started 还必须带 contentHash，且等于平台对 ChangeImpact.workOrderDiff（UTF-8）算出的 SHA-256 hex。来源由可信入口补齐，不信请求体身份。
+
+File 沿用同一 FileStateStore 事务快照，legacy 缺集合按 [] 读取，不升版本、不另开写者。未装配与 PG 模式明确 unsupported，不隐式回退。
+
+读只返回目标 attemptId 与领取代次都等于本次执行、且 decision=compatible 的差异（含 changeId、workOrderDiff、affectedAcceptance、diffHash 与已记录回执层），并校验本执行仍是 in_progress 的当前 Attempt、代次当前且租约有效。写回执在同一围栏事务里校验目标 Attempt、代次与活租约、对应 ChangeImpact 存在且目标一致、decision=compatible，层只能按 adapter_received→session_consumed→executor_started 前进。旧代次、跨 Attempt、目标不符、非 compatible、越层、hash 不符拒绝且无副作用。replan 与 cancel_replace 不下发给执行者。
+
+HTTP 工具为 coagent_get_change_deliveries 与 coagent_ack_change_receipt。身份只来自 run token（role=executor，attemptId 与 claim 齐全）。请求体只接受业务字段；多出字段 400。coordinator、independent_reviewer 与 impact 牌 403。陈旧代次或失租 409。路由按精确工具名放在普通 AGENT_TOOL_ACTION 之前，不改 policy-engine 通用权限表，impact 牌入口白名单不放宽。
+
+回执只记事实层。adapter_received、session_consumed、executor_started 互不相等，也不等于 verified。executor_started 是执行者带 hash 的结构化自述，不是应用证据。叙事只说执行侧已收到、已进入会话、执行者自述已按差异继续，并明确不等于已应用或已验证。不接 pi 轮询与 steer，不启用生产闭环，不新增 WaitReason。
