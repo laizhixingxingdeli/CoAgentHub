@@ -35,3 +35,11 @@ File 沿用同一 FileStateStore 事务快照，legacy 缺集合按 [] 读取，
 HTTP 工具为 coagent_get_change_deliveries 与 coagent_ack_change_receipt。身份只来自 run token（role=executor，attemptId 与 claim 齐全）。请求体只接受业务字段；多出字段 400。coordinator、independent_reviewer 与 impact 牌 403。陈旧代次或失租 409。路由按精确工具名放在普通 AGENT_TOOL_ACTION 之前，不改 policy-engine 通用权限表，impact 牌入口白名单不放宽。
 
 回执只记事实层。adapter_received、session_consumed、executor_started 互不相等，也不等于 verified。executor_started 是执行者带 hash 的结构化自述，不是应用证据。叙事只说执行侧已收到、已进入会话、执行者自述已按差异继续，并明确不等于已应用或已验证。不接 pi 轮询与 steer，不启用生产闭环，不新增 WaitReason。
+
+## 交卷快照与验收确认
+
+B4 在 B3 之上，不新造事件种类。execution_result.submitted 追加 appliedChanges 与 snapshotHash。appliedChanges 是本次执行 Attempt、本工作项、layer=executor_started 且带 contentHash 的 changeId 与 contentHash，按 changeId 升序；未装配变更能力时为 []。snapshotHash 是 SHA-256 hex（UTF-8）。输入是 canonical JSON：对象键按字典序，数组保序。形状为 { v: 1, orderRevision, contractRevision, workOrderHash, appliedChanges }。workOrderHash 是工单内容的 SHA-256 hex，字段为 objective、allowedScope、requiredBehaviour、constraints、acceptance、verification、doNot、contextRefs、validation（缺为 null）、criteria（缺为 null），不含 orderRevision；没有工单时对 canonical JSON null 取哈希。缺 appliedChanges，或 snapshotHash 不是 64 位小写 hex 的旧事件照常可读，叙事标「快照未知」，不补造字段。
+
+L2 accept 之前，若已装配变更能力且存在指向该工作项的 compatible ChangeImpact，平台在同一次验收事务里要求覆盖：指向本次提交 Attempt 的必须已有 executor_started，且 contentHash 等于差异正文哈希；指向本工作项旧 Attempt 的 compatible 变更，这次提交没有覆盖，同样不许 accept。拒绝码 ACCEPT_CHANGES_UNCOVERED，原因列出未覆盖的 changeId，无副作用。reject 不受影响。没有任何变更判断，或没有装配变更能力时，验收与原先一致。
+
+accept 成功，且本次 submittedAttemptId 有平台通过的验证报告时，平台经独立入口 recordVerified 为本次提交覆盖的每条 compatible 变更写一条 verified 记录。字段含 changeId、missionId、workItemId、attemptId（被验收的提交）、claimGeneration、layer=verified、at、contentHash、sourceAttemptId（做验收的 coordinator Attempt）、reportId。事件仍是 change.receipt_recorded。同内容重放幂等且不重复发事件。执行侧 append 与 HTTP 回执继续拒绝 verified；list/get 仍只返回三层执行侧回执。未验收时记录里不出现 verified 字段或空占位。旧的 submitted 与报告按 submittedAttemptId 保留，不被覆写。叙事：layer=verified 的动作是「变更回执：平台已确认」，detail 说明是平台依据 L2 验收与验证报告确认。三种执行侧层的叙事不变。不接 pi，不启用生产闭环，不新增 WaitReason。
