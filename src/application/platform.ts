@@ -631,6 +631,26 @@ export class Platform {
     );
   }
 
+  /**
+   * 失租的旧 impact Attempt 的可信收尾：只关那一条 Attempt，不写判断。
+   *
+   * 只给运行期接线用（调度器在 finally 里撞到 CLAIM_FENCE_REJECTED 之后）：
+   * 身份全从已持久化的 started 事件读回，调用方只能点名「哪条 Attempt」。
+   * HTTP 面不转发这一条——能从外面调用的收尾就等于没有围栏。
+   */
+  finishLostImpactAttempt(
+    missionId: string,
+    coordinatorAttemptId: string,
+    outcome: Parameters<Platform['finishAttempt']>[2],
+  ): Promise<void> {
+    return changeImpact.finishLostImpactAttempt(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      outcome,
+    );
+  }
+
   async submitIndependentReview(
     missionId: string,
     attemptId: string,

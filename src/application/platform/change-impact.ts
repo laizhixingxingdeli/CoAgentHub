@@ -33,6 +33,7 @@ import {
   PlatformRuleError,
   ATTEMPT_STARTED_KIND,
 } from './context.ts';
+import { finishAttempt as attemptsFinish } from './attempts.ts';
 import type { QueueClaimIdentity } from './types.ts';
 
 /** 缺仓储备或事务不带 fence 时的统一拒绝：不退化成`跳过校验直接写」。 */
@@ -582,5 +583,101 @@ export async function listPendingChangeRequests(
     });
     const decided = new Set((await impacts.listByMission(missionId)).map((row) => row.changeId));
     return Object.freeze(all.filter((row) => !decided.has(row.changeId)));
+  });
+}
+
+/**
+ * 失租的旧 impact Attempt 的可信收尾：**只关这一条 Attempt，不写任何判断。**
+ *
+ * 为什么需要它：impact hop 在跑的时候，它的租约可能到期或被别的进程接管（换代）。
+ * 那时正常的 `finishAttempt(claim)` 会被围栏拒掉，而调度器的 finally 必须把
+ * Attempt 关掉 —— 否则执行者都已经终态了，平台上还留着一条没人认领的
+ * in_progress impact coordinator：它占着「唯一 coordinator」名额，让后面的普通
+ * 验收连 Attempt 都开不出来。
+ *
+ * 为什么不能拿调用方给的 owner / generation / clock 当依据：那些正是失租之后不再
+ * 可信的东西。身份全部从**已持久化的 started 事件**读回来（发牌那一刻刻下的
+ * changeId、目标工作项、claim 三元组），再与仓储里的请求与 hop 行对照；时钟只取
+ * ctx.clock。HTTP body 永远不是这里的输入。
+ *
+ * 三条都成立才收：
+ *   1. 这条 Attempt 确实是影响判断专属 Attempt（started 事件带 impact 关联）；
+ *   2. 关联的那条变更与工作项仍对得上（不给「顺手关别人的 Attempt」留口子）；
+ *   3. 事件里那次领取**确实已经失效** —— 还活着就拒绝走这条路径，围栏不该被绕过。
+ *
+ * 收尾复用 `attempts.finishAttempt` 本体：用量、输出尾部、结束原因都按同一套内部
+ * 事件落账，**不**在这里另写一份，也不写 ChangeImpact。
+ */
+export async function finishLostImpactAttempt(
+  ctx: PlatformContext,
+  missionId: string,
+  coordinatorAttemptId: string,
+  outcome: Parameters<typeof attemptsFinish>[3],
+): Promise<void> {
+  if (!supportsChangeImpact(ctx)) {
+    throw new PlatformRuleError(
+      CHANGE_IMPACT_UNSUPPORTED,
+      '当前平台没有装配影响判断所需的变更仓储与队列槽，失租收尾也无从可信核对。',
+    );
+  }
+  const requests = ctx.changeRequests!;
+  const hops = ctx.queuedHops!;
+  return ctx.tx(async () => {
+    const now = ctx.clock.now().toISOString();
+    const { mission } = await ctx.locate(missionId);
+    const attempt = mission.attempt(coordinatorAttemptId);
+    if (!attempt) {
+      throw new PlatformRuleError('UNKNOWN_ATTEMPT', `attempt ${coordinatorAttemptId} 不存在`);
+    }
+    // 只关 impact coordinator：执行者与后来新开的普通 coordinator 都不在这条路径上。
+    if (attempt.kind !== 'coordinator') {
+      throw new PlatformRuleError(
+        'WRONG_ROLE',
+        `attempt ${coordinatorAttemptId} 不是 coordinator，影响判断失租收尾只关 impact coordinator。`,
+      );
+    }
+    // 已经终态：幂等 no-op。重复收尾会把用量与输出尾部再记一次。
+    if (attempt.status !== 'in_progress') return;
+    const events = await ctx.activity.list(missionId);
+    const started = events.find(
+      (event) => event.kind === ATTEMPT_STARTED_KIND && event.attemptId === coordinatorAttemptId,
+    );
+    const association = readAssociation(started?.data);
+    if (!association) {
+      throw new PlatformRuleError(
+        'WRONG_ROLE',
+        `attempt ${coordinatorAttemptId} 的 started 事件没有影响判断关联，不是 impact Attempt，拒绝按失租收尾。`,
+      );
+    }
+    const request = requireRequest(await requests.get(association.changeId), association.changeId);
+    requireSameMission(request, missionId, association.changeId);
+    if (request.workItemId !== association.workItemId) {
+      throw new PlatformRuleError(
+        'CLAIM_FENCE_REJECTED',
+        `变更 ${association.changeId} 的目标工作项与发牌时钉下的不一致，拒绝收尾。`,
+      );
+    }
+    const hop = await hops.get(association.claim.id);
+    const aligned =
+      hop !== undefined &&
+      hop.role === 'coordinator' &&
+      hop.purpose === CHANGE_IMPACT_PURPOSE &&
+      hop.changeId === request.changeId &&
+      hop.missionId === missionId &&
+      hop.workItemId === request.workItemId;
+    if (!aligned) {
+      throw new PlatformRuleError(
+        'CLAIM_FENCE_REJECTED',
+        '这条 Attempt 记下的队列槽不是本条变更的 impact hop，拒绝收尾。',
+      );
+    }
+    // 旧 claim 必须**确实**失效：还活着就说明调用方该走带围栏的正常路径。
+    if (isLiveClaim(hop, association.claim, now)) {
+      throw new PlatformRuleError(
+        'CLAIM_FENCE_REJECTED',
+        '这条 Attempt 的 impact 租约仍然有效，失租收尾不得绕过围栏代写。',
+      );
+    }
+    await attemptsFinish(ctx, missionId, coordinatorAttemptId, outcome);
   });
 }
