@@ -34,6 +34,7 @@ import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
 import { InMemoryDeliveryRepository } from './application/delivery.ts';
 import { FileChangeImpactRepository } from './application/change-impact-repository.ts';
+import { FileChangeReceiptRepository } from './application/change-receipt-repository.ts';
 import { FileChangeRequestRepository } from './application/change-request-repository.ts';
 import {
   FileActivityLog,
@@ -315,6 +316,10 @@ export async function buildPersistentPlatform(
     // 没有对应的 PG 仓储，注入文件版等于把两份存储焊在一起。
     changeRequests: new FileChangeRequestRepository(store),
     changeImpacts: new FileChangeImpactRepository(store),
+    // 回执仓储与上面共用同一个 store：多一个 FileStateStore 实例就多一份内存副本，
+    // 彼此互相盖。未装配即 CHANGE_RECEIPT_UNSUPPORTED——**不**另开 FileStateStore
+    // 回退，那等于把两份存储焊在一起。内存 buildPlatform 与 PG 装配都不注入。
+    changeReceipts: new FileChangeReceiptRepository(store),
     queuedHops,
   });
   const agentPool = new FileAgentPoolRepository(store);

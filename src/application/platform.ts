@@ -36,6 +36,7 @@ import * as views from './platform/views.ts';
 import * as independentReview from './platform/independent-review.ts';
 import * as attempts from './platform/attempts.ts';
 import * as changeImpact from './platform/change-impact.ts';
+import * as changeReceipt from './platform/change-receipt.ts';
 import { queuedAttemptStartedData } from './platform/attempts.ts';
 import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
@@ -50,6 +51,8 @@ import { REVISE_BLOCKED_HINT, orderChangedFields, checkWorkOrderCriteria, checkW
 import { sanitizeAttemptContextMetrics, activityDataHasContextMetrics, keepTrueOrUnknownLeaves } from './platform/context-metrics.ts';
 import type { ChangeRequest } from './change-request.ts';
 import type { ChangeImpact } from './change-impact.ts';
+import type { ChangeReceipt } from './change-receipt.ts';
+import type { ChangeDelivery } from './platform/change-receipt.ts';
 import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 import { PlatformContext, PlatformRuleError, PROTOCOL_VERSION, ATTEMPT_STARTED_KIND } from './platform/context.ts';
@@ -649,6 +652,54 @@ export class Platform {
       coordinatorAttemptId,
       outcome,
     );
+  }
+
+  /**
+   * 执行者视角：这一趟执行能拿到的差异与它们已记录到哪几层。只读。
+   *
+   * 只交 compatible 且 attemptId / 代次都对得上的那些：replan 与 cancel_replace
+   * 不该由执行者自己决定要不要照跑，跨 Attempt 的差异交回来也会被当成这一趟的。
+   */
+  listChangeDeliveries(
+    missionId: string,
+    workItemId: string,
+    attemptId: string,
+    claim?: QueueClaimIdentity,
+  ): Promise<readonly ChangeDelivery[]> {
+    return changeReceipt.listChangeDeliveries(
+      this.#context,
+      missionId,
+      workItemId,
+      attemptId,
+      claim,
+    );
+  }
+
+  /**
+   * 执行者按层回执：adapter_received → session_consumed → executor_started。
+   *
+   * 回执只记「我收到了」，不是已应用 / 已验收；低层回执不得被外推成后面的层。
+   */
+  ackChangeReceipt(
+    missionId: string,
+    workItemId: string,
+    attemptId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeReceipt> {
+    return changeReceipt.ackChangeReceipt(
+      this.#context,
+      missionId,
+      workItemId,
+      attemptId,
+      claim,
+      body,
+    );
+  }
+
+  /** 回执读写是否装配：未装配时上面两条抛 CHANGE_RECEIPT_UNSUPPORTED。 */
+  supportsChangeReceipt(): boolean {
+    return changeReceipt.supportsChangeReceipt(this.#context);
   }
 
   async submitIndependentReview(
