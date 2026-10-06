@@ -71,6 +71,7 @@ import type { ChangeImpactRepository } from '../change-impact.ts';
 import type { ChangeReceiptRepository } from '../change-receipt.ts';
 import type { ChangeCoverageRepository } from '../change-coverage.ts';
 import type { ChangeRequestRepository } from '../change-request.ts';
+import type { ContractHistoryRepository } from '../contract-history.ts';
 import type { QueuedHopRepository } from '../ports.ts';
 import type { ClassificationResult } from '../task-classifier.ts';
 import type { BoundWorkItem, ContractCheck, ContextBundle, WorkItemIndexEntry } from '../context-builder.ts';
@@ -228,6 +229,13 @@ export interface PlatformDeps {
    * CHANGE_COVERAGE_UNSUPPORTED，不退化成「跳过校验直接写」。
    */
   changeCoverages?: ChangeCoverageRepository;
+  /**
+   * 契约原文留档仓储。**单独可选**，不并进上面的影响判断三件套，也不并进回执 /
+   * 覆盖仓储：留档这一侧只跟着 Mission 的 contractRevision 走，硬并进任一组都会
+   * 让「能判断」「能回执」「能记覆盖」「能留原文」互相绑死。缺它时建 Mission 与
+   * 改契约的行为与原来完全一致——不抛错、不另开存储。
+   */
+  contractHistories?: ContractHistoryRepository;
   /**
    * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
    * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。

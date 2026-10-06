@@ -47,6 +47,36 @@ export async function recordStandardFallbackRoute(ctx: PlatformContext, callback
     });
   }
 
+/**
+ * 把这一版契约的验收口径原文留一份。
+ *
+ * 为什么在调用点外面做成一个函数：留档必须与 Mission 的创建 / 换代落在同一个
+ * 事务里，而「同一个事务」靠的是 caller 已经开好的那个 ctx.tx——这里再包一层
+ * 事务，失败时回滚的就只有留档自己，Mission 照建，等于留了一条对不上任何
+ * Mission 的孤证。
+ *
+ * 为什么缺席直接 return 而不是抛错：留档是记录能力，不是规则。没有仓储就
+ * 建不了 Mission，等于把「能不能问得出原文」和「能不能干活」焊死，而后者
+ * 才是平台该保证的。
+ *
+ * 为什么 acceptance 原样不 trim：它是契约里逐条写下的口径，改写 caller 的文本
+ * 等于篡改契约。
+ */
+export async function recordContractAcceptance(
+  ctx: PlatformContext,
+  missionId: string,
+  contractRevision: number,
+  acceptance: readonly string[],
+): Promise<void> {
+  if (ctx.contractHistories === undefined) return;
+  await ctx.contractHistories.append({
+    missionId,
+    contractRevision,
+    acceptance: [...acceptance],
+    at: ctx.clock.now().toISOString(),
+  });
+}
+
 export async function createMission(ctx: PlatformContext, input: CreateMissionInput): Promise<{ missionId: string }> {
     const project = await ctx.ensureProject(input.projectId);
     const missionId = input.missionId ?? ctx.ids.next('M');
@@ -57,6 +87,7 @@ export async function createMission(ctx: PlatformContext, input: CreateMissionIn
     });
     await ctx.projects.save(project);
     await ctx.event(mission, 'mission.created', { contractRevision: mission.contractRevision });
+    await recordContractAcceptance(ctx, mission.id, mission.contractRevision, mission.contract.acceptance);
     return { missionId };
   }
 
@@ -167,6 +198,9 @@ export async function createClassifiedMission(ctx: PlatformContext, callbacks: I
       runKind: mission.runKind,
       classified: true,
     });
+    // 分类入口不走 createMission，留档得在这里再记一次：漏了它，从
+    // createClassifiedMission 进来的 Mission 就永远问不出第 1 版写了什么。
+    await recordContractAcceptance(ctx, mission.id, mission.contractRevision, mission.contract.acceptance);
 
     const routedData: Record<string, unknown> = {
       recommended: classification.recommended,
