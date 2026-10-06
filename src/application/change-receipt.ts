@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { WorkOrder } from '../kernel/index.ts';
 
 /** 回执的层：适配器已收到 / 会话已消费 / 执行器已开跑。**不含**验收层。 */
 export type ChangeReceiptLayer = 'adapter_received' | 'session_consumed' | 'executor_started';
@@ -179,6 +180,25 @@ export function cloneChangeReceipt(receipt: ChangeReceipt): ChangeReceipt {
   return validateChangeReceipt(receipt);
 }
 
+/**
+ * 规范化 JSON：对象键按字典序重排、数组保序，然后 stringify。
+ *
+ * 为什么必须有序化：键顺序变了而内容没变的两个对象，不有序化会算出两个摘要，
+ * 于是「同一份工单」会因为字段书写顺序被判成「内容变了」。
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const body = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',');
+    return `{${body}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 /** 全部业务字段全等；**不比 at**：同一事实的重放只是记的时刻不同。 */
 export function changeReceiptsEqual(a: ChangeReceipt, b: ChangeReceipt): boolean {
   if (a === b) return true;
@@ -189,4 +209,62 @@ export function changeReceiptsEqual(a: ChangeReceipt, b: ChangeReceipt): boolean
   if (a.layer !== b.layer) return false;
   if (a.contentHash !== b.contentHash) return false;
   return true;
+}
+
+/** sha256 hex。全库一处算法：两处各写一遍迟早算出不同的摘要。 */
+export function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** 交卷快照里的一条变更：只认 changeId 与它实际开跑那份 diff 的哈希。 */
+export interface AppliedChangeRef {
+  readonly changeId: string;
+  readonly contentHash: string;
+}
+
+/**
+ * 工单内容哈希。**不含 orderRevision**：修订号是「第几次派」的序号，不是工单内容。
+ * 把它算进去会怎样：同一份内容换个修订号就换摘要，快照比对就再也认不出「原样重派」。
+ */
+export function workOrderContentHash(order: WorkOrder): string {
+  return sha256Hex(
+    canonicalJson({
+      objective: order.objective,
+      allowedScope: [...order.allowedScope],
+      requiredBehaviour: order.requiredBehaviour,
+      constraints: [...order.constraints],
+      acceptance: [...order.acceptance],
+      verification: [...order.verification],
+      doNot: [...order.doNot],
+      contextRefs: order.contextRefs,
+      validation: order.validation ?? null,
+      criteria: order.criteria ?? null,
+    }),
+  );
+}
+
+/**
+ * 交卷快照哈希。
+ *
+ * appliedChanges 先按 changeId 升序：回执入库顺序取决于执行者 ack 的先后，
+ * 那不是内容的一部分。不排序的话，同一批变更换个 ack 顺序就是另一个摘要。
+ */
+export function submissionSnapshotHash(input: {
+  readonly orderRevision: string;
+  readonly contractRevision: number;
+  readonly workOrderHash: string;
+  readonly appliedChanges: readonly AppliedChangeRef[];
+}): string {
+  const appliedChanges = [...input.appliedChanges]
+    .sort((a, b) => (a.changeId < b.changeId ? -1 : a.changeId > b.changeId ? 1 : 0))
+    .map((row) => ({ changeId: row.changeId, contentHash: row.contentHash }));
+  return sha256Hex(
+    canonicalJson({
+      v: 1,
+      orderRevision: input.orderRevision,
+      contractRevision: input.contractRevision,
+      workOrderHash: input.workOrderHash,
+      appliedChanges,
+    }),
+  );
 }

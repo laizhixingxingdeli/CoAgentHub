@@ -1,6 +1,13 @@
 import type { Mission, WorkItem, EscalationBody, EvidenceRecord, ExecutionResultBody, BlockedRecord } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { criteriaList } from './agent-view-helpers.ts';
+import {
+  canonicalJson,
+  sha256Hex,
+  submissionSnapshotHash,
+  workOrderContentHash,
+  type AppliedChangeRef,
+} from '../change-receipt.ts';
 
 export async function submitEvidence(
   ctx: PlatformContext,
@@ -62,6 +69,31 @@ export async function submitExecutionResult(
     // blocked 才取理由原文：partial 会被机器回退退回执行者，计进连续失败等于数两遍。
     const blockedReason =
       body.outcome === 'blocked' ? `${body.summary}\n${body.notes}` : undefined;
+    // 交卷快照：这次跑的**是哪份工单**、**实际照着哪些变更开跑**，在事件里一次性钉住。
+    // 不这么做会怎样：事后只知道「第 N 次派发出的工单」和「执行者 ack 了几条变更」，
+    // 两条信息分处两地，无法证明这次结果对应的是这份工单 + 这批变更。
+    const appliedChanges: readonly AppliedChangeRef[] = ctx.changeReceipts
+      ? (await ctx.changeReceipts.listByMission(mission.id))
+          // 只认本次 Attempt 在这一代领取权下、真的开跑了的那几条：
+          // 别的 Attempt 的回执不是这次执行的事实。
+          .filter(
+            (row) =>
+              row.attemptId === attemptId &&
+              row.workItemId === workItemId &&
+              row.layer === 'executor_started' &&
+              typeof row.contentHash === 'string',
+          )
+          .map((row) => ({ changeId: row.changeId, contentHash: row.contentHash as string }))
+          .sort((a, b) => (a.changeId < b.changeId ? -1 : a.changeId > b.changeId ? 1 : 0))
+      : [];
+    const snapshotHash = submissionSnapshotHash({
+      orderRevision: item.order?.orderRevision ?? 'r1',
+      contractRevision: mission.contractRevision,
+      workOrderHash: item.order
+        ? workOrderContentHash(item.order)
+        : sha256Hex(canonicalJson(null)),
+      appliedChanges,
+    });
     item.submit(body, attemptId);
     await ctx.event(
       mission,
@@ -75,6 +107,9 @@ export async function submitExecutionResult(
         // 关联标准与当时契约修订：统计只回放带这两个的事件。
         criteria: criteriaList(item.order),
         contractRevision: mission.contractRevision,
+        // 本次 Attempt 实际照着开跑的变更（changeId 升序）与上面算出的快照摘要。
+        appliedChanges,
+        snapshotHash,
         ...(blockedReason !== undefined ? { blockedReason } : {}),
       },
       workItemId,
