@@ -117,14 +117,17 @@ export interface UncoveredChangeQuery {
   readonly submittedAttemptId: string;
 }
 
-/** 这一条 impact 有没有被本次提交的 executor_started 覆盖。 */
-function coveredBy(
+/**
+ * 覆盖这一条 impact 的那条 executor_started 回执。门禁只要「有没有」，写 verified 还
+ * 要连代次一起用，所以返回行本身——两边各自判定一次迟早对「哪些算覆盖」产生分歧。
+ */
+export function findCoveringReceipt<T extends UncoveredChangeQuery['receipts'][number]>(
   impact: UncoveredChangeQuery['impacts'][number],
-  receipts: UncoveredChangeQuery['receipts'],
+  receipts: readonly T[],
   submittedAttemptId: string,
-): boolean {
+): T | undefined {
   const hash = diffContentHash(impact.workOrderDiff);
-  return receipts.some(
+  return receipts.find(
     (row) =>
       row.changeId === impact.changeId &&
       row.attemptId === submittedAttemptId &&
@@ -148,7 +151,7 @@ export function uncoveredCompatibleChangeIds(query: UncoveredChangeQuery): reado
   for (const impact of query.impacts) {
     if (impact.workItemId !== query.workItemId) continue;
     if (impact.decision !== 'compatible') continue;
-    if (coveredBy(impact, query.receipts, query.submittedAttemptId)) continue;
+    if (findCoveringReceipt(impact, query.receipts, query.submittedAttemptId)) continue;
     out.add(impact.changeId);
   }
   return Object.freeze([...out].sort());

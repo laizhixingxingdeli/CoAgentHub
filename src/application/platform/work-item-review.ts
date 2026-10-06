@@ -8,6 +8,7 @@ import { getAgentValidationReport } from './validation-report-views.ts';
 import { CHANGE_RECEIPT_RECORDED_KIND } from './change-receipt.ts';
 import {
   diffContentHash,
+  findCoveringReceipt,
   uncoveredCompatibleChangeIds,
   type VerifiedChangeRecord,
 } from '../change-receipt.ts';
@@ -152,30 +153,16 @@ function l2RejectRule(input: { readonly reasons: readonly string[]; readonly req
  * 产生分歧。
  */
 async function requireCoveredChanges(ctx: PlatformContext, mission: Mission, item: WorkItem): Promise<void> {
-  if (!ctx.changeImpacts || !ctx.changeReceipts) return;
   const submittedAttemptId = item.submittedAttemptId;
-  if (submittedAttemptId === undefined) return;
+  if (!ctx.changeImpacts || !ctx.changeReceipts || submittedAttemptId === undefined) return;
+  // list 已经按层滤过、字段也齐，交给纯函数换算就可以，不必再投影一遍。
   const [impacts, receipts] = await Promise.all([
     ctx.changeImpacts.listByMission(mission.id),
     ctx.changeReceipts.listByMission(mission.id),
   ]);
   const uncovered = uncoveredCompatibleChangeIds({
-    impacts: impacts.map((row) => ({
-      changeId: row.changeId,
-      workItemId: row.workItemId,
-      attemptId: row.attemptId,
-      claimGeneration: row.claimGeneration,
-      decision: row.decision,
-      workOrderDiff: row.workOrderDiff,
-    })),
-    receipts: receipts.map((row) => ({
-      changeId: row.changeId,
-      workItemId: row.workItemId,
-      attemptId: row.attemptId,
-      claimGeneration: row.claimGeneration,
-      layer: row.layer,
-      ...(row.contentHash === undefined ? {} : { contentHash: row.contentHash }),
-    })),
+    impacts,
+    receipts,
     workItemId: item.id,
     submittedAttemptId,
   });
@@ -199,9 +186,8 @@ async function recordVerifiedReceipts(
   reviewAttemptId: string,
   item: WorkItem,
 ): Promise<void> {
-  if (!ctx.changeImpacts || !ctx.changeReceipts) return;
   const submittedAttemptId = item.submittedAttemptId;
-  if (submittedAttemptId === undefined) return;
+  if (!ctx.changeImpacts || !ctx.changeReceipts || submittedAttemptId === undefined) return;
   const report = await getAgentValidationReport(ctx, mission.id, item.id);
   if (!report || report.passed !== true) return;
   const [impacts, receipts] = await Promise.all([
@@ -214,16 +200,7 @@ async function recordVerifiedReceipts(
   for (const impact of mine) {
     const hash = diffContentHash(impact.workOrderDiff);
     // 用覆盖用的那条回执的代次：verified 记的是「这一代照这份 diff 跑过并被验收」。
-    const cover = receipts.find(
-      (row) =>
-        row.changeId === impact.changeId &&
-        row.attemptId === submittedAttemptId &&
-        row.layer === 'executor_started' &&
-        row.contentHash === hash &&
-        (impact.attemptId === submittedAttemptId
-          ? row.claimGeneration === impact.claimGeneration
-          : row.workItemId === impact.workItemId),
-    );
+    const cover = findCoveringReceipt(impact, receipts, submittedAttemptId);
     if (!cover) continue;
     const record: VerifiedChangeRecord = {
       changeId: impact.changeId,

@@ -69,17 +69,20 @@ function validateVerifiedRecord(record: VerifiedChangeRecord): VerifiedChangeRec
   });
 }
 
+const VERIFIED_EQUAL_FIELDS: readonly (keyof VerifiedChangeRecord)[] = [
+  'changeId',
+  'missionId',
+  'workItemId',
+  'attemptId',
+  'claimGeneration',
+  'contentHash',
+  'sourceAttemptId',
+  'reportId',
+];
+
+/** 不比 at：同一事实重放只是记的时刻不同。 */
 function verifiedEqual(a: VerifiedChangeRecord, b: VerifiedChangeRecord): boolean {
-  return (
-    a.changeId === b.changeId &&
-    a.missionId === b.missionId &&
-    a.workItemId === b.workItemId &&
-    a.attemptId === b.attemptId &&
-    a.claimGeneration === b.claimGeneration &&
-    a.contentHash === b.contentHash &&
-    a.sourceAttemptId === b.sourceAttemptId &&
-    a.reportId === b.reportId
-  );
+  return VERIFIED_EQUAL_FIELDS.every((key) => a[key] === b[key]);
 }
 
 /**
