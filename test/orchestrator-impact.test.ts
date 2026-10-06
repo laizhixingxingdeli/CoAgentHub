@@ -925,234 +925,245 @@ test('组合 2：容量保留 pending、失败 retry_wait 同槽恢复、旧目�
     },
   );
   const runPromise = orch.runMission(mission, { projectRoot: s.dir, maxRounds: 6 });
-  await waitFor(() => exec.attemptId !== '', '执行者 hop 启动');
-  const executorGen = await liveExecutorGeneration(s.hops, mission);
+  // 失败路径也必须能退出：断言抛错时 exec.gate 没放行，run 的 wait 永不落定，进程就挂住。
+  // finally 里开门闩并等 runMission 落定，修完/修坏都由测试自己收尾，不靠墙钟杀。
+  try {
+    await waitFor(() => exec.attemptId !== '', '执行者 hop 启动');
+    const executorGen = await liveExecutorGeneration(s.hops, mission);
 
-  // 占满 coordinator-a 的 profile 名额（别的 Mission/Project，不挡执行者自己）。
-  await s.hops.enqueue(
-    queueRow('H-occ', {
-      projectId: 'P-other',
-      missionId: 'M-other',
-      role: 'coordinator',
-      runtimeKind: 'scripted',
-      profileId: 'coordinator-a',
-    }),
-  );
-  const occClaimed = await s.hops.claim(
-    'H-occ',
-    'holder',
-    NOW,
-    new Date(Date.parse(NOW) + 30 * 60 * 1000).toISOString(),
-  );
-  assert.ok(occClaimed, '占位行应能领取');
+    // 占满 coordinator-a 的 profile 名额（别的 Mission/Project，不挡执行者自己）。
+    // enqueue 不许携带 runtimeKind/profileId（validateEnqueueHop 当场抛），容量只能由
+    // claimAvailable 在同一临界段里盖章；plain claim() 不写 profile，profile:1 挡不住 impact。
+    await s.hops.enqueue(
+      queueRow('H-occ', { projectId: 'P-other', missionId: 'M-other', role: 'coordinator' }),
+    );
+    const occClaimed = await s.hops.claimAvailable({
+      owner: 'holder',
+      now: NOW,
+      leaseUntil: new Date(Date.parse(NOW) + 30 * 60 * 1000).toISOString(),
+      limits: hopCapacityLimits({ global: 8, project: 8, role: 8, runtime: 8, profile: 1 }),
+      eligible: [{ hopId: 'H-occ', runtimeKind: 'scripted', profileId: 'coordinator-a' }],
+    });
+    assert.equal(occClaimed.kind, 'claimed', '占位行应按 coordinator-a/scripted 盖章领取');
+    if (occClaimed.kind !== 'claimed') throw new Error('占位行领取未成功，后面没法释放');
 
-  // 旧目标的变更：attempt 已换 / 代次已变 —— 不得下发。
-  await s.requests.append(
-    changeRequest('CR-old-attempt', mission, { attemptId: 'attempt-of-a-dead-run', claimGeneration: executorGen }),
-  );
-  await s.requests.append(
-    changeRequest('CR-old-gen', mission, { attemptId: exec.attemptId, claimGeneration: executorGen + 42 }),
-  );
-  // 当前这一代的目标。
-  await s.requests.append(
-    changeRequest('CR-1', mission, { attemptId: exec.attemptId, claimGeneration: executorGen }),
-  );
+    // 旧目标的变更：attempt 已换 / 代次已变 —— 不得下发。
+    await s.requests.append(
+      changeRequest('CR-old-attempt', mission, { attemptId: 'attempt-of-a-dead-run', claimGeneration: executorGen }),
+    );
+    await s.requests.append(
+      changeRequest('CR-old-gen', mission, { attemptId: exec.attemptId, claimGeneration: executorGen + 42 }),
+    );
+    // 当前这一代的目标。
+    await s.requests.append(
+      changeRequest('CR-1', mission, { attemptId: exec.attemptId, claimGeneration: executorGen }),
+    );
 
-  // —— 容量挡住：保留 pending、写 project_busy、**不无 claim 启动** ——
-  await waitFor(
-    () => orch.impactObservations.some((o) => o.kind === 'pending'),
-    '容量挡住时的 pending 观察',
-  );
-  const viewDuringCapacity = await s.platform.getMissionView(mission);
-  assert.equal(viewDuringCapacity.waitReason, 'project_busy', '容量等待只准用既有 WaitReason');
-  const pendingRows = await impactRowsOf(s);
-  assert.equal(pendingRows.length, 1, 'CR-1 只有一个逻辑槽；旧目标的变更不入队');
-  assert.equal(pendingRows[0]!.changeId, 'CR-1');
-  assert.equal(pendingRows[0]!.status, 'queued', '被容量挡住时不得带 claim 启动');
-  assert.equal(pendingRows[0]!.owner, undefined);
-  assert.equal(impactStartedEvents(await s.activity.list(mission)).length, 0, '没领到 claim 就不开 Attempt');
-  assert.equal((await s.impacts.listByMission(mission)).length, 0);
+    // —— 容量挡住：保留 pending、写 project_busy、**不无 claim 启动** ——
+    await waitFor(
+      () => orch.impactObservations.some((o) => o.kind === 'pending'),
+      '容量挡住时的 pending 观察',
+    );
+    const viewDuringCapacity = await s.platform.getMissionView(mission);
+    assert.equal(viewDuringCapacity.waitReason, 'project_busy', '容量等待只准用既有 WaitReason');
+    const pendingRows = await impactRowsOf(s);
+    assert.equal(pendingRows.length, 1, 'CR-1 只有一个逻辑槽；旧目标的变更不入队');
+    assert.equal(pendingRows[0]!.changeId, 'CR-1');
+    assert.equal(pendingRows[0]!.status, 'queued', '被容量挡住时不得带 claim 启动');
+    assert.equal(pendingRows[0]!.owner, undefined);
+    assert.equal(impactStartedEvents(await s.activity.list(mission)).length, 0, '没领到 claim 就不开 Attempt');
+    assert.equal((await s.impacts.listByMission(mission)).length, 0);
 
-  // —— 释放占位 → 下一拍领到 claim 并启动第一跳（脚本上游失败）——
-  await s.hops.complete('H-occ', 'holder', occClaimed?.claimGeneration ?? 1, NOW);
-  await waitFor(() => coordCtl.impacts.length === 1, '第一跳 impact 领取并启动');
-  // 失败进 retry_wait：同一行、attemptCount 1、带 lastFailure。
-  let failedRow: QueuedHop | undefined;
-  const failStarted = Date.now();
-  for (;;) {
-    failedRow = (await impactRowsOf(s)).find((row) => row.status === 'retry_wait');
-    if (failedRow) break;
-    if (Date.now() - failStarted > 15_000) throw new Error('等不到 impact 槽进 retry_wait');
-    await sleep(5);
+    // —— 释放占位 → 下一拍领到 claim 并启动第一跳（脚本上游失败）——
+    await s.hops.complete('H-occ', 'holder', occClaimed.hop.claimGeneration ?? 1, NOW);
+    await waitFor(() => coordCtl.impacts.length === 1, '第一跳 impact 领取并启动');
+    // 失败进 retry_wait：同一行、attemptCount 1、带 lastFailure。
+    let failedRow: QueuedHop | undefined;
+    const failStarted = Date.now();
+    for (;;) {
+      failedRow = (await impactRowsOf(s)).find((row) => row.status === 'retry_wait');
+      if (failedRow) break;
+      if (Date.now() - failStarted > 15_000) throw new Error('等不到 impact 槽进 retry_wait');
+      await sleep(5);
+    }
+    assert.equal(failedRow!.attemptCount, 1);
+    assert.equal(failedRow!.lastFailure?.attemptId, coordCtl.impacts[0]!.attemptId);
+    assert.equal((await s.impacts.listByMission(mission)).length, 0, '失败的那跳没交出判断');
+
+    // 退避没到：监督继续 pending —— 时钟推进后才重领**同一行**。
+    const pendingCountBefore = orch.impactObservations.filter((o) => o.kind === 'pending').length;
+    assert.ok(pendingCountBefore >= 2, '退避期间保留 pending');
+    s.clock.advance(1_500);
+    await waitFor(
+      () => orch.impactObservations.some((o) => o.kind === 'dispatched' && o.changeId === 'CR-1'),
+      'retry_wait 之后同槽恢复并交出判断',
+    );
+    const viewAfterDecided = await s.platform.getMissionView(mission);
+    assert.equal(viewAfterDecided.waitReason, undefined, '恢复后清掉的只能是监督自己写的原因');
+    assert.equal(coordCtl.impacts.length, 2, '恢复 = 同一槽第二次尝试，不是另开一个逻辑 hop');
+    assert.equal((await impactRowsOf(s)).length, 1, '不新 cycle：CR-1 始终只有一行');
+    const recovered = (await impactRowsOf(s))[0]!;
+    assert.ok(recovered.idempotencyKey.includes(':n0'), '行仍属 cycle 0');
+    assert.equal(recovered.claimGeneration, 2, '重领换代');
+    assert.equal(recovered.lastFailure?.attemptId, coordCtl.impacts[0]!.attemptId, '第一次失败留在原行上');
+    const decided = await s.impacts.listByMission(mission);
+    assert.equal(decided.length, 1, '已决定不重复：两次尝试只有一条 ChangeImpact');
+    assert.equal(decided[0]!.coordinatorAttemptId, coordCtl.impacts[1]!.attemptId);
+    assert.equal(decided[0]!.attemptId, exec.attemptId);
+    assert.equal(decided[0]!.claimGeneration, executorGen);
+    assert.equal(
+      orch.impactObservations.filter((o) => o.changeId === 'CR-old-attempt' || o.changeId === 'CR-old-gen').length,
+      0,
+      '目标 attempt/代次已变的变更连出现在观察里都不该有',
+    );
+
+    // 交回执行者：正常收尾、验收、交卷。
+    exec.gate.resolve();
+    const outcome = await runPromise;
+    assert.equal(outcome.kind, 'awaiting_l3_review');
+    assert.equal(exec.waitCalls, 1, '同一跳只 wait 一次（retry 在监督侧，不动执行者的 wait）');
+    const doneRow = (await impactRowsOf(s))[0]!;
+    assert.equal(doneRow.status, 'completed');
+    assert.equal(
+      orch.hops.filter((h) => h.role === 'coordinator' && h.workItemId === 'W-1').length,
+      2,
+      '账上有两跳：失败的一跳与恢复的一跳',
+    );
+  } finally {
+    exec.gate.resolve();
+    // 断言已失败时 runMission 的拒绝不该盖掉真正的失败原因；成功路径上它早已 await 过。
+    await runPromise.catch(() => undefined);
+    await s.close().catch(() => undefined);
   }
-  assert.equal(failedRow!.attemptCount, 1);
-  assert.equal(failedRow!.lastFailure?.attemptId, coordCtl.impacts[0]!.attemptId);
-  assert.equal((await s.impacts.listByMission(mission)).length, 0, '失败的那跳没交出判断');
-
-  // 退避没到：监督继续 pending —— 时钟推进后才重领**同一行**。
-  const pendingCountBefore = orch.impactObservations.filter((o) => o.kind === 'pending').length;
-  assert.ok(pendingCountBefore >= 2, '退避期间保留 pending');
-  s.clock.advance(1_500);
-  await waitFor(
-    () => orch.impactObservations.some((o) => o.kind === 'dispatched' && o.changeId === 'CR-1'),
-    'retry_wait 之后同槽恢复并交出判断',
-  );
-  const viewAfterDecided = await s.platform.getMissionView(mission);
-  assert.equal(viewAfterDecided.waitReason, undefined, '恢复后清掉的只能是监督自己写的原因');
-  assert.equal(coordCtl.impacts.length, 2, '恢复 = 同一槽第二次尝试，不是另开一个逻辑 hop');
-  assert.equal((await impactRowsOf(s)).length, 1, '不新 cycle：CR-1 始终只有一行');
-  const recovered = (await impactRowsOf(s))[0]!;
-  assert.ok(recovered.idempotencyKey.includes(':n0'), '行仍属 cycle 0');
-  assert.equal(recovered.claimGeneration, 2, '重领换代');
-  assert.equal(recovered.lastFailure?.attemptId, coordCtl.impacts[0]!.attemptId, '第一次失败留在原行上');
-  const decided = await s.impacts.listByMission(mission);
-  assert.equal(decided.length, 1, '已决定不重复：两次尝试只有一条 ChangeImpact');
-  assert.equal(decided[0]!.coordinatorAttemptId, coordCtl.impacts[1]!.attemptId);
-  assert.equal(decided[0]!.attemptId, exec.attemptId);
-  assert.equal(decided[0]!.claimGeneration, executorGen);
-  assert.equal(
-    orch.impactObservations.filter((o) => o.changeId === 'CR-old-attempt' || o.changeId === 'CR-old-gen').length,
-    0,
-    '目标 attempt/代次已变的变更连出现在观察里都不该有',
-  );
-
-  // 交回执行者：正常收尾、验收、交卷。
-  exec.gate.resolve();
-  const outcome = await runPromise;
-  assert.equal(outcome.kind, 'awaiting_l3_review');
-  assert.equal(exec.waitCalls, 1, '同一跳只 wait 一次（retry 在监督侧，不动执行者的 wait）');
-  const doneRow = (await impactRowsOf(s))[0]!;
-  assert.equal(doneRow.status, 'completed');
-  assert.equal(
-    orch.hops.filter((h) => h.role === 'coordinator' && h.workItemId === 'W-1').length,
-    2,
-    '账上有两跳：失败的一跳与恢复的一跳',
-  );
-  await s.close();
 
   /* ---------- 租约失效：专属提交拒写零副作用；失租 helper 只关旧 Attempt ---------- */
   const s2 = await assemble();
-  const lostMission = 'M-lost';
-  await s2.platform.createMission({ projectId: 'P-lost', missionId: lostMission, contract: CONTRACT });
-  const coord = await s2.platform.startCoordinatorAttempt(lostMission);
-  await s2.platform.updatePlan(lostMission, coord.attemptId, PLAN);
-  await s2.platform.submitContractCheck(lostMission, coord.attemptId, {
-    verdict: 'ok',
-    summary: '四条都核过',
-  });
-  const { workItemId } = await s2.platform.createWorkItem(lostMission, coord.attemptId, {
-    title: 'W1',
-    order: ORDER,
-  });
-  await s2.platform.dispatchWorkItems(lostMission, coord.attemptId, [workItemId]);
-  const claim = async (
-    id: string,
-    role: 'executor' | 'coordinator',
-    leaseMs: number,
-    extra?: Partial<QueuedHop>,
-  ): Promise<QueueClaimIdentity> => {
-    await s2.hops.enqueue(queueRow(id, { missionId: lostMission, workItemId, role, ...extra }));
-    const taken = await s2.hops.claim(
-      id,
-      `owner-${id}`,
-      s2.clock.now().toISOString(),
-      new Date(s2.clock.now().getTime() + leaseMs).toISOString(),
+  // 失租段的失败路径同样收尾：断言抛错也要关服务与临时目录，进程不得挂在残留连接上。
+  try {
+    const lostMission = 'M-lost';
+    await s2.platform.createMission({ projectId: 'P-lost', missionId: lostMission, contract: CONTRACT });
+    const coord = await s2.platform.startCoordinatorAttempt(lostMission);
+    await s2.platform.updatePlan(lostMission, coord.attemptId, PLAN);
+    await s2.platform.submitContractCheck(lostMission, coord.attemptId, {
+      verdict: 'ok',
+      summary: '四条都核过',
+    });
+    const { workItemId } = await s2.platform.createWorkItem(lostMission, coord.attemptId, {
+      title: 'W1',
+      order: ORDER,
+    });
+    await s2.platform.dispatchWorkItems(lostMission, coord.attemptId, [workItemId]);
+    const claim = async (
+      id: string,
+      role: 'executor' | 'coordinator',
+      leaseMs: number,
+      extra?: Partial<QueuedHop>,
+    ): Promise<QueueClaimIdentity> => {
+      await s2.hops.enqueue(queueRow(id, { missionId: lostMission, workItemId, role, ...extra }));
+      const taken = await s2.hops.claim(
+        id,
+        `owner-${id}`,
+        s2.clock.now().toISOString(),
+        new Date(s2.clock.now().getTime() + leaseMs).toISOString(),
+      );
+      assert.ok(taken, `${id} 应能领到`);
+      return { id, owner: `owner-${id}`, claimGeneration: taken.claimGeneration ?? 1 };
+    };
+    const executorClaim = await claim('H-lost-exec', 'executor', 60_000);
+    const execAttempt = await s2.platform.startExecutorAttempt(
+      lostMission,
+      workItemId,
+      undefined,
+      executorClaim,
     );
-    assert.ok(taken, `${id} 应能领到`);
-    return { id, owner: `owner-${id}`, claimGeneration: taken.claimGeneration ?? 1 };
-  };
-  const executorClaim = await claim('H-lost-exec', 'executor', 60_000);
-  const execAttempt = await s2.platform.startExecutorAttempt(
-    lostMission,
-    workItemId,
-    undefined,
-    executorClaim,
-  );
-  await s2.platform.finishAttempt(lostMission, coord.attemptId, { endedBy: 'structured_submit' });
-  // 第二条普通 coordinator 也开着：失租收尾只准关 impact Attempt，不许碰它。
-  const plainRunning = await s2.platform.startCoordinatorAttempt(lostMission);
-  await s2.requests.append(
-    changeRequest('CR-lost', lostMission, {
-      attemptId: execAttempt.attemptId,
-      claimGeneration: executorClaim.claimGeneration,
-    }),
-  );
-  const impactClaim = await claim('H-lost-impact', 'coordinator', 60_000, {
-    purpose: 'impact',
-    changeId: 'CR-lost',
-  });
-  const issued = await s2.issuer.startImpactCoordinator(lostMission, 'CR-lost', undefined, impactClaim);
+    await s2.platform.finishAttempt(lostMission, coord.attemptId, { endedBy: 'structured_submit' });
+    await s2.requests.append(
+      changeRequest('CR-lost', lostMission, {
+        attemptId: execAttempt.attemptId,
+        claimGeneration: executorClaim.claimGeneration,
+      }),
+    );
+    const impactClaim = await claim('H-lost-impact', 'coordinator', 60_000, {
+      purpose: 'impact',
+      changeId: 'CR-lost',
+    });
+    const issued = await s2.issuer.startImpactCoordinator(lostMission, 'CR-lost', undefined, impactClaim);
 
-  // 推进时钟让 impact（与目标执行者）租约失效。
-  s2.clock.advance(120_000);
-  const bytesBefore = readFileSync(s2.statePath, 'utf8');
-  const rejectedPost = await postJson(
-    s2.baseUrl,
-    '/api/agent/coagent_submit_change_impact',
-    { ...IMPACT_BODY },
-    issued.token,
-  );
-  assert.equal(rejectedPost.status, 409, JSON.stringify(rejectedPost.json));
-  assert.equal(rejectedPost.json.error, 'CLAIM_FENCE_REJECTED');
-  const rejectedGet = await postJson(s2.baseUrl, '/api/agent/coagent_get_change_request', {}, issued.token);
-  assert.equal(rejectedGet.status, 409);
-  assert.equal(rejectedGet.json.error, 'CLAIM_FENCE_REJECTED');
-  assert.equal(readFileSync(s2.statePath, 'utf8'), bytesBefore, '失租后的专属读写必须零副作用');
-  await assert.rejects(
-    () =>
-      s2.platform.finishAttempt(
-        lostMission,
-        issued.attemptId,
-        { endedBy: 'upstream_failure', failureMessage: '失租' },
-        impactClaim,
-      ),
-    (error: unknown) => error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
-    '带旧 claim 的正常收尾必须被围栏拒 —— 这正是编排器走 helper 的触发条件',
-  );
-  // 可信失租收尾：身份全部从 started 事件读回，只关这一条 impact Attempt。
-  await s2.platform.finishLostImpactAttempt(lostMission, issued.attemptId, {
-    endedBy: 'upstream_failure',
-    failureMessage: '租约失效的可信收尾',
-  });
-  const lostEvents = await s2.activity.list(lostMission);
-  assert.equal(
-    lostEvents.filter((e) => e.kind === 'attempt.ended' && e.attemptId === issued.attemptId).length,
-    1,
-  );
-  assert.ok(!endedFor(lostEvents, execAttempt.attemptId), '执行者 Attempt 不受影响');
-  assert.ok(
-    !endedFor(lostEvents, plainRunning.attemptId),
-    'helper 只关点名的旧 impact Attempt，不关别的在跑 coordinator',
-  );
-  assert.equal((await s2.impacts.listByMission(lostMission)).length, 0, '失租收尾不写 ChangeImpact');
-  assert.equal((await s2.requests.get('CR-lost'))?.changeId, 'CR-lost', '请求事实原样保留');
-  // 重复收尾幂等：不再多一条 ended 事件。
-  await s2.platform.finishLostImpactAttempt(lostMission, issued.attemptId, {
-    endedBy: 'upstream_failure',
-  });
-  assert.equal(
-    (await s2.activity.list(lostMission)).filter(
-      (e) => e.kind === 'attempt.ended' && e.attemptId === issued.attemptId,
-    ).length,
-    1,
-  );
-  // 没带 impact 关联的 Attempt 不许走这条路径。
-  await assert.rejects(
-    () => s2.platform.finishLostImpactAttempt(lostMission, plainRunning.attemptId, { endedBy: 'upstream_failure' }),
-    (error: unknown) => error instanceof PlatformRuleError && error.code === 'WRONG_ROLE',
-  );
-  // 旧执行者租约下的只读接缝同样被拒 —— 监督据此停轮询而不是继续撞。
-  await assert.rejects(
-    () =>
-      s2.platform.listPendingChangeRequests(
-        lostMission,
-        workItemId,
-        execAttempt.attemptId,
-        executorClaim,
-      ),
-    (error: unknown) => error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
-  );
-  s2.issuer.revoke(issued.token);
-  assert.equal(s2.registry.resolve(issued.token), undefined, 'finally 必吊销：迟到调用必须被拒');
-  await s2.close();
+    // 推进时钟让 impact（与目标执行者）租约失效。
+    s2.clock.advance(120_000);
+    const bytesBefore = readFileSync(s2.statePath, 'utf8');
+    const rejectedPost = await postJson(
+      s2.baseUrl,
+      '/api/agent/coagent_submit_change_impact',
+      { ...IMPACT_BODY },
+      issued.token,
+    );
+    assert.equal(rejectedPost.status, 409, JSON.stringify(rejectedPost.json));
+    assert.equal(rejectedPost.json.error, 'CLAIM_FENCE_REJECTED');
+    const rejectedGet = await postJson(s2.baseUrl, '/api/agent/coagent_get_change_request', {}, issued.token);
+    assert.equal(rejectedGet.status, 409);
+    assert.equal(rejectedGet.json.error, 'CLAIM_FENCE_REJECTED');
+    assert.equal(readFileSync(s2.statePath, 'utf8'), bytesBefore, '失租后的专属读写必须零副作用');
+    await assert.rejects(
+      () =>
+        s2.platform.finishAttempt(
+          lostMission,
+          issued.attemptId,
+          { endedBy: 'upstream_failure', failureMessage: '失租' },
+          impactClaim,
+        ),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
+      '带旧 claim 的正常收尾必须被围栏拒 —— 这正是编排器走 helper 的触发条件',
+    );
+    // 可信失租收尾：身份全部从 started 事件读回，只关这一条 impact Attempt。
+    await s2.platform.finishLostImpactAttempt(lostMission, issued.attemptId, {
+      endedBy: 'upstream_failure',
+      failureMessage: '租约失效的可信收尾',
+    });
+    const lostEvents = await s2.activity.list(lostMission);
+    assert.equal(
+      lostEvents.filter((e) => e.kind === 'attempt.ended' && e.attemptId === issued.attemptId).length,
+      1,
+    );
+    assert.ok(!endedFor(lostEvents, execAttempt.attemptId), '执行者 Attempt 不受影响');
+    assert.equal((await s2.impacts.listByMission(lostMission)).length, 0, '失租收尾不写 ChangeImpact');
+    assert.equal((await s2.requests.get('CR-lost'))?.changeId, 'CR-lost', '请求事实原样保留');
+    // 重复收尾幂等：不再多一条 ended 事件。
+    await s2.platform.finishLostImpactAttempt(lostMission, issued.attemptId, {
+      endedBy: 'upstream_failure',
+    });
+    assert.equal(
+      (await s2.activity.list(lostMission)).filter(
+        (e) => e.kind === 'attempt.ended' && e.attemptId === issued.attemptId,
+      ).length,
+      1,
+    );
+    // 影响判断独占 Mission 的唯一 coordinator 名额（组合 1 已验收的互斥），所以「另一条
+    // 在跑的普通 coordinator」只能在旧 impact Attempt 被可信收尾、名额腾出来之后开。
+    // 它同样是 helper 不许碰的对象：没带 impact 关联的 Attempt 不许走这条路径。
+    const plainRunning = await s2.platform.startCoordinatorAttempt(lostMission);
+    await assert.rejects(
+      () => s2.platform.finishLostImpactAttempt(lostMission, plainRunning.attemptId, { endedBy: 'upstream_failure' }),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'WRONG_ROLE',
+    );
+    assert.ok(
+      !endedFor(await s2.activity.list(lostMission), plainRunning.attemptId),
+      'helper 只关点名的旧 impact Attempt，不关别的在跑 coordinator',
+    );
+    // 旧执行者租约下的只读接缝同样被拒 —— 监督据此停轮询而不是继续撞。
+    await assert.rejects(
+      () =>
+        s2.platform.listPendingChangeRequests(
+          lostMission,
+          workItemId,
+          execAttempt.attemptId,
+          executorClaim,
+        ),
+      (error: unknown) => error instanceof PlatformRuleError && error.code === 'CLAIM_FENCE_REJECTED',
+    );
+    s2.issuer.revoke(issued.token);
+    assert.equal(s2.registry.resolve(issued.token), undefined, 'finally 必吊销：迟到调用必须被拒');
+  } finally {
+    await s2.close().catch(() => undefined);
+  }
 });
