@@ -2,7 +2,7 @@
 
 读代码前先看这张表：每个目录负责什么、从哪进、不能越过什么线。检视者维护；协调者交卷里「动了哪些目录、对外接口变化」有新东西时更新。**不随每一跳发送**，按需读。
 
-大文件按方法名搜索定位，别整份读：`orchestrator.ts` 约 2,500 行、`platform.ts` 约 2,150 行（入口外壳，实质用例体在 `platform/` 下）、`web/task.js` 约 1,850 行、`api/server.ts` 约 1,700 行。
+大文件按方法名搜索定位，别整份读：`orchestrator.ts` 约 3,000 行、`platform.ts` 约 2,400 行（入口外壳，实质用例体在 `platform/` 下）、`web/task.js` 约 1,850 行、`api/server.ts` 约 2,200 行。
 
 ## 源码（`src/`）
 
@@ -10,8 +10,9 @@
 |---|---|---|---|
 | `src/kernel/` | 纯领域：Mission / WorkItem / Attempt 状态机，契约、工单、结论等载荷类型 | `mission.ts`、`work-item.ts`、`attempt.ts`、`payloads.ts` | 不 import 任何东西（`test/kernel-imports.test.ts` 钉死） |
 | `src/application/platform.ts` | 所有写命令的唯一用例入口：`Platform` 类的公开方法、构造与字段、context 装配；方法体转调 `platform/` 下的职责模块（REF1，2026-10-02） | `Platform` 的公开方法（`createClassifiedMission`、`reviewExecutionResult`、`finalizeMissionByMachine`…） | 规则写在 `platform.ts` 与 `platform/`，不写在 HTTP handler 或 prompt 里；外部只从 `platform.ts` 引用（各模块的名字由它再导出） |
-| `src/application/platform/` | `Platform` 的实质用例体，按职责分 38 个模块（见下节） | 各模块导出 `(ctx, 原参数)` 形式的函数，`ctx` 是 `context.ts` 的共用状态 / 事务 / 事件 | 只由 `platform.ts` 调用；写事件走 `ctx.event(…)`（与 `#event` 等价，护栏测试两种写法都认） |
-| `src/application/orchestrator.ts` | 每一跳的调度：唤醒协调者 / 执行者、换候选、检查点、快车道分支、协调者唤醒指令 | `Orchestrator.runMission` | 只调 Platform，不直接改状态 |
+| `src/application/platform/` | `Platform` 的实质用例体，按职责分 48 个模块（见下节） | 各模块导出 `(ctx, 原参数)` 形式的函数，`ctx` 是 `context.ts` 的共用状态 / 事务 / 事件 | 只由 `platform.ts` 调用；写事件走 `ctx.event(…)`（与 `#event` 等价，护栏测试两种写法都认） |
+| `src/application/orchestrator.ts` | 每一跳的调度：唤醒协调者 / 执行者、换候选、检查点、快车道分支、协调者唤醒指令；执行者 wait 期间可选的 impact 监督接线（`impactSupervision`，默认关闭） | `Orchestrator.runMission` | 只调 Platform，不直接改状态；执行者路径只调一次 `run.wait()`，finally 先 `stopAndJoin` |
+| `src/application/change-request*.ts`、`change-impact*.ts`、`impact-supervisor.ts` | 运行中变更：L3 确认的原始请求（B1）、L2 影响判断的 append-only 记录（B2b）、执行者 wait 期间的有界 impact 监督（B2b） | `ChangeRequestRepository`、`ChangeImpactRepository`、`beginImpactSupervision` | 只保存判断，不投递、不应用；生产入口未接线（见 `specs/runtime-change.md`） |
 | `src/application/plan-*.ts`、`mission-runner.ts` | 方案运行：解析与筛选（`plan-spec`）、分类与路由（`plan-routing`）、逐票驱动（`plan-driver`）、运行记录与升级单（`plan-run`、`plan-run-store`）、装配（`plan-runtime`）、预检（`plan-preflight`）、交接面（`plan-handoff`）、单 Mission 运行与轮次上限（`mission-runner`） | `runPlanOnPlatform`、`MissionRunner.run` | 方案记录是独立 JSON，不进主状态 |
 | `src/application/durable-scheduler.ts`、`candidate-circuit.ts`、`agent-pool.ts`、`runtime-catalog.ts` | 持久队列（租约、代次、五维容量、重试、死信）、候选熔断、候选池、模型清单 | 队列是纯函数 `claimHop` / `renewHop` / `reportHopFailure`；候选池 `AgentPoolRepository` | 候选按平台当前角色有序配置读取；整角色替换核对 revision，在途身份不变 |
 | `src/application/context-builder.ts`、`project-memory.ts`、`context-attribution-report.ts` | 给协调者 / 执行者的简报打包；读 `.coagent/`、生成 VIBE.md、写 memoryDelta；用量归因 | `buildContextBundle`、`readProjectMemory`、`generateVibe` | 简报只放白名单来源 |
@@ -43,9 +44,11 @@
 | 工作项与工单 | `work-orders`（建单、修订）、`work-order-helpers`（工单校验）、`work-item-dispatch`（派发）、`work-item-review`（评审）、`executor-submissions`（执行者证据、结果、blocked）、`standard-redispatch`（Standard 续派）、`redispatch-helpers`（续派纯辅助）、`conflict-dispatch`（冲突派发屏障） |
 | 机器验证 | `standard-validation`（Standard 机器验证）、`validation-report-views`（验证报告投影）、`integration-verification`（合并结果验证） |
 | 快车道 | `lightweight-dispatch`、`lightweight-submission`、`lightweight-validation`、`promotion`（晋升 Standard） |
-| 终审与合入 | `final-review`（人 / 检视者终审与知识落地）、`machine-finalization`（机器终审）、`independent-review`（独立检视）、`ha-validation`、`ha-finalization`、`ha-finalization-helpers` |
+| 交卷 | `mission-result-attachments`（平台自采的交卷附件：最后一次全量结果行、diff 统计、验收与工单对应）、`mission-result-criteria`（交卷 criteria 校验与闸门诊断） |
+| 终审与合入 | `final-review`（人 / 检视者终审与知识落地；只有队列 Mission 在合入时跑项目集成验证）、`machine-finalization`（机器终审）、`independent-review`（独立检视）、`ha-validation`、`ha-finalization`、`ha-finalization-helpers` |
+| 运行中变更 | `change-impact`（专属 impact 开 Attempt、读请求、提交判断、未决请求查询、失租旧 Attempt 收尾，同一事务围栏） |
 | 升级 | `escalations`（升级、契约核对、诊断与答复） |
-| 预算与用量 | `budget-usage`（用量聚合、权威预算）、`usage-helpers`（用量与时间纯辅助） |
+| 预算与用量 | `budget-usage`（用量聚合、权威预算）、`usage-helpers`（用量与时间纯辅助）、`ticket-budget`（单票费用上限与每 15 个工作项检查点的门禁） |
 | 视图与简报 | `views`（只读视图）、`agent-view-helpers`（agent 视图纯投影）、`startup-brief`（开跑简报与裁剪审计）、`context-metrics`（摘要净化） |
 | 活动与影子 | `command-tracking`（命令活动事件）、`post-execution`（执行后影子） |
 
