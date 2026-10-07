@@ -108,6 +108,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 换行：提交进仓库的内容（blob）一律是 LF；本机 `core.autocrlf=true`，检出的工作副本是 CRLF。同一个文件里不要混用 LF 和 CRLF。否则会出现整文件的伪改动，看不清真实改了什么。
 - 不碰 `.idea/`（用户的 IDE 配置）。否则会改坏或提交用户本地的设置。
 - 不读凭据文件（例如 `~/.pi/agent/auth.json`、`typesafe.env`），不在输出、日志、提交里打印 key，给子进程的环境不额外塞凭据（透传名单见 `specs/spawn-env-filter`）。否则凭据会随日志、产物或提交泄露。
+- 协调者和执行者都不直接打开主工作区的 `.coagent-state.json` 及其锁目录，只读也不行：平台服务一直在写这个文件，Windows 上有人打开着它，服务的原子替换就会失败，整个运行崩掉。要看别的 Mission 的状态或活动，用只读 HTTP（`GET /api/missions/<id>`、`GET /api/missions/<id>/activity`），或在交卷里写明需要 L3 提供样例。（COM5-design 的调查报告曾直接读运行中的状态文件取样例，2026-10-07。）
 
 ## 协作与流程
 
@@ -210,6 +211,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   Standard 工作项的冻结工单带 `validation.commands` 时，执行者交卷后、下一跳协调者评审前，平台在可信 Mission 工作目录用现有 `ValidationEngine` 执行命令（argv、不经 shell、
 - **startup-reconciliation** — 启动收敛（RECON-002B）
   平台接手时把上一次残留的在途状态收干净：判死无人收尾的 Attempt、回收孤儿 worktree、补裁它们的实时输出。
+- **time-attribution** — 时间归因
+  应用层纯函数 projectTimeAttribution 将活动、验证报告起止及本 Mission hop 投影成 schemaVersion 1、coverage（complete / partial / unknown）、totalO
 - **validation-review-authority** — ValidationReport 与 ReviewAuthority
   机器独立验收与协调者自报权威分立。执行者**不得**给自己签发通过。
 - **web-shell** — 正式 Web 端外壳、项目页与任务详情
