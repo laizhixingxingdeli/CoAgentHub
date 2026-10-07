@@ -13,6 +13,8 @@
    - 两张票改同一份规格时（COM8、PERF1 都改 candidate-circuit），一张合入并批文档、确认集成分支出现「docs(project): 批准文档提议」之后，再建下一张：同项目有未结束的 Mission（含已建未跑的）会挡文档空档提交，后一张的 memoryDelta 也会对着旧基线。
    - 纯搬家 / 重构票：先找出所有读源码文本的测试（`grep -rln "readFileSync" test/`，看哪些读 `src/`），分两类在票里写明怎么适配——钉死文件路径的、钉死调用写法的（如只认 `this.#event(`）。REF1 因这两类各返工一次（契约 r2、r4）。
    - 票里或升级答复里规定具体做法之前，先核平台允不允许。例：已验收的工作项不能修订，只能新建工单补做（REF1 的 E-2）。
+   - 解析外部数据的票（读别的服务的返回：账户额度、日志、第三方接口）：夹具必须取真实返回的形状（匿名化后），契约里写明真实形状的要点（桶的标记、数值怎么配平、各上游的差异），不凭想象造样例。合入前 L3 用只读脚本对真实数据跑一次修复前后对比：只放行对本机服务的 GET、凭据读取注入成空、输出只含白名单字段、不印账号信息。PI-COM1 反例：虚构样例全绿，真实 CodeBuddy 每账号 26 个桶（总池 Total Points + 每月礼包 + Bonus Pack 1…24，没有 detailOnly / aggregate 标记）被取最小，整个 cbcn 报「剩余 0%、恢复时间 11-02（其实是小包过期日）」，平台据此给 3 个协调者候补开了额度熔断；PI-COM2 改用真实形状夹具修好，合入前后对比 cbcn 0% → 64.82%。
+   - 工单 `validation.commands` 的 argv 不得是 cmd / sh / bash / powershell / pwsh 的壳层包装：校验引擎判 `invalid_argv`，永远红，而验证简版只显示一个没有输出的红（`ValidationReportCommandView` 丢了原因，读完整 VR 才看得到）。全量命令直接写 `["node","--import","tsx","--test","src/*.test.ts"]`（pi）或 `["node","--test"]`（本仓），glob 由 Node 自己展开。PI-COM2 的 W-520 因协调者写了 `bash -lc` 白烧一个执行者来回和一个协调者跳，契约里要点明。
    - 新代码守工程规范（`engineering-standards.md`）；数值目标写成建议值，写明「什么情况下算收尾」。
 3. 写进方案文件（`missions/PLAN-*.json`，本地文件、不进 git）：why、acceptance、constraints、nonGoals、allowedScope（到目录级，全量测试命令里的路径要被范围覆盖）；会触发分类器禁止副作用的措辞（删、迁移、真实外部调用）配上副作用声明。
 4. 开跑前把票单给用户确认。
@@ -34,12 +36,14 @@
 1. 挂守候脚本：`node C:/program1/coagent-experiments/roles/duty-watch.mjs --log <运行日志> [--base <端口>]`；有升级单、合入、挂起、超限（单票 $10、15 个工作项、单项执行 4 次）或运行结束就醒。答复升级后等 20 秒再挂，避开答复还没生效的空档。
 2. 服务开着时看进度只用 HTTP：`/api/missions/<id>`、`/api/missions/<id>/activity`、`/api/missions/<id>/attempts/<attemptId>`、`/api/plan-runs`、`/api/pools`。不跑 `l3 show` / `l3 plan`。
 3. 升级单：
-   - 协调者问「已验收的项要补做 / 作废的项怎么办」：不再属于升级范围（ADR-0007 补充，2026-10-07），答复引用那一条并让它直接新建引用原 id 的补修单；执行者被杀后工作项卡在 dispatched 的，等 COM12 的平台收尾，之前只能由我作废并另建（作废只当「不用做了」用，不是重启办法）。
+   - 协调者问「已验收的项要补做 / 作废的项怎么办」：不再属于升级范围（ADR-0007 补充，2026-10-07），答复引用那一条并让它直接新建引用原 id 的补修单；执行者被杀（墙钟强杀）或平台放弃重跑（无结果到顶、候选排除耗尽）后工作项卡在 dispatched 的：COM12 上线后平台自己把它收成 blocked（事件 `work_item.platform_blocked`，只 Standard、只执行者跳），协调者修订同一张单再派发，不用作废重建；上线前只能由我作废并另建（作废只当「不用做了」用，不是重启办法）。
    - 协调者问契约问题——先核实；票有缺口就 `l3 revise` 发新契约，再 `l3 plan decide <E-n> --action answer`；答复写清做法，不只说「同意」。
    - 平台停在 project_busy / no_available_agent / runaway_suspected 且只给「隔离重跑 / 跳过 / 重划 / 停」——选「停」（reviewer_stop），必要时 `l3 pause` 该 Mission、`l3 retire` 卡死的工作项并写明原因，再开跑，平台续跑同一 Mission（PLAT2 / PLAT5）。
    - 不在方案运行里的 Mission：`l3 answer`，答完重跑 `run-mission`。
 4. 到线（15 个工作项、单项 4 次）时看原因：在推进就放开那一条线继续，在空转就作废、改票或停。
 5. runaway 的恢复：先核实真实承载者是 PlanRun 还是 run-mission，不凭历史 origin 选决策口。暂停 Mission，查实际尝试及租约；作废卡住的工单并保留成果，按调用点或用例组重划，写明真实接口、fixture、定向命令与交卷条件。确认旧执行者退出且租约不再有效后才恢复同一 Mission；原样重派不算恢复。技术拆单由 L3 判断，需求变更或超预算交用户。检查点误答使用显式 `checkpoint approve`，必须带真实 reviewer/reason，费用门禁不变；不编辑状态文件。
+6. 为止损往启动脚本里加环境变量之前，先想它会进哪里：服务拉起的所有子进程都继承，包括平台的校验命令。10-07 为止损设的 `COAGENT_TENROUTER_URL=http://127.0.0.1:9`（让适配器查不到额度、平台当未知放行）使 pi 的 `usage.test.ts` 断言「默认地址」的既有测试在平台校验里红了（VR-228；执行者自己复现，并把那条测试改成不读宿主环境）。先 grep 测试里读该变量的地方；止损用完立刻删，修复合入后重启生效。
+7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件目前没有复位工具，只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），所以每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。缺口：需要一个插件工具。
 
 ## 4. 票与票之间
 
