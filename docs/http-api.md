@@ -1162,7 +1162,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 
 ### POST /api/agent/coagent_escalate_to_l3
 
-鉴权：run token。参数：body见请求示例；Mission/Attempt/WorkItem身份来自x-coagent-run。返回 空对象；以Platform领域类型为准。协调者/执行者/独立检视者权限隔离，越权拒绝；不是L3控制面。
+鉴权：run token。参数：body见请求示例；Mission/Attempt/WorkItem身份来自x-coagent-run。返回 空对象；以Platform领域类型为准。协调者/执行者/独立检视者权限隔离，越权拒绝；不是L3控制面。同一跳已有待答复的普通升级时回409 `ESCALATION_ALREADY_OPEN`（消息写明是历史第几条、是否由契约核对自动发起，以及先等答复再升级）——不新开第二张、不记 escalated、不建投递；平台门禁卡与诊断卡不算普通升级，不受此去重。
 
 请求示例及本机curl：
 
