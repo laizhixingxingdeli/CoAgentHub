@@ -40,6 +40,11 @@ export type RuntimeCatalog =
 export interface UsageRow {
   readonly provider: string;
   readonly status: 'ok' | 'no_auth' | 'error' | 'timeout';
+  /**
+   * 同一 provider 下按上游再分的额度桶（tenrouter 这类聚合器一条 provider 带多个上游）。
+   * 缺省表示这一行对该 provider 的所有模型都算数 —— 老的单上游适配层就长这样。
+   */
+  readonly modelPrefix?: string;
   readonly usedPercent?: number;
   readonly remainingPercent?: number;
   readonly resetAt?: string;
@@ -52,6 +57,51 @@ export interface UsageRow {
 export type RuntimeUsage = readonly UsageRow[] | { readonly available: false; readonly note: string };
 
 const USAGE_STATUSES = new Set(['ok', 'no_auth', 'error', 'timeout']);
+
+/**
+ * 一个候选该看哪条用量行。抽成纯函数是因为**两处**要同一套匹配规则：编排器
+ * 决定「这一跳还能不能派」，网页决定「这一格显示多少额度」。两处各写一份的下场
+ * 是界面上写着还有 80%，编排器却已经把它拉黑 —— 人看着一个绿灯的候选一直不被用。
+ *
+ * 匹配规则：
+ *   - provider 不等于候选的 provider fact，或 status 不是 ok，直接不要。
+ *   - 行上没 modelPrefix 是**兜底**：只在该 provider 下没有任何带前缀的行命中时才算数，
+ *     于是只有 xAI 行的老适配层行为与改动前完全一致。
+ *   - 有 modelPrefix 时，候选的 model fact 必须以「modelPrefix/」开头。用 / 断开是
+ *     为了避免『ag』把『agx/…』也吃进去。
+ *   - 多条命中取**最长前缀**（cbcn 比 c 更贴近这个候选），同长度取输入里靠前的行。
+ *     upstream 那种长名不是匹配键 —— 它是适配层给人看的，模型 fact 里没有它。
+ *
+ * 没有 provider 就返回 undefined：不猜，猜出来的额度会显示在错的候选上。
+ */
+export function findUsageRow(
+  rows: readonly unknown[],
+  provider: string | undefined,
+  model?: string,
+): UsageRow | undefined {
+  if (!provider) return undefined;
+  let matched: UsageRow | undefined;
+  let matchedPrefixLength = -1;
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue;
+    const candidate = row as Record<string, unknown>;
+    if (candidate.provider !== provider || candidate.status !== 'ok') continue;
+    const prefix = candidate.modelPrefix;
+    if (prefix === undefined) {
+      // 兜底只填第一个空位，不覆盖已经命中的带前缀行。
+      if (matched === undefined) matched = row as UsageRow;
+      continue;
+    }
+    if (typeof prefix !== 'string') continue;
+    if (typeof model !== 'string' || !model.startsWith(`${prefix}/`)) continue;
+    // 严格大于：同长度保留先出现的那一行，结果与输入顺序一致、可预期。
+    if (prefix.length > matchedPrefixLength) {
+      matched = row as UsageRow;
+      matchedPrefixLength = prefix.length;
+    }
+  }
+  return matched;
+}
 
 let latestAdapterDir: string | undefined;
 export function rememberAdapterDir(dir: string): void { latestAdapterDir = resolve(dir); }

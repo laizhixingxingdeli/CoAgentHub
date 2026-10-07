@@ -40,7 +40,7 @@ import {
   FileCandidateCircuitRepository,
   FileStateStore,
 } from '../src/application/file-store.ts';
-import type { RuntimeUsage } from '../src/application/runtime-catalog.ts';
+import type { RuntimeUsage, UsageRow } from '../src/application/runtime-catalog.ts';
 import { PgAgentPoolRepository, PgStateStore } from '../src/application/pg-store.ts';
 import { ensureTestDatabase } from './helpers/pg.ts';
 import { createApi } from '../src/api/server.ts';
@@ -905,6 +905,52 @@ describe('候选池 API', () => {
       const pools = await get(base, '/api/pools');
       assert.equal(pools.status, 200);
       assert.deepEqual(pools.json, { classifier: [], coordinator: [], executor: [], independent_reviewer: [] });
+    } finally {
+      close();
+    }
+  });
+
+  test('同一份 tenrouter 行：cbcn 与 ag 候选各显示各自上游的剩余额度', async () => {
+    // 多上游聚合器给的是一份 provider 相同、上游不同的行集。两条候选如果都
+    // 只看 provider，就会拿到同一行 —— 界面上两个候选显示同一个额度，运维
+    // 照着它派活会挑到一个已经没额度的上游。
+    const rows: UsageRow[] = [
+      { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', upstream: 'cbcn-deepseek', remainingPercent: 41 },
+      { provider: 'tenrouter', status: 'ok', modelPrefix: 'ag', upstream: 'ag-long-name', remainingPercent: 9 },
+    ];
+    const { base, close } = await withApi(
+      new InMemoryAgentPoolRepository(),
+      async () => rows,
+      new FileCandidateCircuitRepository(new FileStateStore(tempPath())),
+    );
+    try {
+      // upstream 是长名，不是匹配键：匹配只认 model fact 前缀。
+      await post(base, '/api/pools', {
+        role: 'executor',
+        profileId: 'exec-cbcn',
+        endpoint: 'local',
+        facts: [{ key: 'provider', value: 'tenrouter' }, { key: 'model', value: 'cbcn/deepseek-v3' }],
+      });
+      await post(base, '/api/pools', {
+        role: 'executor',
+        profileId: 'exec-ag',
+        endpoint: 'local',
+        facts: [{ key: 'provider', value: 'tenrouter' }, { key: 'model', value: 'ag/gpt-5' }],
+      });
+      const list = await get(base, '/api/pools');
+      assert.equal(list.status, 200);
+      const snapshot = list.json as unknown as {
+        executor: Array<{
+          profileId: string;
+          health: { usage?: { remainingPercent?: number; upstream?: string; modelPrefix?: string } };
+        }>;
+      };
+      const usageOf = (profileId: string) =>
+        snapshot.executor.find((row) => row.profileId === profileId)?.health.usage;
+      assert.equal(usageOf('exec-cbcn')?.remainingPercent, 41, 'cbcn 候选看 cbcn 那行');
+      assert.equal(usageOf('exec-cbcn')?.upstream, 'cbcn-deepseek');
+      assert.equal(usageOf('exec-ag')?.remainingPercent, 9, 'ag 候选看 ag 那行');
+      assert.equal(usageOf('exec-ag')?.modelPrefix, 'ag');
     } finally {
       close();
     }
