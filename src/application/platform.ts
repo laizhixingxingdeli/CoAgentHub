@@ -38,6 +38,7 @@ import * as attempts from './platform/attempts.ts';
 import * as changeImpact from './platform/change-impact.ts';
 import * as changeReceipt from './platform/change-receipt.ts';
 import * as changeCoverage from './platform/change-coverage.ts';
+import * as acceptanceDisposition from './platform/acceptance-disposition.ts';
 import { queuedAttemptStartedData } from './platform/attempts.ts';
 import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
@@ -54,6 +55,7 @@ import type { ChangeRequest } from './change-request.ts';
 import type { ChangeImpact } from './change-impact.ts';
 import type { ChangeReceipt } from './change-receipt.ts';
 import type { ChangeCoverage } from './change-coverage.ts';
+import type { AcceptanceDispositionRecord } from './acceptance-disposition.ts';
 import type { ChangeDelivery } from './platform/change-receipt.ts';
 import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
@@ -708,6 +710,22 @@ export class Platform {
   ): Promise<ChangeCoverage> {
     return changeCoverage.recordChangeCoverage(
       this.#context, missionId, coordinatorAttemptId, workItemId, body, claim,
+    );
+  }
+
+  /**
+   * 协调者在验收时写下「这一条验收口径这次怎么处置」：平台核对原文是否未变、
+   * 报告是否按当前工单这套命令与范围跑出来之后才落库，成功才发
+   * acceptance.disposition_recorded。这是一次**判断**，本身既不是已通过、也不是已验证。
+   */
+  recordAcceptanceDisposition(
+    missionId: string,
+    coordinatorAttemptId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<AcceptanceDispositionRecord> {
+    return acceptanceDisposition.recordAcceptanceDisposition(
+      this.#context, missionId, coordinatorAttemptId, body, claim,
     );
   }
 

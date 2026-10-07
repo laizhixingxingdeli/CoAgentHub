@@ -36,6 +36,8 @@ import { InMemoryDeliveryRepository } from './application/delivery.ts';
 import { FileChangeImpactRepository } from './application/change-impact-repository.ts';
 import { FileChangeReceiptRepository } from './application/change-receipt-repository.ts';
 import { FileChangeCoverageRepository } from './application/change-coverage-repository.ts';
+import { FileContractHistoryRepository } from './application/contract-history-repository.ts';
+import { FileAcceptanceDispositionRepository } from './application/acceptance-disposition-repository.ts';
 import { FileChangeRequestRepository } from './application/change-request-repository.ts';
 import {
   FileActivityLog,
@@ -325,6 +327,11 @@ export async function buildPersistentPlatform(
     // 彼此互相盖。未装配即 CHANGE_COVERAGE_UNSUPPORTED——**不**另开 FileStateStore
     // 回退，那等于把两份存储焊在一起。内存 buildPlatform 与 PG 装配都不注入。
     changeCoverages: new FileChangeCoverageRepository(store),
+    // 契约原文留档与上面共用同一个 store：多一个 FileStateStore 实例就多一份
+    // 内存副本，彼此互相盖。未装配即不留原文——**不**另开 FileStateStore 回退，
+    // 那等于把两份存储焊在一起。内存 buildPlatform 与 PG 装配都不注入。
+    contractHistories: new FileContractHistoryRepository(store),
+    acceptanceDispositions: new FileAcceptanceDispositionRepository(store),
     queuedHops,
   });
   const agentPool = new FileAgentPoolRepository(store);

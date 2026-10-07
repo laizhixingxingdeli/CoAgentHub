@@ -1,8 +1,9 @@
-import type { Mission, ValidationReport } from '../../kernel/index.ts';
+import type { Mission, ValidationReport, WorkOrderValidationCommand } from '../../kernel/index.ts';
 import type { ActivityEvent } from '../ports.ts';
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 import type { ValidationReportView } from './types.ts';
 import { validationReportKey, validationReportView } from './agent-view-helpers.ts';
+import { normalizePath } from '../validation/engine.ts';
 
 export async function getValidationReport(ctx: PlatformContext, 
     missionId: string,
@@ -138,3 +139,111 @@ export async function workItemValidationReportViews(ctx: PlatformContext,
     }
     return out;
   }
+
+/** 事件里那条命令规格的形状：只认 argv + timeoutMs，多出来的字段一律忽略。 */
+type ReuseCommandSpec = { readonly argv?: unknown; readonly timeoutMs?: unknown };
+
+function readCommandSpecs(value: unknown): ReuseCommandSpec[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: ReuseCommandSpec[] = [];
+  for (const raw of value) {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    out.push(raw as ReuseCommandSpec);
+  }
+  return out;
+}
+
+/** argv 逐元素全等（长度与顺序都在内）。 */
+function sameArgv(a: unknown, b: readonly string[] | readonly unknown[]): boolean {
+  if (!Array.isArray(a)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (typeof a[i] !== 'string') return false;
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function sameCommands(
+  eventCommands: readonly ReuseCommandSpec[],
+  orderCommands: readonly WorkOrderValidationCommand[],
+): boolean {
+  if (eventCommands.length !== orderCommands.length) return false;
+  for (let i = 0; i < eventCommands.length; i += 1) {
+    const event = eventCommands[i]!;
+    const order = orderCommands[i]!;
+    if (typeof event.timeoutMs !== 'number') return false;
+    if (event.timeoutMs !== order.timeoutMs) return false;
+    if (!sameArgv(event.argv, order.argv)) return false;
+  }
+  return true;
+}
+
+/**
+ * 判断一份已落盘的机器验收报告，其命令与范围是否仍是**当前这版工单**那一套。
+ *
+ * 全部按全等判，不做任何语义推断（不看机器名、Node 版本、cwd）：差异意味着「换了
+ * 一件事」，不明确归类成「差不多」就能复用，否则覆写后的旧证据会被当成新工单的
+ * 证据用。
+ *
+ * 报告侧的两处形状：
+ * - command 检查项按出现顺序，argv 必须与工单命令序列全等（报告不存 timeoutMs）。
+ * - changed-paths 检查项恰好一条，其 allowedScope 是 engine 已规范化的，所以工单
+ *   侧要过一遍 normalizePath 才能比——写 `./src/foo.ts` 和写 `src/foo.ts` 是同一个
+ *   范围，不算换了工单。
+ *
+ * 事件侧缺 commands / allowedScope（老事件）直接 false：猜不出就等于不能复用。
+ */
+export function reportReuseSpecMatches(input: {
+  readonly eventData: unknown;
+  readonly report: ValidationReport;
+  readonly orderAllowedScope: readonly string[];
+  readonly orderCommands: readonly WorkOrderValidationCommand[];
+}): boolean {
+  const data = input.eventData;
+  if (data == null || typeof data !== 'object' || Array.isArray(data)) return false;
+  const event = data as { commands?: unknown; allowedScope?: unknown };
+  const eventCommands = readCommandSpecs(event.commands);
+  if (eventCommands === undefined) return false;
+  if (!Array.isArray(event.allowedScope)) return false;
+  if (!sameCommands(eventCommands, input.orderCommands)) return false;
+
+  const eventScope = event.allowedScope;
+  const orderScope = input.orderAllowedScope;
+  if (eventScope.length !== orderScope.length) return false;
+  for (let i = 0; i < eventScope.length; i += 1) {
+    if (typeof eventScope[i] !== 'string') return false;
+    if (eventScope[i] !== orderScope[i]) return false;
+  }
+
+  const reportCommandArgvs: string[][] = [];
+  let changedPathsAllowed: readonly string[] | undefined;
+  for (const check of input.report.checks) {
+    if (check.kind === 'command') {
+      const argv = check.command?.argv;
+      if (argv === undefined) return false;
+      reportCommandArgvs.push([...argv]);
+      continue;
+    }
+    if (check.kind === 'changed-paths') {
+      // 0 条或多于 1 条都说明这份报告不是按本工单的范围跑出来的。
+      if (changedPathsAllowed !== undefined) return false;
+      const allowed = check.changedPaths?.allowedScope;
+      if (allowed === undefined) return false;
+      changedPathsAllowed = allowed;
+    }
+  }
+  if (changedPathsAllowed === undefined) return false;
+
+  if (reportCommandArgvs.length !== input.orderCommands.length) return false;
+  for (let i = 0; i < reportCommandArgvs.length; i += 1) {
+    if (!sameArgv(reportCommandArgvs[i]!, input.orderCommands[i]!.argv)) return false;
+  }
+
+  const normalizedOrderScope = orderScope.map(normalizePath);
+  if (changedPathsAllowed.length !== normalizedOrderScope.length) return false;
+  for (let i = 0; i < changedPathsAllowed.length; i += 1) {
+    if (changedPathsAllowed[i] !== normalizedOrderScope[i]) return false;
+  }
+  return true;
+}

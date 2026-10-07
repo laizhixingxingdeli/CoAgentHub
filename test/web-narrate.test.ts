@@ -612,6 +612,48 @@ describe('事件翻译表：逐条对契约', () => {
     }
   });
 
+  test('acceptance.disposition_recorded：L2 的处置结论，写明不等于验收已通过', () => {
+    const CASES = [
+      { decision: 'reuse', word: '复用' },
+      { decision: 'revalidate', word: '需复验' },
+      { decision: 'new_requirement', word: '新要求' },
+    ] as const;
+    for (const row of CASES) {
+      const out = narrateEvent(
+        {
+          kind: 'acceptance.disposition_recorded',
+          data: { dispositionId: 'D-1', index: 1, decision: row.decision, workItemIds: ['W-1'] },
+        },
+        CTX,
+      );
+      assert.equal(out.untranslated, false);
+      assert.equal(out.badge, 'L2 协调');
+      assert.ok(out.action.includes('L2 记录验收处置'), out.action);
+      assert.ok(out.action.includes(row.word), `${row.decision} 应译成${row.word}：${out.action}`);
+      assert.ok(out.detail.includes('不等于验收已通过'), out.detail);
+      // 扣掉那句明确否定之后再扫：否定句本身含「已通过 / 已验证」四个字，
+      // 不扣的话这条断言永远只能写在纸面上——那才是把门槛降没了。
+      const claims = `${out.badge}${out.action}${out.detail}`.replace(
+        /不等于验收已通过，也不等于已验证/g,
+        '',
+      );
+      assert.ok(!/已(?:通过|验证)/.test(claims), `不许把处置写成验收结论：${out.action} / ${out.detail}`);
+      assert.ok(
+        !`${out.badge}${out.action}${out.detail}`.includes('disposition_recorded'),
+        `漏出了机器事件名：${out.badge} / ${out.action} / ${out.detail}`,
+      );
+    }
+
+    // 空 data 也要能译：漏了字段不等于这条事件没有内容。
+    const bare = narrateEvent({ kind: 'acceptance.disposition_recorded', data: {} }, CTX);
+    assert.equal(bare.untranslated, false);
+    assert.ok(bare.detail.includes('不等于验收已通过'), bare.detail);
+    for (const field of ['badge', 'action', 'detail']) {
+      assert.notEqual(bare[field].trim(), '', `${field} 不能空白`);
+      assert.ok(!/undefined|null/.test(bare[field]), `${field} 漏了机器值：${bare[field]}`);
+    }
+  });
+
   test('execution_result.submitted：缺快照字段说「快照未知」，有就说已记录', () => {
     const bare = narrateEvent({ kind: 'execution_result.submitted', data: { outcome: 'completed' } }, CTX);
     assert.ok(bare.detail.includes('快照未知'), bare.detail);

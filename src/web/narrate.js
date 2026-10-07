@@ -423,6 +423,15 @@ const RECEIPT_PENDING_NOTE = '只是接收侧承认收到，不等于已应用�
  */
 const COVERAGE_PENDING_NOTE = 'L2 声明差异已并入修订后的工单，不是已应用、也不是已验证';
 
+/**
+ * 验收处置的尾注。
+ *
+ * 比覆盖声明更容易被读成结果：处置就写在验收环节，看板上一不留神就成了「这条
+ * 口径过了」。它只是 L2 的一次判断，平台核对的是处置凭据本身，验收通过没有、
+ * 验证跑没跑都不由这条说明；所以「不等于验收已通过」必须显式写在译文里。
+ */
+const DISPOSITION_PENDING_NOTE = '这是 L2 的判断，不等于验收已通过，也不等于已验证';
+
 /** 快照哈希的形状。64 位小写 hex，别的形状一律当「没有」。 */
 const SNAPSHOT_HASH_RE = /^[0-9a-f]{64}$/;
 
@@ -985,6 +994,24 @@ const EVENT_TABLE = {
       badge: 'L2 协调',
       action: '变更覆盖：L2 声明差异已并入修订后的工单',
       detail: `${changeId} · 工单修订 ${revision} · ${COVERAGE_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * L2 的验收处置。**只是处置，不等于验收已通过**：它记录的是「这条口径这次
+   * 复用 / 复验 / 新要求」，平台核对过的只是处置本身的凭据，验收结论与验证
+   * 另有其事。写成「已通过 / 已验证」就是把一条 L2 判断当成验收通过的证据。
+   */
+  'acceptance.disposition_recorded': (event) => {
+    const data = (event && event.data) || {};
+    const labels = { reuse: '复用', revalidate: '需复验', new_requirement: '新要求' };
+    const decision = text(data.decision);
+    const conclusion = labels[decision] || `未识别结论（${decision || '没有结论'}）`;
+    const index = or(data.index, '（没有序号）');
+    return {
+      badge: 'L2 协调',
+      action: `L2 记录验收处置：${conclusion}`,
+      detail: `第 ${index} 条口径 · ${DISPOSITION_PENDING_NOTE}`,
     };
   },
 };
