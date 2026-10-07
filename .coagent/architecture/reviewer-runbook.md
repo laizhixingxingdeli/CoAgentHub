@@ -18,10 +18,11 @@
 
 1. 只读检查：`node src/run-plan.ts … --check`。**只在常驻服务停着时跑**——它整份读状态文件。
 2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。Windows 使用现有隐藏 VBS 包装器经 `explorer.exe` 启动 cmd，包装器采用窗口样式 0，避免弹出终端；不用 WMI 或 Start-Process。启动前核实持锁进程退出、端口空闲，显式设置原 `COAGENT_STATE`、工作目录及日志；不得重复启动。已核实的包装器是 `C:/Users/echo/AppData/Local/Temp/coagenthub-start-service-hidden.vbs`，路径失效时先核实既有启动器，不盲目替换状态路径。派发设置 `COAGENT_AGENT_ENV_PASSTHROUGH=-`；本会话不使用定时任务。
-3. 开跑：`node C:/program1/coagent-experiments/run-plan-platform.mjs <标签> [--project coagent-pi] --max-rounds <n>`。
-   - 轮次：按「预计工作项数 × 2.5」给，最多 100。多组搬家这类大票每个工作项约耗 2.4 轮，REF1 先后撞了 30、60 两次上限。撞上限而仍在推进时：升级单选「停」→ `l3 pause` → 重开，平台续跑同一 Mission。
-   - 按批放票：方案运行开跑时读一次方案、把所有 pending 都选进来，跑完一张直接接下一张。互不依赖的票放进同一批，一批只在开跑前重启一次；后面的票要用前面票的新平台行为、或前面的票挪动了代码位置（如 REF1）时才分批。不在本批的票用 `C:/program1/coagent-experiments/roles/hold-queue.mjs hold <id,…>` 暂改 planned，下一批开跑前 `release <id,…>`（用户 2026-10-03 要求提速，原来一次只放一张）。
-   - 协调者与执行者的候选在开跑时定死，换模型要等下一次开跑。执行者用 pi 的 workbuddy 提供方：全天 cn:hy4-preview 排第一（exec-wb-hy4），cn:hy3、cn:deepseek-v4.1-flash 顶替（exec-wb-hy3、exec-wb-ds-flash）——用户 10-02 23:0x「改hy4执行者」、10-03 白天「也用」。
+3. 新票通过新版 CoAgentHub v5 L3 插件开跑（0.2.2，2026-10-04）：先 `coagenthub_get_platform_status` 核实服务持锁身份、当前占用；冻结完整 Contract 后 `coagenthub_create_mission`，Delivery recipient 使用当前真实 Codex root 会话；再 `coagenthub_start_mission`，指定独立集成 worktree、已验收的 adapter 路径和 maxRounds。启动不直读状态文件，不另起 CLI 写者或终端，环境透传声明固定为 `-`。生产 run-plan 已退役，不对历史 PlanRun 原样续跑。
+   - 插件 accepted 只是 HTTP 请求受理；`coagenthub_get_hosted_run` 的 running 表示平台启动输出已确认，ended 提供退出码；Mission 完成以权威视图和交卷证据为准。断流或插件重启后观测为 unknown，先查 Mission/activity 和真实运行者，禁止盲目重试。当前插件同实例抑制重复启动，不承诺跨实例分布式去重。
+   - 恢复暂停只清 paused，不负责启动；挂起先走 resume_parked 的目标同步。已有 Mission 的启动读取当前权威 Contract，不用旧本地规格覆盖。历史 origin 不决定承载通路：先核实真实 PlanRun 已停止还是仍运行。
+   - 轮次按预计工作量配置，最多100；触顶仍在推进时核实原因再续跑同一 Mission，不能默认新建重跑。互不依赖票可同批验证，改平台源码只在无运行 agent 的空档重启一次；依赖新行为的下一批在服务加载后开跑。
+   - 候选顺序以平台当前角色配置为权威，每次派发读取；start_mission 的 coordinator/executor 参数只作兼容校验，不覆盖当前配置。提示词及适配器更新安排在 Mission 空档。
 4. coagent-pi 的票要 `--worktrees`，常驻服务托管不支持（#26）：用 coagent-pi 自己的独立状态 `C:/program1/coagent-experiments/roles/state-pi/.coagent-state.json` 独立运行，可与主线并行。独立运行不发布端口，值守用只看日志的 `C:/program1/coagent-experiments/roles/log-watch.mjs --log <运行日志> --max-minutes 25`。适配器按每次派发现读，合入 coagent-pi 集成分支后下一次派发就生效：改协调者 / 执行者提示词或简报的票放到 Mission 之间跑。
 
 ## 3. 值守
@@ -99,3 +100,19 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 服务持有唯一写者并驱动队列；前项等待门禁或 L3 终审时后项不启动。依赖仅在关联 Mission completed 后放行。启动时固定项目配置，后续改配置不影响在途任务和续跑工作区。失败停靠为 Mission 暂停与诊断待办，查明原因后走 resume；费用升级、检查点、挂起、放弃、重试及最终审查继续使用 Mission 入口。standard 由真实检视者签字并执行项目集成验证；lightweight 也须逐条验收和集成验证才完成。
 
 生产 run-plan 控制入口已退役返回410，离线执行不再创建平台或 PlanRun。历史 PlanRun 查询、决定与测试恢复逻辑保留；不要重新启动历史 Plan 运行。实际 AC4 仍保留原状态与基线，本次直接实施不伪造其平台交卷。前端另行设计，master 仍待用户说“合”。
+
+## 2026-10-04 插件值守与验证补充
+当前会话平台操作只经 v5 L3 插件，不沿用上文历史 HTTP/CLI 写操作。协调者先让执行者跑定向自测，由工单 validation.commands 对实际交付提交执行全量；L3读取完整 ValidationReport，核对 argv/cwd、退出码、计数及提交来源。固定七处 HAOFF1 源码未变且全量 skipped=7 时，不为收集名称重复全量；代码变化、失败、缺失证据或平台对新提交来源的必需验证仍须执行。
+协调者当前 get_mission/get_work_item 只提供验证摘要，不能取得完整报告。缺报告先升级索取，保留 submitted；不得仅因读取缺口先 reject。已 rejected 不能直接 accept，必须在合法状态修订后重新派发、提交，再独立验收；不编辑状态，不伪造提交来源。COM2 的实际恢复保留原代码和定向证据，通过新 Attempt 的平台全量重新验证，完整历史保留。
+插件 pause 只限制后续调度，不保证打断运行中的 agent；当前没有已验证的在途追加指令/安全中止插件入口。恢复前查真实 hosted 退出状态与 activeLeases，不能把暂停当成已退出。
+独立 AC4-platform-closeout-20261004 已完成并合入 a756fc5；原历史 AC4 仍 parked、历史 PlanRun stopped，二者不得混称。COM1 b52973a、文档 e69aa30 和 COM2 36971f0 已合入 codex/communication-integration；服务仍运行 master d4f39c8，这些新改动尚未加载。
+
+## 2026-10-06 补充（B2b 收尾的教训）
+- 服务被系统重启带掉时：先核实持锁进程已死、心跳超过 120 秒、端口空闲、没有残留 agent，再用隐藏 VBS 启动；平台会自动隔离接管残锁并写审计，不用手工清锁。
+- 换检视者会话（例如从 Codex 换到 Claude）时，先停旧会话的 Delivery 桥接守护进程，否则通知会注入旧会话并被自动 ACK，出现两个 L3 同时决策。没有桥接的会话不手工 ACK，只主动读权威状态。
+- 零代码的验证单也要给非空的 allowedScope：执行者交卷后的冻结范围检查点遇到空范围会直接抛错，验证不会跑（`orchestrator.ts` 检查点段）。要保证零改动，就把 diffSize 设成 maxChangedFiles=0、maxChangedLines=0。
+- 不走队列的 Mission（create 后用托管 run-mission 运行），检视者合入时平台不会再跑项目集成验证（`final-review.ts` 只对队列配置运行）。所以终审前必须有绑定最终提交的平台全量 VR；中间的单如果只跑定向，最后要补一张验证单。协调者自己跑的全量不能代替。
+- 同一条验收连续三个工作项没通过时，平台会自动开验收标准级升级。要强制拆单或改做法，就写进契约修订：只写在退休理由里的拆单建议，协调者不一定照做（B2b 的 r5）。
+- 工单 validation 里的 diffSize 只用在零代码验证单（0/0）。实现单不要设行数硬上限：B4 的 W-489、W-491 各因超了几行被平台判失败、白重派一次，这违背工单标准第 7 条。
+- 执行者自己跑全量会和平台 VR 抢同一批全机共用的 PG 测试库，制造 DUPLICATE_ID 之类的假红；看到红就交 partial 时平台又不跑 VR，会原地打转（B3 的 W-487）。验证单的 requiredBehaviour 要写死「只跑一次定向、交证据、立即交 completed」。
+- pi 协调者还没有读取完整 VR 的工具，每张单验收前都会升级来要全文。L3 按「报告原文 + 来源事件 + Git 关联 + HAOFF1 静态 skip 核对」答复，然后续跑；要等 pi A2 注册、集成代码部署到服务以后，这一来一回才会消失。

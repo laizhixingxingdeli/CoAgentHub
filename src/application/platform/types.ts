@@ -67,6 +67,13 @@ import type { WorkspaceManager } from '../workspace.ts';
 import type { ArtifactStore } from '../artifact-store.ts';
 import type { CommandRunner } from '../validation/ports.ts';
 import type { LiveOutput } from '../live.ts';
+import type { ChangeImpactRepository } from '../change-impact.ts';
+import type { ChangeReceiptRepository } from '../change-receipt.ts';
+import type { ChangeCoverageRepository } from '../change-coverage.ts';
+import type { ChangeRequestRepository } from '../change-request.ts';
+import type { ContractHistoryRepository } from '../contract-history.ts';
+import type { AcceptanceDispositionRepository } from '../acceptance-disposition.ts';
+import type { QueuedHopRepository } from '../ports.ts';
 import type { ClassificationResult } from '../task-classifier.ts';
 import type { BoundWorkItem, ContractCheck, ContextBundle, WorkItemIndexEntry } from '../context-builder.ts';
 import type { StandardAutoRedispatchReason, StandardAutoRedispatchSkipReason } from '../platform.ts';
@@ -200,6 +207,48 @@ export interface PlatformDeps {
    * 测试注入 HA 授权文件绝对路径。生产只读 COAGENT_HA_AUTHORITY_FILE，每次现读。
    */
   haAuthorityFile?: string;
+  /**
+   * 运行中变更的已确认请求 / 影响判断仓储，以及队列槽仓储。
+   *
+   * 三样**成组可选**：缺任一样就不装配影响判断能力，专属动作返回
+   * CHANGE_IMPACT_UNSUPPORTED，而不是退化成「不校验直接写」。分开注入会出现
+   * 读得到请求、校不了租约的半截能力——那正是最容易被当成完整能力的一种。
+   */
+  changeRequests?: ChangeRequestRepository;
+  changeImpacts?: ChangeImpactRepository;
+  queuedHops?: QueuedHopRepository;
+  /**
+   * 接收侧回执仓储。**单独可选**，不与上面三件套绑死：回执这一侧只认已持久的
+   * 影响判断、不读变更请求，硬并进那一组会让「能判断」与「能回执」互相绑死。
+   * 缺它时专属动作返回 CHANGE_RECEIPT_UNSUPPORTED，不退化成「跳过校验直接写」。
+   */
+  changeReceipts?: ChangeReceiptRepository;
+  /**
+   * 覆盖记录仓储。**单独可选**，不并进上面的影响判断三件套，也不并进回执仓储：
+   * 覆盖这一侧只认已持久的影响判断与当前工单正文，硬并进任一组都会让「能判断」
+   * 「能回执」「能记覆盖」三种能力互相绑死。缺它时专属动作返回
+   * CHANGE_COVERAGE_UNSUPPORTED，不退化成「跳过校验直接写」。
+   */
+  changeCoverages?: ChangeCoverageRepository;
+  /**
+   * 契约原文留档仓储。**单独可选**，不并进上面的影响判断三件套，也不并进回执 /
+   * 覆盖仓储：留档这一侧只跟着 Mission 的 contractRevision 走，硬并进任一组都会
+   * 让「能判断」「能回执」「能记覆盖」「能留原文」互相绑死。缺它时建 Mission 与
+   * 改契约的行为与原来完全一致——不抛错、不另开存储。
+   */
+  contractHistories?: ContractHistoryRepository;
+  /**
+   * 验收处置仓储。**单独可选**，不并进上面的影响判断三件套，也不并进回执 /
+   * 覆盖 / 留档仓储：处置是协调者主动作出的结论，硬并进任一组都会让几种能力
+   * 互相绑死。缺它时专属动作抛 ACCEPTANCE_DISPOSITION_UNSUPPORTED——**不**另开
+   * 存储、不退化成「跳过核对直接写」。
+   */
+  acceptanceDispositions?: AcceptanceDispositionRepository;
+  /**
+   * 验收证据门禁旗标。**默认关闭（undefined / false）**。
+   * main/PG/托管入口都不赋值。开启时交卷与机器终审对受影响的验收条目核对有效处置。
+   */
+  acceptanceEvidenceGate?: boolean;
   /**
    * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
    * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。

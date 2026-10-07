@@ -1,5 +1,6 @@
 import type { MissionContract, WaitReason } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
+import { recordContractAcceptance } from './mission-intake.ts';
 type AnswerEscalation = (missionId: string, answer: string) => Promise<{ question: string; answer: string }>;
 
 export async function reviseContract(ctx: PlatformContext, answerEscalation: AnswerEscalation, 
@@ -22,6 +23,9 @@ export async function reviseContract(ctx: PlatformContext, answerEscalation: Ans
       });
     }
     await ctx.event(mission, 'contract.revised', { contractRevision, status: mission.status });
+    // 换代成功才留原文：reviseContract 抛错时这一版根本没生效，记一笔会把没
+    // 生效的契约写成事实；只留 unreliable 的新版，旧版原文也就再问不出来了。
+    await recordContractAcceptance(ctx, missionId, contractRevision, contract.acceptance);
     return { contractRevision };
   }
 

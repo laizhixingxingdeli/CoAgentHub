@@ -534,6 +534,24 @@ function freezeWorkOrder(
   } else {
     delete copy.validation;
   }
+  // 顶层数组全部换成新数组：freezePayload 是**原地**冻结它收到的数组的。
+  // 直接沿用调用方的数组，等于替调用方把它自己的数组冻上——调用方之后
+  // push/splice 会在与工单无关的地方抛 TypeError，而且它俩共享同一份元素，
+  // 改其中一个就同时改了工单内容。
+  for (const key of Object.keys(copy)) {
+    const field = copy[key];
+    if (Array.isArray(field)) {
+      copy[key] = [...field];
+    }
+  }
+  // contextRefs 的元素也要复制：只换数组的话，WorkItem 里的 ContextRef 对象
+  // 仍与调用方是同一个引用，事后改它的 kind/ref/why 就等于绕过 reviseOrder
+  // 直接改工单内容。裸字符串是标量，原样保留以兼容老工单。
+  if (Array.isArray(copy.contextRefs)) {
+    copy.contextRefs = (copy.contextRefs as unknown[]).map((ref) =>
+      isPlainObject(ref) ? Object.freeze({ ...ref }) : ref,
+    );
+  }
   // 工单修订号：缺省（旧工单 / 老快照无字段）视作 r1。restore 模式下同样补齐，
   // 保证「老快照无 revision 恢复视作 r1」且与 toSnapshot 往返一致。
   if (!Object.prototype.hasOwnProperty.call(copy, 'orderRevision') || copy.orderRevision == null) {

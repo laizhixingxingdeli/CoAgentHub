@@ -30,6 +30,12 @@ import {
 import { dirname, resolve, sep } from 'node:path';
 import { Project } from '../kernel/index.ts';
 import type { ValidationReport } from '../kernel/index.ts';
+import type { ChangeRequest } from './change-request.ts';
+import type { ChangeImpact } from './change-impact.ts';
+import type { ChangeReceipt } from './change-receipt.ts';
+import type { ChangeCoverage } from './change-coverage.ts';
+import type { ContractHistoryRecord } from './contract-history.ts';
+import type { AcceptanceDispositionRecord } from './acceptance-disposition.ts';
 import type { MissionSnapshot, ProjectSnapshot } from '../kernel/snapshot.ts';
 import type {
   ActivityEvent,
@@ -114,6 +120,37 @@ interface StateFile {
    * 旧文件缺键补 []，不 bump StateFile.version。
    */
   validationReports: ValidationReport[];
+  /**
+   * L3 确认的原始变更（append-only）。旧文件缺键补 []，不 bump StateFile.version。
+   */
+  changeRequests: ChangeRequest[];
+  /**
+   * 变更影响的判断结论（append-only）。
+   * 不进 projects / activity / deliveries / archive package：它是听从侧面、
+   * 跟着 ChangeRequest.changeId 走的独立机器事实。旧文件缺键补 []，不 bump。
+   */
+  changeImpacts: ChangeImpact[];
+  /**
+   * 接收侧回执（append-only）。跟着 ChangeRequest.changeId 走，按 changeId + layer
+   * 各留一张。不进 projects / activity / deliveries / archive package。
+   * 旧文件缺键补 []，不 bump StateFile.version。
+   */
+  changeReceipts: ChangeReceipt[];
+  /**
+   * 变更已写进哪轮工单内容的覆盖记录（append-only）。跟着 ChangeRequest.changeId
+   * 走，按 changeId + orderRevision 各留一张。旧文件缺键补 []，不 bump。
+   */
+  changeCoverages: ChangeCoverage[];
+  /**
+   * Mission 契约原文留档（append-only）。按 missionId + contractRevision 各留一张。
+   * 不进 projects / activity / deliveries / archive package。旧文件缺键补 []，不 bump。
+   */
+  contractHistories: ContractHistoryRecord[];
+  /**
+   * 验收处置（append-only）。按 dispositionId 全局成键，不按 mission 分组。
+   * 不进 projects / activity / deliveries / archive package。旧文件缺键补 []，不 bump。
+   */
+  acceptanceDispositions: AcceptanceDispositionRecord[];
   queuedHops: QueuedHop[];
   candidateCircuits: CandidateCircuit[];
   candidateCircuitResetEvents?: Array<{ profileId: string; actor: string; at: string; reason: string }>;
@@ -175,6 +212,12 @@ function emptyState(): StateFile {
     archivedMissions: [],
     queryRuns: [],
     validationReports: [],
+    changeRequests: [],
+    changeImpacts: [],
+    changeReceipts: [],
+    changeCoverages: [],
+    contractHistories: [],
+    acceptanceDispositions: [],
     queuedHops: [],
     candidateCircuits: [],
   };
@@ -225,6 +268,12 @@ interface OpenTransaction {
   readonly deliveries: Delivery[];
   readonly queryRuns: QueryRunRecord[];
   readonly validationReports: ValidationReport[];
+  readonly changeRequests: ChangeRequest[];
+  readonly changeImpacts: ChangeImpact[];
+  readonly changeReceipts: ChangeReceipt[];
+  readonly changeCoverages: ChangeCoverage[];
+  readonly contractHistories: ContractHistoryRecord[];
+  readonly acceptanceDispositions: AcceptanceDispositionRecord[];
   readonly agentPool: AgentPoolRow[];
   readonly archivedMissions: ArchivedMissionRef[];
   readonly queuedHops: QueuedHop[];
@@ -451,6 +500,12 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
       if (!Array.isArray(state.archivedMissions)) state.archivedMissions = [];
       if (!Array.isArray(state.queryRuns)) state.queryRuns = [];
       if (!Array.isArray(state.validationReports)) state.validationReports = [];
+      if (!Array.isArray(state.changeRequests)) state.changeRequests = [];
+      if (!Array.isArray(state.changeImpacts)) state.changeImpacts = [];
+      if (!Array.isArray(state.changeReceipts)) state.changeReceipts = [];
+      if (!Array.isArray(state.changeCoverages)) state.changeCoverages = [];
+      if (!Array.isArray(state.contractHistories)) state.contractHistories = [];
+      if (!Array.isArray(state.acceptanceDispositions)) state.acceptanceDispositions = [];
       if (!Array.isArray(state.queuedHops)) state.queuedHops = [];
       if (!Array.isArray(state.candidateCircuits)) state.candidateCircuits = [];
       // 加键之前写下的投递行按旧规则补键：去重从此只看键（C1）。
@@ -551,6 +606,12 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
       deliveries: [...s.deliveries],
       queryRuns: [...s.queryRuns],
       validationReports: [...s.validationReports],
+      changeRequests: [...s.changeRequests],
+      changeImpacts: [...s.changeImpacts],
+      changeReceipts: [...s.changeReceipts],
+      changeCoverages: [...s.changeCoverages],
+      contractHistories: [...s.contractHistories],
+      acceptanceDispositions: [...s.acceptanceDispositions],
       agentPool: [...s.agentPool],
       archivedMissions: [...s.archivedMissions],
       queuedHops: [...s.queuedHops],
@@ -580,6 +641,12 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     s.deliveries = tx.deliveries;
     s.queryRuns = tx.queryRuns;
     s.validationReports = tx.validationReports;
+    s.changeRequests = tx.changeRequests;
+    s.changeImpacts = tx.changeImpacts;
+    s.changeReceipts = tx.changeReceipts;
+    s.changeCoverages = tx.changeCoverages;
+    s.contractHistories = tx.contractHistories;
+    s.acceptanceDispositions = tx.acceptanceDispositions;
     s.agentPool = tx.agentPool;
     s.archivedMissions = tx.archivedMissions;
     s.queuedHops = tx.queuedHops;

@@ -897,4 +897,144 @@ describe('WorkItem.reviseOrder：修订号递增与快照往返', () => {
       assert.equal(item.order?.orderRevision, 'r1');
     }
   });
+
+  test('创建与合法修订复制数组/ContextRef：输入后续可变且不污染工单，内部冻结', () => {
+    const allowedScope = ['src/a.ts'];
+    const constraints = ['c1'];
+    const acceptance = ['a1'];
+    const verification = ['node --test'];
+    const doNot = ['d1'];
+    const criteria = [1, 2];
+    const refObj = { kind: 'file' as const, ref: 'src/a.ts', why: '仅说明' };
+    const contextRefs = ['src/bare.ts', refObj];
+    const item = new WorkItem({
+      id: 'W-rev',
+      missionId: 'M1',
+      title: 'revise',
+      order: { ...BASE_ORDER, allowedScope, constraints, acceptance, verification, doNot, criteria, contextRefs },
+    });
+    assert.equal(item.order?.orderRevision, 'r1');
+
+    // 工单持有的是新数组/新对象，不是调用方那几份引用。
+    assert.notEqual(item.order?.allowedScope, allowedScope);
+    assert.notEqual(item.order?.constraints, constraints);
+    assert.notEqual(item.order?.acceptance, acceptance);
+    assert.notEqual(item.order?.verification, verification);
+    assert.notEqual(item.order?.doNot, doNot);
+    assert.notEqual(item.order?.criteria, criteria);
+    assert.notEqual(item.order?.contextRefs, contextRefs);
+    assert.notEqual(item.order?.contextRefs[1], refObj);
+
+    // 调用方随后改自己的数组与 ContextRef：不抛，也改不到工单内容。
+    allowedScope.push('src/hack.ts');
+    constraints.splice(0, 1);
+    acceptance.push('hack');
+    verification.length = 0;
+    doNot.push('hack');
+    criteria.push(9);
+    refObj.ref = 'src/hack.ts';
+    refObj.why = 'hacked';
+    contextRefs.push('src/extra.ts');
+    assert.deepEqual(item.order?.allowedScope, ['src/a.ts']);
+    assert.deepEqual(item.order?.constraints, ['c1']);
+    assert.deepEqual(item.order?.acceptance, ['a1']);
+    assert.deepEqual(item.order?.verification, ['node --test']);
+    assert.deepEqual(item.order?.doNot, ['d1']);
+    assert.deepEqual(item.order?.criteria, [1, 2]);
+    assert.deepEqual(item.order?.contextRefs, [
+      'src/bare.ts',
+      { kind: 'file', ref: 'src/a.ts', why: '仅说明' },
+    ]);
+
+    // 内部数组与 ContextRef 元素冻结：赋值/push 都抛 TypeError。
+    assert.ok(Object.isFrozen(item.order));
+    assert.ok(Object.isFrozen(item.order!.allowedScope));
+    assert.ok(Object.isFrozen(item.order!.contextRefs));
+    assert.ok(Object.isFrozen(item.order!.contextRefs[1]));
+    assert.throws(() => {
+      (item.order!.allowedScope as unknown as string[]).push('x');
+    }, TypeError);
+    assert.throws(() => {
+      (item.order!.contextRefs as unknown as unknown[]).push('x');
+    }, TypeError);
+    assert.throws(() => {
+      (item.order!.contextRefs[1] as unknown as { ref: string }).ref = 'x';
+    }, TypeError);
+
+    // 合法修订走同一条 freezeWorkOrder：同样复制，修订号递增到 r2。
+    const r2Scope = ['src/b.ts'];
+    const r2Ref = { kind: 'file' as const, ref: 'src/b.ts' };
+    const r2ContextRefs = ['src/b.ts', r2Ref];
+    item.reviseOrder({
+      ...BASE_ORDER,
+      objective: 'objective-r2',
+      allowedScope: r2Scope,
+      contextRefs: r2ContextRefs,
+    });
+    assert.equal(item.order?.orderRevision, 'r2');
+    assert.equal(item.order?.objective, 'objective-r2');
+    assert.notEqual(item.order?.allowedScope, r2Scope);
+    assert.notEqual(item.order?.contextRefs, r2ContextRefs);
+    assert.notEqual(item.order?.contextRefs[1], r2Ref);
+    r2Scope.push('src/hack.ts');
+    r2Ref.ref = 'src/hack.ts';
+    r2ContextRefs.push('src/extra.ts');
+    assert.deepEqual(item.order?.allowedScope, ['src/b.ts']);
+    assert.deepEqual(item.order?.contextRefs, ['src/b.ts', { kind: 'file', ref: 'src/b.ts' }]);
+    assert.ok(Object.isFrozen(item.order!.allowedScope));
+    assert.ok(Object.isFrozen(item.order!.contextRefs[1]));
+  });
+
+  test('恢复复制可变快照数组/ContextRef：快照后续修改不影响恢复结果，内部冻结', () => {
+    const sourceRefs = ['src/bare.ts', { kind: 'file' as const, ref: 'src/a.ts', why: '仅说明' }];
+    const item = new WorkItem({
+      id: 'W-rev',
+      missionId: 'M1',
+      title: 'revise',
+      order: { ...BASE_ORDER, contextRefs: sourceRefs },
+    });
+    item.reviseOrder({ ...BASE_ORDER, objective: 'objective-r2', contextRefs: sourceRefs });
+    const snap = item.toSnapshot();
+    assert.equal(snap.order?.orderRevision, 'r2');
+
+    // 快照输入由调用方现攒出来：数组与 ContextRef 都是可变副本，
+    // 不是 toSnapshot 里那份本身已冻结的 order。
+    const snapScope = [...snap.order!.allowedScope];
+    const snapRef = { kind: 'file' as const, ref: 'src/a.ts', why: '仅说明' };
+    const snapRefs = ['src/bare.ts', snapRef];
+    const mutableOrder: WorkOrder = {
+      ...snap.order!,
+      allowedScope: snapScope,
+      contextRefs: snapRefs,
+    };
+    const restored = WorkItem.restore({ ...snap, order: mutableOrder });
+    assert.equal(restored.order?.orderRevision, 'r2');
+    assert.equal(restored.order?.objective, 'objective-r2');
+    assert.notEqual(restored.order?.allowedScope, snapScope);
+    assert.notEqual(restored.order?.contextRefs, snapRefs);
+    assert.notEqual(restored.order?.contextRefs[1], snapRef);
+
+    snapScope.push('src/hack.ts');
+    snapRef.ref = 'src/hack.ts';
+    snapRef.why = 'hacked';
+    snapRefs.push('src/extra.ts');
+    assert.deepEqual(restored.order?.allowedScope, ['src/foo.ts']);
+    // 裸字符串 contextRefs 往返仍原样。
+    assert.equal(restored.order?.contextRefs[0], 'src/bare.ts');
+    assert.deepEqual(restored.order?.contextRefs, [
+      'src/bare.ts',
+      { kind: 'file', ref: 'src/a.ts', why: '仅说明' },
+    ]);
+    assert.deepEqual(restored.toSnapshot().order, snap.order);
+
+    assert.ok(Object.isFrozen(restored.order!.allowedScope));
+    assert.ok(Object.isFrozen(restored.order!.contextRefs));
+    assert.ok(Object.isFrozen(restored.order!.contextRefs[1]));
+    assert.throws(() => {
+      (restored.order!.allowedScope as unknown as string[]).push('x');
+    }, TypeError);
+    assert.throws(() => {
+      (restored.order!.contextRefs[1] as unknown as { ref: string }).ref = 'x';
+    }, TypeError);
+  });
 });

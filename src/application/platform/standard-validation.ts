@@ -1,3 +1,4 @@
+import type { ValidationReport, WorkOrder } from '../../kernel/index.ts';
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 
 /**
@@ -7,6 +8,40 @@ import { PlatformRuleError, type PlatformContext } from './context.ts';
  * 不散着拼字符串。
  */
 const VALIDATION_BASELINE_EVENT_KIND = 'work_item.validation_baseline_recorded';
+
+/**
+ * validation.reported 事件的写入数据。
+ *
+ * 除了报告引用，还必须带上**当时那版工单**的命令规格与 allowedScope：报告本身不存
+ * timeoutMs，覆写 shortages 也不记命令，少了这两份原文，事后就无法判断「同一件事重
+ * 跑一遍」还是「换了命令」。留给 reportReuseSpecMatches 做全等比对。
+ *
+ * argv / allowedScope 全部拷新数组：事件写进 append-only 台账就是历史快照，事后改
+ * 入参还能改动它就等于台账可以被追溯地篡改。
+ */
+export function validationReportedData(
+  report: Pick<ValidationReport, 'id' | 'passed'>,
+  submittedAttemptId: string,
+  order: WorkOrder,
+): {
+  reportId: string;
+  passed: boolean;
+  submittedAttemptId: string;
+  commands: { argv: string[]; timeoutMs: number }[];
+  allowedScope: string[];
+} {
+  const commands = order.validation?.commands ?? [];
+  return {
+    reportId: report.id,
+    passed: report.passed,
+    submittedAttemptId,
+    commands: commands.map((command) => ({
+      argv: [...command.argv],
+      timeoutMs: command.timeoutMs,
+    })),
+    allowedScope: [...order.allowedScope],
+  };
+}
 
 export async function recordStandardValidationBaseline(ctx: PlatformContext, input: {
     readonly missionId: string;
@@ -182,11 +217,7 @@ export async function validateStandardWorkItem(ctx: PlatformContext, input: {
       await ctx.event(
         live,
         'validation.reported',
-        {
-          reportId: result.report.id,
-          passed: result.report.passed,
-          submittedAttemptId,
-        },
+        validationReportedData(result.report, submittedAttemptId, order),
         liveItem.id,
         // attemptId 留空：写这条的是平台，不是执行者，也不是 reviewer。
       );

@@ -23,6 +23,8 @@ import {
   type PlanRunListItem,
 } from '../application/plan-run-store.ts';
 import { ClassifiedMissionInputError } from '../application/classified-mission-intake.ts';
+import { ChangeImpactConflictError } from '../application/change-impact.ts';
+import { ChangeReceiptConflictError } from '../application/change-receipt.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import type {
   AgentPoolAddInput,
@@ -32,6 +34,11 @@ import type {
 } from '../application/agent-pool.ts';
 import { KernelError } from '../kernel/index.ts';
 import { RunTokenRegistry } from './run-tokens.ts';
+import {
+  IMPACT_READ_ONLY_MESSAGE,
+  isImpactAllowedAction,
+  isImpactRun,
+} from './impact-run-policy.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
 import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage, type UsageRow } from '../application/runtime-catalog.ts';
@@ -847,10 +854,89 @@ export function createApi(deps: ApiDeps): Server {
   };
 
   /**
+   * impact 牌专属的两个工具。
+   *
+   * 按**精确工具名**写死，不入 AGENT_TOOL_ACTION、也不复用任何宽泛的写别名：
+   * 走别名的话，将来给协调者加一条新写就顺带把限权身份的那条也开了，而这里
+   * 要的是「多一个都不行」。所以这两个名字不在策略矩阵里，门禁写在下面两层。
+   */
+  const IMPACT_EXCLUSIVE_TOOLS = new Set([
+    'coagent_get_change_request',
+    'coagent_submit_change_impact',
+  ]);
+
+  /**
+   * 回执专属的两个工具：只有**执行者自己的牌**能调。
+   *
+   * 与上面那组 impact 工具刻意分开：两组是两条链的两端（判断 / 接收），身份来源
+   * 不同（impact hop / 执行者自己的 hop）、代次互不相干。混进同一个集合的话，
+   * 将来「给 impact 多开一格」会顺手把执行者回执也开给限权身份。
+   */
+  const RECEIPT_EXCLUSIVE_TOOLS = new Set([
+    'coagent_get_change_deliveries',
+    'coagent_ack_change_receipt',
+  ]);
+
+  /**
+   * 覆盖声明专属工具：只有**普通协调者牌**（L2）能调。
+   *
+   * 与上面两组刻意分开：三组身份互不相同（impact hop / 执行者自己的 hop /
+   * 普通协调者 hop），合并成一组的话，将来给其中一端多开一格会顺手把另外
+   * 两端也开出去。它同样不入 AGENT_TOOL_ACTION、也不进 impact 白名单——
+   * impact 牌是只读的限权身份，让它声明覆盖等于拿「只做判断」的牌写执行侧的
+   * 恢复事实。
+   */
+  const COVERAGE_EXCLUSIVE_TOOLS = new Set(['coagent_record_change_coverage']);
+
+  /**
+   * 验收处置专属工具：只有**普通协调者牌**（L2）能调。
+   *
+   * 与上面三组刻意分开：四组身份来源互不相同（impact hop / 执行者自己的 hop /
+   * 普通协调者 hop 声明覆盖 / 普通协调者 hop 写验收处置），合并成一组的话，
+   * 将来给其中一端加名字会顺手把处置也开出去。它不入 AGENT_TOOL_ACTION、
+   * 也不进 impact 白名单——impact 牌是只读的限权身份，让它写验收处置等于拿
+   * 「只做判断」的牌给自己签验收结论。
+   */
+  const DISPOSITION_EXCLUSIVE_TOOLS = new Set(['coagent_record_acceptance_disposition']);
+
+  /**
+   * impact Run 在整个 HTTP 面的入口白名单。
+   *
+   * 只看 path + method + 已解析 token：请求体在这一步还没读，也不会被读——
+   * 读 body 才能让 body 影响判定，而 body 是对方填的。
+   * agent 工具走 /api/agent/<已有 handler>，且要么映射到一个只读白名单动作、
+   * 要么是上面那两个显式点名的专属工具；其余一切入口（包括将来新加的路由）
+   * 默认拒绝。
+   */
+  const rejectImpactRunOutsideAllowlist = (req: IncomingMessage): void => {
+    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (!path.startsWith('/api/')) return;
+    const header = req.headers['x-coagent-run'];
+    const token = Array.isArray(header) ? header[0] : header;
+    // 未解析出 impact 牌（无 token / 普通牌）完全按原路径走：这里不改任何旧行为。
+    if (!isImpactRun(tokens.resolve(token))) return;
+    const method = req.method ?? 'GET';
+    const tool = path.startsWith('/api/agent/') ? path.slice('/api/agent/'.length) : undefined;
+    const known = tool !== undefined && Object.hasOwn(agentTools, tool);
+    const allowed =
+      (method === 'GET' && path === '/api/run/brief') ||
+      (method === 'POST' &&
+        known &&
+        (isImpactAllowedAction(AGENT_TOOL_ACTION[tool!]) || IMPACT_EXCLUSIVE_TOOLS.has(tool!)));
+    if (!allowed) throw new HttpError(403, 'ACTION_DENIED', IMPACT_READ_ONLY_MESSAGE);
+  };
+
+  /**
    * agent 工具在 Run Token 解析之后求策略。角色对错仍让 Platform 抛出原
    * WRONG_ROLE 文案（除作废工单这条本来就在 HTTP 层）。绑定不匹配在这里挡。
    */
   const enforceAgentPolicy = (run: RunContext, action: PolicyAction): void => {
+    // impact 牌只允许白名单里的读动作。放在 evaluatePolicy 之前：协调者的通用
+    // 矩阵里写动作占了绝大多数，让 impact 牌落下去的话 ACTION_DENIED 会顺着
+    // 下面那条「交回 Platform 抛 WRONG_ROLE」的旧兼容回退变成放行。
+    if (isImpactRun(run) && !isImpactAllowedAction(action)) {
+      throw new HttpError(403, 'ACTION_DENIED', IMPACT_READ_ONLY_MESSAGE);
+    }
     const verdict = evaluatePolicy({
       principal: principalFromRun(run),
       action,
@@ -888,6 +974,288 @@ export function createApi(deps: ApiDeps): Server {
     return run.workItemId;
   };
 
+  /**
+   * 两个 impact 专属工具的门禁：只有 role=coordinator、purpose=impact、changeId /
+   * workItemId 非空、且带完整 claim 三元组的牌能过。
+   *
+   * 普通 coordinator / executor / independent_reviewer 牌一律 403，而且**不看
+   * body**——body 是对方填的，拿它判断身份等于把门禁交给调用方。
+   *
+   * 为什么这里把 role / workItemId / claim 也逐个再验一遍（发牌时已经验过）：
+   * 门禁是 fail-closed 的那一层，它只能依赖 RunContext 自身的形状，不能依赖
+   * 「发牌方一定按规矩填了」。少了任一条，一张缺目标或缺领取身份的牌就会带着
+   * 半截身份走进 Platform，而 Platform 那边只会按它拿到的那半截去核对。
+   */
+  const requireImpactChangeId = (run: RunContext): string => {
+    const claim = run.claim;
+    const complete =
+      run.role === 'coordinator' &&
+      run.purpose === 'impact' &&
+      typeof run.changeId === 'string' &&
+      run.changeId.trim().length > 0 &&
+      typeof run.workItemId === 'string' &&
+      run.workItemId.trim().length > 0 &&
+      claim !== undefined &&
+      claim.id.trim().length > 0 &&
+      claim.owner.trim().length > 0 &&
+      Number.isSafeInteger(claim.claimGeneration) &&
+      claim.claimGeneration > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有 impact 目的牌能调用这个工具；普通协调者 / 执行者 / 独立检视者，以及缺 changeId / 目标 / 领取身份的牌一律拒绝。',
+      );
+    }
+    return run.changeId as string;
+  };
+
+  /**
+   * 两个回执专属工具的门禁：只有 role=executor、**不是** impact 牌、workItemId /
+   * attemptId 非空、且带完整 claim 三元组的牌能过。
+   *
+   * 为什么专门排掉 purpose='impact'：impact 牌是只读的限权身份，让它签回执等于
+   * 拿「只做判断」的牌去写接收侧事实。它不在 IMPACT_EXCLUSIVE_TOOLS 里，所以会
+   * 在 rejectImpactRunOutsideAllowlist 处、读 body 之前就 403。
+   *
+   * 同样**不看 body**：执行者的目标与代次只能来自牌，body 里自称什么都是对方填的。
+   */
+  const requireExecutorReceiptRun = (run: RunContext): void => {
+    const claim = run.claim;
+    const complete =
+      run.role === 'executor' &&
+      run.purpose !== 'impact' &&
+      typeof run.workItemId === 'string' &&
+      run.workItemId.trim().length > 0 &&
+      typeof run.attemptId === 'string' &&
+      run.attemptId.trim().length > 0 &&
+      claim !== undefined &&
+      claim.id.trim().length > 0 &&
+      claim.owner.trim().length > 0 &&
+      Number.isSafeInteger(claim.claimGeneration) &&
+      claim.claimGeneration > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有执行者自己的牌能调用这个工具；impact 牌、协调者 / 独立检视者，以及缺目标 / 领取身份的牌一律拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 覆盖声明工具的门禁：只有 role=coordinator、**不是** impact 牌、attemptId
+   * 非空、且带完整 claim 三元组的牌能过。
+   *
+   * 为什么不收 workItemId 而是 attemptId：这一条工具做的是 L2 在重派后声明
+   * 「旧 Attempt 的差异已并入修订后的工单」，说话的是协调者这一趟 hop 本身，
+   * 不是某个被派发的目标工作项；绑工作项反而会把「这一趟说了什么」和「派给
+   * 谁」混成一件。
+   *
+   * 同样**不看 body**：L2 的身份与代次只能来自牌，body 里自称什么都是对方填的。
+   */
+  const requireCoordinatorCoverageRun = (run: RunContext): void => {
+    const claim = run.claim;
+    const complete =
+      run.role === 'coordinator' &&
+      run.purpose !== 'impact' &&
+      typeof run.attemptId === 'string' &&
+      run.attemptId.trim().length > 0 &&
+      claim !== undefined &&
+      claim.id.trim().length > 0 &&
+      claim.owner.trim().length > 0 &&
+      Number.isSafeInteger(claim.claimGeneration) &&
+      claim.claimGeneration > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有普通协调者牌能调用这个工具；执行者、独立检视者与 impact 牌一律拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 验收处置的门禁：只有 role=coordinator、**不是** impact 牌、attemptId 非空的
+   * 牌能过。
+   *
+   * 为什么**不要** claim 也不要 workItemId：处置是 L2 在验收时对着整份契约说的
+   * 话，一条处置可以点名多个工作项，且协调者这一趟 hop 本身可能就没有队列领取
+   * 身份（控制面直接发的牌）。要求它们只会把「L2 这一趟说了什么」变成「某个被
+   * 派发的 hop 领到了什么」。
+   *
+   * 同样**不看 body**：身份只能来自牌，body 里自称什么都是对方填的。这也是分流
+   * 必须排在 readJson 之前的原因。
+   */
+  const requireCoordinatorDispositionRun = (run: RunContext): void => {
+    const complete =
+      run.role === 'coordinator' &&
+      run.purpose !== 'impact' &&
+      typeof run.attemptId === 'string' &&
+      run.attemptId.trim().length > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有普通协调者牌能调用这个工具；执行者、独立检视者与 impact 牌一律拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 处置体只认这五个业务键。
+   *
+   * 多一个键就 400（含 missionId / attemptId / role / claim / at / contractRevision
+   * 这些身份与代次字段：它们全由牌与平台侧的已持久事实补齐，允许调用方补一个
+   * 就是自己签自己的来源）。缺字段与类型不对**不在 HTTP 层再判一遍**：规则已经
+   * 写在 Platform 一份，这里复制一份只会两处各自漂移。
+   */
+  const requireDispositionBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const known = new Set(['dispositionId', 'index', 'decision', 'workItemIds', 'basis']);
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `验收处置只接受 dispositionId / index / decision / workItemIds / basis：${key} 不受理`,
+        );
+      }
+    }
+    return {
+      dispositionId: body.dispositionId,
+      index: body.index,
+      decision: body.decision,
+      workItemIds: body.workItemIds,
+      basis: body.basis,
+    };
+  };
+
+  /**
+   * 覆盖声明体只认三个业务字段：changeId / orderRevision / workOrderHash。
+   *
+   * 其余字段一律 400，尤其 changeId 之外的任何身份与结论字段（missionId /
+   * attemptId / role / claim / claimGeneration / verified / applied）：它们全由
+   * 牌与平台侧的已持久事实补齐，允许调用方补一个就是自己签自己的来源。
+   */
+  const requireCoverageBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const known = new Set(['changeId', 'orderRevision', 'workOrderHash']);
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `覆盖声明只接受 changeId / orderRevision / workOrderHash：${key} 不受理`,
+        );
+      }
+    }
+    for (const key of ['changeId', 'orderRevision', 'workOrderHash']) {
+      const value = body[key];
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', `${key} 必须是非空字符串。`);
+      }
+    }
+    if (!/^[0-9a-f]{64}$/.test(body.workOrderHash as string)) {
+      throw new HttpError(
+        400,
+        'BAD_REQUEST',
+        'workOrderHash 必须是 64 位小写 hex（sha256）。',
+      );
+    }
+    return {
+      changeId: body.changeId,
+      orderRevision: body.orderRevision,
+      workOrderHash: body.workOrderHash,
+    };
+  };
+
+  /**
+   * 回执体只认 changeId / layer，layer=executor_started 还要 contentHash。
+   *
+   * 其余字段一律 400，尤其 attemptId / missionId / workItemId / role / claim /
+   * claimGeneration / at / verified：它们全由牌与已持久的影响判断补齐，允许调用
+   * 方补一个就是自己签自己的来源，回执链不再是事实。
+   */
+  const requireReceiptAckBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const layer = body.layer;
+    const known = new Set<string>(
+      layer === 'executor_started' ? ['changeId', 'layer', 'contentHash'] : ['changeId', 'layer'],
+    );
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `回执只接受 changeId / layer${layer === 'executor_started' ? ' / contentHash' : ''}：${key} 不受理`,
+        );
+      }
+    }
+    if (typeof body.changeId !== 'string' || body.changeId.trim().length === 0) {
+      throw new HttpError(400, 'BAD_REQUEST', 'changeId 必须是非空字符串。');
+    }
+    if (
+      layer !== 'adapter_received' &&
+      layer !== 'session_consumed' &&
+      layer !== 'executor_started'
+    ) {
+      throw new HttpError(
+        400,
+        'BAD_REQUEST',
+        `layer 必须是 adapter_received | session_consumed | executor_started 之一：${String(layer)}` +
+          '（verified 不是可写层：回执只记收到，验收通过是另一件事）',
+      );
+    }
+    if (layer === 'executor_started') {
+      const hash = body.contentHash;
+      if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          'executor_started 的 contentHash 必须是 64 位小写 hex（sha256）。',
+        );
+      }
+    }
+    return {
+      changeId: body.changeId,
+      layer,
+      ...(layer === 'executor_started' ? { contentHash: body.contentHash as string } : {}),
+    };
+  };
+
+  /**
+   * 牌上钉死的目标工作项必须与这次要动的那条变更指向的工作项一致。
+   *
+   * Platform 核的是「变更 → 队列槽 → 目标执行」那一侧；这里补的是「牌 → 变更」
+   * 这一侧。少了它，一张绑着 A 工单的 impact 牌可以读到并判断 B 工单的变更，
+   * 而 Platform 只会看到「这条变更确实归这个 Mission」——它不知道牌上写的是谁。
+   */
+  const requireImpactTarget = (run: RunContext, workItemId: string): void => {
+    if (run.workItemId !== workItemId) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '这张 impact 牌绑的目标工作项不是这条变更指向的工作项，拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 业务体只认四个字段：多一个（尤其是任何 changeId / missionId / claim 之类的
+   * 身份字段）就 400——身份来自牌与请求记录，调用方补一个就是自己签自己的来源。
+   */
+  const requireImpactDecisionBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const known = new Set(['decision', 'workOrderDiff', 'affectedAcceptance', 'reason']);
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `影响判断只接受 decision / workOrderDiff / affectedAcceptance / reason：${key} 不受理`,
+        );
+      }
+    }
+    return { ...body };
+  };
+
   /** 每个工具一个 handler。handler 里没有规则，规则都在 Platform。 */
   const agentTools: Record<
     string,
@@ -908,6 +1276,159 @@ export function createApi(deps: ApiDeps): Server {
         throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取工作项详情。');
       }
       return platform.getAgentWorkItem(run.missionId, workItemId);
+    },
+
+    async coagent_get_validation_report(run, body) {
+      // 完整机器验证报告只给协调者：enforceAgentPolicy 对 coordinator 之外的角色保留
+      // 「交回 Platform 抛 WRONG_ROLE」的旧兼容回退，那条回退在这里会落到放行，
+      // 所以显式按 run.role 挡一次，fail-closed。
+      if (run.role !== 'coordinator') {
+        throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取完整验证报告。');
+      }
+      const { workItemId, reportId } = body as unknown as { workItemId: unknown; reportId?: unknown };
+      if (typeof workItemId !== 'string' || workItemId.length === 0) {
+        throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
+      }
+      if (reportId !== undefined && (typeof reportId !== 'string' || reportId.length === 0)) {
+        throw new HttpError(400, 'BAD_REQUEST', 'reportId 必须是非空字符串。');
+      }
+      // 身份只取 run.missionId：请求体里的 missionId / attemptId / role 一律不采信。
+      // 采信的话，执行者只要在 body 里写一句 role: 'coordinator' 就能读别人的报告。
+      const report = await platform.getAgentValidationReport(
+        run.missionId,
+        workItemId,
+        reportId,
+      );
+      if (!report) {
+        // 文案不提归属：说「这份属于别的 Mission / 工单」等于给了探测归属的接口。
+        throw new HttpError(404, 'VALIDATION_REPORT_NOT_FOUND', '没有这份验证报告');
+      }
+      return report;
+    },
+
+    /**
+     * 读这一次要判断的已确认变更。
+     *
+     * body 必须是空的：changeId 只来自牌上冻住的那一条。收 body changeId 等于
+     * 让限权身份自己挑「我要判断哪条变更」，而它能挑的那批里有一条是别人的。
+     */
+    async coagent_get_change_request(run, body) {
+      if (Object.keys(body).length > 0) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          'coagent_get_change_request 不接受请求体：变更身份只来自本次运行的凭据。',
+        );
+      }
+      const changeId = requireImpactChangeId(run);
+      const request = await platform.getChangeRequest(run.missionId, run.attemptId, changeId, run.claim);
+      requireImpactTarget(run, request.workItemId);
+      return request;
+    },
+
+    /**
+     * 提交这一次的影响判断。
+     *
+     * body 只认四业务字段：decision / workOrderDiff / affectedAcceptance / reason。
+     * 身份字段一个都不收——它们由 Platform 从请求记录与队列槽补齐，允许调用方补
+     * 就等于允许自己签自己的来源。
+     */
+    async coagent_submit_change_impact(run, body) {
+      const changeId = requireImpactChangeId(run);
+      const business = requireImpactDecisionBody(body);
+      // 先读一次核目标再写：只核 body 的话「判断的是哪条变更」全靠牌的 self-report，
+      // 而牌上钉的目标是不是这条变更写的那个，只有仓储里的请求记录说了算。
+      // 这次读也顺带把 Platform 的归属 / 代次 / claim 校核跑一遍——不通过就轮不到写。
+      const request = await platform.getChangeRequest(run.missionId, run.attemptId, changeId, run.claim);
+      requireImpactTarget(run, request.workItemId);
+      return platform.submitChangeImpact(
+        run.missionId,
+        run.attemptId,
+        changeId,
+        business,
+        run.claim,
+      );
+    },
+
+    /**
+     * 执行者读发给自己的差异。
+     *
+     * body 必须为空：目标工作项 / Attempt / 代次全在牌上，收 body 等于让调用方自己
+     * 挑「我要读哪一趟执行的差异」。
+     */
+    async coagent_get_change_deliveries(run, body) {
+      if (Object.keys(body).length > 0) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          'coagent_get_change_deliveries 不接受请求体：目标与代次只来自本次运行的凭据。',
+        );
+      }
+      return {
+        deliveries: await platform.listChangeDeliveries(
+          run.missionId,
+          run.workItemId!,
+          run.attemptId,
+          run.claim,
+        )
+      };
+    },
+
+    /**
+     * 执行者按层回执。
+     *
+     * 只透传 changeId / layer /（executor_started 的 contentHash）；身份与 at 由
+     * Platform 从围栏、已持久的影响判断与平台时钟现取。回执只记「我收到了」，
+     * 不是已应用 / 已验收。
+     */
+    async coagent_ack_change_receipt(run, body) {
+      const business = requireReceiptAckBody(body);
+      return platform.ackChangeReceipt(
+        run.missionId,
+        run.workItemId!,
+        run.attemptId,
+        business,
+        run.claim,
+      );
+    },
+
+    /**
+     * L2 声明「旧 Attempt 的那份差异已并入修订后的工单」。
+     *
+     * 只透传 changeId / orderRevision / workOrderHash；Mission / Attempt /
+     * 代次 / at 全由 Platform 从牌与平台时钟现取。这是一条**声明**，平台核对
+     * 属实才成立，本身既不是已应用、也不是已验证。
+     */
+    async coagent_record_change_coverage(run, body) {
+      const workItemId = requireWorkItem(run);
+      const business = requireCoverageBody(body);
+      return platform.recordChangeCoverage(
+        run.missionId,
+        run.attemptId,
+        workItemId,
+        business,
+        run.claim,
+      );
+    },
+
+    /**
+     * L2 写下「这一条验收口径这次怎么处置」。
+     *
+     * 只透传那五个业务键，其余字段一律 400；Mission / Attempt / claim 全由
+     * Platform 从牌与平台侧已持久事实现取。
+     *
+     * 这是一条**判断记录**，不等于验收已通过、也不等于已验证：平台核对原文未变、
+     * 报告按当前工单这套命令与范围跑出来之后才落库，落库也只说明「这条口径这次
+     * 这么处置」。
+     */
+    async coagent_record_acceptance_disposition(run, body) {
+      const business = requireDispositionBody(body);
+      return platform.recordAcceptanceDisposition(
+        run.missionId,
+        run.attemptId,
+        business,
+        run.claim,
+      );
     },
 
     async coagent_get_contract(run) {
@@ -1115,6 +1636,15 @@ export function createApi(deps: ApiDeps): Server {
         // 409：请求本身合法，是当前状态不允许。工具会把 message 原样回给模型，
         // 所以 message 必须写成「下一步该干什么」，不是一句 invalid state。
         writeJson(res, 409, { error: error.code, message: error.message }, identity);
+      } else if (error instanceof ChangeImpactConflictError) {
+        // 影响判断是 append-only 事实：同一个 changeId 上「结论不同」是业务冲突，
+        // 不是服务端故障。落到下面那个 500 分支的话，调用方会以为是自己把服务打挂了，
+        // 而真正该做的是换新 changeId 重算。
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
+      } else if (error instanceof ChangeReceiptConflictError) {
+        // 回执与影响判断同构：同一 changeId + layer 上「内容不同」是 append-only
+        // 事实冲突，不是服务端故障。落到 500 的话调用方会以为是自己把服务打挂了。
+        writeJson(res, 409, { error: error.code, message: error.message }, identity);
       } else if (error instanceof Error && /^DOCUMENT_(?:PATH_FORBIDDEN|SYMLINK_FORBIDDEN|CHANGES_REQUIRED|CHANGE_INVALID|EMPTY_ANCHOR|ANCHOR_NOT_UNIQUE)$/.test(error.message)) {
         writeJson(res, 400, { error: error.message, message: '文档路径或精确差异无效，请刷新原文并重新提交' }, identity);
       } else if (error instanceof AgentPoolError) {
@@ -1214,6 +1744,11 @@ export function createApi(deps: ApiDeps): Server {
   }
 
   async function handleWithReviewerFence(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // impact 牌的 fail-closed 门禁必须在**一切之前**：reviewer fence、beforeRead、
+    // readJson、具体 handler、onMutation 都可能在拒绝之前就动到状态。
+    // 身份只从 x-coagent-run 解析，绝不看请求体——否则 body 里写一句
+    // purpose: 'impact' 就能自称只读、写一句 role: 'coordinator' 就能自称可写。
+    rejectImpactRunOutsideAllowlist(req);
     if (req.method !== 'POST') return handle(req, res);
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
     const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
@@ -1593,6 +2128,40 @@ export function createApi(deps: ApiDeps): Server {
       const handler = agentTools[tool];
       if (!handler) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
       const run = requireRun(req);
+      // 两个 impact 专属工具在**普通 AGENT_TOOL_ACTION 流程之前**分流：
+      // 它们故意不在策略矩阵里，走普通流程会落到 UNKNOWN_TOOL，而真正要说清的
+      // 是「你这张牌不是 impact 牌」；放到前面，门禁就只由 requireImpactChangeId
+      // 一处说了算，也不会被任何将来新增的宽泛写别名顺带放行。
+      if (IMPACT_EXCLUSIVE_TOOLS.has(tool)) {
+        requireImpactChangeId(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
+      // 回执组同样在普通 AGENT_TOOL_ACTION 之前分流：它们不在策略矩阵里，走普通
+      // 流程会落到 UNKNOWN_TOOL，而要说清的是「你这张牌不是这一趟执行自己的牌」。
+      // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定。
+      if (RECEIPT_EXCLUSIVE_TOOLS.has(tool)) {
+        requireExecutorReceiptRun(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
+      // 覆盖声明同样在普通 AGENT_TOOL_ACTION 之前分流：它不在策略矩阵里，走普通
+      // 流程会落到 UNKNOWN_TOOL，而要说清的是「你这张牌不是普通协调者牌」。
+      // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定。
+      if (COVERAGE_EXCLUSIVE_TOOLS.has(tool)) {
+        requireCoordinatorCoverageRun(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
+      // 验收处置同样在普通 AGENT_TOOL_ACTION 之前分流：它不在策略矩阵里，走普通
+      // 流程会落到 UNKNOWN_TOOL，而要说清的是「你这张牌不是普通协调者牌」。
+      // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定，
+      // 非法 JSON 也会先变成 400 而不是 403。
+      if (DISPOSITION_EXCLUSIVE_TOOLS.has(tool)) {
+        requireCoordinatorDispositionRun(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
       const action = AGENT_TOOL_ACTION[tool];
       if (!action) throw new HttpError(404, 'UNKNOWN_TOOL', `没有这个工具：${tool}`);
       enforceAgentPolicy(run, action);
@@ -1625,7 +2194,14 @@ export function createApi(deps: ApiDeps): Server {
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
     if (method === 'GET' && missionMatch) {
       await requireControl(req, POLICY_ACTION.missionRead);
-      return send(res, 200, await platform.getMissionView(missionMatch[1]));
+      const id = missionMatch[1];
+      // timeAttribution 与 mission 视图同级只读（同一 missionRead 授权）：
+      // 页面一张时间线要阶段耗时，而耗时来自报告仓储与 hop 行，不在 MissionView 里。
+      // 另开一个接口会让首屏多一次往返，且授权要再讲一遍。
+      return send(res, 200, {
+        ...(await platform.getMissionView(id)),
+        timeAttribution: await platform.getTimeAttribution(id),
+      });
     }
 
     // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks 可能很长，

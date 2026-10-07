@@ -1074,6 +1074,181 @@ describe('调度器：整条 Mission 自己走完', () => {
   });
 });
 
+describe('协调者唤醒：完整简报优先与合法补修交接', () => {
+  // 完整简报场景不再要求每跳先 coagent_get_mission：这两条脚本一次都没调用它。
+  // 「少查一次」本身没有外部症状（界面一模一样），只能从 instructions 捕获的
+  // 原文证明：一是不要求重复查询，二是该分支该说的（验收原文交接、同轮语义）都在。
+  const BRIEF_FIRST_COORDINATOR: ScriptTable = {
+    'coordinator:-:0': {
+      steps: [
+        { tool: 'coagent_update_plan', body: PLAN },
+        { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+        { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
+        {
+          tool: 'coagent_dispatch_work_item',
+          body: (previous) => ({ workItemIds: [previous.workItemId] }),
+        },
+      ],
+    },
+    'coordinator:-:1': {
+      steps: [
+        {
+          tool: 'coagent_review_execution_result',
+          body: {
+            workItemId: 'W-1',
+            verdict: 'accept',
+            acceptanceResults: ORDER.acceptance.map((criterion) => ({
+              criterion,
+              status: 'pass' as const,
+              evidence: '测试替身：逐条核过',
+            })),
+            reasons: ['逐条验收过'],
+            requiredChanges: [],
+          },
+        },
+        {
+          tool: 'coagent_submit_mission_result',
+          body: {
+            outcome: 'delivered',
+            summary: '改好了并验证过',
+            acceptanceEvidence: ['node --test 退出码 0'],
+            memoryDelta: [],
+            openRisks: [],
+          },
+        },
+      ],
+    },
+  };
+
+  test('完整简报不再要求重复查询：首轮与验收都不调 get_mission 仍走完', async () => {
+    const coordinator = new ScriptedRuntime(BRIEF_FIRST_COORDINATOR);
+    current = await harness({ coordinator, executor: new ScriptedRuntime(EXECUTOR_HAPPY) });
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-brief-first', contract: CONTRACT });
+
+    const result = await current.makeOrchestrator().runMission('M-brief-first', { projectRoot: process.cwd() });
+    assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+
+    const view = await current.platform.getMissionView('M-brief-first');
+    assert.equal(view.workItems[0]?.status, 'accepted');
+
+    assert.equal(
+      coordinator.transcript.filter((entry) => entry.tool === 'coagent_get_mission').length,
+      0,
+      '简报里已有的状态不该再查一遍',
+    );
+    // 每一跳的唤醒语都得說清「先照简报、按需才查」和交接要求——漏掉一个分支，
+    // 从那个分支派出去的工单就没有验收原文。
+    assert.equal(coordinator.instructions.length, 2);
+    for (const instruction of coordinator.instructions) {
+      assert.match(instruction, /已经在开跑简报里/);
+      assert.doesNotMatch(instruction, /先 coagent_get_mission 看当前状态/);
+      assert.match(instruction, /coagent_get_work_item/);
+      assert.match(instruction, /验收标准时，必须在 requiredBehaviour/);
+    }
+    assert.match(coordinator.instructions[1]!, /1 个工作项交回了结果/);
+    assert.match(coordinator.instructions[1]!, /全部验收完/);
+    assert.match(coordinator.instructions[1]!, /一次派完/);
+  });
+
+  test('blocked 代表路径：按需取详情，先修订有差异的工单再派发', async () => {
+    const BLOCKED_ORDER = { ...ORDER, allowedScope: ['src/bar.ts'], acceptance: ['bar() === 1'] };
+    const coordinator = new ScriptedRuntime({
+      'coordinator:-:0': {
+        steps: [
+          { tool: 'coagent_update_plan', body: PLAN },
+          { tool: 'coagent_create_work_item', body: { title: '修 foo', ...ORDER } },
+          { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
+          {
+            tool: 'coagent_dispatch_work_item',
+            body: (previous) => ({ workItemIds: [previous.workItemId] }),
+          },
+        ],
+      },
+      // 完整简报里没有工单正文，只有 necessary 时才查 get_work_item——这正是
+      // 「必要详情查询保留」的唯一 external 症状。顺序也必须如此：先修订到
+      // 有可见差异，再派发；原样重派会被 WORK_ORDER_REVISION_REQUIRED 挡下。
+      'coordinator:-:1': {
+        steps: [
+          { tool: 'coagent_get_work_item', body: { workItemId: 'W-1' } },
+          {
+            tool: 'coagent_revise_work_order',
+            body: { workItemId: 'W-1', ...BLOCKED_ORDER },
+          },
+          { tool: 'coagent_dispatch_work_item', body: { workItemIds: ['W-1'] } },
+        ],
+      },
+      // 验收要看修订后的工单：criterion 必须照抄当前 acceptance 原文。
+      'coordinator:-:2': {
+        steps: [
+          {
+            tool: 'coagent_review_execution_result',
+            body: {
+              workItemId: 'W-1',
+              verdict: 'accept',
+              acceptanceResults: BLOCKED_ORDER.acceptance.map((criterion) => ({
+                criterion,
+                status: 'pass' as const,
+                evidence: '测试替身：逐条核过',
+              })),
+              reasons: ['逐条验收过'],
+              requiredChanges: [],
+            },
+          },
+          {
+            tool: 'coagent_submit_mission_result',
+            body: {
+              outcome: 'delivered',
+              summary: '改好了并验证过',
+              acceptanceEvidence: ['node --test 退出码 0'],
+              memoryDelta: [],
+              openRisks: [],
+            },
+          },
+        ],
+      },
+    });
+    const executor = new ScriptedRuntime({
+      'executor:W-1:0': {
+        steps: [
+          { tool: 'coagent_get_work_order', body: {} },
+          {
+            tool: 'coagent_report_blocked',
+            body: {
+              reason: '工单说改 src/foo.ts，但这个文件不存在',
+              whatWasTried: ['ls src/', 'grep -r foo'],
+              needsFromUpstream: '确认真正的文件路径',
+            },
+          },
+        ],
+      },
+      'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+    });
+    current = await harness({ coordinator, executor });
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-blocked-fix', contract: CONTRACT });
+
+    const result = await current.makeOrchestrator().runMission('M-blocked-fix', { projectRoot: process.cwd() });
+    assert.deepEqual(result, { kind: 'awaiting_l3_review' });
+
+    const view = await current.platform.getMissionView('M-blocked-fix');
+    assert.equal(view.workItems[0]?.status, 'accepted');
+
+    // 只看处理 blocked 那一跳的调用：第 0 轮那次派发在它之前，混着比没有意义。
+    const tools = coordinator.transcript
+      .filter((entry) => entry.key === 'coordinator:-:1')
+      .map((entry) => entry.tool);
+    assert.deepEqual(tools, [
+      'coagent_get_work_item',
+      'coagent_revise_work_order',
+      'coagent_dispatch_work_item',
+    ], `blocked 那一跳应是「取详情 → 修订 → 派发」：${tools.join(' → ')}`);
+    const wake = coordinator.instructions[1]!;
+    assert.match(wake, /个工作项不成立/);
+    assert.match(wake, /coagent_get_work_item 取详情/);
+    assert.deepEqual(view.workItems[0]?.order?.allowedScope, ['src/bar.ts'], '修订要可见地改到工单正文');
+    assert.equal(view.workItems[0]?.order?.orderRevision, 'r2', '修订号必须递增，否则重派会被挡');
+  });
+});
+
 const CAP_NOW = '2026-01-01T00:00:00.000Z';
 
 function capLimits(overrides: Partial<HopCapacityLimits> = {}): HopCapacityLimits {

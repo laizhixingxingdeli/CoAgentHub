@@ -6,7 +6,14 @@ import type { WorkspaceManager } from '../workspace.ts';
 import { InlineArtifactStore, type ArtifactStore } from '../artifact-store.ts';
 import type { LiveOutput } from '../live.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
-import type { PlatformDeps, PlatformValidationDeps, QueueClaimIdentity } from '../platform.ts';
+import type { QueuedHopRepository } from '../ports.ts';
+import type { ChangeImpactRepository } from '../change-impact.ts';
+import type { ChangeReceiptRepository } from '../change-receipt.ts';
+import type { ChangeCoverageRepository } from '../change-coverage.ts';
+import type { ChangeRequestRepository } from '../change-request.ts';
+import type { ContractHistoryRepository } from '../contract-history.ts';
+import type { AcceptanceDispositionRepository } from '../acceptance-disposition.ts';
+import type { QueueClaimIdentity, PlatformDeps, PlatformValidationDeps } from '../platform.ts';
 
 export class PlatformRuleError extends Error {
   readonly code: string;
@@ -61,6 +68,14 @@ export class PlatformContext {
   validation: PlatformValidationDeps | undefined;
   haAuthorityFile: string | undefined;
   live: LiveOutput | undefined;
+  changeRequests: ChangeRequestRepository | undefined;
+  changeImpacts: ChangeImpactRepository | undefined;
+  changeReceipts: ChangeReceiptRepository | undefined;
+  changeCoverages: ChangeCoverageRepository | undefined;
+  contractHistories: ContractHistoryRepository | undefined;
+  acceptanceDispositions: AcceptanceDispositionRepository | undefined;
+  readonly acceptanceEvidenceGate: boolean;
+  queuedHops: QueuedHopRepository | undefined;
   onProjectIdle: ((projectId: string) => Promise<unknown>) | undefined;
 
   constructor(deps: PlatformDeps) {
@@ -78,6 +93,14 @@ export class PlatformContext {
     this.validation = deps.validation;
     this.haAuthorityFile = deps.haAuthorityFile;
     this.live = deps.live;
+    this.changeRequests = deps.changeRequests;
+    this.changeImpacts = deps.changeImpacts;
+    this.changeReceipts = deps.changeReceipts;
+    this.changeCoverages = deps.changeCoverages;
+    this.contractHistories = deps.contractHistories;
+    this.acceptanceDispositions = deps.acceptanceDispositions;
+    this.acceptanceEvidenceGate = deps.acceptanceEvidenceGate === true;
+    this.queuedHops = deps.queuedHops;
   }
 
   tx<T>(fn: () => Promise<T>): Promise<T> {
@@ -99,6 +122,11 @@ export class PlatformContext {
       now: this.clock.now().toISOString(),
     };
     return this.transaction.runFenced(fence, fn).catch(mapClaimFenceError);
+  }
+
+  /** 事务是否支持租约核对：没有它，「带着队列身份」就无从校验。 */
+  hasFencedTransaction(): boolean {
+    return isFencedCommandTransaction(this.transaction);
   }
 
   async attemptHasQueueMark(missionId: string, attemptId: string): Promise<boolean> {

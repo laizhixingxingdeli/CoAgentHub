@@ -69,6 +69,7 @@ const MACHINE_KINDS = [
   'final_review.integration_verified',
   'final_review.merge_applied',
   'work_item.redispatched',
+  'change.receipt_recorded',
 ];
 
 /** 一条真 Mission 会喂给页面的 ctx（形状取自 MissionView）。 */
@@ -319,6 +320,17 @@ const CASES = [
     action: '重新派发工作项',
     detailHas: ['事件翻译表'],
   },
+  {
+    name: 'change.receipt_recorded',
+    event: {
+      kind: 'change.receipt_recorded',
+      data: { changeId: 'CR-1', layer: 'session_consumed', workItemId: 'W-465' },
+      workItemId: 'W-465',
+    },
+    badge: 'L1 执行',
+    action: '变更回执：已进入会话',
+    detailHas: ['CR-1', '不等于已应用或已验证'],
+  },
 ];
 
 /* ============================ 文件形状 ============================ */
@@ -467,6 +479,192 @@ describe('事件翻译表：逐条对契约', () => {
       assert.ok(whole.trim().length > 0, '整段不能是空白');
       if (kind) assert.ok(whole.includes(kind), `没带上 kind：${whole}`);
     }
+  });
+
+  test('change.impact_decided：三结论都只是判断、未应用；cancel_replace 说的是「需取消替换」；未知结论安全退回', () => {
+    const data = { changeId: 'CR-1', workItemId: 'W-465', attemptId: 'W-465.exec-1', affectedAcceptance: [1] };
+    const cases = [
+      { decision: 'compatible', label: '兼容照跑' },
+      { decision: 'replan', label: '需重排' },
+      { decision: 'cancel_replace', label: '需取消替换' },
+    ];
+    for (const c of cases) {
+      const out = narrateEvent(
+        { kind: 'change.impact_decided', data: { ...data, decision: c.decision } },
+        CTX,
+      );
+      assert.equal(out.untranslated, false);
+      assert.equal(out.badge, 'L2 协调');
+      assert.ok(out.action.includes(c.label), `action 该说「${c.label}」：${out.action}`);
+      assert.ok(out.detail.includes('CR-1'), out.detail);
+      // 只是判断：不许出现「已取消 / 已重排 / 已应用 / 已处理」这种落地说法。
+      assert.ok(/只是判断/.test(out.detail), out.detail);
+      assert.ok(/尚未应用/.test(out.detail), out.detail);
+      assert.ok(
+        !/已(?:取消|重排|应用|处理)/.test(`${out.badge}${out.action}${out.detail}`),
+        `不许把判断写成已落地：${out.action} / ${out.detail}`,
+      );
+    }
+
+    // 认不出的结论：原样带回、仍标只是判断，不替调用方编一个说法。
+    const unknown = narrateEvent(
+      { kind: 'change.impact_decided', data: { ...data, decision: 'no_such_decision', affectedAcceptance: [] } },
+      CTX,
+    );
+    assert.equal(unknown.untranslated, false);
+    assert.ok(unknown.action.includes('no_such_decision'), unknown.action);
+    assert.ok(/只是判断/.test(unknown.detail), unknown.detail);
+    for (const field of ['badge', 'action', 'detail']) {
+      assert.notEqual(unknown[field].trim(), '', `${field} 不能空白`);
+      assert.ok(!/undefined|null/.test(unknown[field]), `${field} 漏了机器值：${unknown[field]}`);
+    }
+
+    // 连结论字段都没有：退回「没有结论」，仍不空、仍只是判断。
+    const missing = narrateEvent({ kind: 'change.impact_decided', data: {} }, CTX);
+    assert.ok(missing.action.includes('没有结论'), missing.action);
+    assert.ok(/只是判断/.test(missing.detail), missing.detail);
+  });
+
+  test('change.receipt_recorded：三层都只说收到，不等于已应用或已验证；未知层仍翻译', () => {
+    const data = { changeId: 'CR-1', workItemId: 'W-465', attemptId: 'W-465.exec-1' };
+    const cases = [
+      { layer: 'adapter_received', label: '执行侧已收到' },
+      { layer: 'session_consumed', label: '已进入会话' },
+      { layer: 'executor_started', label: '执行者自述已按差异继续' },
+    ];
+    for (const c of cases) {
+      const out = narrateEvent(
+        { kind: 'change.receipt_recorded', data: { ...data, layer: c.layer } },
+        CTX,
+      );
+      assert.equal(out.untranslated, false);
+      assert.equal(out.badge, 'L1 执行');
+      assert.ok(out.action.includes(c.label), `action 该说「${c.label}」：${out.action}`);
+      assert.ok(out.detail.includes('CR-1'), out.detail);
+      // 回执没有验收层：不许出现「已应用 / 已验证 / 已处理」这种落地说法。
+      assert.ok(/不等于已应用或已验证/.test(out.detail), out.detail);
+      // 扣掉那句明确否定之后再扫：否定句本身含「已应用 / 已验证」四个字，
+      // 不扣的话这条断言永远只能写在纸面上——那才是把门槛降没了。
+      const claims = `${out.badge}${out.action}${out.detail}`.replace(/不等于已应用或已验证/g, '');
+      assert.ok(
+        !/已(?:应用|验证|处理)/.test(claims),
+        `不许把回执写成已落地：${out.action} / ${out.detail}`,
+      );
+      assert.ok(
+        !`${out.badge}${out.action}${out.detail}`.includes('receipt_recorded'),
+        `漏出了机器事件名：${out.badge} / ${out.action} / ${out.detail}`,
+      );
+      for (const field of ['badge', 'action', 'detail']) {
+        assert.notEqual(out[field].trim(), '', `${field} 不能空白`);
+        assert.ok(!/undefined|null/.test(out[field]), `${field} 漏了机器值：${out[field]}`);
+      }
+    }
+
+    // verified 是平台夹验收之后写的确认层，不是接收侧 ACK：说清是平台依据
+    // L2 验收与验证报告确认的，不挂「不等于已应用或已验证」那句尾注。
+    const verified = narrateEvent(
+      { kind: 'change.receipt_recorded', data: { ...data, layer: 'verified' } },
+      CTX,
+    );
+    assert.equal(verified.untranslated, false);
+    assert.equal(verified.badge, '平台');
+    assert.ok(verified.action.includes('平台已确认'), verified.action);
+    assert.ok(verified.detail.includes('CR-1'), verified.detail);
+    assert.ok(verified.detail.includes('平台依据 L2 验收与验证报告确认'), verified.detail);
+    assert.ok(!/不等于已应用或已验证/.test(verified.detail), verified.detail);
+
+    // 认不出的层：仍翻译、仍不带验收结论，不替调用方下结论。
+    const unknown = narrateEvent(
+      { kind: 'change.receipt_recorded', data: { ...data, layer: 'nope' } },
+      CTX,
+    );
+    assert.equal(unknown.untranslated, false);
+    assert.ok(unknown.action.includes('未识别层'), unknown.action);
+    assert.ok(/不等于已应用或已验证/.test(unknown.detail), unknown.detail);
+  });
+
+  test('change.coverage_recorded：L2 声明差异已并入修订后的工单，不是已应用也不是已验证', () => {
+    const out = narrateEvent(
+      {
+        kind: 'change.coverage_recorded',
+        data: { changeId: 'CR-1', workItemId: 'W-1', orderRevision: 'r2' },
+      },
+      CTX,
+    );
+    assert.equal(out.untranslated, false);
+    assert.ok(out.action.includes('并入修订后的工单'), out.action);
+    assert.ok(out.detail.includes('CR-1'), out.detail);
+    // 扣掉那句明确否定之后再扫：否定句本身含「已应用 / 已验证」四个字，
+    // 不扣的话这条断言永远只能写在纸面上——那才是把门槛降没了。
+    const claims = `${out.badge}${out.action}${out.detail}`.replace(
+      /不是已应用、也不是已验证/g,
+      '',
+    );
+    assert.ok(!/已(?:应用|验证)/.test(claims), `不许把声明写成已落地：${out.action} / ${out.detail}`);
+    assert.ok(/不是已应用/.test(out.detail), `尾注必须显式否掉已应用：${out.detail}`);
+    assert.ok(
+      !`${out.badge}${out.action}${out.detail}`.includes('coverage_recorded'),
+      `漏出了机器事件名：${out.badge} / ${out.action} / ${out.detail}`,
+    );
+    for (const field of ['badge', 'action', 'detail']) {
+      assert.notEqual(out[field].trim(), '', `${field} 不能空白`);
+      assert.ok(!/undefined|null/.test(out[field]), `${field} 漏了机器值：${out[field]}`);
+    }
+  });
+
+  test('acceptance.disposition_recorded：L2 的处置结论，写明不等于验收已通过', () => {
+    const CASES = [
+      { decision: 'reuse', word: '复用' },
+      { decision: 'revalidate', word: '需复验' },
+      { decision: 'new_requirement', word: '新要求' },
+    ] as const;
+    for (const row of CASES) {
+      const out = narrateEvent(
+        {
+          kind: 'acceptance.disposition_recorded',
+          data: { dispositionId: 'D-1', index: 1, decision: row.decision, workItemIds: ['W-1'] },
+        },
+        CTX,
+      );
+      assert.equal(out.untranslated, false);
+      assert.equal(out.badge, 'L2 协调');
+      assert.ok(out.action.includes('L2 记录验收处置'), out.action);
+      assert.ok(out.action.includes(row.word), `${row.decision} 应译成${row.word}：${out.action}`);
+      assert.ok(out.detail.includes('不等于验收已通过'), out.detail);
+      // 扣掉那句明确否定之后再扫：否定句本身含「已通过 / 已验证」四个字，
+      // 不扣的话这条断言永远只能写在纸面上——那才是把门槛降没了。
+      const claims = `${out.badge}${out.action}${out.detail}`.replace(
+        /不等于验收已通过，也不等于已验证/g,
+        '',
+      );
+      assert.ok(!/已(?:通过|验证)/.test(claims), `不许把处置写成验收结论：${out.action} / ${out.detail}`);
+      assert.ok(
+        !`${out.badge}${out.action}${out.detail}`.includes('disposition_recorded'),
+        `漏出了机器事件名：${out.badge} / ${out.action} / ${out.detail}`,
+      );
+    }
+
+    // 空 data 也要能译：漏了字段不等于这条事件没有内容。
+    const bare = narrateEvent({ kind: 'acceptance.disposition_recorded', data: {} }, CTX);
+    assert.equal(bare.untranslated, false);
+    assert.ok(bare.detail.includes('不等于验收已通过'), bare.detail);
+    for (const field of ['badge', 'action', 'detail']) {
+      assert.notEqual(bare[field].trim(), '', `${field} 不能空白`);
+      assert.ok(!/undefined|null/.test(bare[field]), `${field} 漏了机器值：${bare[field]}`);
+    }
+  });
+
+  test('execution_result.submitted：缺快照字段说「快照未知」，有就说已记录', () => {
+    const bare = narrateEvent({ kind: 'execution_result.submitted', data: { outcome: 'completed' } }, CTX);
+    assert.ok(bare.detail.includes('快照未知'), bare.detail);
+    assert.ok(bare.detail.includes('completed'), bare.detail);
+
+    const hash = 'a'.repeat(64);
+    const full = narrateEvent(
+      { kind: 'execution_result.submitted', data: { outcome: 'completed', appliedChanges: [], snapshotHash: hash } },
+      CTX,
+    );
+    assert.ok(!full.detail.includes('快照未知'), full.detail);
   });
 
   test('整体：已翻译结果的 badge+action+detail 里不出现任何机器事件名', () => {

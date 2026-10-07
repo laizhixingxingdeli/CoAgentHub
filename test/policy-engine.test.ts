@@ -7,6 +7,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  AGENT_TOOL_ACTION,
   evaluatePolicy,
   POLICY_ACTION,
   POLICY_REASON,
@@ -549,5 +550,17 @@ describe('PolicyEngine 六类 × 六类范围：逐格固定预期', () => {
       ['finalize：reviewer', POLICY_ACTION.finalizeReviewer],
     ];
     for (const [label, action] of rows) check(expired, action, EXPIRED, `expired × ${label}`);
+  });
+});
+
+describe('PolicyEngine agent 工具映射：coagent_get_validation_report', () => {
+  test('映射到 workItemGetAgentDetail，coordinator allow，executor / independent_reviewer / 未知角色 deny', () => {
+    assert.deepEqual(AGENT_TOOL_ACTION.coagent_get_validation_report, POLICY_ACTION.workItemGetAgentDetail);
+    assert.equal(decision(coordinator, AGENT_TOOL_ACTION.coagent_get_validation_report), 'allow');
+    assert.equal(decision(executor, AGENT_TOOL_ACTION.coagent_get_validation_report), 'deny');
+    assert.equal(decision(independentReviewer, AGENT_TOOL_ACTION.coagent_get_validation_report), 'deny');
+    const unknown: PolicyPrincipal = { status: 'ok', kind: 'query', id: ATTEMPT, missionId: MISSION, attemptId: ATTEMPT };
+    assert.equal(decision(unknown, AGENT_TOOL_ACTION.coagent_get_validation_report), 'deny');
+    assert.equal(code(executor, AGENT_TOOL_ACTION.coagent_get_validation_report), POLICY_REASON.ACTION_DENIED);
   });
 });

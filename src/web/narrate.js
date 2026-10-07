@@ -380,6 +380,72 @@ const sameAsEscalated = (event) => ({
   detail: or(event && event.data && event.data.question, '（没有写问题）'),
 });
 
+/**
+ * 三种影响结论的人话。
+ *
+ * 三条都说「只是判断，尚未应用」：这条事件是 L2 判断落了库，**不是**已经取消 /
+ * 重排 / 应用。cancel_replace 尤其要写成「需取消替换」而不是「已取消替换」——
+ * 写成已取消，看板就成了「这事儿已经处理完」的证明，而执行侧其实一步都没动。
+ *
+ * 认不出的结论原样回显：编一个说法等于替调用方下结论。
+ */
+const DECISION_CN = {
+  compatible: '兼容照跑',
+  replan: '需重排',
+  cancel_replace: '需取消替换',
+};
+
+/** 三条结论共用的尾注：这条判断只是判断，不代表任何东西已经落地。 */
+const IMPACT_PENDING_NOTE = '只是判断，尚未应用：不触发取消、重排或应用';
+
+/**
+ * 三层回执的人话。
+ *
+ * 三条都只说「收到了」这一步：adapter 收到、进了会话、执行者自述照着跑了。
+ * 不许写成「已应用 / 已处理 / 已验证」——回执没有验收层，写成已验证等于让一条
+ * 自述记录当验收通过的证据。
+ */
+const RECEIPT_LAYER_CN = {
+  adapter_received: '执行侧已收到',
+  session_consumed: '已进入会话',
+  executor_started: '执行者自述已按差异继续',
+};
+
+/** 三层共用的尾注：回执是承认收到，不是验收结论。 */
+const RECEIPT_PENDING_NOTE = '只是接收侧承认收到，不等于已应用或已验证';
+
+/**
+ * 覆盖声明的尾注。
+ *
+ * 这条比回执更容易被读成落地：写的时候就在说「差异已并入工单」，看板上一不留神
+ * 就成了「改完了」。它是 L2 的**声明**、平台核对属实才算数，全程没有执行结果、
+ * 没有验收；所以同样的四个字（已应用 / 已验证）必须显式否掉。
+ */
+const COVERAGE_PENDING_NOTE = 'L2 声明差异已并入修订后的工单，不是已应用、也不是已验证';
+
+/**
+ * 验收处置的尾注。
+ *
+ * 比覆盖声明更容易被读成结果：处置就写在验收环节，看板上一不留神就成了「这条
+ * 口径过了」。它只是 L2 的一次判断，平台核对的是处置凭据本身，验收通过没有、
+ * 验证跑没跑都不由这条说明；所以「不等于验收已通过」必须显式写在译文里。
+ */
+const DISPOSITION_PENDING_NOTE = '这是 L2 的判断，不等于验收已通过，也不等于已验证';
+
+/** 快照哈希的形状。64 位小写 hex，别的形状一律当「没有」。 */
+const SNAPSHOT_HASH_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * 交卷有没有带快照。**缺了就直说「快照未知」，不补字段**：旧结果里根本没有
+ * appliedChanges / snapshotHash，替它造一个等于把「没记录」显示成「记录了」，
+ * 而快照正是事后对账要查的东西。
+ */
+const snapshotSuffix = (data) => {
+  const d = data || {};
+  if (!Array.isArray(d.appliedChanges) || !SNAPSHOT_HASH_RE.test(text(d.snapshotHash))) return ' · 快照未知';
+  return ' · 已记录快照';
+};
+
 /** 事件表：kind → { badge, action, detail }。加一条事件就加一行，漏了会被测试问出来。 */
 const EVENT_TABLE = {
   'project.execution_configured': () => ({ badge: 'L3', action: '更新项目执行配置', detail: '后续任务使用新配置，已启动任务保留原配置' }),
@@ -465,7 +531,7 @@ const EVENT_TABLE = {
     return {
       badge: 'L1 → L2',
       action: '交回结果',
-      detail: outcomeText(data.outcome) + (count === undefined ? '' : ` · 改了 ${count} 个文件`),
+      detail: outcomeText(data.outcome) + (count === undefined ? '' : ` · 改了 ${count} 个文件`) + snapshotSuffix(data),
     };
   },
 
@@ -871,6 +937,124 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '交卷后影子评估',
       detail: or(data.quality, '只记不改审查级别'),
+    };
+  },
+
+  // 运行中变更的影响判断。**只是判断，不是应用**：文案里不许出现「已处理 /
+  // 已应用 / 已重排」——那条判断落地是另一条链路，写成已完成会让人拿它当已处理。
+  'change.impact_decided': (event) => {
+    const data = (event && event.data) || {};
+    const decision = text(data.decision);
+    const label = DECISION_CN[decision] || `未识别结论（${decision || '没有结论'}）`;
+    const acceptance = Array.isArray(data.affectedAcceptance) ? data.affectedAcceptance : [];
+    const count = acceptance.length;
+    const scope = count === 0 ? '没有点名受影响的验收' : `受影响验收 ${acceptance.join('、')}`;
+    return {
+      badge: 'L2 协调',
+      action: `影响判断：${label}`,
+      detail: `${or(data.changeId, '（没有变更编号）')} · ${scope} · ${IMPACT_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * 执行侧回执。**只是「收到了」，不等于已应用或已验证**：回执没有验收层，
+   * 把 ACK 写成已应用 / 已验证，看板就会拿「有回执」当「改好了」的证据。
+   */
+  'change.receipt_recorded': (event) => {
+    const data = (event && event.data) || {};
+    const layer = text(data.layer);
+    const changeId = or(data.changeId, '（没有变更编号）');
+    // verified 是平台夹验收之后写的确认层，性质上已经不是「接收侧承认收到」：
+    // 走上面的三层分支会把平台确认降格成一张 ACK，走未识别分支又会把它报成乱码。
+    if (layer === 'verified') {
+      return {
+        badge: PLATFORM_ROLE_LABEL,
+        action: '变更回执：平台已确认',
+        detail: `${changeId} · 平台依据 L2 验收与验证报告确认`,
+      };
+    }
+    const label = RECEIPT_LAYER_CN[layer] || `未识别层（${layer || '没有层'}）`;
+    return {
+      badge: 'L1 执行',
+      action: `变更回执：${label}`,
+      detail: `${changeId} · ${RECEIPT_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * L2 的覆盖声明。**只是声明，不是落地**：它说的是「旧 Attempt 的差异已经写进
+   * 修订后的工单」，执行还没发生、验收也没发生。写成已应用 / 已验证，B4 的验收
+   * 门就会被一张自述通行证顶掉。
+   */
+  'change.coverage_recorded': (event) => {
+    const data = (event && event.data) || {};
+    const changeId = or(data.changeId, '（没有变更编号）');
+    const revision = or(data.orderRevision, '（没有工单修订号）');
+    return {
+      badge: 'L2 协调',
+      action: '变更覆盖：L2 声明差异已并入修订后的工单',
+      detail: `${changeId} · 工单修订 ${revision} · ${COVERAGE_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * L2 的验收处置。**只是处置，不等于验收已通过**：它记录的是「这条口径这次
+   * 复用 / 复验 / 新要求」，平台核对过的只是处置本身的凭据，验收结论与验证
+   * 另有其事。写成「已通过 / 已验证」就是把一条 L2 判断当成验收通过的证据。
+   */
+  'acceptance.disposition_recorded': (event) => {
+    const data = (event && event.data) || {};
+    const labels = { reuse: '复用', revalidate: '需复验', new_requirement: '新要求' };
+    const decision = text(data.decision);
+    const conclusion = labels[decision] || `未识别结论（${decision || '没有结论'}）`;
+    const index = or(data.index, '（没有序号）');
+    return {
+      badge: 'L2 协调',
+      action: `L2 记录验收处置：${conclusion}`,
+      detail: `第 ${index} 条口径 · ${DISPOSITION_PENDING_NOTE}`,
+    };
+  },
+
+  /**
+   * 工具结束事实（COM5 T2/T3）。
+   *
+   * 这几条**不进命令族豁免**：可读的结束事实不等于命令开始。把它们折叠成
+   * 「跑了多少条命令」的计数，工具时长就会被讲成命令数——两者不是一回事，
+   * 一个是时长，一个是条数。所以它们各自有单条翻译。
+   */
+  'runtime.tool.completed': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L1 执行',
+      action: `工具结束：${or(data.name, '（没有工具名）')}`,
+      detail: `callId ${or(data.callId, '（没有 callId）')}`,
+    };
+  },
+
+  'hop.enqueued': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: `队列入队：${or(data.role, '（没有角色）')}`,
+      detail: `hop ${or(data.hopId, '（没有 hopId）')} · 入队于 ${or(data.enqueuedAt, '（没有入队时点）')}`,
+    };
+  },
+
+  'hop.claimed': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '队列领取',
+      detail: `hop ${or(data.hopId, '（没有 hopId）')} · 代次 ${or(data.claimGeneration, '（没有代次）')} · 认领于 ${or(data.claimedAt, '（没有认领时点）')}`,
+    };
+  },
+
+  'hop.backoff': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '队列退避',
+      detail: `hop ${or(data.hopId, '（没有 hopId）')} · 第 ${or(data.attemptCount, '（没有次数）')} 次失败 · 退避到 ${or(data.availableAt, '（没有退避时点）')}`,
     };
   },
 };

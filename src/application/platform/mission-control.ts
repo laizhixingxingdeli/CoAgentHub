@@ -5,6 +5,7 @@ import { validateMissionResultCriteria } from './mission-result-criteria.ts';
 import { collectMissionResultAttachments } from './mission-result-attachments.ts';
 import { resultDeliveryKey } from '../delivery.ts';
 import { captureMissionDocuments } from './document-queue.ts';
+import { missingAcceptanceEvidenceIndexes } from './acceptance-disposition.ts';
 
 export async function retireWorkItem(
   ctx: PlatformContext,  criteriaFailureStop: (mission: Mission, item: WorkItem) => Promise<void>,
@@ -72,6 +73,15 @@ export async function submitMissionResult(
           `还有未验收的工作项：${unfinished.map((i) => `${i.id}(${i.status})`).join(', ')}。` +
             '每一张都要么验收通过、要么作废（coagent_retire_work_item）之后才能交卷；' +
             '确实交不出来就用 outcome=blocked。',
+        );
+      }
+    }
+    if (ctx.acceptanceEvidenceGate === true && body.outcome === 'delivered' && body.criteria !== undefined) {
+      const missing = await missingAcceptanceEvidenceIndexes(ctx, mission, body.criteria);
+      if (missing.length > 0) {
+        throw new PlatformRuleError(
+          'ACCEPTANCE_EVIDENCE_REQUIRED',
+          `受影响的验收条目缺少对当前契约修订有效的处置：${missing.join(', ')}`,
         );
       }
     }

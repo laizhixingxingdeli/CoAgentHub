@@ -16,7 +16,12 @@ import * as haValidation from './platform/ha-validation.ts';
 import * as promotion from './platform/promotion.ts';
 import * as postExecution from './platform/post-execution.ts';
 import * as commandTracking from './platform/command-tracking.ts';
+import * as toolActivity from './platform/tool-activity.ts';
+import * as hopEvents from './platform/hop-events.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 import * as validationReportViews from './platform/validation-report-views.ts';
+import * as timeAttributionView from './platform/time-attribution-view.ts';
+import type { TimeAttribution } from './time-attribution.ts';
 import * as standardRedispatch from './platform/standard-redispatch.ts';
 import * as standardValidation from './platform/standard-validation.ts';
 import * as budgetUsage from './platform/budget-usage.ts';
@@ -35,6 +40,10 @@ import * as startupBrief from './platform/startup-brief.ts';
 import * as views from './platform/views.ts';
 import * as independentReview from './platform/independent-review.ts';
 import * as attempts from './platform/attempts.ts';
+import * as changeImpact from './platform/change-impact.ts';
+import * as changeReceipt from './platform/change-receipt.ts';
+import * as changeCoverage from './platform/change-coverage.ts';
+import * as acceptanceDisposition from './platform/acceptance-disposition.ts';
 import { queuedAttemptStartedData } from './platform/attempts.ts';
 import * as missionIntake from './platform/mission-intake.ts';
 import * as missionLifecycle from './platform/mission-lifecycle.ts';
@@ -47,6 +56,12 @@ import { criteriaFailureStopFor, priorGuidanceForWorkItem, coordinatorStartupSou
 export { criteriaFailureStopFor } from './platform/agent-view-helpers.ts';
 import { REVISE_BLOCKED_HINT, orderChangedFields, checkWorkOrderCriteria, checkWorkOrderStandard, checkAcceptanceResults } from './platform/work-order-helpers.ts';
 import { sanitizeAttemptContextMetrics, activityDataHasContextMetrics, keepTrueOrUnknownLeaves } from './platform/context-metrics.ts';
+import type { ChangeRequest } from './change-request.ts';
+import type { ChangeImpact } from './change-impact.ts';
+import type { ChangeReceipt } from './change-receipt.ts';
+import type { ChangeCoverage } from './change-coverage.ts';
+import type { AcceptanceDispositionRecord } from './acceptance-disposition.ts';
+import type { ChangeDelivery } from './platform/change-receipt.ts';
 import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 import { PlatformContext, PlatformRuleError, PROTOCOL_VERSION, ATTEMPT_STARTED_KIND } from './platform/context.ts';
@@ -542,6 +557,183 @@ export class Platform {
     return this.#attemptHasQueueMark(missionId, attemptId);
   }
 
+  /* ===================== 运行中变更的影响判断（限权） ===================== */
+
+  /**
+   * 当前装配是否支持影响判断。
+   *
+   * 不是「大概可以用」：三样仓储 + 事务 fence 缺任一样都不算。给调用方一个能问的
+   * 口子，它就不会用 try/catch 去猜——猜出来的「不支持」会被当成「这次先算了」。
+   */
+  supportsChangeImpact(): boolean {
+    return changeImpact.supportsChangeImpact(this.#context);
+  }
+
+  /**
+   * 为一条已确认变更开一次限权 coordinator Attempt。
+   *
+   * changeId 是这次 Attempt 唯一要判断的变更，由发牌那一刻钉死；后面读写都拿它校核，
+   * 普通 coordinator Attempt 借用不了这几个专属动作。
+   */
+  startImpactCoordinatorAttempt(
+    missionId: string,
+    changeId: string,
+    profile?: UsedProfile,
+    claim?: QueueClaimIdentity,
+  ): Promise<{ attemptId: string; workItemId: string }> {
+    return changeImpact.startImpactCoordinatorAttempt(
+      this.#context,
+      missionId,
+      changeId,
+      profile,
+      claim,
+    );
+  }
+
+  getChangeRequest(
+    missionId: string,
+    coordinatorAttemptId: string,
+    changeId: string,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeRequest> {
+    return changeImpact.getChangeRequest(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      changeId,
+      claim,
+    );
+  }
+
+  submitChangeImpact(
+    missionId: string,
+    coordinatorAttemptId: string,
+    changeId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeImpact> {
+    return changeImpact.submitChangeImpact(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      changeId,
+      body,
+      claim,
+    );
+  }
+
+  /**
+   * 某个 executor 视角下还没有影响判断的变更请求。只读，不落新事实。
+   *
+   * 参数里没有任何 changeId：它是「还有哪些没判断」而不是「某一条怎么样」，
+   * 带 changeId 的版本会退化成一个可反复探测的单条查询。
+   */
+  listPendingChangeRequests(
+    missionId: string,
+    workItemId: string,
+    executorAttemptId: string,
+    executorClaim?: QueueClaimIdentity,
+  ): Promise<readonly ChangeRequest[]> {
+    return changeImpact.listPendingChangeRequests(
+      this.#context,
+      missionId,
+      workItemId,
+      executorAttemptId,
+      executorClaim,
+    );
+  }
+
+  /**
+   * 失租的旧 impact Attempt 的可信收尾：只关那一条 Attempt，不写判断。
+   *
+   * 只给运行期接线用（调度器在 finally 里撞到 CLAIM_FENCE_REJECTED 之后）：
+   * 身份全从已持久化的 started 事件读回，调用方只能点名「哪条 Attempt」。
+   * HTTP 面不转发这一条——能从外面调用的收尾就等于没有围栏。
+   */
+  finishLostImpactAttempt(
+    missionId: string,
+    coordinatorAttemptId: string,
+    outcome: Parameters<Platform['finishAttempt']>[2],
+  ): Promise<void> {
+    return changeImpact.finishLostImpactAttempt(
+      this.#context,
+      missionId,
+      coordinatorAttemptId,
+      outcome,
+    );
+  }
+
+  /**
+   * 执行者视角：这一趟执行能拿到的差异与它们已记录到哪几层。只读。
+   *
+   * 只交 compatible 且 attemptId / 代次都对得上的那些：replan 与 cancel_replace
+   * 不该由执行者自己决定要不要照跑，跨 Attempt 的差异交回来也会被当成这一趟的。
+   */
+  listChangeDeliveries(
+    missionId: string,
+    workItemId: string,
+    attemptId: string,
+    claim?: QueueClaimIdentity,
+  ): Promise<readonly ChangeDelivery[]> {
+    return changeReceipt.listChangeDeliveries(
+      this.#context, missionId, workItemId, attemptId, claim,
+    );
+  }
+
+  /**
+   * 执行者按层回执：adapter_received → session_consumed → executor_started。
+   * 回执只记「我收到了」，不是已应用 / 已验收；低层不得被外推成后面的层。
+   */
+  ackChangeReceipt(
+    missionId: string,
+    workItemId: string,
+    attemptId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeReceipt> {
+    return changeReceipt.ackChangeReceipt(
+      this.#context, missionId, workItemId, attemptId, claim, body,
+    );
+  }
+
+  /** 回执读写是否装配：未装配时上面两条抛 CHANGE_RECEIPT_UNSUPPORTED。 */
+  supportsChangeReceipt(): boolean {
+    return changeReceipt.supportsChangeReceipt(this.#context);
+  }
+
+  /**
+   * 协调者声明「这条变更已写进第 N 轮工单内容」：平台核对当前工单的轮次与内容
+   * 哈希后才记下，成功才发 change.coverage_recorded。这是一条**声明**，本身既不
+   * 是已应用、也不是已验证。
+   */
+  recordChangeCoverage(
+    missionId: string,
+    coordinatorAttemptId: string,
+    workItemId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<ChangeCoverage> {
+    return changeCoverage.recordChangeCoverage(
+      this.#context, missionId, coordinatorAttemptId, workItemId, body, claim,
+    );
+  }
+
+  /**
+   * 协调者在验收时写下「这一条验收口径这次怎么处置」：平台核对原文是否未变、
+   * 报告是否按当前工单这套命令与范围跑出来之后才落库，成功才发
+   * acceptance.disposition_recorded。这是一次**判断**，本身既不是已通过、也不是已验证。
+   */
+  recordAcceptanceDisposition(
+    missionId: string,
+    coordinatorAttemptId: string,
+    body: unknown,
+    claim?: QueueClaimIdentity,
+  ): Promise<AcceptanceDispositionRecord> {
+    return acceptanceDisposition.recordAcceptanceDisposition(
+      this.#context, missionId, coordinatorAttemptId, body, claim,
+    );
+  }
+
   async submitIndependentReview(
     missionId: string,
     attemptId: string,
@@ -878,6 +1070,14 @@ export class Platform {
   }
 
   /* ============================ L2 协调者面 ============================ */
+
+  /**
+   * 只读时间归因投影（COM5 T4）。与 getMissionView 分开：它要另读报告仓储与 hop 行，
+   * 而 getMissionView 的其它调用方不需要为一条时间线多付这份读取。
+   */
+  async getTimeAttribution(missionId: string): Promise<TimeAttribution> {
+    return timeAttributionView.getTimeAttribution(this.#context, missionId);
+  }
 
   async getMissionView(missionId: string): Promise<MissionView> {
     return views.getMissionView(this.#context, { workItemValidationReportViews: (m, e) => this.#workItemValidationReportViews(m, e), haReviewHold: (m) => this.#haReviewHold(m) }, missionId);
@@ -1461,6 +1661,67 @@ export class Platform {
   }
 
   /**
+   * Trusted tool-completion fact (COM5 T2).
+   *
+   * Adapter-reported `tool.completed`, no activityClass required and no command
+   * count involved — a readable end fact is not a command start. Envelope
+   * carries attemptId; `at` is the platform write clock, never a caller time.
+   */
+  async recordToolCompleted(
+    missionId: string,
+    attemptId: string,
+    input: { readonly callId: string; readonly name: string },
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordToolCompleted(missionId, attemptId, input));
+  }
+
+  async #recordToolCompleted(
+    missionId: string,
+    attemptId: string,
+    input: { readonly callId: string; readonly name: string },
+  ): Promise<void> {
+    return toolActivity.recordToolCompleted(this.#context, missionId, attemptId, input);
+  }
+
+  /**
+   * Trusted hop-enqueued fact (COM5 T3). Callers pass the row actually inserted —
+   * an idempotency hit on an old row must not be narrated as a new enqueue.
+   */
+  async recordHopEnqueued(missionId: string, hop: QueuedHop): Promise<void> {
+    return this.#tx(() => this.#recordHopEnqueued(missionId, hop));
+  }
+
+  async #recordHopEnqueued(missionId: string, hop: QueuedHop): Promise<void> {
+    return hopEvents.recordHopEnqueued(this.#context, missionId, hop);
+  }
+
+  /**
+   * Trusted first-claim fact (COM5 T3). Only the row returned by this claim may
+   * be passed: `renew` overwrites `updatedAt`, so a later re-read cannot tell
+   * when the claim happened.
+   */
+  async recordHopClaimed(missionId: string, hop: QueuedHop): Promise<void> {
+    return this.#tx(() => this.#recordHopClaimed(missionId, hop));
+  }
+
+  async #recordHopClaimed(missionId: string, hop: QueuedHop): Promise<void> {
+    return hopEvents.recordHopClaimed(this.#context, missionId, hop);
+  }
+
+  /**
+   * Trusted backoff fact (COM5 T3). Written only for `retry_wait`; `failedAt`
+   * comes from this failure's own `lastFailure.at`, not from a re-read row.
+   */
+  async recordHopBackoff(missionId: string, hop: QueuedHop): Promise<void> {
+    return this.#tx(() => this.#recordHopBackoff(missionId, hop));
+  }
+
+  async #recordHopBackoff(missionId: string, hop: QueuedHop): Promise<void> {
+    return hopEvents.recordHopBackoff(this.#context, missionId, hop);
+  }
+
+  /**
    * L3 答复一条升级：答复落库后协调者下一轮在 coagent_get_mission 里看到它据此继续
    * （升级后调度器是停着的，再叫协调者只会让它再升级一次）。
    * 队首若是票级门禁，同事务里解析答复并增额/批准：分两次写会留下「已答复却还在等」
@@ -1940,6 +2201,21 @@ export class Platform {
     reportId: string,
   ): Promise<ValidationReport | undefined> {
     return validationReportViews.getValidationReport(this.#context, missionId, reportId);
+  }
+
+  /**
+   * 协调者读「本工单当前提交」的完整机器验证报告。
+   *
+   * 只读：不记事件、不改状态。读不到（没交卷、没跑过验收、归属不符、没注入 reports）
+   * 一律 undefined，由 HTTP 层统一成 404——不区分「不存在」和「属于别处」，
+   * 否则就给了跨 Mission 探测报告 id 的接口。
+   */
+  async getAgentValidationReport(
+    missionId: string,
+    workItemId: string,
+    reportId?: string,
+  ): Promise<ValidationReport | undefined> {
+    return validationReportViews.getAgentValidationReport(this.#context, missionId, workItemId, reportId);
   }
 
   /**

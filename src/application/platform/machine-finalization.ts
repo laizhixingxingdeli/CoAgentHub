@@ -4,6 +4,7 @@ import { assertFinalizePolicy, landMemory } from './final-review.ts';
 import { runIntegrationMergeVerify } from './integration-verification.ts';
 import { queuedExecutionConfig } from './mission-queue.ts';
 import { missionResultCriteriaIssues } from './mission-result-criteria.ts';
+import { missingAcceptanceEvidenceIndexes } from './acceptance-disposition.ts';
 import { POLICY_ACTION } from '../policy-engine.ts';
 import type { Mission } from '../../kernel/index.ts';
 
@@ -24,7 +25,13 @@ async function holdForUnmetCriteria(
   mission: Mission,
 ): Promise<boolean> {
   const acceptanceCount = mission.contract?.acceptance.length ?? 0;
-  const issues = missionResultCriteriaIssues(mission.result?.criteria, acceptanceCount);
+  const issues = [...missionResultCriteriaIssues(mission.result?.criteria, acceptanceCount)];
+  if (ctx.acceptanceEvidenceGate === true && issues.length === 0 && Array.isArray(mission.result?.criteria)) {
+    const missing = await missingAcceptanceEvidenceIndexes(ctx, mission, mission.result.criteria);
+    for (const index of missing) {
+      issues.push(`#${index} 受影响但没有对当前契约修订有效的验收处置`);
+    }
+  }
   if (issues.length === 0) return false;
 
   const question =

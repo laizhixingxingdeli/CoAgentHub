@@ -28,6 +28,7 @@ import type {
   StandardAutoRedispatchHandoff,
 } from './platform.ts';
 import { PlatformRuleError } from './platform.ts';
+import { CHANGE_IMPACT_UNSUPPORTED } from './platform/change-impact.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
 import { NoLiveOutput } from './live.ts';
@@ -55,6 +56,18 @@ import {
   type QueuedHop,
   type QueuedHopWait,
 } from './durable-scheduler.ts';
+import {
+  beginImpactSupervision,
+  impactSupervisionInstruction,
+  impactSupervisionSettings,
+  impactSupervisionSupported,
+  inertImpactSupervisionSession,
+  type ImpactHopDisposition,
+  type ImpactSupervisionObservation,
+  type ImpactSupervisionSession,
+  type ImpactSupervisionSettings,
+} from './impact-supervisor.ts';
+import type { ChangeRequest } from './change-request.ts';
 
 export interface RolePool {
   readonly runtime: AgentRuntime;
@@ -178,6 +191,22 @@ export interface OrchestratorDeps {
    * 缺省 0：立刻 waiting，保持 D7。生产 CLI 传 120000，让首次 1s 退避不必结束运行。
    */
   inRunBackoffWaitMs?: number;
+  /**
+   * 运行期影响判断监督（AC3）：**默认关闭的 opt-in**。
+   *
+   * 省略这个字段就是生产默认：零监督、零 hop，行为与现网一致。给了它也不代表
+   * 能监督 —— 牌口要有 startImpactCoordinator、Platform 要装配变更仓储、队列
+   * 仓储要有 claimAvailable，缺任一项按 unsupported 处理（不退化成普通
+   * coordinator 牌，也不拿无 claim 的启动去碰运气）。
+   *
+   * 坏值在构造时抛，和 inRunBackoffWaitMs 同风格：pollIntervalMs=0 会变成忙等，
+   * 而那时候执行者已经在跑，症状是「这一跳多了几条莫名其妙的 hop」。
+   */
+  impactSupervision?: {
+    readonly enabled: true;
+    readonly pollIntervalMs: number;
+    readonly maxChecks: number;
+  };
   usageReader?: () => Promise<{ readonly available: boolean; readonly [key: string]: unknown } | readonly unknown[]>;
   now?: () => Date;
 }
@@ -297,26 +326,58 @@ function coordinatorBody(view: {
   workItems: { id: string; status: string }[];
   promotions?: readonly { triggerRule: string }[];
 }): string {
+  // 本跳简报优先。
+  //
+  // 开跑简报（/api/run/brief）已经带着契约、规划、工作项索引与上一跳增量——
+  // 每一跳都先 coagent_get_mission 等于把同一份状态再买一遍。协调者轮次是整条
+  // Mission 开销的主项（一条走到六轮的，协调者一个人占 74%），所以默认不查。
+  const briefFirst =
+    '这一跳要用的状态已经在开跑简报里（契约、规划、工作项索引、上一跳增量）。' +
+    '直接照它开工，不要先 coagent_get_mission 再取一遍。';
+  // 「按需查询」必须点名哪个缺口用哪个工具。不点名的话它会退化成「每次都查
+  // mission」——而全量索引正是这几份里最贵的那一份，等于什么都没省。
+  const queryWhenNeeded =
+    '只有在这三种情况下才查：' +
+    '(1) 简报缺你要用的必要详情——缺某张工单的正文 / 证据 / 评审用 coagent_get_work_item，' +
+    '缺验收标准原文用 coagent_get_contract，确实需要全量工作项索引才用 coagent_get_mission；' +
+    '(2) 发现并发变化——简报是这一跳开始时拍的，之后有人改过就不作数；' +
+    '(3) 平台拒绝了你的调用，要按错误提示补信息。';
+  // 派发前的交接。执行者没有协调者的权限：让它自己去翻它拿不到的契约，结果
+  // 只能是 report_blocked，或者凭猜测补一条——两种情况都白花一整跳。
+  const acceptanceHandoff =
+    '**派发前交接**：工单要求引用上层 Contract 的验收标准时，必须在 requiredBehaviour ' +
+    '或 contextRefs 里给出相关验收的原文（或完整的对应表）。执行者无需、也不应自行寻找' +
+    '它无权限取得的契约；只带与这张工单相关的条目，不要把整份契约背景重复搬进工单。';
+  // 共用段落每个分支都带：交接提示漏掉一个分支，从那个分支派出去的工单就缺验收
+  // 原文，而补那一跳的代价远大于多说这三段。
+  const shared = [briefFirst, queryWhenNeeded, '', acceptanceHandoff];
   const answered = view.escalationLog.filter((item) => item.answer).at(-1);
   if (view.finalReview?.verdict === 'send_back') {
     const reasons = view.finalReview.reasons.map((reason) => `  - ${reason}`).join('\n');
-    // 打回时最常见的浪费：为同一条意见另开新工作项。实测过一次——
-    // 一条"注释里少写一句"的意见滚出了三个工作项、七跳、$2.31。
-    // 所以这里要明确说「先改已有的」，并把已验收的 id 列出来降低门槛。
-    const reusable = view.workItems.filter((item) => item.status === 'accepted');
+    // 补修顺序由平台说了算，不由「优先改原项」这句口号说了算：accepted 与 dispatched
+    // 都不可修订（协调者 Node 实验里两个状态的 revise 都是 ILLEGAL_TRANSITION）。
+    // 所以先把工作项分成可修订与已验收两类，各给一条走得通的顺序——照一句做不到的
+    // 指令撞两次 409，实测就是三个工作项、七跳、$2.31。
+    const revisable = view.workItems.filter(
+      (item) => item.status === 'created' || item.status === 'rejected' || item.status === 'blocked',
+    );
+    // 已验收的历史留着：那件事做过、也被验过，抹掉它等于改写记录。补修是另开一张
+    // 引用它的工单，不是把它改掉。
+    const accepted = view.workItems.filter((item) => item.status === 'accepted');
+    const list = (items: readonly { id: string }[]): string =>
+      items.map((item) => item.id).join('、') || '无';
     return [
       'L3 把这个 Mission 打回了，理由：',
       reasons,
       '',
-      '先 coagent_get_mission 看当前状态，按这些理由重新规划。',
+      `**可修订的**（${list(revisable)}，状态 created / rejected / blocked）：` +
+        '先 coagent_revise_work_order 把工单改对，再派发。派发之后同样改不了，顺序不能反。',
+      `**已验收的**（${list(accepted)}）：accepted 不能修订。` +
+        '保留它已验收过的历史，另建一张补修工单——正文里引用原工作项 id 与 L3 指出的差距——再派发那张新的。',
+      '一条差距一张补修单：为同一条意见另开多张，实测滚出三个工作项、七跳、$2.31。',
+      '重新派发或新建的工单必须与上一版有可见差异——逐字相同的工单不算数。',
       '',
-      '**优先修正已有的工作项，不要为同一条意见另开新的。**',
-      reusable.length > 0
-        ? `已验收的工作项：${reusable.map((item) => item.id).join('、')}。` +
-          '要继续改它们就直接重新派发，把「这次要避开什么」写进工单正文。'
-        : '',
-      '只有当 L3 的意见确实指向一件此前没做过的**独立**工作时，才新建工作项。',
-      '重新派发的工单必须与上一版有可见差异——逐字相同的工单不算数。',
+      ...shared,
     ]
       .filter(Boolean)
       .join('\n');
@@ -326,8 +387,9 @@ function coordinatorBody(view: {
       'L3 答复了你的升级。',
       `问题：${answered.question}`,
       `答复：${answered.answer}`,
+      '按这个答复继续。',
       '',
-      '先 coagent_get_mission 看当前状态，按这个答复继续。',
+      ...shared,
     ].join('\n');
   }
   const blocked = view.workItems.filter((item) => item.status === 'blocked');
@@ -335,13 +397,19 @@ function coordinatorBody(view: {
     // 只提 blocked，**不提 retired**：作废掉的那些已经不用管了，而且现在也
     // 不再拦着交卷。早先两者同一个状态，这句话只好含糊地说"可能是执行者报的、
     // 也可能是 L3 作废的"，然后让协调者自己去猜该不该管。
-    return (
-      `执行者报了 ${blocked.length} 个工作项不成立（${blocked.map((i) => i.id).join('、')}）。` +
-      '先 coagent_get_mission 看它们说了什么，然后二选一：' +
-      '**确实还要做**就把工单改对再重新派发；' +
-      '**已经不用做了**就 coagent_retire_work_item 作废掉并写清理由。' +
-      '别把它晾在那儿——blocked 会一直拦着这条 Mission 交卷。'
-    );
+    return [
+      `执行者报了 ${blocked.length} 个工作项不成立（${blocked.map((i) => i.id).join('、')}）。`,
+      // 执行者的 blocked 报告本来就是「相关事实 / 缺什么决定 / 建议怎么办」三段，
+      // 协调者的处置要把这三段并起来说——只回一句「不成立」，下一次还是同一个人
+      // 在同一处卡住。
+      '它的报告里已经带着相关事实、缺什么决定、建议怎么办；缺原记录就用 coagent_get_work_item 取详情，' +
+        '判断之后二选一：',
+      '**确实还要做**就先 coagent_revise_work_order 把工单改对（blocked 可修订），再派发；',
+      '**已经不用做了**就 coagent_retire_work_item 作废，理由里把相关事实、缺的决定、建议一次写清。',
+      '别把它晾在那儿——blocked 会一直拦着这条 Mission 交卷。',
+      '',
+      ...shared,
+    ].join('\n');
   }
   const submitted = view.workItems.filter((item) => item.status === 'submitted');
   if (submitted.length > 0) {
@@ -355,18 +423,25 @@ function coordinatorBody(view: {
     const origin = promoted
       ? `这条 Mission 是从 Lightweight 升级上来的，原因：${promoted.triggerRule}\n\n`
       : '';
-    return (
+    return [
       origin +
-      `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
-      '先 coagent_get_mission 看当前状态，然后**在这一轮里把它们全部验收完**。\n\n' +
+        `平台唤醒你：${submitted.length} 个工作项交回了结果（${ids}）。` +
+        '**在这一轮里把它们全部验收完**——每交还一次控制权就是一轮全新的协调者会话。',
+      // 逐项验收与打回都用现有字段：acceptanceResults 逐条给结论；reject 的
+      // requiredChanges 写清验收项 / 实际 / 预期 / 怎么复验——只给一句「没过」，
+      // 执行者只能猜差在哪，下一轮多半原样交回来。
+      '验收用 coagent_review_execution_result：accept 要逐条给 acceptanceResults；' +
+        '打回用 requiredChanges，每条写清**验收项 / 实际 / 预期 / 怎么复验**，不要另造字段。',
       '验完之后如果还有下一批要做的，同样**一次派完**——' +
-      'coagent_dispatch_work_item 的 workItemIds 是数组，互不依赖的放在同一次调用里。'
-    );
+        'coagent_dispatch_work_item 的 workItemIds 是数组，互不依赖的放在同一次调用里。',
+      '',
+      ...shared,
+    ].join('\n');
   }
   if (view.planRevision > 0) {
-    return '平台唤醒你。先 coagent_get_mission 看当前状态，然后决定下一步。';
+    return ['平台唤醒你。按简报决定下一步。', '', ...shared].join('\n');
   }
-  return '开始这个 Mission。先 coagent_get_mission。';
+  return ['开始这个 Mission。', '', ...shared].join('\n');
 }
 
 /**
@@ -418,9 +493,18 @@ export class Orchestrator {
   #hopLeaseMs: number;
   #hopLimits: HopCapacityLimits;
   #inRunBackoffWaitMs: number;
+  /** 运行期影响判断监督配置；undefined = 关闭（生产默认）。 */
+  #impactSupervision: ImpactSupervisionSettings | undefined;
   /** hopClock 上的本次 runMission 墙钟截止；越过则不再睡退避。 */
   #missionDeadlineAt: number | undefined;
   readonly hops: HopRecord[] = [];
+  /**
+   * 监督动作的可追溯记录（只在 opt-in 启用时会有内容）。
+   *
+   * 为什么只记不判：这段日志回答的是「这一代执行期间到底有没有开过判断跳、
+   * 为什么没开」，而排障者需要能看出它**没有**拿这些动作冒充验收或应用。
+   */
+  readonly impactObservations: ImpactSupervisionObservation[] = [];
   /** profileId → 冷却到期时间戳。S07.4 的 Availability，最小可用形态。 */
   readonly #cooldown = new Map<string, number>();
   /**
@@ -459,6 +543,7 @@ export class Orchestrator {
     // 坏上限在第一跳领取前就必须拒绝。默认走代码上限，避免漏配变成「不限」。
     this.#hopLimits = hopCapacityLimits(deps.hopCapacityLimits);
     this.#inRunBackoffWaitMs = inRunBackoffWaitMs(deps.inRunBackoffWaitMs);
+    this.#impactSupervision = impactSupervisionSettings(deps.impactSupervision);
     this.#hopScheduler = deps.queuedHops
       ? new DurableScheduler(
           deps.queuedHops,
@@ -1733,6 +1818,16 @@ export class Orchestrator {
      * 看起来和正常的一模一样。
      */
     onExecutorStart?: () => Promise<void>;
+    /**
+     * 影响判断专属跳（只由监督下发）。
+     *
+     * 两者必须同时给。少了它们，一次影响判断会去占普通 coordinator 槽：
+     * 同一个工作项的「验收」和「判断一条变更」是两个逻辑 hop，共用一个槽就等于
+     * 互相顶掉（而幂等键完全相同会让第二条直接复用第一条的行）。给了 purpose+changeId
+     * 就走 hopIdempotencyKey 的 impact 前缀，每条变更自己的槽。
+     */
+    purpose?: 'impact';
+    changeId?: string;
   }): Promise<
     | { endedBy: string; resumeRef?: string; persistentUnknown?: boolean }
     /**
@@ -1752,8 +1847,14 @@ export class Orchestrator {
       role: input.role,
       missionId: input.missionId,
       workItemId: input.workItemId,
+      purpose: input.purpose,
+      changeId: input.changeId,
     });
     if (parked) return parked;
+    // impact 跳的硬前提：牌口与平台能力都在，否则宁可不开这一跳。
+    // **绝不回退成普通 startCoordinator 发 impact 牌**：那张牌没有 changeId 绑定，
+    // 拿它去调专属动作只会得到「平台坏了」的错误。
+    if (input.purpose === 'impact') this.#requireImpactCapability();
 
     const now = this.#now().getTime();
     const usable = await this.#availableCandidates(input.pool, now);
@@ -1812,6 +1913,8 @@ export class Orchestrator {
           workItemId: input.workItemId,
           maxAttempts: limit,
           candidate: identity,
+          purpose: input.purpose,
+          changeId: input.changeId,
         });
         if (queued.kind === 'waiting') {
           if (queued.wait === 'capacity') {
@@ -1839,9 +1942,18 @@ export class Orchestrator {
       }
 
       const claim = this.#trustedQueueClaim(claimedHop);
+      // impact 跳仍走 coordinator pool（同一个并发上限与同一套候选健康），但**发的是
+      // 限权牌**：changeId 由牌铤死，只能读/写那一条变更。
       const { attemptId, token } =
         input.role === 'coordinator'
-          ? await this.#tokens.startCoordinator(input.missionId, profile, claim)
+          ? input.purpose === 'impact'
+            ? await this.#tokens.startImpactCoordinator!(
+                input.missionId,
+                input.changeId as string,
+                profile,
+                claim,
+              )
+            : await this.#tokens.startCoordinator(input.missionId, profile, claim)
           : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile, claim);
 
       let outcome: Awaited<ReturnType<Awaited<ReturnType<AgentRuntime['start']>>['wait']>> | undefined;
@@ -1901,9 +2013,9 @@ export class Orchestrator {
           throw writeError;
         }
       };
+      let impactSession: ImpactSupervisionSession = inertImpactSupervisionSession;
       try {
         // Attempt 已开：start 抛错也算消耗了这一跳。不置位的话 failover 会握着 A
-        // 的租约跳过 B；进程若在 start 返回前崩溃，hopRan 本来就不会落盘，
         // 未 complete 的租约仍可供恢复夹具接管。
         hopRan = true;
         const run = await input.pool.runtime.start({
@@ -1976,6 +2088,16 @@ export class Orchestrator {
               }
               // activityClass === 'other' → no command-start fact
             }
+          } else if (event.kind === 'tool.completed') {
+            // COM5 T2：工具结束是无条件事实，不看 activityClass，也不进命令计数。
+            // 与 command.started 共用同一条串行落盘队列：两条事实的相对顺序就是
+            // 「开始 → 结束」，并行写会让他们在存储层乱序，工具耗时正负翻转。
+            enqueueCommandDurable(() =>
+              this.#platform.recordToolCompleted(input.missionId, attemptId, {
+                callId: event.callId,
+                name: event.name,
+              }),
+            );
           } else if (event.kind === 'usage') {
             streamedUsage = event.usage;
             void this.#live.append({ ...base, kind: 'usage', usage: event.usage });
@@ -2022,12 +2144,30 @@ export class Orchestrator {
           }, this.#wallClockMs);
         };
         armWallClock();
+        // 唯一 hook 点：执行者的 wait 还没落定期间，可以开一条限权 impact hop 把
+        // L3 已确认变更的影响判断持久下来。监督只拿着 **同一份** waitPromise（绝不
+        // 去调第二次 run.wait()），它自己不能决定何时结束、也不能关掉任何 Attempt。
+        //
+        // wait 仍然只调一次：2076 那条 `await run.wait()` 换成 `await waitPromise`，
+        // 下面的 flushCommandDurable 包装原样保留（运行时抛错后也不能丢已收到的
+        // 命令持久事实）。
+        const waitPromise = run.wait();
+        impactSession = this.#beginImpactSupervision({
+          role: input.role,
+          purpose: input.purpose,
+          waitPromise,
+          missionId: input.missionId,
+          workItemId: input.workItemId,
+          executorAttemptId: attemptId,
+          executorClaim: claim,
+          cwd: input.cwd,
+        });
         // Flush durable command facts even when wait() throws after events were received.
         // Preserve the original runtime failure; do not let a secondary write error replace it.
         // If only the write fails, surface that so we never falsely claim authoritative coverage.
         let waitError: unknown;
         try {
-          outcome = await run.wait();
+          outcome = await waitPromise;
         } catch (error) {
           waitError = error;
         } finally {
@@ -2053,12 +2193,19 @@ export class Orchestrator {
           failureMessage: message,
         };
       } finally {
+        // **先 join 监督，再收尾执行者自己。**
+        //
+        // 这里的顺序不是风格问题：执行者已进入终态流程后还留着 in_progress 的 impact
+        // coordinator，它就既占着「唯一 coordinator」名额（后面的普通验收开不出
+        // Attempt），又在没人看着的时候往仓储里写判断。stopAndJoin 只停新启动：
+        // 已在飞的那一跳会跑完它自己的一跳，这里等它结束，**不 abort**。
+        await impactSession.stopAndJoin();
         clearInterval(heartbeat);
         clearTimeout(wallClock);
         unsubscribe?.();
         // 收尾必须在 finally：运行时崩了而 attempt 没收尾，这个工作项就
         // 永远开不了下一次尝试。
-        await this.#platform.finishAttempt(input.missionId, attemptId, {
+        const attemptFinish: Parameters<Platform['finishAttempt']>[2] = {
           // 被墙钟掐掉的记成 killed_wall_clock，不是 upstream_failure。
           // 运行时那边只看得到"进程被杀"，分不出是谁掐的——**只有这里知道**。
           // 不在这儿改正，事后要分辨就只能去 failureMessage 里做字符串匹配。
@@ -2078,7 +2225,20 @@ export class Orchestrator {
           ...(!runaway && outcome?.contextMetrics !== undefined
             ? { contextMetrics: outcome.contextMetrics }
             : {}),
-        }, claim);
+        };
+        if (input.purpose === 'impact') {
+          // impact 跳失租时 finishAttempt 会被围栏拒掉：走可信收尾关掉旧 Attempt，
+          // 且 **finally 必吊销牌** —— 迟到的工具调用必须被拒。
+          await this.#finishImpactHopWithLostFenceRecovery({
+            missionId: input.missionId,
+            attemptId,
+            token,
+            claim,
+            outcome: attemptFinish,
+          });
+        } else {
+          await this.#platform.finishAttempt(input.missionId, attemptId, attemptFinish, claim);
+        }
         // 收尾只裁当前 Mission/Attempt 的早期实时输出，保留尾部供事后排障。
         await this.#live.finish?.(input.missionId, attemptId).catch(() => undefined);
         this.#tokens.revoke(token);
@@ -2290,6 +2450,187 @@ export class Orchestrator {
   }
 
   /**
+   * 影响判断监督的**能力探测**（不试、不括、不回退）。
+   *
+   * 三项缺任何一项都算 unsupported：
+   *   - 牌口没有 `startImpactCoordinator` → 只能发普通牌，而普通牌没有 changeId 绑定；
+   *   - Platform.supportsChangeImpact() !== true → 专属读写全会被 CHANGE_IMPACT_UNSUPPORTED 拒掉；
+   *   - 队列仓储没有 `claimAvailable` → 走不了五维容量/公平，impact 会绕过上限。
+   * 不退化成普通 startCoordinator：那张牌过不了专属动作的校核，调用方只会把
+   * 「这里没装配」误读成「平台坏了」。
+   */
+  #impactCapacityReady(): boolean {
+    return (
+      typeof this.#tokens.startImpactCoordinator === 'function' &&
+      this.#platform.supportsChangeImpact() === true &&
+      this.#supportsCapacityClaim()
+    );
+  }
+
+  /** impact 跳的硬前提。不成立就**不开这一跳**，而不是拿普通牌去发 impact 牌。 */
+  #requireImpactCapability(): void {
+    if (!this.#impactCapacityReady()) {
+      throw new PlatformRuleError(
+        CHANGE_IMPACT_UNSUPPORTED,
+        '当前装配不支持影响判断专属跳（缺限权发牌口 / 变更仓储 / 容量领取），不启动 impact hop。',
+      );
+    }
+  }
+
+  /**
+   * 唯一 hook：把监督挂到执行者那一跳的 waitPromise 上。
+   *
+   * 默认关闭；不启用 / 不是执行者普通跳 / 本身就是 impact 跳（不许套第二层）时，
+   * 直接拿到一个 no-op session，调用方那边无需分支。
+   */
+  #beginImpactSupervision(input: {
+    role: 'coordinator' | 'executor';
+    purpose?: 'impact';
+    waitPromise: Promise<unknown>;
+    missionId: string;
+    workItemId: string | undefined;
+    executorAttemptId: string;
+    executorClaim: QueueClaimIdentity | undefined;
+    cwd: string;
+  }): ImpactSupervisionSession {
+    const settings = this.#impactSupervision;
+    if (settings === undefined || input.role !== 'executor' || input.purpose !== undefined) {
+      return inertImpactSupervisionSession;
+    }
+    const workItemId = input.workItemId;
+    const executorClaim = input.executorClaim;
+    const supported = impactSupervisionSupported({
+      settingsPresent: true,
+      issuerSupports: typeof this.#tokens.startImpactCoordinator === 'function',
+      platformSupports: this.#platform.supportsChangeImpact() === true,
+      capacityClaimSupported: this.#supportsCapacityClaim(),
+      executorClaimPresent: executorClaim !== undefined,
+      workItemPresent: workItemId !== undefined,
+    });
+    return beginImpactSupervision({
+      waitPromise: input.waitPromise,
+      settings,
+      missionId: input.missionId,
+      workItemId: workItemId ?? '-',
+      executorAttemptId: input.executorAttemptId,
+      executorClaimGeneration: executorClaim?.claimGeneration ?? -1,
+      supported,
+      // 只读接缝：失败（包括围栏拒）交给监督自己处置，这里不吞也不重试。
+      listPending: () =>
+        this.#platform.listPendingChangeRequests(
+          input.missionId,
+          workItemId ?? '-',
+          input.executorAttemptId,
+          executorClaim,
+        ),
+      runImpactHop: (change) =>
+        this.#dispatchImpactHop({
+          missionId: input.missionId,
+          cwd: input.cwd,
+          change,
+        }),
+      // 等待原因只用已有的那两种（project_busy / target_changed），不新增英文原因。
+      setWaitReason: (reason, detail) =>
+        this.#platform.setWaitReason(input.missionId, reason, detail),
+      observe: (entry) => {
+        this.impactObservations.push(entry);
+      },
+    });
+  }
+
+  /**
+   * 下发一跳 impact：走现有 #runHop，因此心跳 / 墙钟 / 候选健康 / 熔断 /
+   * 队列领取 / finally 收牌全部复用原路径，本跳不写第二套。
+   *
+   * 预算：下发前过一次既有 PRE 闸。硬上限已耗尽时不开新的判断 hop——
+   * 那只会多花一笔钱而什何也决定不了（这不是 abort，执行者那一跳照旧跑完）。
+   */
+  async #dispatchImpactHop(input: {
+    missionId: string;
+    cwd: string;
+    change: ChangeRequest;
+  }): Promise<ImpactHopDisposition> {
+    const gate = await this.#enforceAuthoritativeBudget(input.missionId);
+    if (gate.kind === 'stop') {
+      return {
+        kind: 'blocked',
+        detail: `既有预算闸已拦下本次运行（${gate.outcome.reason}），影响判断保留 pending。`,
+      };
+    }
+    const hop = await this.#runHop({
+      role: 'coordinator',
+      missionId: input.missionId,
+      // 目标工作项来自仓储里的那条变更，不是调用方自述。
+      workItemId: input.change.workItemId,
+      cwd: input.cwd,
+      pool: this.#coordinator,
+      instruction: impactSupervisionInstruction(input.change),
+      purpose: 'impact',
+      changeId: input.change.changeId,
+    });
+    if (!hop) return { kind: 'blocked', detail: '协调者候选耗尽，本轮不开影响判断。' };
+    if ('endedBy' in hop || 'alreadyCompleted' in hop) return { kind: 'ran' };
+    if ('retrySameSlot' in hop) {
+      return { kind: 'pending', detail: '同一 impact 槽已等到退避，下一拍重领。' };
+    }
+    const detail = hop.detail ?? this.#stallDetail(hop.exhausted, input.change.workItemId);
+    if (hop.exhausted === 'target_changed') return { kind: 'stale', detail };
+    // 容量 / 退避 / 暂停 / 缺候选：都是「现在不能开」而不是「判断失败了」。
+    // **保留 pending，不抢、不无 claim 启动。**
+    if (
+      hop.exhausted === 'project_busy' ||
+      hop.exhausted === 'cancelled_by_user' ||
+      hop.exhausted === 'no_available_agent' ||
+      hop.exhausted === 'attempt_limit_reached'
+    ) {
+      return { kind: 'pending', detail };
+    }
+    return { kind: 'blocked', detail };
+  }
+
+  /**
+   * impact hop 的收尾：围栏拒写时走**可信失租收尾**，且收不了也得把牌掉。
+   *
+   * 为什么不能直接把 finishAttempt 的错冒出去：执行者已经终态了，而这条 impact
+   * Attempt 会永远停在 in_progress；也不能“当成已收尾”默默过去：用量与结束原因
+   * 得落账。只拿 CLAIM_FENCE_REJECTED 走 helper（其余错误照旧抛 —— 把真故障
+   * 归成失租，等于把一个需要人看的问题写成等一等就好）。
+   *
+   * `revoke` 在 helper 自己的 finally 里：迟到的工具调用必须被拒。
+   * 外层 finally 后面那句重复 revoke 是幂等的（同一张牌删两次）。
+   */
+  async #finishImpactHopWithLostFenceRecovery(input: {
+    missionId: string;
+    attemptId: string;
+    token: string;
+    claim: QueueClaimIdentity | undefined;
+    outcome: Parameters<Platform['finishAttempt']>[2];
+  }): Promise<void> {
+    try {
+      try {
+        await this.#platform.finishAttempt(
+          input.missionId,
+          input.attemptId,
+          input.outcome,
+          input.claim,
+        );
+      } catch (error) {
+        if (!(error instanceof PlatformRuleError) || error.code !== 'CLAIM_FENCE_REJECTED') {
+          throw error;
+        }
+        // 只关这条旧 impact Attempt：不关新开的 coordinator，也不写 ChangeImpact。
+        await this.#platform.finishLostImpactAttempt(
+          input.missionId,
+          input.attemptId,
+          input.outcome,
+        );
+      }
+    } finally {
+      this.#tokens.revoke(input.token);
+    }
+  }
+
+  /**
    * Queue gate used by both coordinator/executor hops and HA independent review.
    * No-op when queuedHops was not injected, so existing fixtures keep their behaviour.
    */
@@ -2299,6 +2640,8 @@ export class Orchestrator {
     workItemId?: string;
     maxAttempts: number;
     candidate?: { runtimeKind: string; profileId: string };
+    purpose?: 'impact';
+    changeId?: string;
   }): Promise<
     | { kind: 'bypass' }
     | { kind: 'claimed'; hop: QueuedHop }
@@ -2327,6 +2670,8 @@ export class Orchestrator {
       role: input.role,
       workItemId,
       contractRevision: view.contractRevision,
+      purpose: input.purpose,
+      changeId: input.changeId,
     });
     const idempotencyKey = hopIdempotencyKey({
       missionId: input.missionId,
@@ -2334,6 +2679,8 @@ export class Orchestrator {
       workItemId,
       contractRevision: view.contractRevision,
       attemptCycle,
+      purpose: input.purpose,
+      changeId: input.changeId,
     });
     const nowIso = this.#hopClock.now().toISOString();
     const enqueueInput = {
@@ -2346,6 +2693,11 @@ export class Orchestrator {
       attemptCount: 0,
       maxAttempts: Math.max(input.maxAttempts, 1),
       idempotencyKey,
+      // 一条变更一个独立槽：不传这两样就会生成普通 coordinator key，于是影响判断
+      // 抢占验收跳的逻辑槽（两边其实是两件不同的事）。只给 impact 路径带上。
+      ...(input.purpose === 'impact' && input.changeId !== undefined
+        ? { purpose: input.purpose, changeId: input.changeId }
+        : {}),
     };
     const acquired = this.#supportsCapacityClaim()
       ? await this.#claimEnqueuedHopWithCapacity(enqueueInput, nowIso, input.candidate)
@@ -2428,7 +2780,20 @@ export class Orchestrator {
     | { kind: 'completed'; hop: QueuedHop }
     | { kind: 'waiting'; hop: QueuedHop; wait: QueuedHopWait }
   > {
+    // enqueue 前邻接快照：用来区分「本次插入新行」与「幂等命中旧行」。
+    // 放在 enqueue 紧前面，早取会和别的 runner 的入队之间出错。
+    const preEnqueueKeyed = new Set(
+      (await this.#queuedHops!.list()).map((row) => row.idempotencyKey),
+    );
     const hop = await this.#hopScheduler!.enqueue(input);
+    // COM5 T3：入队事件只在**本次真的插入了新行**时发。幂等命中旧行不补事件——
+    // 补一条等于把「这次没人入队」讲成「入队了」，而这正是排障要分辨的那件事。
+    if (!preEnqueueKeyed.has(input.idempotencyKey)) {
+      await this.#platform.recordHopEnqueued(input.missionId, hop);
+    }
+    // 认领事件只认 queued/retry_wait → claimed 那一次迁移。续租会改 updatedAt，
+    // 过期接管的 claimed 行是重新认领而不是首次认领，都不发这条。
+    const claimablePrior = hop.status === 'queued' || hop.status === 'retry_wait';
     if (hop.status === 'completed') return { kind: 'completed', hop };
     const parked = parkedQueuedHopWait(hop, nowIso);
     if (parked) return parked;
@@ -2466,7 +2831,12 @@ export class Orchestrator {
       // 仓储不得把非 eligible 行领走。若仍发生，不得 complete（会丢掉别人的工作）。
       return { kind: 'waiting', hop, wait: 'lease' };
     }
-    if (result.kind === 'claimed') return result;
+    if (result.kind === 'claimed') {
+      // claimedAt 取**本次认领返回行**的 updatedAt：随后 renew 会把它覆盖，
+      // 所以事件必须在这里、用返回行写下来，事后再读行就永远拿不到认领时点。
+      if (claimablePrior) await this.#platform.recordHopClaimed(input.missionId, result.hop);
+      return result;
+    }
     if (result.kind === 'waiting') return result;
     const latest = (await this.#queuedHops!.get(hop.id)) ?? hop;
     if (latest.status === 'completed') return { kind: 'completed', hop: latest };
@@ -2548,6 +2918,8 @@ export class Orchestrator {
     role: HopRole;
     missionId: string;
     workItemId?: string;
+    purpose?: 'impact';
+    changeId?: string;
   }): Promise<{ exhausted: WaitReason; detail: string } | undefined> {
     if (!this.#queuedHops) return undefined;
     const view = await this.#platform.getMissionView(input.missionId);
@@ -2558,6 +2930,8 @@ export class Orchestrator {
       role: input.role,
       workItemId,
       contractRevision: view.contractRevision,
+      purpose: input.purpose,
+      changeId: input.changeId,
     });
     const existing = rows.find(
       (row) =>
@@ -2568,6 +2942,8 @@ export class Orchestrator {
           workItemId,
           contractRevision: view.contractRevision,
           attemptCycle,
+          purpose: input.purpose,
+          changeId: input.changeId,
         }),
     );
     if (!existing) return undefined;
@@ -2619,7 +2995,7 @@ export class Orchestrator {
   }): Promise<QueuedHop> {
     // 报告失败不得 catch 后假装成功：仓储缺方法或围栏拒写都必须冒出来，
     // 否则会走回 complete / 换槽，把同一失败再计一次或把 hop 放掉。
-    return this.#hopScheduler!.reportFailure({
+    const reported = await this.#hopScheduler!.reportFailure({
       id: input.hop.id,
       claimGeneration: input.hop.claimGeneration!,
       attemptId: input.attemptId,
@@ -2628,6 +3004,13 @@ export class Orchestrator {
       disposition: input.disposition,
       retryable: input.retryable,
     });
+    // 只有真的进了退避才写 backoff：dead_letter 不发（它不是等待），
+    // 幂等重放返回同一行也不补第二条。
+    if (reported.status === 'retry_wait') {
+      await this.#platform.recordHopBackoff(input.hop.missionId, reported);
+    }
+    // 原样返回仓储结果：错误不吞，状态也不改写成别的。
+    return reported;
   }
 
   /**

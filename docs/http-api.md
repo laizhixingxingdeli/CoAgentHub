@@ -394,7 +394,22 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ### GET /api/missions/:missionId
 
-鉴权：控制面（可选resolver）。参数：路径missionId。完整视图包含契约、结果、升级和签字。
+鉴权：控制面（可选resolver）。参数：路径missionId。完整视图包含契约、结果、升级和签字，另附只读的 `timeAttribution` 时间归因投影。
+
+`timeAttribution` 为**只读派生**字段，取值规则：
+
+- `schemaVersion`：当前为 `1`。`coverage`：`complete` / `partial` / `unknown`，分别表示投影里全部、部分、没有可计区间。
+- `totalOccupiedMs`：已知阶段的**并集**总长；没有任何已知区间时是 `null`（不是 `0`，空输入不制造零）。
+- `phases[]`：每项含 `kind`（**闭集**：`queue` / `hop_backoff` / `schedule_select` / `agent_run` / `tool` / `validation` / `l2_review` / `waiting_decision` / `pause` / `park` / `unclassified`）、可选 `start` / `end`、`durationMs`、`attemptId` / `workItemId`、`countedInTotal`、`overlaps[]`、`quality`（`measured` / `unknown`）、可选 `note`；`agent_run` 还原样带 `attempt.ended` 的 `usage`。
+- `durationMs: null` 表示**未知**：缺事件（如没有 `runtime.tool.completed`、没有 `attempt.ended`、历史 hop 没有认领时点）一律标未知，**不**用当前时间、下一条事件、token 或 `contextMetrics` 推算毫秒。未知项不进总占用。
+- 重叠（如验证窗落在某次运行内）**两侧都显示**，相交的切片只进 `totalOccupiedMs` 一次，并在双方 `overlaps` 里标明。
+- 展示层的「未分类」指某次运行里减去已知工具并集之后的剩余，它挂在 `agent_run` 内、不额外计入总占用。
+
+口径说明：
+
+- 工具的开始/结束时间是**串行落盘钟**（`runtime.command.started` / `runtime.tool.completed` 各自的 `at`），所以 `durationMs` 的误差是两次落盘延迟之差，不是测量噪声。
+- hop 的精确发生时点（`hop.enqueued` / `hop.claimed` / `hop.backoff`）只写在事件 `data` 里，**不**改写 `QueuedHop` 里可被续租/失败覆盖的字段；当前投影对排队与退避按**事件 `at`** 计算。
+- 报告里的 `outputTail` 等命令正文**不属于**时间归因输入，本字段里不会出现。
 
 请求示例及本机curl：
 
@@ -408,7 +423,16 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 {
   "missionId": "M-example",
   "status": "planning",
-  "workItems": []
+  "workItems": [],
+  "timeAttribution": {
+    "schemaVersion": 1,
+    "coverage": "partial",
+    "totalOccupiedMs": 120000,
+    "phases": [
+      { "kind": "agent_run", "start": "2026-10-07T03:00:06.628Z", "end": "2026-10-07T03:04:04.086Z", "durationMs": 237458, "countedInTotal": true, "overlaps": [], "quality": "measured" },
+      { "kind": "tool", "start": "2026-10-07T03:00:30.000Z", "durationMs": null, "countedInTotal": false, "overlaps": [], "quality": "unknown", "note": "缺少 runtime.tool.completed，工具时长未知" }
+    ]
+  }
 }
 ```
 
@@ -863,6 +887,10 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ## agent 工具接口
 
+impact Run（`purpose='impact'` 的 run token）是限权身份：只放行 `GET /api/run/brief`、映射到 missionRead / attemptGetBrief / attemptGetContext / workItemGetAgentDetail 的 `/api/agent/*` 读工具（如 get_mission、get_contract、get_project_context、get_work_item、get_validation_report），以及两个按**精确工具名**点名的专属工具 `coagent_get_change_request`（body 必须为空）与 `coagent_submit_change_impact`（body 只接受 decision/workOrderDiff/affectedAcceptance/reason）。这两个工具不入策略矩阵、不复用任何宽泛写别名，只在 impact 牌上放行，且另要求 role=coordinator、changeId 与目标 workItemId 非空、claim 三元组完整；请求指向的工作项与牌上目标不一致时 403。普通协调者/执行者/独立检视者牌对它们一律 403 `ACTION_DENIED`。同一个 changeId 上重复提交相同业务内容按幂等返回原记录，内容不同回 409 `CHANGE_IMPACT_CONFLICT` 且不覆盖。其余一切入口（含 finish、两种终审、控制写与未知工具）一律 403 `ACTION_DENIED`，且在被拒前不读 body、不落盘。绑定、来源与角色门禁对放行的读继续生效（例如 get_context 仍按实际来源门禁执行，impact 不解锁它）。purpose/changeId/role 只由可信调用方在发牌时配对写入，HTTP 没有签发端点，body 自述一律不采信。
+
+影响判断只是**判断**，不是应用：提交 decision 不触发重派 / 取消，也不把任何状态标成 applied / verified；原冻结工单不改。本阶段尚未启动 impact 运行监督。
+
 ### GET /api/run/brief
 
 鉴权：run token。参数：x-coagent-run必填。绑定本次运行的开跑简报，包含契约/工单与角色需要的上下文。
@@ -914,6 +942,41 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 ```json
 {
   "id": "W-1"
+}
+```
+
+### POST /api/agent/coagent_get_validation_report
+
+鉴权：run token。参数：body 见请求示例，workItemId 必填且为非空字符串，reportId 可选、给出时必须是非空字符串；Mission/Attempt/角色只从 x-coagent-run 取，body 里带 missionId / attemptId / role 一律不采信，也不能借 L3 控制面身份。返回 完整 ValidationReport（checks 含 command.argv/cwd/exitCode/outputTail，成功项与长输出都不裁剪）；以 Platform 领域类型为准。仅协调者可读，执行者/查询者/独立检视者与无 run 的运行一律拒绝；不是 L3 控制面。默认取同一 WorkItem 当前 submittedAttemptId 最新一条 validation.reported 所引用的报告，显式 reportId 也须被当前提交的引用事件认下，且报告自身 missionId / workItemId / attemptId 与当前提交一致。不存在 / 跨 Mission / 跨工单 / 旧来源 / 无来源统一 404 VALIDATION_REPORT_NOT_FOUND，文案不泄露归属；读取不产生事件与状态转移。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"workItemId":"W-1"}' 'http://127.0.0.1:3101/api/agent/coagent_get_validation_report'
+```
+
+响应结构摘录：
+
+```json
+{
+  "id": "VR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "attemptId": "AT-1",
+  "passed": true,
+  "checks": [
+    {
+      "kind": "command",
+      "passed": true,
+      "summary": "command exited 0",
+      "command": {
+        "argv": ["node", "--test"],
+        "cwd": "/proj",
+        "exitCode": 0,
+        "outputTail": "tests 1 / pass 1 / fail 0\\n"
+      }
+    }
+  ]
 }
 ```
 
@@ -1279,6 +1342,160 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
       "证据不足"
     ]
   }
+}
+```
+
+### POST /api/agent/coagent_get_change_request
+
+鉴权：run token，且必须是 role=coordinator、purpose=impact、changeId 与目标 workItemId 均非空、并带完整 claim 三元组的**影响判断牌**。参数：body必须为空；Mission/Attempt/WorkItem/changeId身份全部来自x-coagent-run。返回 本次要判断的那条已确认变更（ChangeRequest）；以Platform领域类型为准。该请求指向的工作项必须与牌上钉死的目标一致，否则403 ACTION_DENIED。普通协调者/执行者/独立检视者牌一律403 ACTION_DENIED；body不接受任何字段，changeId不受理。目标那一侧的租约/代次/Attempt 已失效时由Platform回409（如 CLAIM_FENCE_REJECTED / UNKNOWN_ATTEMPT）；平台未装配变更仓储与队列槽时回409 CHANGE_IMPACT_UNSUPPORTED（不降级成放行）。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{}' 'http://127.0.0.1:3101/api/agent/coagent_get_change_request'
+```
+
+响应结构摘录：
+
+```json
+{
+  "changeId": "CR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "attemptId": "W-1.exec-1",
+  "claimGeneration": 1,
+  "confirmedChange": "改 < 为 <="
+}
+```
+
+### POST /api/agent/coagent_submit_change_impact
+
+鉴权：run token，且必须是 role=coordinator、purpose=impact、changeId 与目标 workItemId 均非空、并带完整 claim 三元组的**影响判断牌**。参数：body仅接受decision（compatible 兼容照跑｜replan 需重排｜cancel_replace 需取消替换）/workOrderDiff/affectedAcceptance/reason；Mission/Attempt/WorkItem/changeId身份全部来自x-coagent-run。返回 已保存的影响判断（ChangeImpact）；以Platform领域类型为准。提交前先读一次请求核目标：目标与牌不一致时403 ACTION_DENIED；目标不满足时由Platform回409（CLAIM_FENCE_REJECTED / UNKNOWN_ATTEMPT / UNKNOWN_CHANGE_REQUEST）。普通协调者/执行者/独立检视者牌一律403 ACTION_DENIED；body里任何身份字段一律400。同一个changeId上重复提交相同业务内容按幂等返回原记录（不再发事件），内容不同回409 CHANGE_IMPACT_CONFLICT且不覆盖原记录。
+
+**这只是「判断」，不是「应用」**：decision=replan / cancel_replace 都不会触发重派或取消，也不把任何状态标成 applied / verified。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"decision":"compatible","workOrderDiff":"把 step 2 换成 step 2b","affectedAcceptance":[1],"reason":"step 2b 仍可执行"}' 'http://127.0.0.1:3101/api/agent/coagent_submit_change_impact'
+```
+
+响应结构摘录：
+
+```json
+{
+  "changeId": "CR-1",
+  "decision": "compatible",
+  "claimGeneration": 1,
+  "coordinatorAttemptId": "coord-2"
+}
+```
+
+### POST /api/agent/coagent_get_change_deliveries
+
+鉴权：run token，且必须是 role=executor、**不是** impact 牌、attemptId 与 workItemId 非空、并带完整 claim 三元组的**执行者自己的牌**。参数：body 必须是空对象 `{}`——目标 Mission / Attempt / WorkItem / 代次全部来自 x-coagent-run。返回 `{ deliveries: [...] }`，其中每项含 changeId / workOrderDiff / affectedAcceptance / diffHash / receipts（已录到的层）；以 Platform 领域类型为准。只有结论为 compatible、且 attemptId 与代次都对得上这一趟执行的差异会出现：replan 与 cancel_replace 不由执行者自己决定照跑，跨 Attempt 的差异交回来会被当成这一趟的。没有符合的差异时返回空数组，不是错误。coordinator / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`（impact 牌因不在白名单里、在读 body 之前就被拒）；body 里多任何字段一律 400 `BAD_REQUEST`；租约失效或代次不符回 409（`CLAIM_FENCE_REJECTED` / `UNKNOWN_ATTEMPT`）。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{}' 'http://127.0.0.1:3101/api/agent/coagent_get_change_deliveries'
+```
+
+响应结构摘录：
+
+```json
+{
+  "deliveries": [
+    {
+      "changeId": "CR-1",
+      "workOrderDiff": "把 step 2 换成 step 2b",
+      "affectedAcceptance": [1],
+      "diffHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241",
+      "receipts": []
+    }
+  ]
+}
+```
+
+### POST /api/agent/coagent_ack_change_receipt
+
+鉴权：同上（执行者自己的牌）。参数：body 只接受 changeId / layer（layer=executor_started 时还必须带 contentHash，即 workOrderDiff 的 sha256 小写 hex）；Mission / Attempt / WorkItem / role / claim / claimGeneration / at / verified 一律不受理——多一个身份字段就 400，身份全部由牌与已持久的影响判断补齐。layer 取 adapter_received（执行侧已收到）｜ session_consumed（已进入会话）｜ executor_started（执行者自述已按差异继续）；verified 不是可写层。返回写下的那一层回执（ChangeReceipt）；以 Platform 领域类型为准。
+
+只有发给这趟执行的 compatible 差异可回执：replan / cancel_replace 与跨 Attempt 的差异回 409 `CHANGE_NOT_DELIVERABLE`；低层没落就写高层、或已录高层再写低层回 409 `RECEIPT_LAYER_ORDER`；executor_started 的 contentHash 与实际 diff 不符回 409 `RECEIPT_HASH_MISMATCH`；租约失效或代次不符回 409 `CLAIM_FENCE_REJECTED`；同一层重复回执相同内容按幂等返回原记录（不再发事件），内容不同回 409 `CHANGE_RECEIPT_CONFLICT` 且不覆盖。coordinator / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`；body 多字段或 layer 不合法一律 400 `BAD_REQUEST`。所有拒绝要么在读 body 之前、要么在同一个事务内回滚，盘上逐字节不变。
+
+**回执（ACK）不等于已应用或已验证**：它只记「接收侧承认收到了」，回执链全程没有 verified 层；也不等于执行结果通过验收、不等于这份 diff 已经合进产线。写回执的动作不能用来证明质量。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"changeId":"CR-1","layer":"executor_started","contentHash":"9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"}' 'http://127.0.0.1:3101/api/agent/coagent_ack_change_receipt'
+```
+
+响应结构摘录：
+
+```json
+{
+  "changeId": "CR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "attemptId": "W-1.exec-1",
+  "claimGeneration": 1,
+  "layer": "executor_started",
+  "contentHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"
+}
+```
+
+### POST /api/agent/coagent_record_change_coverage
+
+鉴权：普通 coordinator run token（L2 声明这条差异已经落到哪一轮工单上），**不是** impact 牌。参数：body 只接受 changeId / orderRevision / workOrderHash（workOrderHash 是修订后工单内容的 sha256 小写 hex，64 位）；missionId / attemptId / workItemId / role / claim / claimGeneration / at / verified / applied 一律不受理——多一个就 400，身份全由牌补齐。executor / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`（在读 body 之前就拒）；body 多字段、字段为空或 workOrderHash 不是 64 位小写 hex 一律 400 `BAD_REQUEST`。返回写下的那条 ChangeCoverage；以 Platform 领域类型为准。
+
+**这是 L2 的一条声明，不是已应用、也不是已验证**：它说的是「指向旧 Attempt 的那份兼容差异，已经写进修订后的工单」，平台核对属实后才成立。执行还没发生，验收也没发生；这条记录本身不构成执行结果通过验收的证据，也不代表差异已经合进产线。后续提交只要在交卷快照里带上与这里一致的工单修订号与 workOrderHash，就算覆盖了这条变更。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"changeId":"CR-1","orderRevision":"r2","workOrderHash":"9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241"}' 'http://127.0.0.1:3101/api/agent/coagent_record_change_coverage'
+```
+
+响应结构摘录：
+
+```json
+{
+  "changeId": "CR-1",
+  "missionId": "M-example",
+  "workItemId": "W-1",
+  "orderRevision": "r2",
+  "workOrderHash": "9d4fbbb3d09d3b36d8573d4185d0bbc69e52e61c3b2dabb72e68c11539512241",
+  "coordinatorAttemptId": "W-1.coord-1",
+  "at": "2026-10-07T00:00:00.000Z"
+}
+```
+
+### POST /api/agent/coagent_record_acceptance_disposition
+
+鉴权：普通 coordinator run token（L2 在验收时写明这一条口径这次怎么处置），**不是** impact 牌。参数：body 只接受 dispositionId / index / decision / workItemIds / basis；missionId / attemptId / role / claim / at / contractRevision 一律不受理——多一个就 400（错误里带那个键名），身份全由牌补齐。executor / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`，**且在读 body 之前就拒**（body 是非法 JSON 也是 403，不是 400）；index 落在当前契约验收口径范围之外、决策取值不对等一并在这里汇总为 409 `ACCEPTANCE_DISPOSITION_REJECTED`。返回写下的那条 AcceptanceDispositionRecord；以 Platform 领域类型为准。
+
+**这是 L2 的一条判断，不等于验收已通过，也不等于已验证**：它记录的是「这条口径这次复用 / 复验 / 新要求」，平台核对的是处置凭据本身（原文有没有变、报告是不是按当前工单这套命令与范围跑出来的），核对通过也不代表这条口径已经通过验收、也不代表结论已经验证过。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"dispositionId":"D-1","index":1,"decision":"revalidate","workItemIds":["W-1"],"basis":{"note":"复验"}}' 'http://127.0.0.1:3101/api/agent/coagent_record_acceptance_disposition'
+```
+
+响应结构摘录：
+
+```json
+{
+  "dispositionId": "D-1",
+  "missionId": "M-example",
+  "contractRevision": 1,
+  "index": 1,
+  "decision": "revalidate",
+  "workItemIds": ["W-1"],
+  "basis": { "note": "复验" },
+  "coordinatorAttemptId": "M-example.coord-1",
+  "at": "2026-10-07T00:00:00.000Z"
 }
 ```
 

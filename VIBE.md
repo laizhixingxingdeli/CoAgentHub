@@ -22,7 +22,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - **L2 协调者**：在一个 Mission 内规划、拆 WorkItem、写冻结工单，逐项验收执行者的交付，在代码层面守住架构。可以改 plan；**不能改契约**（契约只由 L3 修订），发现契约不成立、或者影响目标 / 验收标准 / 架构边界时升级给 L3。对 `.coagent/` 只能在交卷时提议（memoryDelta）。开工先核对检视者的票：每条验收要改的文件是否都在范围里、提到的输入是否存在、诊断与假设是否属实、验收之间是否矛盾；核对通过就在同一跳里接着建单派发；有问题才先升级、不派工（检视者下发的不一定对）。每一跳都要以结构化动作结束，只更新规划不算推进。派工前先把整个改动捋顺写进规划，分五步：探索要动的模块和调用方；定测试接缝（优先已有的、越高越少越好）；写设计（实现决定、各处怎么衔接、碰到哪些既有测试与不变量、不做什么）；拆工单（先预重构，再一张一条能单独验证的小路径并写明依赖，牵动面大的改动先加新形式、分批迁移、最后删旧的）；只派依赖已完成的一批。不边派边想，不派「先试试看」的工单（用户 2026-10-01，参照 to-spec / to-tickets）。工单按下面的「工单标准」写。
 - **L1 执行者**：只执行冻结的 WorkOrder，不能自验收、不能重新定义目标；工单不够就报 blocked，不自己补分析。
 - **落地**：未经 L3 不得 completed。无人值守按方案推进时，机器 L3 凭合并后在**集成分支**上跑出的方案级验证放行（ADR-0004）。master 一律由用户放行。
-- **Lightweight（Fast Lane）**：没有协调者规划会话，分类时写好一张冻结工单，由机器验证验收；验证没过或改动超出轻量规模就转 Standard 交协调者。仍须 L3 落地（ADR-0004）。
+- **Lightweight（Fast Lane）**：分类时写好一张冻结工单，不开协调者规划会话。机器验证通过后，由与 Standard 相同候选池的协调者逐条验收；accept 后交 L3，reject 在同一协调者跳转 Standard 并继续规划，计入既有 AC1 连续失败。机器验证失败或超出轻量规模照旧升级 Standard；机器报告不代替 L2/L3 权威（AC4，2026-10-04 收尾验证）。
 - **high_assurance**：独立检视 + 检视者签名放行的通道已实现（ADR-0006），但按用户决定关着（HAOFF1）：判为 high_assurance 的票按 Standard 走；四类禁止副作用仍然拒绝建单。
 - **队列**：Mission 是基本单位，按顺序与依赖一个接一个推进；方案只是排序的工具，不另立一套升级、上限与记录（ADR-0007）。
 
@@ -32,12 +32,15 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 1. 一张工单做一个完整的小功能（连同它的测试和文案），一般改 1–3 个文件。不要把同一个功能拆成类型、接线、文案、测试多张——每多一张就多一轮派发、验证、验收，约 5 分钟；也不要把几条不相关的修改塞进一张（第 8 条）（用户 2026-10-03 要求提速）。
 2. 写明要读的文件和行段，执行者不必再搜索。
+   - 尺寸建议：常规工单预计 15–20 分钟完成；需阅读/修改约 300 行以上、涉及多组 fixture 或多处接线时，先由协调者核实接缝，按调用点或用例组拆成能各自验证的单元。这是预警，不是行数或时间硬门禁；简单任务只需位置、目标和一条命令。
 3. 写明改什么：哪个函数、什么位置、改成什么行为，必要时给签名或伪代码。
 4. 测试最多 1–2 条，写明测什么、断言什么。
 5. 验证命令一两条，可以直接复制运行。
 6. 执行者交半成品或报卡住，说明工单太大或不清楚：拆小或写清楚再派，不原样重派；同一个行为拆了 3 次还没过，升级给检视者。
 7. 新代码守工程规范的预警线（`architecture/engineering-standards.md`，用户 2026-10-02）：新函数不超过 40 行、嵌套不超过 3 层、参数不超过 4 个。这些数都是建议、不是硬约束（用户：「只是建议…没必要硬性要求」）：要改的大文件不让它明显变大——接线需要的少量新增可以，要加的多就抽成新模块；不许为了凑行数删注释、压缩写法；协调者不得把行数写成工单的硬约束（AC3 的 W-432 写了「orchestrator.ts 不增长」，执行者为此删注释、反复数行数）。协调者验收按那份规范的审查五维（设计、功能、复杂度、测试、命名与注释）逐项看，超线的要么让执行者拆，要么在验收理由里写明为什么可以。
 8. 打回时修改要求有好几条，就拆成几张各管一条的小单再派，不要合成一张原样重派（AC3 的 W-429 一张单塞了四条修改，cn:hy3 连续三次把输出上限全用在思考上、交不出结果）。
+9. 执行者开工第一步先跑工单 verification 里的定向命令，并经 `coagent_submit_evidence` 交一次证据（红的也交）：平台会把 30 分钟零证据的执行判为 runaway 并停下，中途交过证据才把墙钟延长一次。协调者派单前自己先跑一次定向，把已知失败和修改位置写进工单，执行者就不用再通读调度内部。（B2b 的 W-473、W-478、W-479 连续三次栽在开工通读约 25 分钟上；契约 r5 改成先交证据之后，W-480、W-481 分别 4 分钟和 20 分钟交卷，2026-10-06。）
+10. 少走一来一回（用户 2026-10-07 要求提速）：①工作项的平台 VR 摘要全绿（每条命令 passed，changed-paths / forbidden-paths 通过）时，协调者直接验收，不为补全文升级；只有 VR 失败或需要失败细节时才升级要全文，完整 VR 原文由 L3 在终审时核对。②最后一张实现单的 validation 直接带 `node --test` 全量，它的 VR 就是最终提交的平台全量；只有最后一张单之后又有改动，才补零代码验证单。③只派依赖已经 accepted 的单，不派明知会 blocked 的单。④实现单不设行数硬上限，diffSize 只用于零代码验证单。（B4 一个 Mission 里，两次升级往返各约 10 分钟，单开的验证单约 10 分钟，行数上限造成两次重派。）
 
 ## Architecture
 
@@ -105,23 +108,39 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 换行：提交进仓库的内容（blob）一律是 LF；本机 `core.autocrlf=true`，检出的工作副本是 CRLF。同一个文件里不要混用 LF 和 CRLF。否则会出现整文件的伪改动，看不清真实改了什么。
 - 不碰 `.idea/`（用户的 IDE 配置）。否则会改坏或提交用户本地的设置。
 - 不读凭据文件（例如 `~/.pi/agent/auth.json`、`typesafe.env`），不在输出、日志、提交里打印 key，给子进程的环境不额外塞凭据（透传名单见 `specs/spawn-env-filter`）。否则凭据会随日志、产物或提交泄露。
+- 协调者和执行者都不直接打开主工作区的 `.coagent-state.json` 及其锁目录，只读也不行：平台服务一直在写这个文件，Windows 上有人打开着它，服务的原子替换就会失败，整个运行崩掉。要看别的 Mission 的状态或活动，用只读 HTTP（`GET /api/missions/<id>`、`GET /api/missions/<id>/activity`），或在交卷里写明需要 L3 提供样例。（COM5-design 的调查报告曾直接读运行中的状态文件取样例，2026-10-07。）
 
 ## 协作与流程
 
 检视者、协调者和平台操作时遵守。
 
 - 只按显式路径 `git add` / commit，不用 `git add -A`、`git add .`。否则会把用户的未跟踪文件（IDE 配置、本地方案文件、实验输出）卷进提交。
-- 主工作区就是集成分支 `auto/harness-remaining` 的检出。Mission 在跑时，集成分支上不许有任何新提交（文档、手工改动、别的会话的改动都算），主工作区也不许留未提交的改动。否则平台合不进这个 Mission：合入要求目标 HEAD 等于 Mission 开工时的提交、且工作区干净（REF1 就因此只能手动合入）。手工或别的会话的改动在单独的 worktree / 分支上做，两个 Mission 之间由检视者合入。
+- Mission 的目标集成分支与 projectRoot 以 workspaceRef 为准，不从主工作区当前分支推断；2026-10-04 主工作区为 master，通信优化使用独立 codex/communication-integration worktree。Mission 在跑时，目标集成分支上不许有任何新提交（文档、手工改动、别的会话的改动都算），目标集成工作区也不许留未提交的改动。否则平台合不进这个 Mission：合入要求目标 HEAD 等于 Mission 开工时的提交、且工作区干净（REF1 就因此只能手动合入）。手工或别的会话的改动在单独的 worktree / 分支上做，两个 Mission 之间由检视者合入。
 - 验证在独立 worktree（`.coagent-worktrees/` 下）里跑，不在用户的主工作区里跑。否则主工作区里用户开着的 IDE、未跟踪文件会被算进改动，或被验证过程改坏。
 - 冻结票和验收时不要求穷举测试；协调者验收不得要求超出契约点名的测试。否则测试越写越多，便宜的执行者反复返工。
 - 前端换框架的判据：需要虚拟滚动 / 拖拽 / 富文本这类复杂组件，或页面数超过 8。在那之前，「换成 React 会更好写」不是理由。
 
+## 已确认 Mission 的连续运行（2026-10-04）
+
+基本单位仍是 Mission；用户确认冻结清单后通过项目 mission-queue 入队，执行目录、适配器、检视者与集成验证属于项目 execution-config。队列只提供顺序和依赖，门禁、费用、失败和最终审查按 Mission 处理。配置变化仅影响未启动任务；人工签字也必须跑项目集成验证，失败回滚并留待审查。使用步骤见 reviewer-runbook 的 Mission 队列节；生产旧 run-plan 已退役，历史记录保留恢复兼容。
+
+
+## AC4 收尾记录（2026-10-04）
+
+AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-20261004 经执行者证据、协调者逐条 L2 与 L3 最终审查 completed，通过插件合入 codex/communication-integration（a756fc5）。全量 2365 tests / 2358 pass / 0 fail / 7 既有 HAOFF1 skip；报告见 docs/ac4-platform-closeout-20261004.md。3101 常驻服务托管了本收尾任务，但本票未另跑真实 lightweight Mission 作端到端验证。
+
+历史 PLAN-harness-remaining-20261003-0307-AC4 保留 parked、未 completed，历史 PlanRun 已 stopped；它已有部分 WorkItem accepted 成果与 L2 记录，缺的是整份 Mission 的最终交卷与验收，不能把独立收尾结论补造为历史记录，也不能把未整票完成写成所有历史工作项均无验收。此次文档及收尾仅合入独立集成分支，master 仍待用户另行授权。
+
 ## Capability 索引
 
+- **acceptance-evidence** — 验收证据处置
+  平台按契约修订留下验收原文。协调者对受影响条目显式写下 reuse、revalidate 或 new_requirement。交卷门禁默认关闭，只在显式开启后约束受影响条目。不做语义推断，不做跨环境测试缓存。
 - **candidate-circuit** — 候选熔断持久状态
   候选熔断按 `profileId` 隔离。查询无记录返回 `closed`；`open` 保存失败分类 `failureClass` 和 ISO `openUntil`。显式非探测失败可从任何状态重新打开并覆写分类与截止。
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
   入口把**结构化 facts / assessment** 交给确定性 classifier，再按推荐路由创建 Mission（或拒绝）。caller **不得**自填 route。
+- **code-metrics** — 代码度量告警
+  `src/application/code-metrics.ts` 接收源码路径与文本，近似报告文件超过 400 行、函数超过 40 行、参数超过 4 个、嵌套超过 3 层、复杂度达到 15 及 src 相对依赖环。复杂签名、表达式箭头、读
 - **context-attribution-report** — 离线只读上下文归因报告
   在启用任何默认简报裁剪前，先从已持久化的文件状态量出可归因的逐 Attempt 信号及历史缺口。运行 `node src/context-attribution-report.ts --input <state.json> [--archi
 - **context-builder** — 角色 Context Bundle 与开跑简报来源
@@ -146,6 +165,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   `Platform.listRuns(missionId)` 是同一任务多次运行的只读对照出口；`src/l3.ts runs` 直接展示这些事实。
 - **file-state-atomic-write** — 文件状态原子提交短暂改名拒绝重试
   FileStateStore 的主状态文件先写临时文件再 rename 覆盖。仅遇到 Windows 常见临时拒绝 `EPERM`、`EBUSY`、`EACCES` 时短退避有限重试（最多十次、总等待不超过约两秒）；其他错误立即抛出，重试耗
+- **generated-git-commits** — 平台生成的 Git 提交与分支释放
+  检查点为 `chore(mission): <W-n> 检查点 <missionId>`，交付为 `chore(mission): 执行者交付 <missionId>`，合并为 `merge(mission): <missionId> <契
 - **hosted-run-routing** — 常驻持锁服务编排入口与 CLI 回环转发
   文件存储下，`run-mission` 与 `run-plan` 保留原有命令前缀。正式运行在输入和环境前置校验、方案资格筛选/仓库预检之后探测同一 statePath 写者：经身份验证的 live 服务由回环 HTTP 启动，并在同一服务
 - **http-control-auth** — HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
@@ -176,8 +197,12 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   按 `missions/PLAN-*.json` 的资格候选顺序逐项推进；`node src/run-plan.ts` 驱动，独立 JSON PlanRun 记录方案层状态、升级、决定和停止原因，与 Mission 和 Mission 内 
 - **query-run** — 独立 QueryRun（只读问答）
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
+- **reviewer-workflow** — 检视者工作流
+  2026-10-03 直接实施：RV1–RV5 后端与可选 MCP 补充入口。公开 HTTP 契约见 `docs/http-api.md`；不包含前端界面设计。
 - **run-token-lifecycle** — Run Token 生命周期（RECON-002A）
   Run Token 是某一次 Attempt 的临时运行身份；Agent 只能通过 token 获得 mission / attempt / role / workItem 上下文，不接受请求体自述身份。
+- **runtime-change** — 运行中变更
+  Application 的 ChangeRequestRepository 提供 append/get/listByMission；内存与 File 实现保存 L3 确认的原始请求。记录字段为 changeId、missionId、revi
 - **runtime-observability** — 运行时状态路径、实时输出与模型清单
   直接执行 `node src/main.ts` 且未设 `COAGENT_STATE` 时，状态文件缺省为该 `src/main.ts` 所在仓库根的 `.coagent-state.json`，与调用时的 cwd 无关。缺省路径不存在则拒
 - **spawn-env-filter** — 子进程环境过滤（Spawn env filter）
@@ -186,6 +211,8 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
   Standard 工作项的冻结工单带 `validation.commands` 时，执行者交卷后、下一跳协调者评审前，平台在可信 Mission 工作目录用现有 `ValidationEngine` 执行命令（argv、不经 shell、
 - **startup-reconciliation** — 启动收敛（RECON-002B）
   平台接手时把上一次残留的在途状态收干净：判死无人收尾的 Attempt、回收孤儿 worktree、补裁它们的实时输出。
+- **time-attribution** — 时间归因
+  应用层纯函数 projectTimeAttribution 将活动、验证报告起止及本 Mission hop 投影成 schemaVersion 1、coverage（complete / partial / unknown）、totalO
 - **validation-review-authority** — ValidationReport 与 ReviewAuthority
   机器独立验收与协调者自报权威分立。执行者**不得**给自己签发通过。
 - **web-shell** — 正式 Web 端外壳、项目页与任务详情
