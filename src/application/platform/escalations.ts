@@ -4,6 +4,54 @@ import { PlatformContext, PlatformRuleError } from './context.ts';
 import { escalationDeliveryKey } from '../delivery.ts';
 import { criteriaList, criteriaFailureStopFor, criteriaFailureQuestion, criteriaFailureWhy, hasOpenDiagnosticEscalation, readDiagnosticCriteria } from './agent-view-helpers.ts';
 
+/**
+ * 本跳是不是已经有一张待答复的普通升级。
+ *
+ * 普通 = 不是平台可信门禁（platformGate），也不是诊断卡（criteriaFailureStop）。那两类
+ * 由平台自己的门禁逻辑决定开不开，把它们算进来会让「机制卡」挡掉协调者真要说的话。
+ *
+ * 返回索引而不是布尔量：调用方要把「历史第几条」写进错误消息，也要把
+ * contract_check.submitted 的 escalationIndex 指回同一张卡——L3 答的是那张卡，
+ * 不是另开的第二张。
+ */
+async function openPlainEscalation(
+  ctx: PlatformContext,
+  mission: Mission,
+  attemptId: string,
+): Promise<{ index: number; contractCheck: boolean } | undefined> {
+  const candidates = mission.openEscalations.filter(
+    (escalation) => escalation.attemptId === attemptId && escalation.platformGate === undefined,
+  );
+  if (candidates.length === 0) return undefined;
+  // 诊断卡的身份只认事件里那个布尔量，所以要读事件；读在写入之前，被拒的调用不留半套流转。
+  const events = await ctx.activity.list(mission.id);
+  const plain = candidates.find(
+    (escalation) => readDiagnosticCriteria(events, escalation.question) === undefined,
+  );
+  if (plain === undefined) return undefined;
+  const index = mission.escalations.indexOf(plain);
+  if (index < 0) return undefined;
+  const contractCheck = events.some((event) => {
+    if (event.kind !== 'contract_check.submitted') return false;
+    const data = event.data as { escalationIndex?: unknown } | undefined;
+    return data?.escalationIndex === index;
+  });
+  return { index, contractCheck };
+}
+
+/** 同跳重复升级的拒绝消息：说清答哪一张、为什么不能再开、这一跳该怎么办。 */
+function alreadyOpenEscalationMessage(index: number, contractCheck: boolean): string {
+  return [
+    `本跳已有一条待答复的普通升级（历史第 ${index + 1} 条）。`,
+    contractCheck
+      ? '那条是契约核对判为 issues 后平台自动开的升级，L3 会在那一条里看到核对结论。'
+      : '',
+    '不要为同一跳重复升级：本跳直接结束，等 L3 答复那张卡即可。',
+  ]
+    .filter((part) => part.length > 0)
+    .join('');
+}
+
 export async function submitContractCheck(
   ctx: PlatformContext,
     missionId: string,
@@ -38,20 +86,27 @@ export async function submitContractCheck(
       const contractRevision = mission.contractRevision;
       let escalationIndex: number | undefined;
       if (input.verdict === 'issues') {
-        // 复用既有升级与投递：另写一条路会变成两次升级、两封信。
-        await recordEscalationAndDeliver(ctx, mission, {
-          attemptId,
-          question:
-            `契约核对发现问题（r${contractRevision}），需要 L3 裁决：\n` +
-            issues.map((issue) => `- ${issue}`).join('\n'),
-          why: `协调者开工前核对契约发现问题：${summary}`,
-          optionsConsidered: [
-            '按现契约直接派工（对不上的那条执行者必然卡住）',
-            '由协调者自行修订契约（契约只由 L3 修订，越权）',
-            '升级给 L3 修订契约后再派工',
-          ],
-        });
-        escalationIndex = mission.escalations.length - 1;
+        // 已经有一张待答复的普通升级时复用它的索引：同一跳里自动核对与手动升级
+        // 指向同一张卡，L3 答一次就够；再开第二张只会让人不知道该答哪张。
+        const existing = await openPlainEscalation(ctx, mission, attemptId);
+        if (existing !== undefined) {
+          escalationIndex = existing.index;
+        } else {
+          // 复用既有升级与投递：另写一条路会变成两次升级、两封信。
+          await recordEscalationAndDeliver(ctx, mission, {
+            attemptId,
+            question:
+              `契约核对发现问题（r${contractRevision}），需要 L3 裁决：\n` +
+              issues.map((issue) => `- ${issue}`).join('\n'),
+            why: `协调者开工前核对契约发现问题：${summary}`,
+            optionsConsidered: [
+              '按现契约直接派工（对不上的那条执行者必然卡住）',
+              '由协调者自行修订契约（契约只由 L3 修订，越权）',
+              '升级给 L3 修订契约后再派工',
+            ],
+          });
+          escalationIndex = mission.escalations.length - 1;
+        }
       }
       await ctx.event(
         mission,
@@ -76,6 +131,14 @@ export async function escalateToL3(
     body: Omit<EscalationBody, 'attemptId'>,
   ): Promise<void> {
     const { mission } = await ctx.requireAttempt(missionId, attemptId, 'coordinator');
+    // 查在任何写入之前：找到就抛，不记 escalated、不建投递，盘上逐字节不变。
+    const duplicate = await openPlainEscalation(ctx, mission, attemptId);
+    if (duplicate !== undefined) {
+      throw new PlatformRuleError(
+        'ESCALATION_ALREADY_OPEN',
+        alreadyOpenEscalationMessage(duplicate.index, duplicate.contractCheck),
+      );
+    }
     await recordEscalationAndDeliver(ctx, mission, { ...body, attemptId });
   }
 
