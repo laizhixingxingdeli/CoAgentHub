@@ -1247,6 +1247,57 @@ describe('协调者唤醒：完整简报优先与合法补修交接', () => {
     assert.deepEqual(view.workItems[0]?.order?.allowedScope, ['src/bar.ts'], '修订要可见地改到工单正文');
     assert.equal(view.workItems[0]?.order?.orderRevision, 'r2', '修订号必须递增，否则重派会被挡');
   });
+
+  test('首次派发与机器续做都优先用开跑简报的工单，不再要求先取工单', async () => {
+    // 「简报优先」没有外部可见的症状（执行者拿到的工单内容一模一样，界面也一模一样），
+    // 只能从 instructions 捕获的原文证明：首次派发与 partial 自动续做都不再把
+    // coagent_get_work_order 当默认第一步，而且都说清了缺正文时才调工具。
+    const PREVIOUS_SUMMARY = '只改了一半：foo() 的边界还没处理';
+    const coordinator = new ScriptedRuntime({
+      'coordinator:-:0': COORDINATOR_HAPPY['coordinator:-:0'],
+    });
+    const executor = new ScriptedRuntime({
+      'executor:W-1': {
+        steps: [
+          {
+            tool: 'coagent_submit_evidence',
+            body: { kind: 'test', summary: '改了一半', command: 'node --test', exitCode: 0 },
+          },
+          {
+            tool: 'coagent_submit_execution_result',
+            body: (previous) => ({
+              outcome: 'partial',
+              summary: PREVIOUS_SUMMARY,
+              changedFiles: ['src/foo.ts'],
+              evidenceIds: [previous.evidenceId],
+              notes: '还在改边界',
+            }),
+          },
+        ],
+      },
+    });
+    current = await harness({ coordinator, executor });
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-brief-exec', contract: CONTRACT });
+
+    // maxRounds=3：开局派发 + 首次执行者 + 一次 partial 自动续做，正好两跳执行者。
+    await current.makeOrchestrator().runMission('M-brief-exec', {
+      projectRoot: process.cwd(),
+      maxRounds: 3,
+    });
+
+    const instructions = executor.instructions;
+    assert.equal(instructions.length, 2, `首次派发 + 一次自动续做：${instructions.length}`);
+    for (const instruction of instructions) {
+      assert.match(instruction, /开跑简报/);
+      assert.match(instruction, /你的工单/);
+      assert.match(instruction, /才调用 coagent_get_work_order/);
+      assert.doesNotMatch(instruction, /先调用 coagent_get_work_order/);
+    }
+    // 续做那一跳还要保留「冻结工单才是权威」与上一轮说明。
+    assert.match(instructions[1]!, /冻结工单才是权威/);
+    assert.match(instructions[1]!, /下面的说明只是补充/);
+    assert.match(instructions[1]!, /只改了一半/);
+  });
 });
 
 const CAP_NOW = '2026-01-01T00:00:00.000Z';
