@@ -1189,6 +1189,23 @@ describe('详情页：这一跳实际传递的正文', () => {
     assert.ok(bareHtml.includes('运行模型 未记录'), bareHtml);
     assert.equal(/undefined|NaN|\[object Object\]/.test(bareHtml), false, bareHtml);
 
+    // 缺哪项略哪项：候选与提供方各自只在真存在时才进括号；都不存在就连括号也不出。
+    const noProvider = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-4', data: { kind: 'coordinator', profile: { profileId: 'coord-partial', facts: [{ key: 'model', value: 'gpt-6.1-sol' }, { key: 'reasoning', value: 'high' }] } } },
+    ]);
+    const noProfileId = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-5', data: { kind: 'coordinator', profile: { facts: [{ key: 'provider', value: 'openai-codex' }, { key: 'model', value: 'gpt-6.1-sol' }] } } },
+    ]);
+    const onlyModel = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-6', data: { kind: 'coordinator', profile: { facts: [{ key: 'model', value: 'gpt-6.1-sol' }] } } },
+    ]);
+    assert.ok(stageDetailHtml(noProvider, W4_VIEW, null).includes('运行模型 gpt-6.1-sol · 思考 high（候选 coord-partial）'), stageDetailHtml(noProvider, W4_VIEW, null));
+    assert.ok(stageDetailHtml(noProfileId, W4_VIEW, null).includes('运行模型 gpt-6.1-sol（openai-codex）'), stageDetailHtml(noProfileId, W4_VIEW, null));
+    const onlyModelHtml = stageDetailHtml(onlyModel, W4_VIEW, null);
+    assert.ok(onlyModelHtml.includes('运行模型 gpt-6.1-sol'), onlyModelHtml);
+    assert.equal(onlyModelHtml.includes('（）'), false, onlyModelHtml);
+    assert.equal(onlyModelHtml.includes('没有记下'), false, onlyModelHtml);
+
     // L3 与平台不属于任何一跳。
     for (const g of groupActivity([
       { kind: 'orchestration.round.started', data: {} },

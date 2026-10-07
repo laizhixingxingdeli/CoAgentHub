@@ -326,19 +326,6 @@ function stageLabel(group, context) {
   return stageName(fake, context);
 }
 
-/**
- * 环节头上的本跳模型。没有模型的那一跳写「模型 · 未记录」而不是留空：留空和
- * 「这条数据本来就没有这一栏」在屏幕上长得一样，而这里差的是「没记下来」。
- * title 与正文同一份来源（modelLabel），不另写一份拼法。
- */
-function stageModelHtml(group) {
-  const m = stageModel(group);
-  if (!m.eligible) return '';
-  const body = m.text || '模型 · 未记录';
-  const title = m.title || body;
-  return '<span class="stage-model" title="' + esc(title) + '">' + esc(body) + '</span>';
-}
-
 /** 组内最能代表这一跳的事件：优先非开关门、也非命令族（命令族折叠，不当摘要）。 */
 function representativeEvent(events) {
   const rows = events || [];
@@ -637,6 +624,11 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
         .join('');
       const cmds = startedCommands(g.events);
       const selected = selectedAttemptId !== null && key === selectedAttemptId;
+      // 本跳模型：身份解析只走 stageModel，拼 HTML 留在这里。没有模型的那一跳
+      // 写「模型 · 未记录」而不是留空——留空和「这条数据本来就没有这一栏」在屏幕上
+      // 长得一样，而这里差的是「没记下来」。title 与正文同一份来源（modelLabel）。
+      const model = stageModel(g);
+      const modelBody = model.text || '模型 · 未记录';
       // 只有**用户真的展开过**的那几组才写 open：默认收起是硬要求，
       // 一上来就给所有环节加 open 等于没折叠。
       return '<details class="stage tone-' + esc(tone) + ' role-' + esc(shown.role || 'other') + '"'
@@ -646,7 +638,9 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
         + '<summary class="stage-head" data-stage-select>'
         +   '<span class="stage-name">' + esc(name) + '</span>'
         +   '<span class="chip ' + esc(tone) + '">' + esc(badge) + '</span>'
-        +   stageModelHtml(g)
+        +   (model.eligible
+          ? '<span class="stage-model" title="' + esc(model.title || modelBody) + '">' + esc(modelBody) + '</span>'
+          : '')
         +   '<span class="stage-clock mono">' + esc(formatClock(firstAt(g.events))) + ' → ' + esc(g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) ? '进行中' : formatClock(lastAt(g.events))) + '</span>'
         +   '<span class="stage-dur mono">'
         +     esc(formatDuration(firstAt(g.events), g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) && context.nowIso ? context.nowIso : lastAt(g.events))) + '</span>'
@@ -888,25 +882,6 @@ function finalReviewBlock(finalReview) {
 }
 
 /**
- * 详情页的「运行模型」一行。放在环节名与角色徽章那一行**之后**、摘要之前：
- * 人打开这一页要回答的第一个问题是「这一跳到底是谁在干」，模型是这个答案的一半。
- *
- * 括号里的候选 id 与提供方与本行同一个 profile 取出，不另做 model / reasoning
- * 解析（那两项只走 narrate.modelLabel）。缺哪项略哪项：写成空括号或「undefined」
- * 看起来像真有一个空候选。
- */
-function detailModelHtml(group) {
-  const m = stageModel(group);
-  if (!m.eligible) return '';
-  const bits = [];
-  if (m.profileId || m.provider) {
-    bits.push(m.profileId ? `候选 ${m.profileId}` : '（没有记下候选）', m.provider || '（没有记下提供方）');
-  }
-  const body = m.text ? m.text + (bits.length ? `（${bits.join('，')}）` : '') : '未记录';
-  return '<div class="detail-sub">' + esc('运行模型 ' + body) + '</div>';
-}
-
-/**
  * 选中环节的详情。回答的是「这一跳实际传递了什么」：协调者写回的结论、派给
  * 执行者的工单正文、执行者交回的结果与证据、验收的结论、升级的问答、L3 的判断。
  *
@@ -968,11 +943,27 @@ export function stageDetailHtml(group, ctx, attempt) {
       ? fieldLabel('attempt') + ' 这一组事件不属于任何一跳（L3 自己动手的）'
       : formatAttemptId('').label);
 
+  // 运行模型：放在环节名与角色徽章那一行**之后**、摘要之前——人打开这一页要回答的
+  // 第一个问题是「这一跳到底是谁在干」，模型是这个答案的一半。括号里的候选 id 与
+  // 提供方与本行同一个 profile 取出（stageModel 已给出），不另做 model / reasoning
+  // 解析（那两项只走 narrate.modelLabel）。缺哪项略哪项：只有真存在的项才进数组，
+  // 数组空就不出括号；写成空括号或占位短语看起来像真有一个空候选。
+  const model = stageModel(group);
+  let modelBody = '';
+  if (model.eligible) {
+    const bits = [];
+    if (model.profileId) bits.push('候选 ' + model.profileId);
+    if (model.provider) bits.push(model.provider);
+    modelBody = model.text
+      ? model.text + (bits.length > 0 ? '（' + bits.join('，') + '）' : '')
+      : '未记录';
+  }
+
   return '<div class="detail-head">'
     +   '<span class="detail-title">' + esc(stageLabel(group, context)) + '</span>'
     +   '<span class="chip ' + esc(shown.tone) + '">' + esc(shown.badge) + '</span>'
     + '</div>'
-    + detailModelHtml(group)
+    + (modelBody ? '<div class="detail-sub">' + esc('运行模型 ' + modelBody) + '</div>' : '')
     + (head
       ? '<div class="detail-sub">' + esc(narrateEvent(head, context).detail) + '</div>'
       : '<div class="detail-sub muted">这一跳还没有能说明白它在干什么的事件。</div>')
