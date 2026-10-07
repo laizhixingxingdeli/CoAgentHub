@@ -6,7 +6,8 @@ import { PlatformRuleError } from './context.ts';
 
 /**
  * 工单处于「正在跑 / 已出结果」时不能修订。每条给协调者下一步能照做的事：
- * 等结果、先验收、或走作废重建。created / rejected / blocked 不在表里，可修订。
+ * 等结果或等平台收尾后修订同一张单、先验收这次结果、要补做就新建补修单；作废只表示
+ * 不用做了。created / rejected / blocked 不在表里，可修订。
  */
 export const REVISE_BLOCKED_HINT: Partial<Record<WorkItemStatus, string>> = {
   // 恢复路径有两条，提示必须照实写清，否则协调者会以为「改不动」而走作废，
