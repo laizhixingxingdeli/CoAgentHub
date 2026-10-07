@@ -263,7 +263,9 @@ export type MissionRunOutcome =
 const FRESH_SESSION_PREFIX =
   '（这是一次全新的会话：你**不记得**上一跳做过什么。' +
   '这条 Mission 的全部状态——调查发现、根因、排除过的假设、决策、方向、' +
-  '工作项、验收记录、升级问答——都在平台上，用 coagent_get_mission 读。' +
+  '工作项、验收记录、升级问答——都在平台上，而这一跳要用的已经在开跑简报里。' +
+  '只有简报缺了你要用的内容时，才按正文写的三种情况按需查询——' +
+  '其中包括用 coagent_get_mission 取全量工作项索引。' +
   '你自己上一跳写回平台的东西仍然算数，没写回去的已经没了。）';
 
 /**
@@ -313,7 +315,8 @@ function executorContinuationInstruction(handoff: StandardAutoRedispatchHandoff)
       : `你上一轮交付的冻结命令验证没通过（这是第 ${handoff.count} 次退回重做）`;
   return [
     `${why}，平台把同一个工作项退回给你。接着做，不要从头再来。`,
-    '先调用 coagent_get_work_order 重新读一遍冻结工单——它才是权威，下面的说明只是补充。',
+    '工单已在开跑简报的「你的工单」一节里，直接照它执行；只有简报里没有工单正文时才调用 coagent_get_work_order。',
+    '冻结工单才是权威，下面的说明只是补充。',
     `上一轮说明：${handoff.summary}`,
   ].join('\n');
 }
@@ -735,7 +738,7 @@ export class Orchestrator {
             pool: this.#executor,
             instruction: handoff
               ? executorContinuationInstruction(handoff)
-              : '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+              : '平台派给你一个工作项：工单已在开跑简报的「你的工单」一节里，直接照它执行；只有简报里没有工单正文时才调用 coagent_get_work_order。',
             ...(handoff?.resumeRef !== undefined ? { resumeRef: handoff.resumeRef } : {}),
             ...(needsStandardValidation
               ? {
@@ -1201,7 +1204,7 @@ export class Orchestrator {
         cwd,
         pool: this.#executor,
         instruction:
-          '平台派给你一个工作项。先调用 coagent_get_work_order 读取工单，然后执行。',
+          '平台派给你一个工作项：工单已在开跑简报的「你的工单」一节里，直接照它执行；只有简报里没有工单正文时才调用 coagent_get_work_order。',
       });
       if (hop && 'alreadyCompleted' in hop) return { kind: 'continue' };
       if (hop && 'retrySameSlot' in hop) return { kind: 'continue' };
