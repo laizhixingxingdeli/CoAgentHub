@@ -439,7 +439,10 @@ describe('同一工作项的无结构化结果不许无界重跑首候选', () =
     assert.match(handoff, /连续次数 2/);
     assert.match(handoff, /e1/);
     const viewA = await platformA.getMissionView('M1');
-    assert.equal(viewA.workItems[0].status, 'dispatched', '平台不许伪造执行者 blocked 或结构化结果');
+    // W-524：平台自己放弃重跑（候选排除耗尽）且已证明无活执行者后收成 blocked，
+    // 是**有意改变**旧性质（旧断言钉的是 dispatched）。唤醒原因、次数、候选顺序
+    // 的断言不变；这不是「平台伪造执行者 blocked 或结构化结果」——收尾只写状态。
+    assert.equal(viewA.workItems[0].status, 'blocked', '平台可信收尾，协调者才能修订同一张单再派');
 
     // 两个候选都不交结果：到顶是 4 次（跨候选），第 5 跳不许发生。
     const both = new ScriptedRuntime({
@@ -468,7 +471,9 @@ describe('同一工作项的无结构化结果不许无界重跑首候选', () =
     assert.match(handoffB, /e1/);
     assert.match(handoffB, /e2/);
     const viewB = await platformB.getMissionView('M1');
-    assert.equal(viewB.workItems[0].status, 'dispatched');
+    // 同上：跨候选到顶（4 次）也走平台可信收尾——旧断言钉的 dispatched 同样
+    // 是**有意改变**的性质。
+    assert.equal(viewB.workItems[0].status, 'blocked');
   });
 });
 
@@ -514,6 +519,9 @@ describe('一跳跑太久', () => {
     const view = await platform.getMissionView('M1');
     assert.equal(view.waitReason, 'runaway_suspected');
     assert.equal(view.waitDetail, detail, '写回平台的必须是这一句，不是一句泛泛的');
+    // W-524：被掐断的执行者已经收尾、令牌已吊销，平台能证明没有活执行者，
+    // 工作项从 dispatched 收成 blocked。停机原因与文案断言全部保持不变。
+    assert.equal(view.workItems[0].status, 'blocked', '墙钟强杀后工作项也交给人处置，不残留 dispatched');
 
     // **被杀掉的那一跳花的钱要算进账。**
     //

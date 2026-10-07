@@ -321,8 +321,9 @@ function coordinatorInstruction(view: {
     !view.finalReview;
   const body = [
     // 同一工作项无结果到顶 / 排除后没人：平台把这一跳的**唯一**原因写在这里。
-    // 不写的话，协调者看到的只是一个仍是 dispatched 的工作项与一句泛泛的
-    // 「按简报决定下一步」——它会以为是普通的空闲轮回，而不是这次执行被拦住。
+    // 不写的话，协调者只知道工作项卡住了（或收尾被拒后仍停在 dispatched）、
+    // 以及一句泛泛的「按简报决定下一步」——它会以为是普通的空闲轮回，而不是
+    // 这次执行被拦住。
     view.waitDetail ? `**执行者已经被挡住：** ${view.waitDetail}` : '',
     coordinatorBody(view),
   ]
@@ -800,6 +801,10 @@ export class Orchestrator {
               excludedProfileIds: rotation.excludedProfileIds,
               exhausted: false,
             });
+            // COM12 B（W-524）：这不是「等候选冷却」，是**平台自己放弃重跑**，且
+            // 最后一次尝试已经收尾。先把停着的 dispatched 可信收成 blocked，
+            // 协调者才能修订同一张单再派；转换被拒/失败不改下面的交回语义。
+            await this.#blockStalledNoResultLimit(missionId, item, rotation.consecutive);
             // 不开下一次执行跳：再赌一轮既换不回新信息，又正好是这条规则要挡的事。
             continue;
           }
@@ -857,6 +862,9 @@ export class Orchestrator {
                 excludedProfileIds,
                 exhausted: true,
               });
+              // COM12 B（W-524）：候选排除耗尽（人还有、只是在这张单上被挡）
+              // 同样属于「平台放弃重跑」。执行者已经不在，先收成 blocked 再交。
+              await this.#blockStalledNoResultLimit(missionId, item, rotation.consecutive);
               continue;
             }
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
@@ -890,7 +898,9 @@ export class Orchestrator {
           await this.#autoRedispatchStandard(missionId, item.id);
         }
         // 有工单交回协调者时不 continue：掉进下面的协调者段，让它在简报里
-        // 看到次数与候选。工作项仍是 dispatched——平台不替它判工单是否成立。
+        // 看到次数与候选。两个交回分支在设置 handoff 之前已经调过平台收尾
+        // （W-524）：能证明无活执行者就把 dispatched 收成 blocked，收尾被拒时
+        // 维持 dispatched——平台收尾只写状态，不替它判工单是否成立。
         if (!noResultHandoff) continue;
         noResultWaitDetail = noResultHandoff;
         await this.#platform.setWaitReason(missionId, 'attempt_limit_reached', noResultHandoff);
@@ -1938,7 +1948,8 @@ export class Orchestrator {
    * 工作项交回协调者时写进等待通路的那句话。
    *
    * 必须带上：工作项 id、连续次数、涉及候选，以及是「到顶」还是「排除后没人」——
-   * 协调者只能看到这一个工作项还是 dispatched，缺哪一项它都得自己去猜。
+   * 协调者从简报里最多只看得见这一个工作项的当前状态（平台收尾后可能是 blocked，
+   * 收尾被拒时还是 dispatched），缺哪一项它都得自己去猜。
    */
   #noResultHandoffDetail(input: {
     workItemId: string;
@@ -1959,6 +1970,77 @@ export class Orchestrator {
       '交给你处置：确认工单本身有问题就 coagent_revise_work_order 改对再派发，' +
       '不用做了就 coagent_retire_work_item 作废。'
     );
+  }
+
+  /**
+   * COM12 B（W-524）：平台自己放弃重跑的两个交回边界（同一工作项无结果到顶、
+   * 局部排除后没有候选）共用这条收尾。
+   *
+   * 最后一次执行跳已经 finishAttempt 收掉、令牌吊销，平台能证明没有活执行者
+   * 了；把仍 dispatched 的工作项收成 blocked，协调者才能修订同一张单再派，
+   * 不必作废重建。预期尝试与工单修订号取自本轮视图，平台会与当前事实核对：
+   * 快照过期、还有 in_progress 或不是 Standard 时**无副作用拒绝**。
+   *
+   * 这条路径上没有持有任何一跳的队列租约（执行者早被收掉），所以不传 claim；
+   * 平台靠快照核对与 in_progress 检查挡住迟到写入。收尾是尽力而为：被拒或
+   * 写失败都不改「交回协调者」的语义，工作项维持现状。
+   */
+  async #blockStalledNoResultLimit(
+    missionId: string,
+    item: MissionView['workItems'][number],
+    consecutive: number,
+  ): Promise<void> {
+    const expectedAttemptId = item.attemptIds.at(-1);
+    if (expectedAttemptId === undefined) return;
+    try {
+      await this.#platform.blockStalledWorkItem({
+        missionId,
+        workItemId: item.id,
+        source: 'no_result_limit',
+        expectedAttemptId,
+        orderRevision: item.order?.orderRevision ?? 'r1',
+        consecutive,
+      });
+    } catch {
+      // 平台收尾失败/被拒时保持原样：协调者照旧收到次数与候选，仍能修订或作废。
+    }
+  }
+
+  /**
+   * COM12 B（W-524）：墙钟强杀后的可信收尾。
+   *
+   * 调用点必须在 run.abort 已杀整棵进程树、await run.wait() 已观察退出、finally
+   * 已 finishAttempt 并吊销令牌**之后**——只有那时才证明得了没有活执行者。预期
+   * 尝试就是刚被掐断的 attemptId；minutes 按原详情口径（延长过一次就翻倍）。
+   * 修订号读当前视图：拿旧修订号去写会被平台无副作用拒绝，等于这次收尾白跑。
+   * 仍然持有这一跳的队列 claim，原样传给平台做租约围栏核对；租约已丢掉也一样
+   * 无副作用拒绝，不会替别人收尾。
+   */
+  async #blockStalledOnRunaway(
+    missionId: string,
+    workItemId: string,
+    attemptId: string,
+    minutes: number,
+    claim: QueueClaimIdentity | undefined,
+  ): Promise<void> {
+    try {
+      const view = await this.#platform.getMissionView(missionId);
+      const item = view.workItems.find((row) => row.id === workItemId);
+      if (!item) return;
+      await this.#platform.blockStalledWorkItem(
+        {
+          missionId,
+          workItemId,
+          source: 'runaway',
+          expectedAttemptId: attemptId,
+          orderRevision: item.order?.orderRevision ?? 'r1',
+          minutes,
+        },
+        claim,
+      );
+    } catch {
+      // 收尾失败不改变 runaway 的停机语义：照旧 return exhausted:'runaway_suspected'。
+    }
   }
 
   /** 把停机原因翻译成人能直接照做的一句话。 */
@@ -2583,6 +2665,21 @@ export class Orchestrator {
       if (runaway) {
         const minutes = Math.round(this.#wallClockMs / 60_000);
         const where = input.workItemId ? `工作项 ${input.workItemId}` : '协调者';
+        // COM12 B（W-524）：到这里 finally 已经跑完——run.abort 杀了整棵进程树、
+        // await run.wait() 已观察退出、被掐断的 Attempt 已 finishAttempt 收尾并
+        // 吊销令牌，平台才证明得了「没有活执行者」。把仍 dispatched 的工作项可信
+        // 收成 blocked（source runaway），协调者才能修订同一张单再派，不必作废重建。
+        // 只有执行者跳有工作项；收尾被拒/失败不改下面的 runaway 停机语义。调用仍
+        // 在持有这一跳队列 claim 期间，迟到的收尾会被围栏拒掉。
+        if (input.role === 'executor' && input.workItemId !== undefined) {
+          await this.#blockStalledOnRunaway(
+            input.missionId,
+            input.workItemId,
+            attemptId,
+            extendedOnce ? minutes * 2 : minutes,
+            claim,
+          );
+        }
         return {
           exhausted: 'runaway_suspected',
           // detail 跟着返回，不在这里写平台：调用方那边紧接着就会用
