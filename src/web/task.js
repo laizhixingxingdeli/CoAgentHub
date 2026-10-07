@@ -37,6 +37,7 @@ import {
   formatAttemptId,
   formatUsage,
   isRuntimeCommand,
+  modelLabel,
   narrateEvent,
   newFileLabel,
   nowDoing,
@@ -272,6 +273,47 @@ function presentRole(group) {
 }
 
 /**
+ * 本组「本跳用的模型」。
+ *
+ * 只认非空 attemptId 的协调者 / 执行者组：L3 与平台组不属于任何一跳，它们没有
+ * 发牌那一刻的 profile，硬凑一个模型等于替别人认领一个它没跑过的模型。
+ *
+ * profile 只从本组自己的 attempt.started.data 里取：读当前候选池等于拿今天的
+ * 配置去解释昨天那一跳（候选表会改），而 attempt.profile.resolved 是运行时报回来
+ * 的实际身份，与「发牌时选的是哪条候选」不是同一个问题。
+ *
+ * 资格判断与本组 profile 查找收在这一处：列表与详情各写一遍的话，改了一处
+ * 资格判断另一处还在给平台组贴模型。model / reasoning 只在 narrate.modelLabel
+ * 里解析，这里只另外取一个 provider（括号里要它），不重做那两个。
+ *
+ * 返回 { eligible, text, title, profileId, provider }：eligible=false 表示这一组
+ * 根本不该有这一栏；eligible=true 而 text 为空表示这一跳没记下模型，由调用方
+ * 说人话（列表与详情的句子不一样，所以不在这里编）。
+ */
+function stageModel(group) {
+  const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
+  if (!group || !group.attemptId) return { eligible: false, text: '', title: '', profileId: '', provider: '' };
+  if (role !== 'coordinator' && role !== 'executor') return { eligible: false, text: '', title: '', profileId: '', provider: '' };
+
+  const started = (group.events || []).find((e) => e && e.kind === 'attempt.started');
+  const profile = started && started.data && started.data.profile;
+  const label = modelLabel(profile);
+  const p = profile && typeof profile === 'object' ? profile : {};
+  const facts = Array.isArray(p.facts) ? p.facts : [];
+  const providerFact = facts.find((f) => f && String(f.key) === 'provider');
+  const provider = providerFact && providerFact.value !== undefined && providerFact.value !== null
+    ? String(providerFact.value).trim() : '';
+
+  return {
+    eligible: true,
+    text: label ? label.text : '',
+    title: label ? label.title : '',
+    profileId: String(p.profileId === undefined || p.profileId === null ? '' : p.profileId).trim(),
+    provider,
+  };
+}
+
+/**
  * 环节名。平台组不能走 stageName：空 attemptId 会被当成 L3。
  * L1/L2 orphan 同样不能把空 id 喂给 stageName，否则「协调」会写成「L3 检视者」。
  */
@@ -282,6 +324,19 @@ function stageLabel(group, context) {
   const fakeId = group.role === 'executor' ? 'orphan.exec-1' : 'coord-orphan';
   const fake = (group.events || []).map((e) => Object.assign({}, e, { attemptId: fakeId }));
   return stageName(fake, context);
+}
+
+/**
+ * 环节头上的本跳模型。没有模型的那一跳写「模型 · 未记录」而不是留空：留空和
+ * 「这条数据本来就没有这一栏」在屏幕上长得一样，而这里差的是「没记下来」。
+ * title 与正文同一份来源（modelLabel），不另写一份拼法。
+ */
+function stageModelHtml(group) {
+  const m = stageModel(group);
+  if (!m.eligible) return '';
+  const body = m.text || '模型 · 未记录';
+  const title = m.title || body;
+  return '<span class="stage-model" title="' + esc(title) + '">' + esc(body) + '</span>';
 }
 
 /** 组内最能代表这一跳的事件：优先非开关门、也非命令族（命令族折叠，不当摘要）。 */
@@ -591,6 +646,7 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
         + '<summary class="stage-head" data-stage-select>'
         +   '<span class="stage-name">' + esc(name) + '</span>'
         +   '<span class="chip ' + esc(tone) + '">' + esc(badge) + '</span>'
+        +   stageModelHtml(g)
         +   '<span class="stage-clock mono">' + esc(formatClock(firstAt(g.events))) + ' → ' + esc(g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) ? '进行中' : formatClock(lastAt(g.events))) + '</span>'
         +   '<span class="stage-dur mono">'
         +     esc(formatDuration(firstAt(g.events), g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) && context.nowIso ? context.nowIso : lastAt(g.events))) + '</span>'
@@ -832,6 +888,25 @@ function finalReviewBlock(finalReview) {
 }
 
 /**
+ * 详情页的「运行模型」一行。放在环节名与角色徽章那一行**之后**、摘要之前：
+ * 人打开这一页要回答的第一个问题是「这一跳到底是谁在干」，模型是这个答案的一半。
+ *
+ * 括号里的候选 id 与提供方与本行同一个 profile 取出，不另做 model / reasoning
+ * 解析（那两项只走 narrate.modelLabel）。缺哪项略哪项：写成空括号或「undefined」
+ * 看起来像真有一个空候选。
+ */
+function detailModelHtml(group) {
+  const m = stageModel(group);
+  if (!m.eligible) return '';
+  const bits = [];
+  if (m.profileId || m.provider) {
+    bits.push(m.profileId ? `候选 ${m.profileId}` : '（没有记下候选）', m.provider || '（没有记下提供方）');
+  }
+  const body = m.text ? m.text + (bits.length ? `（${bits.join('，')}）` : '') : '未记录';
+  return '<div class="detail-sub">' + esc('运行模型 ' + body) + '</div>';
+}
+
+/**
  * 选中环节的详情。回答的是「这一跳实际传递了什么」：协调者写回的结论、派给
  * 执行者的工单正文、执行者交回的结果与证据、验收的结论、升级的问答、L3 的判断。
  *
@@ -897,6 +972,7 @@ export function stageDetailHtml(group, ctx, attempt) {
     +   '<span class="detail-title">' + esc(stageLabel(group, context)) + '</span>'
     +   '<span class="chip ' + esc(shown.tone) + '">' + esc(shown.badge) + '</span>'
     + '</div>'
+    + detailModelHtml(group)
     + (head
       ? '<div class="detail-sub">' + esc(narrateEvent(head, context).detail) + '</div>'
       : '<div class="detail-sub muted">这一跳还没有能说明白它在干什么的事件。</div>')
