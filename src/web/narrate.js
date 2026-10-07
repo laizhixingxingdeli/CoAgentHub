@@ -386,6 +386,9 @@ export function evidenceKindLabel(kind) {
 
 const OUTCOME_CN = { completed: '完成', partial: '部分完成', delivered: '已交付', blocked: '没做出来' };
 
+/** 平台收尾（work_item.platform_blocked）的来源。认不出来的原样带出，不编原因。 */
+const STALL_SOURCE_CN = { runaway: '一跳跑太久被掐断', no_result_limit: '连续无结构化结果到顶' };
+
 /** outcome 是人话在前、机器值在括号里：两边的人都要能对上号。 */
 const outcomeText = (outcome) => {
   const key = text(outcome);
@@ -546,6 +549,19 @@ const EVENT_TABLE = {
       badge: 'L2',
       action: '修订工单',
       detail: `工作项 ${or(event && event.workItemId, '（没有工作项 ID）')}${revisionText} · 改了：${changedText}`,
+    };
+  },
+
+  // 平台收尾：跑飞被掐断 / 连续无结构化结果到顶，执行者已不在，平台代写卡住。
+  // 与 blocked.reported 分开：那条是 L1 自述，这条没有人替 L1 说，所以不复用它——
+  // 混成一条的话，界面上看不出这些卡住是平台收的，执行失败计数也会被算错。
+  'work_item.platform_blocked': (event) => {
+    const data = (event && event.data) || {};
+    const source = text(data.source);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '平台把卡住的工作项转为卡住',
+      detail: `来源 ${source ? STALL_SOURCE_CN[source] || source : '（没有写来源）'} · ${or(data.reason, '（没有写原因）')}`,
     };
   },
 
