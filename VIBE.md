@@ -40,6 +40,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 7. 新代码守工程规范的预警线（`architecture/engineering-standards.md`，用户 2026-10-02）：新函数不超过 40 行、嵌套不超过 3 层、参数不超过 4 个。这些数都是建议、不是硬约束（用户：「只是建议…没必要硬性要求」）：要改的大文件不让它明显变大——接线需要的少量新增可以，要加的多就抽成新模块；不许为了凑行数删注释、压缩写法；协调者不得把行数写成工单的硬约束（AC3 的 W-432 写了「orchestrator.ts 不增长」，执行者为此删注释、反复数行数）。协调者验收按那份规范的审查五维（设计、功能、复杂度、测试、命名与注释）逐项看，超线的要么让执行者拆，要么在验收理由里写明为什么可以。
 8. 打回时修改要求有好几条，就拆成几张各管一条的小单再派，不要合成一张原样重派（AC3 的 W-429 一张单塞了四条修改，cn:hy3 连续三次把输出上限全用在思考上、交不出结果）。
 9. 执行者开工第一步先跑工单 verification 里的定向命令，并经 `coagent_submit_evidence` 交一次证据（红的也交）：平台会把 30 分钟零证据的执行判为 runaway 并停下，中途交过证据才把墙钟延长一次。协调者派单前自己先跑一次定向，把已知失败和修改位置写进工单，执行者就不用再通读调度内部。（B2b 的 W-473、W-478、W-479 连续三次栽在开工通读约 25 分钟上；契约 r5 改成先交证据之后，W-480、W-481 分别 4 分钟和 20 分钟交卷，2026-10-06。）
+10. 少走一来一回（用户 2026-10-07 要求提速）：①工作项的平台 VR 摘要全绿（每条命令 passed，changed-paths / forbidden-paths 通过）时，协调者直接验收，不为补全文升级；只有 VR 失败或需要失败细节时才升级要全文，完整 VR 原文由 L3 在终审时核对。②最后一张实现单的 validation 直接带 `node --test` 全量，它的 VR 就是最终提交的平台全量；只有最后一张单之后又有改动，才补零代码验证单。③只派依赖已经 accepted 的单，不派明知会 blocked 的单。④实现单不设行数硬上限，diffSize 只用于零代码验证单。（B4 一个 Mission 里，两次升级往返各约 10 分钟，单开的验证单约 10 分钟，行数上限造成两次重派。）
 
 ## Architecture
 
@@ -131,6 +132,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 
 ## Capability 索引
 
+- **acceptance-evidence** — 验收证据处置
+  平台按契约修订留下验收原文。协调者对受影响条目显式写下 reuse、revalidate 或 new_requirement。交卷门禁默认关闭，只在显式开启后约束受影响条目。不做语义推断，不做跨环境测试缓存。
 - **candidate-circuit** — 候选熔断持久状态
   候选熔断按 `profileId` 隔离。查询无记录返回 `closed`；`open` 保存失败分类 `failureClass` 和 ISO `openUntil`。显式非探测失败可从任何状态重新打开并覆写分类与截止。
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
