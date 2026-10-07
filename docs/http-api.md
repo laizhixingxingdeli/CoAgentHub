@@ -394,7 +394,22 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ### GET /api/missions/:missionId
 
-鉴权：控制面（可选resolver）。参数：路径missionId。完整视图包含契约、结果、升级和签字。
+鉴权：控制面（可选resolver）。参数：路径missionId。完整视图包含契约、结果、升级和签字，另附只读的 `timeAttribution` 时间归因投影。
+
+`timeAttribution` 为**只读派生**字段，取值规则：
+
+- `schemaVersion`：当前为 `1`。`coverage`：`complete` / `partial` / `unknown`，分别表示投影里全部、部分、没有可计区间。
+- `totalOccupiedMs`：已知阶段的**并集**总长；没有任何已知区间时是 `null`（不是 `0`，空输入不制造零）。
+- `phases[]`：每项含 `kind`（**闭集**：`queue` / `hop_backoff` / `schedule_select` / `agent_run` / `tool` / `validation` / `l2_review` / `waiting_decision` / `pause` / `park` / `unclassified`）、可选 `start` / `end`、`durationMs`、`attemptId` / `workItemId`、`countedInTotal`、`overlaps[]`、`quality`（`measured` / `unknown`）、可选 `note`；`agent_run` 还原样带 `attempt.ended` 的 `usage`。
+- `durationMs: null` 表示**未知**：缺事件（如没有 `runtime.tool.completed`、没有 `attempt.ended`、历史 hop 没有认领时点）一律标未知，**不**用当前时间、下一条事件、token 或 `contextMetrics` 推算毫秒。未知项不进总占用。
+- 重叠（如验证窗落在某次运行内）**两侧都显示**，相交的切片只进 `totalOccupiedMs` 一次，并在双方 `overlaps` 里标明。
+- 展示层的「未分类」指某次运行里减去已知工具并集之后的剩余，它挂在 `agent_run` 内、不额外计入总占用。
+
+口径说明：
+
+- 工具的开始/结束时间是**串行落盘钟**（`runtime.command.started` / `runtime.tool.completed` 各自的 `at`），所以 `durationMs` 的误差是两次落盘延迟之差，不是测量噪声。
+- hop 的精确发生时点（`hop.enqueued` / `hop.claimed` / `hop.backoff`）只写在事件 `data` 里，**不**改写 `QueuedHop` 里可被续租/失败覆盖的字段；当前投影对排队与退避按**事件 `at`** 计算。
+- 报告里的 `outputTail` 等命令正文**不属于**时间归因输入，本字段里不会出现。
 
 请求示例及本机curl：
 
@@ -408,7 +423,16 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 {
   "missionId": "M-example",
   "status": "planning",
-  "workItems": []
+  "workItems": [],
+  "timeAttribution": {
+    "schemaVersion": 1,
+    "coverage": "partial",
+    "totalOccupiedMs": 120000,
+    "phases": [
+      { "kind": "agent_run", "start": "2026-10-07T03:00:06.628Z", "end": "2026-10-07T03:04:04.086Z", "durationMs": 237458, "countedInTotal": true, "overlaps": [], "quality": "measured" },
+      { "kind": "tool", "start": "2026-10-07T03:00:30.000Z", "durationMs": null, "countedInTotal": false, "overlaps": [], "quality": "unknown", "note": "缺少 runtime.tool.completed，工具时长未知" }
+    ]
+  }
 }
 ```
 

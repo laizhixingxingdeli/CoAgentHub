@@ -20,6 +20,8 @@ import * as toolActivity from './platform/tool-activity.ts';
 import * as hopEvents from './platform/hop-events.ts';
 import type { QueuedHop } from './durable-scheduler.ts';
 import * as validationReportViews from './platform/validation-report-views.ts';
+import * as timeAttributionView from './platform/time-attribution-view.ts';
+import type { TimeAttribution } from './time-attribution.ts';
 import * as standardRedispatch from './platform/standard-redispatch.ts';
 import * as standardValidation from './platform/standard-validation.ts';
 import * as budgetUsage from './platform/budget-usage.ts';
@@ -1068,6 +1070,14 @@ export class Platform {
   }
 
   /* ============================ L2 协调者面 ============================ */
+
+  /**
+   * 只读时间归因投影（COM5 T4）。与 getMissionView 分开：它要另读报告仓储与 hop 行，
+   * 而 getMissionView 的其它调用方不需要为一条时间线多付这份读取。
+   */
+  async getTimeAttribution(missionId: string): Promise<TimeAttribution> {
+    return timeAttributionView.getTimeAttribution(this.#context, missionId);
+  }
 
   async getMissionView(missionId: string): Promise<MissionView> {
     return views.getMissionView(this.#context, { workItemValidationReportViews: (m, e) => this.#workItemValidationReportViews(m, e), haReviewHold: (m) => this.#haReviewHold(m) }, missionId);
