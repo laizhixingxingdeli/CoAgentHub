@@ -191,7 +191,7 @@
 
 ### 草案 B：可信 killed 收尾
 
-- **目录范围（`allowedScope`）**：`src/application/platform/attempts.ts`、`src/application/platform.ts`、`src/application/orchestrator.ts`，以及**待新增的候选小 helper** `src/application/platform/killed-executor-recovery.ts`（仅候选路径，**不是现有函数**）。
+- **目录范围（`allowedScope`）**：`src/application/platform/attempts.ts`、`src/application/platform.ts`、`src/application/orchestrator.ts`，**待新增的候选小 helper** `src/application/platform/killed-executor-recovery.ts`（仅候选路径，**不是现有函数**），以及本段测试接缝与验证命令已列出的两个测试文件 `test/orchestrator.test.ts`、`test/command-transaction.test.ts`（补入以保证范围与本段测试命令闭合；原「目录范围」清单遗漏）。
 - **真实函数/接缝**：`finishAttempt`（`attempts.ts:64–177`，状态写在 :129–133）或抽出上面那个**小恢复 helper**，由 `platform.ts` 少量接线；orchestrator `finally` 可信调用（`:2454–2502`，`killed_wall_clock` 在 :2469）。**`kernel.recordBlocked` 不改**（`work-item.ts:288–294` 已可用）。
 - **测试接缝**：`test/orchestrator.test.ts` 的 `ScriptedRuntime`（:3200–3290 已有墙钟强杀组）与 `test/command-transaction.test.ts`（:59–120、:228–277 事务组）。
 - **关键测试（1–2 条）**：① 「killed 且未提交 → item 转 `blocked`，且在修订前拒绝重派」；② 「迟到的旧 claim 调用无副作用，事务回滚」。
