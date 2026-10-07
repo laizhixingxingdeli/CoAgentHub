@@ -16,6 +16,9 @@ import * as haValidation from './platform/ha-validation.ts';
 import * as promotion from './platform/promotion.ts';
 import * as postExecution from './platform/post-execution.ts';
 import * as commandTracking from './platform/command-tracking.ts';
+import * as toolActivity from './platform/tool-activity.ts';
+import * as hopEvents from './platform/hop-events.ts';
+import type { QueuedHop } from './durable-scheduler.ts';
 import * as validationReportViews from './platform/validation-report-views.ts';
 import * as standardRedispatch from './platform/standard-redispatch.ts';
 import * as standardValidation from './platform/standard-validation.ts';
@@ -1645,6 +1648,67 @@ export class Platform {
 
   async #recordCommandTrackingInvalid(missionId: string, attemptId: string): Promise<void> {
     return commandTracking.recordCommandTrackingInvalid(this.#context, missionId, attemptId);
+  }
+
+  /**
+   * Trusted tool-completion fact (COM5 T2).
+   *
+   * Adapter-reported `tool.completed`, no activityClass required and no command
+   * count involved — a readable end fact is not a command start. Envelope
+   * carries attemptId; `at` is the platform write clock, never a caller time.
+   */
+  async recordToolCompleted(
+    missionId: string,
+    attemptId: string,
+    input: { readonly callId: string; readonly name: string },
+  ): Promise<void> {
+    // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
+    return this.#tx(() => this.#recordToolCompleted(missionId, attemptId, input));
+  }
+
+  async #recordToolCompleted(
+    missionId: string,
+    attemptId: string,
+    input: { readonly callId: string; readonly name: string },
+  ): Promise<void> {
+    return toolActivity.recordToolCompleted(this.#context, missionId, attemptId, input);
+  }
+
+  /**
+   * Trusted hop-enqueued fact (COM5 T3). Callers pass the row actually inserted —
+   * an idempotency hit on an old row must not be narrated as a new enqueue.
+   */
+  async recordHopEnqueued(missionId: string, hop: QueuedHop): Promise<void> {
+    return this.#tx(() => this.#recordHopEnqueued(missionId, hop));
+  }
+
+  async #recordHopEnqueued(missionId: string, hop: QueuedHop): Promise<void> {
+    return hopEvents.recordHopEnqueued(this.#context, missionId, hop);
+  }
+
+  /**
+   * Trusted first-claim fact (COM5 T3). Only the row returned by this claim may
+   * be passed: `renew` overwrites `updatedAt`, so a later re-read cannot tell
+   * when the claim happened.
+   */
+  async recordHopClaimed(missionId: string, hop: QueuedHop): Promise<void> {
+    return this.#tx(() => this.#recordHopClaimed(missionId, hop));
+  }
+
+  async #recordHopClaimed(missionId: string, hop: QueuedHop): Promise<void> {
+    return hopEvents.recordHopClaimed(this.#context, missionId, hop);
+  }
+
+  /**
+   * Trusted backoff fact (COM5 T3). Written only for `retry_wait`; `failedAt`
+   * comes from this failure's own `lastFailure.at`, not from a re-read row.
+   */
+  async recordHopBackoff(missionId: string, hop: QueuedHop): Promise<void> {
+    return this.#tx(() => this.#recordHopBackoff(missionId, hop));
+  }
+
+  async #recordHopBackoff(missionId: string, hop: QueuedHop): Promise<void> {
+    return hopEvents.recordHopBackoff(this.#context, missionId, hop);
   }
 
   /**

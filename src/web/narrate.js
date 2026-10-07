@@ -1014,6 +1014,49 @@ const EVENT_TABLE = {
       detail: `第 ${index} 条口径 · ${DISPOSITION_PENDING_NOTE}`,
     };
   },
+
+  /**
+   * 工具结束事实（COM5 T2/T3）。
+   *
+   * 这几条**不进命令族豁免**：可读的结束事实不等于命令开始。把它们折叠成
+   * 「跑了多少条命令」的计数，工具时长就会被讲成命令数——两者不是一回事，
+   * 一个是时长，一个是条数。所以它们各自有单条翻译。
+   */
+  'runtime.tool.completed': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: 'L1 执行',
+      action: `工具结束：${or(data.name, '（没有工具名）')}`,
+      detail: `callId ${or(data.callId, '（没有 callId）')}`,
+    };
+  },
+
+  'hop.enqueued': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: `队列入队：${or(data.role, '（没有角色）')}`,
+      detail: `hop ${or(data.hopId, '（没有 hopId）')} · 入队于 ${or(data.enqueuedAt, '（没有入队时点）')}`,
+    };
+  },
+
+  'hop.claimed': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '队列领取',
+      detail: `hop ${or(data.hopId, '（没有 hopId）')} · 代次 ${or(data.claimGeneration, '（没有代次）')} · 认领于 ${or(data.claimedAt, '（没有认领时点）')}`,
+    };
+  },
+
+  'hop.backoff': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '队列退避',
+      detail: `hop ${or(data.hopId, '（没有 hopId）')} · 第 ${or(data.attemptCount, '（没有次数）')} 次失败 · 退避到 ${or(data.availableAt, '（没有退避时点）')}`,
+    };
+  },
 };
 
 /**
