@@ -889,6 +889,17 @@ export function createApi(deps: ApiDeps): Server {
   const COVERAGE_EXCLUSIVE_TOOLS = new Set(['coagent_record_change_coverage']);
 
   /**
+   * 验收处置专属工具：只有**普通协调者牌**（L2）能调。
+   *
+   * 与上面三组刻意分开：四组身份来源互不相同（impact hop / 执行者自己的 hop /
+   * 普通协调者 hop 声明覆盖 / 普通协调者 hop 写验收处置），合并成一组的话，
+   * 将来给其中一端加名字会顺手把处置也开出去。它不入 AGENT_TOOL_ACTION、
+   * 也不进 impact 白名单——impact 牌是只读的限权身份，让它写验收处置等于拿
+   * 「只做判断」的牌给自己签验收结论。
+   */
+  const DISPOSITION_EXCLUSIVE_TOOLS = new Set(['coagent_record_acceptance_disposition']);
+
+  /**
    * impact Run 在整个 HTTP 面的入口白名单。
    *
    * 只看 path + method + 已解析 token：请求体在这一步还没读，也不会被读——
@@ -1062,6 +1073,61 @@ export function createApi(deps: ApiDeps): Server {
         '只有普通协调者牌能调用这个工具；执行者、独立检视者与 impact 牌一律拒绝。',
       );
     }
+  };
+
+  /**
+   * 验收处置的门禁：只有 role=coordinator、**不是** impact 牌、attemptId 非空的
+   * 牌能过。
+   *
+   * 为什么**不要** claim 也不要 workItemId：处置是 L2 在验收时对着整份契约说的
+   * 话，一条处置可以点名多个工作项，且协调者这一趟 hop 本身可能就没有队列领取
+   * 身份（控制面直接发的牌）。要求它们只会把「L2 这一趟说了什么」变成「某个被
+   * 派发的 hop 领到了什么」。
+   *
+   * 同样**不看 body**：身份只能来自牌，body 里自称什么都是对方填的。这也是分流
+   * 必须排在 readJson 之前的原因。
+   */
+  const requireCoordinatorDispositionRun = (run: RunContext): void => {
+    const complete =
+      run.role === 'coordinator' &&
+      run.purpose !== 'impact' &&
+      typeof run.attemptId === 'string' &&
+      run.attemptId.trim().length > 0;
+    if (!complete) {
+      throw new HttpError(
+        403,
+        'ACTION_DENIED',
+        '只有普通协调者牌能调用这个工具；执行者、独立检视者与 impact 牌一律拒绝。',
+      );
+    }
+  };
+
+  /**
+   * 处置体只认这五个业务键。
+   *
+   * 多一个键就 400（含 missionId / attemptId / role / claim / at / contractRevision
+   * 这些身份与代次字段：它们全由牌与平台侧的已持久事实补齐，允许调用方补一个
+   * 就是自己签自己的来源）。缺字段与类型不对**不在 HTTP 层再判一遍**：规则已经
+   * 写在 Platform 一份，这里复制一份只会两处各自漂移。
+   */
+  const requireDispositionBody = (body: Record<string, unknown>): Record<string, unknown> => {
+    const known = new Set(['dispositionId', 'index', 'decision', 'workItemIds', 'basis']);
+    for (const key of Object.keys(body)) {
+      if (!known.has(key)) {
+        throw new HttpError(
+          400,
+          'BAD_REQUEST',
+          `验收处置只接受 dispositionId / index / decision / workItemIds / basis：${key} 不受理`,
+        );
+      }
+    }
+    return {
+      dispositionId: body.dispositionId,
+      index: body.index,
+      decision: body.decision,
+      workItemIds: body.workItemIds,
+      basis: body.basis,
+    };
   };
 
   /**
@@ -1340,6 +1406,26 @@ export function createApi(deps: ApiDeps): Server {
         run.missionId,
         run.attemptId,
         workItemId,
+        business,
+        run.claim,
+      );
+    },
+
+    /**
+     * L2 写下「这一条验收口径这次怎么处置」。
+     *
+     * 只透传那五个业务键，其余字段一律 400；Mission / Attempt / claim 全由
+     * Platform 从牌与平台侧已持久事实现取。
+     *
+     * 这是一条**判断记录**，不等于验收已通过、也不等于已验证：平台核对原文未变、
+     * 报告按当前工单这套命令与范围跑出来之后才落库，落库也只说明「这条口径这次
+     * 这么处置」。
+     */
+    async coagent_record_acceptance_disposition(run, body) {
+      const business = requireDispositionBody(body);
+      return platform.recordAcceptanceDisposition(
+        run.missionId,
+        run.attemptId,
         business,
         run.claim,
       );
@@ -2064,6 +2150,15 @@ export function createApi(deps: ApiDeps): Server {
       // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定。
       if (COVERAGE_EXCLUSIVE_TOOLS.has(tool)) {
         requireCoordinatorCoverageRun(run);
+        const body = redactSecretsDeep(await readJson(req));
+        return send(res, 200, await handler(run, body as Record<string, never>));
+      }
+      // 验收处置同样在普通 AGENT_TOOL_ACTION 之前分流：它不在策略矩阵里，走普通
+      // 流程会落到 UNKNOWN_TOOL，而要说清的是「你这张牌不是普通协调者牌」。
+      // 门禁必须在 readJson 之前：先读 body 就等于让对方填的东西参与身份判定，
+      // 非法 JSON 也会先变成 400 而不是 403。
+      if (DISPOSITION_EXCLUSIVE_TOOLS.has(tool)) {
+        requireCoordinatorDispositionRun(run);
         const body = redactSecretsDeep(await readJson(req));
         return send(res, 200, await handler(run, body as Record<string, never>));
       }
