@@ -74,6 +74,7 @@ export class PlatformContext {
   changeCoverages: ChangeCoverageRepository | undefined;
   contractHistories: ContractHistoryRepository | undefined;
   acceptanceDispositions: AcceptanceDispositionRepository | undefined;
+  readonly acceptanceEvidenceGate: boolean;
   queuedHops: QueuedHopRepository | undefined;
   onProjectIdle: ((projectId: string) => Promise<unknown>) | undefined;
 
@@ -98,6 +99,7 @@ export class PlatformContext {
     this.changeCoverages = deps.changeCoverages;
     this.contractHistories = deps.contractHistories;
     this.acceptanceDispositions = deps.acceptanceDispositions;
+    this.acceptanceEvidenceGate = deps.acceptanceEvidenceGate === true;
     this.queuedHops = deps.queuedHops;
   }
 

@@ -507,6 +507,185 @@ async function requireFreshEvidence(
 }
 
 /**
+ * 计算受影响且 status=pass 的验收条目中缺少当前契约修订有效处置的 index 列表（1-indexed，升序，去重）。
+ *
+ * 它不写任何状态。四个仓储任一缺席，抛 PlatformRuleError，code 仍是 ACCEPTANCE_DISPOSITION_UNSUPPORTED。
+ */
+export async function missingAcceptanceEvidenceIndexes(
+  ctx: PlatformContext,
+  mission: Mission,
+  criteria: readonly { index: number; status: string }[],
+): Promise<number[]> {
+  requireAssembled(ctx);
+
+  const acceptanceCount = mission.contract?.acceptance.length ?? 0;
+  if (acceptanceCount === 0) return [];
+
+  // 1. 计算受影响 index（1..acceptanceCount，去重）
+  const affectedSet = new Set<number>();
+
+  // 来源 1：contractHistories.listByMission 按 contractRevision 排序。
+  // 若 1..mission.contractRevision 有任一修订没有留档，则全部 index 受影响（原文未知）。
+  // 否则对每个 index，相邻两版 acceptance[index-1] 用 !== 比较，不等（含新增，上一版是 undefined）就受影响；
+  // 当前修订留档的该条与 mission.contract.acceptance[index-1] 不等也受影响。
+  const histories = (await ctx.contractHistories!.listByMission(mission.id)).slice().sort(
+    (a, b) => a.contractRevision - b.contractRevision,
+  );
+  const historyByRev = new Map<number, (typeof histories)[number]>();
+  for (const h of histories) {
+    historyByRev.set(h.contractRevision, h);
+  }
+
+  let missingHistory = false;
+  for (let r = 1; r <= mission.contractRevision; r += 1) {
+    if (!historyByRev.has(r)) {
+      missingHistory = true;
+      break;
+    }
+  }
+
+  if (missingHistory) {
+    for (let i = 1; i <= acceptanceCount; i += 1) {
+      affectedSet.add(i);
+    }
+  } else {
+    for (let i = 1; i <= acceptanceCount; i += 1) {
+      let isAffected = false;
+      for (let hIdx = 1; hIdx < histories.length; hIdx += 1) {
+        const prevText = histories[hIdx - 1]?.acceptance[i - 1];
+        const currText = histories[hIdx]?.acceptance[i - 1];
+        if (prevText !== currText) {
+          isAffected = true;
+          break;
+        }
+      }
+      if (!isAffected) {
+        const last = historyByRev.get(mission.contractRevision);
+        const currentContractText = mission.contract?.acceptance[i - 1];
+        if (last !== undefined && last.acceptance[i - 1] !== currentContractText) {
+          isAffected = true;
+        }
+      }
+      if (isAffected) {
+        affectedSet.add(i);
+      }
+    }
+  }
+
+  // 来源 2：changeImpacts.listByMission 里每条 affectedAcceptance 中落在范围内的 index。
+  // decision 为 replan 或 cancel_replace 时，再把该 impact.workItemId 的当前工单 order.criteria（必须是数组）里的范围内数字加进来。criteria 缺省或空数组不加。禁止调用 criteriaList。
+  const impacts = await ctx.changeImpacts!.listByMission(mission.id);
+  for (const impact of impacts) {
+    if (Array.isArray(impact.affectedAcceptance)) {
+      for (const idx of impact.affectedAcceptance) {
+        if (typeof idx === 'number' && idx >= 1 && idx <= acceptanceCount) {
+          affectedSet.add(idx);
+        }
+      }
+    }
+    if (impact.decision === 'replan' || impact.decision === 'cancel_replace') {
+      const item = mission.workItem(impact.workItemId);
+      const orderCriteria = item?.order?.criteria;
+      if (Array.isArray(orderCriteria)) {
+        for (const idx of orderCriteria) {
+          if (typeof idx === 'number' && idx >= 1 && idx <= acceptanceCount) {
+            affectedSet.add(idx);
+          }
+        }
+      }
+    }
+  }
+
+  // 来源 3：活动流里 kind==='change.impact_decided' 的事件同样处理：
+  // data.affectedAcceptance，以及 data.decision 为 replan/cancel_replace 时用 data.workItemId 或事件 workItemId 去读当前 order.criteria。
+  // 有事件无记录、有记录无事件都算，不要漏。
+  const events = (await ctx.activity.list(mission.id)) as readonly {
+    readonly at: string;
+    readonly kind: string;
+    readonly data: unknown;
+    readonly workItemId?: string;
+  }[];
+  for (const event of events) {
+    if (event.kind !== CHANGE_IMPACT_DECIDED_KIND) continue;
+    const data = event.data;
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) continue;
+    const row = data as Record<string, unknown>;
+    const affected = row.affectedAcceptance;
+    if (Array.isArray(affected)) {
+      for (const idx of affected) {
+        if (typeof idx === 'number' && idx >= 1 && idx <= acceptanceCount) {
+          affectedSet.add(idx);
+        }
+      }
+    }
+    if (row.decision === 'replan' || row.decision === 'cancel_replace') {
+      const workItemId = typeof row.workItemId === 'string' ? row.workItemId : event.workItemId;
+      if (workItemId !== undefined) {
+        const item = mission.workItem(workItemId);
+        const orderCriteria = item?.order?.criteria;
+        if (Array.isArray(orderCriteria)) {
+          for (const idx of orderCriteria) {
+            if (typeof idx === 'number' && idx >= 1 && idx <= acceptanceCount) {
+              affectedSet.add(idx);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // criteria 里只有 status==='pass' 且 index 受影响、又没有有效处置的，才放进返回数组。
+  const candidateIndexes = new Set<number>();
+  for (const c of criteria) {
+    if (c.status === 'pass' && affectedSet.has(c.index)) {
+      candidateIndexes.add(c.index);
+    }
+  }
+  if (candidateIndexes.size === 0) {
+    return [];
+  }
+
+  // 2. 核对有效处置
+  // listByMission 里 missionId、index、contractRevision 都等于当前 Mission 的记录，
+  // 任一条重跑现有核对不抛 ACCEPTANCE_DISPOSITION_REJECTED 即有效。
+  // reuse 调现有 requireReuse，revalidate/new_requirement 调现有 requireFreshEvidence。
+  // 只接住 code 为 ACCEPTANCE_DISPOSITION_REJECTED 的 PlatformRuleError 并视为无效；别的错误继续抛。
+  // 不要接住 AcceptanceDispositionConflictError。
+  const allDispositions = await ctx.acceptanceDispositions!.listByMission(mission.id);
+  const relevantDispositions = allDispositions.filter(
+    (d) => d.missionId === mission.id && d.contractRevision === mission.contractRevision && candidateIndexes.has(d.index),
+  );
+
+  const validIndexes = new Set<number>();
+  for (const d of relevantDispositions) {
+    if (validIndexes.has(d.index)) continue;
+    try {
+      const orders = await requireCriteria(ctx, mission, d.index, d.workItemIds);
+      if (d.decision === 'reuse') {
+        await requireReuse(ctx, mission, d.index, d.basis, d.workItemIds, orders);
+      } else {
+        await requireFreshEvidence(ctx, mission, d.index, d.basis, d.workItemIds, orders, d.decision);
+      }
+      validIndexes.add(d.index);
+    } catch (err: unknown) {
+      if (err instanceof PlatformRuleError && err.code === 'ACCEPTANCE_DISPOSITION_REJECTED') {
+        // 无效处置，继续找下一条
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  const missing: number[] = [];
+  for (const idx of candidateIndexes) {
+    if (!validIndexes.has(idx)) {
+      missing.push(idx);
+    }
+  }
+  return missing.sort((a, b) => a - b);
+}
+
+/**
  * 记下一条处置。
  *
  * 核对顺序即拒绝顺序：装配 → 身份 → 形状 → 范围与 criteria → 证据 → 落库。任一条

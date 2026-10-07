@@ -245,6 +245,11 @@ export interface PlatformDeps {
    */
   acceptanceDispositions?: AcceptanceDispositionRepository;
   /**
+   * 验收证据门禁旗标。**默认关闭（undefined / false）**。
+   * main/PG/托管入口都不赋值。开启时交卷与机器终审对受影响的验收条目核对有效处置。
+   */
+  acceptanceEvidenceGate?: boolean;
+  /**
    * 可选实时通道。finishAttempt 落地前取本跳尾部写入 Attempt.output。
    * 不注入则行为与原来一样（只信 outcome.output）。Orchestrator 仍在收尾之后才 live.finish。
    */
