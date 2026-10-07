@@ -232,6 +232,30 @@ const W4_CTX = {
   ],
 };
 
+/**
+ * 真实 profile 夹具：形状就是 platform 落进 `attempt.started.data.profile` 的那份
+ * （AgentPoolCandidate 的 facts 原样带过来）。缺 `facts` 的那份也要能试——
+ * 历史事件就是没有 facts，编一个模型比留一句「未记录」更糟。
+ */
+const REAL_COORD_PROFILE = {
+  profileId: 'coordinator-gpt-6.1-sol',
+  endpoint: 'local',
+  facts: [
+    { key: 'provider', value: 'openai-codex' },
+    { key: 'model', value: 'gpt-6.1-sol' },
+    { key: 'reasoning', value: 'medium' },
+  ],
+};
+const REAL_EXEC_PROFILE = {
+  profileId: 'exec-tr-ds-flash',
+  endpoint: 'local',
+  facts: [
+    { key: 'provider', value: 'tenrouter' },
+    { key: 'model', value: 'cbcn/deepseek-v4.1-flash' },
+    { key: 'reasoning', value: 'medium' },
+  ],
+};
+
 /** 与 web-narrate 夹具同形：LQ1 当时那页 65 条。不读状态文件。 */
 function lq1Events(): Record<string, any>[] {
   const rows: Record<string, any>[] = [
@@ -729,6 +753,53 @@ describe('环节分组', () => {
     assert.ok(done.includes('终审：放行并落地'), done);
     assert.ok(done.includes('合入 deadbeefcafebabe'), done);
   });
+
+  test('环节头显示本跳实际用的模型：本组 profile 取，缺记回退，L3 / 平台无栏', async () => {
+    const { stageListHtml } = await loaded;
+    const { modelLabel } = await import('../src/web/narrate.js');
+    // 纯文案先各自钉一遍：原值模型 + 思考档位；title 带上候选与提供方；缺 model 回 null。
+    assert.deepEqual(modelLabel(REAL_COORD_PROFILE), {
+      text: 'gpt-6.1-sol · 思考 medium',
+      title: '候选 coordinator-gpt-6.1-sol · openai-codex / gpt-6.1-sol · 思考 medium',
+    });
+    assert.equal(modelLabel({ profileId: 'p', endpoint: 'local', facts: [{ key: 'reasoning', value: 'high' }] }), null, '没有 model 就没有文案');
+    assert.equal(modelLabel(undefined), null);
+
+    const t = (n: number) => `2026-03-04T06:${String(n).padStart(2, '0')}:00.000Z`;
+    const rows = [
+      { at: t(1), kind: 'attempt.started', attemptId: 'coord-1', data: { kind: 'coordinator', profile: REAL_COORD_PROFILE } },
+      { at: t(2), kind: 'plan.updated', attemptId: 'coord-1', data: { planRevision: 1 } },
+      { at: t(3), kind: 'attempt.started', attemptId: 'W-510.exec-1', workItemId: 'W-510', data: { kind: 'executor', profile: REAL_EXEC_PROFILE } },
+      // 历史那一跳没记下 profile：不许顺手借用别的模型，也不许留一个空栏。
+      { at: t(4), kind: 'attempt.started', attemptId: 'coord-2', data: { kind: 'coordinator' } },
+      { at: t(5), kind: 'orchestration.round.started', data: {} },
+      { at: t(6), kind: 'final_review.merged', data: { mergedInto: 'main' } },
+    ];
+    const html = stageListHtml(rows, null, null, { workItems: [{ id: 'W-510', title: '接模型那一栏' }] });
+    const stageOf = (key: string) =>
+      html.split('<details class="stage ').find((p) => p.includes(`data-attempt-id="${key}"`)) || '';
+
+    // 每一栏的正文与 title 都取自**本组** attempt.started 的那份 profile。
+    assert.ok(
+      stageOf('coord-1').includes('<span class="stage-model" title="候选 coordinator-gpt-6.1-sol · openai-codex / gpt-6.1-sol · 思考 medium">gpt-6.1-sol · 思考 medium</span>'),
+      stageOf('coord-1'),
+    );
+    assert.ok(stageOf('W-510.exec-1').includes('title="候选 exec-tr-ds-flash · tenrouter / cbcn/deepseek-v4.1-flash · 思考 medium"'), stageOf('W-510.exec-1'));
+    assert.ok(stageOf('W-510.exec-1').includes('>cbcn/deepseek-v4.1-flash · 思考 medium</span>'), stageOf('W-510.exec-1'));
+    // 缺 profile：诚实说没记录，不拿别的环节的模型顶上。
+    assert.ok(stageOf('coord-2').includes('>模型 · 未记录</span>'), stageOf('coord-2'));
+    // L3 与平台不属于任何一跳：连这一栏都不出现。
+    const l3 = html.split('<details class="stage ').find((p) => p.includes('放行并落地')) || '';
+    const plat = html.split('<details class="stage ').find((p) => p.includes('开始新一轮调度')) || '';
+    assert.ok(l3.length > 0 && plat.length > 0, html);
+    assert.equal(l3.includes('stage-model'), false, l3);
+    assert.equal(plat.includes('stage-model'), false, plat);
+    // 新增的只是一栏，不是第二个容器；排序也不许被动。
+    assert.equal((html.match(/<details class="stage /g) || []).length, 5);
+    assert.equal((html.match(/<ul class="evt-list">/g) || []).length, 5);
+    const order = [...html.matchAll(/data-attempt-id="([^"]*)"/g)].map((m) => m[1]);
+    assert.deepEqual(order, ['coord-1', 'W-510.exec-1', 'coord-2', 'platform', '']);
+  });
 });
 
 describe('用量卡', () => {
@@ -1092,6 +1163,71 @@ describe('详情页：这一跳实际传递的正文', () => {
     const body = src.slice(a, src.indexOf('/** 一轮游标拉取', a));
     assert.match(body, /if \(!attemptId\)/, '空 attemptId 要直接返回，不打 /attempts/undefined');
     assert.equal(body.includes('causationId'), false, '钥匙是环节自己的 attemptId，不是事件的 causationId');
+  });
+
+  test('详情「运行模型」：同一个 modelLabel 的文案 + 同源候选/提供方，缺记与 L3 不显示', async () => {
+    const { stageDetailHtml, groupActivity } = await loaded;
+    const groupOf = (rows: Record<string, any>[]) => groupActivity(rows)[0];
+    const coord = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-2', data: { kind: 'coordinator', profile: REAL_COORD_PROFILE } },
+      { kind: 'plan.updated', attemptId: 'coord-2', data: { planRevision: 1 } },
+    ]);
+    const exec = groupOf([
+      { kind: 'attempt.started', attemptId: 'W-510.exec-1', workItemId: 'W-510', data: { kind: 'executor', profile: REAL_EXEC_PROFILE } },
+    ]);
+    const bare = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-3', data: { kind: 'coordinator' } },
+    ]);
+
+    // 正文与列表栏同一份来源（modelLabel.text），括号里的候选 id 与提供方取自
+    // 同一个 profile.facts —— 另做一份 model / reasoning 解析就会漂。
+    const coordHtml = stageDetailHtml(coord, W4_VIEW, null);
+    assert.ok(coordHtml.includes('运行模型 gpt-6.1-sol · 思考 medium（候选 coordinator-gpt-6.1-sol，openai-codex）'), coordHtml);
+    const execHtml = stageDetailHtml(exec, W4_VIEW, null);
+    assert.ok(execHtml.includes('运行模型 cbcn/deepseek-v4.1-flash · 思考 medium（候选 exec-tr-ds-flash，tenrouter）'), execHtml);
+    const bareHtml = stageDetailHtml(bare, W4_VIEW, null);
+    assert.ok(bareHtml.includes('运行模型 未记录'), bareHtml);
+    assert.equal(/undefined|NaN|\[object Object\]/.test(bareHtml), false, bareHtml);
+
+    // 缺哪项略哪项：候选与提供方各自只在真存在时才进括号；都不存在就连括号也不出。
+    const noProvider = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-4', data: { kind: 'coordinator', profile: { profileId: 'coord-partial', facts: [{ key: 'model', value: 'gpt-6.1-sol' }, { key: 'reasoning', value: 'high' }] } } },
+    ]);
+    const noProfileId = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-5', data: { kind: 'coordinator', profile: { facts: [{ key: 'provider', value: 'openai-codex' }, { key: 'model', value: 'gpt-6.1-sol' }] } } },
+    ]);
+    const onlyModel = groupOf([
+      { kind: 'attempt.started', attemptId: 'coord-6', data: { kind: 'coordinator', profile: { facts: [{ key: 'model', value: 'gpt-6.1-sol' }] } } },
+    ]);
+    assert.ok(stageDetailHtml(noProvider, W4_VIEW, null).includes('运行模型 gpt-6.1-sol · 思考 high（候选 coord-partial）'), stageDetailHtml(noProvider, W4_VIEW, null));
+    assert.ok(stageDetailHtml(noProfileId, W4_VIEW, null).includes('运行模型 gpt-6.1-sol（openai-codex）'), stageDetailHtml(noProfileId, W4_VIEW, null));
+    const onlyModelHtml = stageDetailHtml(onlyModel, W4_VIEW, null);
+    assert.ok(onlyModelHtml.includes('运行模型 gpt-6.1-sol'), onlyModelHtml);
+    assert.equal(onlyModelHtml.includes('（）'), false, onlyModelHtml);
+    assert.equal(onlyModelHtml.includes('没有记下'), false, onlyModelHtml);
+
+    // L3 与平台不属于任何一跳。
+    for (const g of groupActivity([
+      { kind: 'orchestration.round.started', data: {} },
+      { kind: 'final_review.merged', data: { mergedInto: 'main' } },
+    ])) {
+      const d = stageDetailHtml(g, W4_VIEW, null);
+      assert.equal(d.includes('运行模型'), false, `角色 ${g.role} 不该有运行模型那一行`);
+    }
+
+    // 线要接上：真 activity 上确实带发牌那一刻的 profile（否则这一行永远是「未记录」），
+    // 而 seed 那份没有 facts —— 这一跳必须如实说没记下模型，不许编一个。
+    const { base } = await seedMission();
+    const activity = (await (await fetch(`${base}/api/missions/M-task/activity`)).json()) as Record<string, any>[];
+    const coordStarted = activity.find((e) => e.kind === 'attempt.started' && !e.workItemId);
+    assert.ok(coordStarted, 'activity 里找不到协调者那一跳');
+    assert.equal(typeof coordStarted.data.profile.profileId, 'string', 'attempt.started 要带发牌时的 profile');
+    assert.ok(coordStarted.data.profile.profileId.length > 0);
+    assert.equal(typeof coordStarted.data.profile.endpoint, 'string');
+    const seeded = groupActivity(activity).find((g) => g.attemptId === coordStarted.attemptId);
+    const seededHtml = stageDetailHtml(seeded, W4_VIEW, null);
+    assert.ok(seededHtml.includes('运行模型 未记录'), seededHtml);
+    assert.equal(seededHtml.includes(coordStarted.data.profile.profileId), false, '没有 facts 时不许把候选 id 当模型印出来');
   });
 });
 
