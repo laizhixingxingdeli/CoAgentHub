@@ -41,7 +41,7 @@ import {
 } from './impact-run-policy.ts';
 import { WEB_PAGE } from './web.ts';
 import { serveStatic } from './static.ts';
-import { getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage, type UsageRow } from '../application/runtime-catalog.ts';
+import { findUsageRow, getRuntimeUsage, listRuntimeModels, type RuntimeCatalog, type RuntimeUsage, type UsageRow } from '../application/runtime-catalog.ts';
 import { NoLiveOutput, PLAN_LIVE_EMPTY_REASON } from '../application/live.ts';
 import type { LiveOutput, PlanLiveChunk, PlanRunLiveOutput } from '../application/live.ts';
 import type { DeliveryRepository } from '../application/delivery.ts';
@@ -537,8 +537,10 @@ function quotaExtras(circuit: CandidateCircuit): Pick<AgentPoolCandidateHealth, 
 /** 候选 facts 里的 provider 对上哪条用量行。没有 provider fact 就无从对应 —— 不猜。 */
 function usageRowFor(candidate: AgentPoolCandidate, rows: readonly UsageRow[]): UsageRow | undefined {
   const provider = candidate.facts.find((fact) => fact.key === 'provider')?.value;
-  if (!provider) return undefined;
-  return rows.find((row) => row.provider === provider && row.status === 'ok');
+  const model = candidate.facts.find((fact) => fact.key === 'model')?.value;
+  // model 也带上：同一 provider 下按 modelPrefix 分桶时，光有 provider 会把
+  // 整条 provider 的第一行（可能是别的上游）显示给这个候选。
+  return findUsageRow(rows, provider, model);
 }
 
 function runtimeHealth(lease: QueuedHop | undefined): AgentPoolCandidateHealth['runtime'] {

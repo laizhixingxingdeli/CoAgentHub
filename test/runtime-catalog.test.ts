@@ -24,7 +24,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform } from '../src/application/platform.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
-import { getRuntimeUsage, adapterDir, rememberAdapterDir } from '../src/application/runtime-catalog.ts';
+import { getRuntimeUsage, adapterDir, rememberAdapterDir, findUsageRow } from '../src/application/runtime-catalog.ts';
 import type { RuntimeCatalog, UsageRow } from '../src/application/runtime-catalog.ts';
 
 const SUCCESS: RuntimeCatalog = {
@@ -129,6 +129,59 @@ describe('运行时用量读取', () => {
       if (old === undefined) delete process.env.COAGENT_ADAPTER_DIR;
       else process.env.COAGENT_ADAPTER_DIR = old;
     }
+  });
+});
+
+describe('findUsageRow（编排器与健康投影共用的匹配规则）', () => {
+  test('行原样接受；最具体前缀优先、同长度取首行、无前缀兼容老 xAI 行', async () => {
+    // 适配层新加的字段不能在平台侧被挡住或抹掉：多上游聚合器的行就是多了
+    // modelPrefix / upstream。收紧协议会让整个用量读取降级成 unavailable。
+    const parsed = await getRuntimeUsage(process.cwd(), async () => ({
+      stdout: '[{"provider":"tenrouter","status":"ok","modelPrefix":"cbcn","upstream":"cbcn-deepseek","remainingPercent":41}]',
+      stderr: '',
+    }) as never);
+    assert.deepEqual(parsed, [
+      { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', upstream: 'cbcn-deepseek', remainingPercent: 41 },
+    ]);
+
+    const rows = [
+      { provider: 'tenrouter', status: 'ok', modelPrefix: 'c', remainingPercent: 1 },
+      { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', remainingPercent: 41 },
+      { provider: 'tenrouter', status: 'ok', modelPrefix: 'ag', remainingPercent: 9 },
+      // 老适配层：没有 modelPrefix，整条 provider 只有这一行。
+      { provider: 'xai', status: 'ok', remainingPercent: 7 },
+    ];
+    assert.equal(findUsageRow(rows, 'tenrouter', 'cbcn/deepseek-v3')?.remainingPercent, 41);
+    assert.equal(findUsageRow(rows, 'tenrouter', 'ag/gpt-5')?.remainingPercent, 9);
+    assert.equal(findUsageRow(rows, 'xai', 'grok-4')?.remainingPercent, 7, '老 xAI 行走无前缀兜底');
+    // 前缀必须整个路径段对上：ag 不该把 agx/… 吃掉。
+    assert.equal(findUsageRow(rows, 'tenrouter', 'agx/foo'), undefined);
+
+    // 同长度候选无法同时命中一个 model，所以照原样取输入里靠前的那一行。
+    assert.equal(
+      findUsageRow([
+        { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', remainingPercent: 1 },
+        { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', remainingPercent: 2 },
+      ], 'tenrouter', 'cbcn/x')?.remainingPercent,
+      1,
+      '重复前缀取首行',
+    );
+
+    // 有前缀行命中时，同 provider 的无前缀行不再参与（它只是兜底）。
+    assert.equal(
+      findUsageRow([
+        { provider: 'tenrouter', status: 'ok', remainingPercent: 100 },
+        { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', remainingPercent: 41 },
+      ], 'tenrouter', 'cbcn/x')?.remainingPercent,
+      41,
+    );
+    // provider 不匹配 / status 不是 ok / 没有 provider fact 都不得命中。
+    assert.equal(findUsageRow(rows, 'other', 'cbcn/x'), undefined);
+    assert.equal(
+      findUsageRow([{ provider: 'tenrouter', status: 'no_auth', remainingPercent: 0 }], 'tenrouter', 'cbcn/x'),
+      undefined,
+    );
+    assert.equal(findUsageRow(rows, undefined, 'cbcn/x'), undefined);
   });
 });
 

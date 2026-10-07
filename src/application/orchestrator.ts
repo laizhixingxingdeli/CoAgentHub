@@ -37,7 +37,7 @@ import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.t
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
 import { classifyCandidateFailure, resolveQuotaResetTime, type CandidateCircuit } from './candidate-circuit.ts';
-import { getRuntimeUsage } from './runtime-catalog.ts';
+import { findUsageRow, getRuntimeUsage } from './runtime-catalog.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
 import {
   acquireQueuedHop,
@@ -148,6 +148,14 @@ const HEARTBEAT_MS = 15_000;
  * 30 分钟：W1–W4 里最长的一次**正常**执行者跑了 25 分钟，协调者最长 6 分钟。
  */
 const ATTEMPT_WALL_CLOCK_MS = 30 * 60 * 1000;
+
+/**
+ * 候选额度快照的复用窗口。
+ *
+ * 60 秒这个量级对着的是「一跳」而不是「一次读取」：一次筛选内本来就去重成一次，
+ * 60 秒足够覆盖紧随其后的下一跳，又不至于长到让一个刚恢复的上游一直显示耗尽。
+ */
+const USAGE_CACHE_TTL_MS = 60_000;
 
 /**
  * 同一工作项「尾部连续 no_structured_result」的封顶次数。
@@ -518,6 +526,21 @@ export class Orchestrator {
   #wallClockMs: number;
   #candidateCircuits: CandidateCircuitRepository | undefined;
   #usageReader: () => Promise<{ readonly available: boolean; readonly [key: string]: unknown } | readonly unknown[]>;
+  /**
+   * 候选额度读取的**实例级**短期缓存。
+   *
+   * 为什么必须有：一次筛选要先给 N 个候选逐个问「你还有额度吗」，N 次问的其实是
+   * 同一份快照；一条 Mission 有几跳（规划、执行、验收），每跳都重新拉一遍，于是
+   * 一次运行把同一个上游打十几次。去限流的是我们自己的读，不是候选。
+   *
+   * 为什么是实例字段而不是模块级：模块级会在同一进程里串到别的 Mission / 别的
+   * 测试替身上——一份读错的行会让**别人**的候选被误判成耗尽，而症状隔着一整条
+   * Mission 才出现。实例级随编排器生灭，范围恰好是「这一次运行」。
+   *
+   * 失败与不可用**不写缓存**：写进去等于把一次抖动锁成 60 秒的「没额度」，而
+   * 60 秒恰好是一次退避重试的窗口。不缓存，下一跳就能自己恢复。
+   */
+  #usageCache: { rows: readonly unknown[]; expiresAt: number } | undefined;
   #now: () => Date;
   #queuedHops: QueuedHopRepository | undefined;
   #hopScheduler: DurableScheduler | undefined;
@@ -567,6 +590,7 @@ export class Orchestrator {
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
     this.#candidateCircuits = deps.candidateCircuits;
     this.#usageReader = deps.usageReader ?? getRuntimeUsage;
+    this.#usageCache = undefined;
     this.#now = deps.now ?? (() => new Date());
     this.#staleAcknowledged = deps.acceptStaleBase ?? false;
     this.#queuedHops = deps.queuedHops;
@@ -1577,11 +1601,14 @@ export class Orchestrator {
     if (!this.#candidateCircuits) {
       return candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
     }
+    // 额度读取器要建在循环**外面**：这一次筛选里 N 个候选问的是同一份快照，
+    // 闭包内的局部 Promise 把它们去重成一次读取（含失败结果，失败也不重试）。
+    const readUsage = this.#usageRowsReader();
     const available: ExecutionProfile[] = [];
     for (const profile of candidates) {
       const circuit = await this.#candidateCircuits.get(profile.profileId);
       if (circuit.state === 'closed') {
-        const resetAt = await this.#usageResetAt(profile, now);
+        const resetAt = await this.#usageResetAt(profile, readUsage, now);
         if (resetAt) {
           await this.#candidateCircuits.open({ profileId: profile.profileId, failureClass: 'quota', openUntil: resetAt });
           continue;
@@ -1589,7 +1616,7 @@ export class Orchestrator {
         available.push(profile);
       } else if (circuit.state === 'open' && circuit.openUntil !== null && Date.parse(circuit.openUntil) <= now) {
         if (circuit.failureClass === 'quota') {
-          const usage = await this.#quotaUsage(profile, now);
+          const usage = await this.#quotaUsage(profile, readUsage, now);
           if (usage.kind !== 'available') continue;
         }
         available.push(profile);
@@ -1602,36 +1629,78 @@ export class Orchestrator {
     return pool.loadCandidates ? pool.loadCandidates() : pool.candidates;
   }
 
-  async #usageResetAt(profile: ExecutionProfile, now: number): Promise<string | undefined> {
-    const usage = await this.#quotaUsage(profile, now);
+  /**
+   * 返回「这次筛选读一次额度行」的读取器。
+   *
+   * 两层去重，各管一件事：
+   *   - **本次筛选**：闭包里的局部 Promise 把 N 个候选合成一次调用。读失败的结果
+   *     同样被这一份 Promise 共享——失败重试会把 N 次读放大成 2N 次，而下游
+   *     本来就是「读不到就当未知」。
+   *   - **跨跳**：实例缓存 60 秒，让同一条 Mission 的下一跳直接复用。
+   *     只有**成功拿到行**才写缓存；失败或 unavailable 不写，否则一次抖动会被
+   *     锁成 60 秒的「没额度」，而 60 秒恰好是一次退避重试的窗口。
+   */
+  #usageRowsReader(): () => Promise<readonly unknown[] | undefined> {
+    let pending: Promise<readonly unknown[] | undefined> | undefined;
+    return async () => {
+      const cached = this.#usageCache;
+      if (cached && cached.expiresAt > this.#now().getTime()) return cached.rows;
+      pending ??= this.#readUsageRows();
+      return pending;
+    };
+  }
+
+  /** 归一化后的一次读取。形状不认识（false / 非数组 providers / 抛异常）都是 undefined。 */
+  async #readUsageRows(): Promise<readonly unknown[] | undefined> {
+    let rows: readonly unknown[] | undefined;
+    try {
+      const usage = await this.#usageReader();
+      if (Array.isArray(usage)) {
+        rows = usage;
+      } else if (usage.available === true && Array.isArray(usage.providers)) {
+        rows = usage.providers as readonly unknown[];
+      }
+    } catch {
+      rows = undefined;
+    }
+    if (rows) this.#usageCache = { rows, expiresAt: this.#now().getTime() + USAGE_CACHE_TTL_MS };
+    return rows;
+  }
+
+  async #usageResetAt(
+    profile: ExecutionProfile,
+    readUsage: () => Promise<readonly unknown[] | undefined>,
+    now: number,
+  ): Promise<string | undefined> {
+    const usage = await this.#quotaUsage(profile, readUsage, now);
     return usage.kind === 'exhausted' ? usage.resetAt : undefined;
   }
 
-  async #quotaUsage(profile: ExecutionProfile, now: number): Promise<
+  async #quotaUsage(
+    profile: ExecutionProfile,
+    readUsage: () => Promise<readonly unknown[] | undefined>,
+    now: number,
+  ): Promise<
     { kind: 'exhausted'; resetAt: string } | { kind: 'available' | 'unknown' }
   > {
     const providerFact = profile.facts?.find((fact) => fact.key === 'provider');
     if (!providerFact) return { kind: 'unknown' };
-    try {
-      const usage = await this.#usageReader();
-      const providers = Array.isArray(usage) ? usage : usage.providers;
-      if (!Array.isArray(usage) && !usage.available) return { kind: 'unknown' };
-      if (!Array.isArray(providers)) return { kind: 'unknown' };
-      const row = providers.find((entry) =>
-        entry !== null && typeof entry === 'object' &&
-        (entry as Record<string, unknown>).provider === providerFact.value &&
-        (entry as Record<string, unknown>).status === 'ok',
-      ) as Record<string, unknown> | undefined;
-      if (!row) return { kind: 'unknown' };
-      const exhausted = row.remainingPercent === 0 || (typeof row.usedPercent === 'number' && row.usedPercent >= 100);
-      if (exhausted) {
-        const reset = typeof row.resetAt === 'string' ? Date.parse(row.resetAt) : Number.NaN;
-        if (Number.isFinite(reset) && reset > now) return { kind: 'exhausted', resetAt: new Date(reset).toISOString() };
-      }
-      if ((typeof row.remainingPercent === 'number' && row.remainingPercent > 0) ||
-          (typeof row.usedPercent === 'number' && row.usedPercent < 100)) return { kind: 'available' };
-      return { kind: 'unknown' };
-    } catch { return { kind: 'unknown' }; }
+    const rows = await readUsage();
+    if (!rows) return { kind: 'unknown' };
+    const model = profile.facts?.find((fact) => fact.key === 'model')?.value;
+    // 匹配规则由 runtime-catalog 的纯函数统一：provider + modelPrefix（最长前缀，
+    // 无前缀兜底），status 非 ok 的行不算。模型 fact 也要带上，否则同一 provider
+    // 下的多个上游会共用第一行 —— 界面上写着还有 80%，编排器却已经把候选拉黑。
+    const row = findUsageRow(rows, providerFact.value, model) as Record<string, unknown> | undefined;
+    if (!row) return { kind: 'unknown' };
+    const exhausted = row.remainingPercent === 0 || (typeof row.usedPercent === 'number' && row.usedPercent >= 100);
+    if (exhausted) {
+      const reset = typeof row.resetAt === 'string' ? Date.parse(row.resetAt) : Number.NaN;
+      if (Number.isFinite(reset) && reset > now) return { kind: 'exhausted', resetAt: new Date(reset).toISOString() };
+    }
+    if ((typeof row.remainingPercent === 'number' && row.remainingPercent > 0) ||
+        (typeof row.usedPercent === 'number' && row.usedPercent < 100)) return { kind: 'available' };
+    return { kind: 'unknown' };
   }
 
   /** 候选的可用性快照，供界面显示"为什么停着"。 */
