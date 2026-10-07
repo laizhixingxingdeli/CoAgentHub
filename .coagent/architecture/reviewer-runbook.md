@@ -34,6 +34,7 @@
 1. 挂守候脚本：`node C:/program1/coagent-experiments/roles/duty-watch.mjs --log <运行日志> [--base <端口>]`；有升级单、合入、挂起、超限（单票 $10、15 个工作项、单项执行 4 次）或运行结束就醒。答复升级后等 20 秒再挂，避开答复还没生效的空档。
 2. 服务开着时看进度只用 HTTP：`/api/missions/<id>`、`/api/missions/<id>/activity`、`/api/missions/<id>/attempts/<attemptId>`、`/api/plan-runs`、`/api/pools`。不跑 `l3 show` / `l3 plan`。
 3. 升级单：
+   - 协调者问「已验收的项要补做 / 作废的项怎么办」：不再属于升级范围（ADR-0007 补充，2026-10-07），答复引用那一条并让它直接新建引用原 id 的补修单；执行者被杀后工作项卡在 dispatched 的，等 COM12 的平台收尾，之前只能由我作废并另建（作废只当「不用做了」用，不是重启办法）。
    - 协调者问契约问题——先核实；票有缺口就 `l3 revise` 发新契约，再 `l3 plan decide <E-n> --action answer`；答复写清做法，不只说「同意」。
    - 平台停在 project_busy / no_available_agent / runaway_suspected 且只给「隔离重跑 / 跳过 / 重划 / 停」——选「停」（reviewer_stop），必要时 `l3 pause` 该 Mission、`l3 retire` 卡死的工作项并写明原因，再开跑，平台续跑同一 Mission（PLAT2 / PLAT5）。
    - 不在方案运行里的 Mission：`l3 answer`，答完重跑 `run-mission`。
