@@ -87,7 +87,14 @@ export async function createMission(ctx: PlatformContext, input: CreateMissionIn
     });
     await ctx.projects.save(project);
     await ctx.event(mission, 'mission.created', { contractRevision: mission.contractRevision });
-    await recordContractAcceptance(ctx, mission.id, mission.contractRevision, mission.contract.acceptance);
+    // 为什么先判 contract 再取 acceptance：kernel 允许 Mission 没有契约（那时 contractRevision
+    // 保持 0），而无条件写 mission.contract.acceptance 会在进入 recordContractAcceptance 之前就
+    // 求值 undefined.acceptance，抛 TypeError——「没有仓储就 return」是在函数体里，挡不住传参。
+    // 不这么写，无契约的 Mission 连建都建不出来，且历史里会凭空多出一条对不上契约的留档。
+    const contract = mission.contract;
+    if (contract !== undefined) {
+      await recordContractAcceptance(ctx, mission.id, mission.contractRevision, contract.acceptance);
+    }
     return { missionId };
   }
 
