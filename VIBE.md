@@ -59,6 +59,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - QueryRun 不是 Mission；只读靠工具 allowlist，不靠 prompt。
 - 权威执行预算：hard 可停 / 内部晋升，soft 只告警；caller 不得手填 `budget_exceeded`（ADR-0005；按票累计的费用硬停已定，实现前由检视者人工执行）。
 - Decision/Jev 在 OFF/SHADOW 下不具执行权威；SHADOW 仅审计（ADR-0002）。
+- 活动事件的 `at` 一律是平台落盘时钟，调用方不能回填：`ActivityLog.append` 不收 `at`，三种存储都用 `clock.now()`。需要比落盘更精确的发生时刻时放进事件 `data`（如 `hop.claimed` 的 `claimedAt`），记录时刻与发生时刻分开（COM5 契约 r2，2026-10-07）。
 
 ## Web 约定
 
