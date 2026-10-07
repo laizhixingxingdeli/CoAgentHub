@@ -8,11 +8,27 @@ import { PlatformRuleError } from './context.ts';
  * 等结果、先验收、或走作废重建。created / rejected / blocked 不在表里，可修订。
  */
 export const REVISE_BLOCKED_HINT: Partial<Record<WorkItemStatus, string>> = {
-  dispatched: '正在执行中，改不了：等执行者交卷（或报告卡住）后再修订，或先作废重建。',
+  // 平台收尾（work_item.platform_blocked）会把跑飞 / 连续无结果的工作项转成 blocked，
+  // 那时 dispatched 就不成立了。提示里必须说清这条恢复路径，否则协调者会为了改工单
+  // 而把一张还得做的工作项作废掉。
+  dispatched:
+    '正在执行中，改不了；执行者已被平台终止或平台不再重跑的，平台会把它转为卡住，转后即可修订同一张单再派发——不要为了改工单而作废它。',
   submitted: '已有执行结果待验收，先 review_execution_result 收掉这次结果，再决定是否修订。',
-  accepted: '已经验收通过，不能修订；契约若变应由 L3 打回，再重建工单。',
-  retired: '已经作废，不能修订；需要的话请新建一张工单。',
+  accepted:
+    '已验收不能修订；要补做就新建一张补修单，在 requiredBehaviour 里引用原工作项 id 与它已满足的验收、只写还缺的部分，原单的验收记录保持不动；目标、验收、范围不变就不需要升级给 L3，变了才升级。',
+  retired:
+    '已作废，不能修订，作废表示这件事不用做了或已被取代；要做的内容不一样就新建工单并引用原 id，不要用作废来重启一个卡住的工作项。',
 };
+
+/**
+ * 派发门禁里「当前状态不能派发」的提示：给协调者下一步能照做的事。
+ * retired 不是坏状态——它表示这件事已被取代，要再做就新建一张引用原 id 的工单。
+ */
+export function notDispatchableHint(status: WorkItemStatus): string {
+  return status === 'retired'
+    ? '已作废，不能派发，作废表示这件事不用做了或已被取代；要做的内容不一样就新建工单并引用原 id，不要用作废来重启一个卡住的工作项。'
+    : '改不了这一张就新建一张工单；卡住的工作项先修订再派发。';
+}
 
 /**
  * 两份工单的顶层字段差异（字段名，排序）。

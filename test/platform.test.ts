@@ -1174,6 +1174,190 @@ describe('W-292：blocked/partial 工单未修订禁止原样重派', () => {
   });
 });
 
+describe('W-523：平台可信卡住收尾与修订重派', () => {
+  test('综合可信转换：活执行者不写，收尾后事件独立，重复/迟到无副作用，修订后可再派', async () => {
+    const { platform, activity, projects } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M523', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M523');
+    await platform.updatePlan('M523', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M523', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M523', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M523', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M523', workItemId);
+
+    // 1) 还有活执行者：不写、不改状态。
+    const liveAttempt = await platform.blockStalledWorkItem({
+      missionId: 'M523', workItemId, source: 'runaway', expectedAttemptId: exec.attemptId,
+      orderRevision: 'r1', minutes: 31,
+    });
+    assert.equal(liveAttempt.converted, false);
+    assert.equal((await platform.getMissionView('M523')).workItems[0].status, 'dispatched');
+    assert.equal((await activity.list('M523')).filter((e) => e.kind === 'work_item.platform_blocked').length, 0);
+
+    // 2) 执行者已结束（被平台掐断）：转成 blocked，只写 work_item.platform_blocked。
+    await platform.finishAttempt('M523', exec.attemptId, { endedBy: 'killed_wall_clock' });
+    const done = await platform.blockStalledWorkItem({
+      missionId: 'M523', workItemId, source: 'runaway', expectedAttemptId: exec.attemptId,
+      orderRevision: 'r1', minutes: 31,
+    });
+    assert.equal(done.converted, true);
+    assert.match(done.reason, /平台掐断：一跳连续跑了 31 分钟/);
+    const view = await platform.getMissionView('M523');
+    assert.equal(view.workItems[0].status, 'blocked');
+    const events = await activity.list('M523');
+    const blocked = events.filter((e) => e.kind === 'work_item.platform_blocked');
+    assert.equal(blocked.length, 1);
+    assert.deepEqual(blocked[0]?.data, {
+      source: 'runaway', orderRevision: 'r1', attemptId: exec.attemptId, reason: done.reason,
+    });
+    assert.equal(blocked[0]?.workItemId, workItemId);
+    assert.equal(blocked[0]?.attemptId, exec.attemptId);
+    // 不是 blocked.reported：平台收尾不计入执行者那一条失败计数。
+    assert.equal(events.filter((e) => e.kind === 'blocked.reported').length, 0);
+    const blockedItem = await liveWorkItem(projects, 'P', 'M523', workItemId);
+    assert.equal(blockedItem.blocked?.attemptId, exec.attemptId);
+    assert.deepEqual(blockedItem.blocked?.whatWasTried, [`${exec.attemptId}（killed_wall_clock）`]);
+
+    // 3) 重复调用无副作用。
+    const again = await platform.blockStalledWorkItem({
+      missionId: 'M523', workItemId, source: 'runaway', expectedAttemptId: exec.attemptId, orderRevision: 'r1',
+    });
+    assert.equal(again.converted, false);
+    assert.equal((await activity.list('M523')).filter((e) => e.kind === 'work_item.platform_blocked').length, 1);
+
+    // 4) 未修订的原样重派仍被门禁拦住。
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M523', coord.attemptId, [workItemId]),
+      (e: unknown) => (e as PlatformRuleError).code === 'WORK_ORDER_REVISION_REQUIRED',
+    );
+    assert.equal((await platform.getMissionView('M523')).workItems[0].status, 'blocked');
+
+    // 5) 修订后可再派；此后旧快照（旧 attemptId / 旧修订号）再来一次收尾都无副作用。
+    const { revision } = await platform.reviseWorkOrder('M523', coord.attemptId, workItemId, {
+      ...ORDER, objective: '改对前提再做',
+    });
+    assert.equal(revision, 'r2');
+    await platform.dispatchWorkItems('M523', coord.attemptId, [workItemId]);
+    const exec2 = await platform.startExecutorAttempt('M523', workItemId);
+    await platform.finishAttempt('M523', exec2.attemptId, { endedBy: 'no_structured_result' });
+    const staleAttempt = await platform.blockStalledWorkItem({
+      missionId: 'M523', workItemId, source: 'no_result_limit', expectedAttemptId: exec.attemptId, orderRevision: 'r2',
+    });
+    assert.equal(staleAttempt.converted, false);
+    const staleRevision = await platform.blockStalledWorkItem({
+      missionId: 'M523', workItemId, source: 'no_result_limit', expectedAttemptId: exec2.attemptId, orderRevision: 'r1',
+    });
+    assert.equal(staleRevision.converted, false);
+    assert.equal((await platform.getMissionView('M523')).workItems[0].status, 'dispatched');
+
+    // 新快照成立：来源是连续无结果到顶，理由换一套说法。
+    const limited = await platform.blockStalledWorkItem({
+      missionId: 'M523', workItemId, source: 'no_result_limit', expectedAttemptId: exec2.attemptId,
+      orderRevision: 'r2', consecutive: 3,
+    });
+    assert.equal(limited.converted, true);
+    assert.match(limited.reason, /平台放弃重跑：同一工作项连续 3 次没有结构化结果/);
+    const finalView = await platform.getMissionView('M523');
+    assert.equal(finalView.workItems[0].status, 'blocked');
+    const finalItem = await liveWorkItem(projects, 'P', 'M523', workItemId);
+    assert.deepEqual(
+      finalItem.blocked?.whatWasTried,
+      [`${exec.attemptId}（killed_wall_clock）`, `${exec2.attemptId}（no_structured_result）`],
+    );
+    assert.match(finalItem.blocked?.needsFromUpstream ?? '', /coagent_revise_work_order/);
+  });
+
+  test('A 提示：accepted/retired 修订拒绝含补修单与引用原，retired 派发指新建引用原 id', async () => {
+    const { platform, projects } = makePlatform();
+    await platform.createMission({ projectId: 'P', missionId: 'M523h', contract: CONTRACT });
+    const coord = await platform.startCoordinatorAttempt('M523h');
+    await platform.updatePlan('M523h', coord.attemptId, PLAN);
+    const { workItemId } = await platform.createWorkItem('M523h', coord.attemptId, { title: 'W', order: ORDER });
+    await platform.submitContractCheck('M523h', coord.attemptId, { verdict: 'ok', summary: '测试契约已核对' });
+    await platform.dispatchWorkItems('M523h', coord.attemptId, [workItemId]);
+    const exec = await platform.startExecutorAttempt('M523h', workItemId);
+    await platform.submitEvidence('M523h', exec.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M523h', exec.attemptId, {
+      outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无',
+    });
+    await platform.finishAttempt('M523h', exec.attemptId, { endedBy: 'structured_submit' });
+    await platform.reviewExecutionResult('M523h', coord.attemptId, {
+      workItemId, verdict: 'accept',
+      acceptanceResults: ORDER.acceptance.map((c) => ({ criterion: c, status: 'pass' as const, evidence: '核过' })),
+      reasons: ['ok'], requiredChanges: [],
+    });
+
+    // accepted：不能修订，要补做就新建补修单引用原工作项 id 与已满足的验收。
+    await assert.rejects(
+      () => platform.reviseWorkOrder('M523h', coord.attemptId, workItemId, { ...ORDER, objective: '补一处' }),
+      (e: unknown) => {
+        const err = e as PlatformRuleError;
+        return err.code === 'WORK_ITEM_NOT_REVISABLE'
+          && /补修单/.test(err.message)
+          && /引用原工作项 id/.test(err.message)
+          && /验收记录保持不动/.test(err.message);
+      },
+    );
+    assert.equal((await platform.getMissionView('M523h')).workItems[0].status, 'accepted');
+
+    // retired：同样不能修订，且不得用作废来重启一个卡住的工作项。
+    // accepted 不让作废（那是在改历史），所以另用一张派发中的工作项走到 retired。
+    const retired = await platform.createWorkItem('M523h', coord.attemptId, { title: 'W-retired', order: ORDER });
+    await platform.dispatchWorkItems('M523h', coord.attemptId, [retired.workItemId]);
+    await platform.retireWorkItem('M523h', retired.workItemId, '被新工单取代');
+    await assert.rejects(
+      () => platform.reviseWorkOrder('M523h', coord.attemptId, retired.workItemId, { ...ORDER, objective: '换个做法' }),
+      (e: unknown) => {
+        const err = e as PlatformRuleError;
+        return err.code === 'WORK_ITEM_NOT_REVISABLE' && /不要用作废来重启一个卡住的工作项/.test(err.message);
+      },
+    );
+    assert.equal(
+      (await liveWorkItem(projects, 'P', 'M523h', retired.workItemId)).status,
+      'retired',
+    );
+
+    // retired 派发：错误码与状态都不变，提示指向新建引用原 id 的工单。
+    await assert.rejects(
+      () => platform.dispatchWorkItems('M523h', coord.attemptId, [retired.workItemId]),
+      (e: unknown) => {
+        const err = e as PlatformRuleError;
+        return err.code === 'NOT_DISPATCHABLE' && /引用原 id/.test(err.message);
+      },
+    );
+    assert.equal(
+      (await liveWorkItem(projects, 'P', 'M523h', retired.workItemId)).status,
+      'retired',
+    );
+
+    // dispatched 提示：说明平台会把它转为卡住，转后即可修订同一张单——不要为改工单而作废。
+    const second = await platform.createWorkItem('M523h', coord.attemptId, { title: 'W2', order: ORDER });
+    await platform.dispatchWorkItems('M523h', coord.attemptId, [second.workItemId]);
+    await assert.rejects(
+      () => platform.reviseWorkOrder('M523h', coord.attemptId, second.workItemId, { ...ORDER, objective: '改一改' }),
+      (e: unknown) => {
+        const err = e as PlatformRuleError;
+        return err.code === 'WORK_ITEM_NOT_REVISABLE'
+          && /平台会把它转为卡住/.test(err.message)
+          && /不要为了改工单而作废它/.test(err.message);
+      },
+    );
+    // submitted 提示不动：先收掉这次结果。
+    const exec2 = await platform.startExecutorAttempt('M523h', second.workItemId);
+    await platform.submitEvidence('M523h', exec2.attemptId, { kind: 'test', summary: '绿', command: 'node --test', exitCode: 0 });
+    await platform.submitExecutionResult('M523h', exec2.attemptId, {
+      outcome: 'completed', summary: '改好了', changedFiles: ['src/foo.ts'], evidenceIds: [], notes: '无',
+    });
+    await assert.rejects(
+      () => platform.reviseWorkOrder('M523h', coord.attemptId, second.workItemId, { ...ORDER, objective: '再改' }),
+      (e: unknown) => {
+        const err = e as PlatformRuleError;
+        return err.code === 'WORK_ITEM_NOT_REVISABLE' && /review_execution_result/.test(err.message);
+      },
+    );
+  });
+});
+
 describe('W-317 协调者简报：工作项索引 + 上一跳增量（生产接线）', () => {
   test('首次 coordinator 有索引、增量为空、plan 不变；后续 coordinator 取到提交证据增量；executor 不携带两来源', async () => {
     const { platform } = makePlatform();

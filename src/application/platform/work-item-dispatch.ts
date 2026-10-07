@@ -2,6 +2,8 @@ import type { Mission, Project } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { runDecisionShadow } from '../decision-shadow-runner.ts';
 import { enforceMissionTicketGates } from './ticket-budget.ts';
+import { notDispatchableHint } from './work-order-helpers.ts';
+import { PLATFORM_BLOCKED_EVENT_KIND } from './stalled-work-item.ts';
 
 export async function dispatchWorkItems(
   ctx: PlatformContext,
@@ -33,7 +35,7 @@ export async function dispatchWorkItems(
       if (!dispatchable.includes(item.status)) {
         throw new PlatformRuleError(
           'NOT_DISPATCHABLE',
-          `工作项 ${item.id} 当前是 ${item.status}，不能派发`,
+          `工作项 ${item.id} 当前是 ${item.status}，不能派发；${notDispatchableHint(item.status)}`,
         );
       }
     }
@@ -47,6 +49,9 @@ export async function dispatchWorkItems(
       const lastRelevant = [...history].reverse().find((event) => {
         if (event.workItemId !== item.id) return false;
         if (event.kind === 'blocked.reported') return true;
+        // 平台收尾（W-523）：执行者已不在、平台代写的卡住也算「最近一次卡住」，
+        // 否则平台刚收的项可以被原样重派出去，白烧一次执行者。
+        if (event.kind === PLATFORM_BLOCKED_EVENT_KIND) return true;
         if (event.kind === 'execution_result.submitted') {
           const outcome = (event.data as { outcome?: string } | undefined)?.outcome;
           return outcome === 'blocked' || outcome === 'partial';
