@@ -8,6 +8,9 @@
 2. 核实票里的事实：要改的文件在哪；提到的输入（文件、接口、别的仓库的代码、规格）确实存在；新增事件要在 `src/web/narrate.js` 补翻译，新增等待原因还要补 `src/api/web.ts` 的 WAIT_REASON 表（`test/wait-reason-coverage.test.ts` 钉死，AC3 漏过）；新增协调者工具要由适配器（coagent-pi）先注册。
    - 对照架构决定与规格（`.coagent/architecture/decisions/`、`.coagent/specs/`）：票的做法不能和 ADR 冲突（AC3 先写了「复用 ExecutionBudget 硬停」，与 ADR-0005 冲突，r2 改成独立门禁）。
    - 验收要改接口时先核它现在的返回形状（RS1 要给列表加计数，可列表是裸数组）。
+   - 要推翻或改变既有行为的票：先按行为词、状态词、错误码、候选 id、事件名 grep `test/`，找出钉着旧行为的断言；契约里点名文件与行号并授权改写，把这些测试文件放进允许范围，把「为保持绿而缩小新规则」列入非目标；钉着别的性质的测试变红就是实现错了，不许改测试迁就。COM8 漏过一次（`orchestrator.test.ts:729` 钉着「no_structured_result 不换候选」，执行者做完才发现，白花一轮并发了契约 r2），同类还有 VR1（`docs/http-api.md` 路由文档）、COM3-B4（web-narrate 叙事测试）。
+   - 契约不要写协调者读不到的证据（如「绑定最终提交的完整平台 VR」）：它会为此升级，白占一个来回（PI-COM1 的 W-512 就多了一轮）。写成「交卷带 VR 编号与摘要，完整 VR 由 L3 终审核对」。
+   - 两张票改同一份规格时（COM8、PERF1 都改 candidate-circuit），一张合入并批文档、确认集成分支出现「docs(project): 批准文档提议」之后，再建下一张：同项目有未结束的 Mission（含已建未跑的）会挡文档空档提交，后一张的 memoryDelta 也会对着旧基线。
    - 纯搬家 / 重构票：先找出所有读源码文本的测试（`grep -rln "readFileSync" test/`，看哪些读 `src/`），分两类在票里写明怎么适配——钉死文件路径的、钉死调用写法的（如只认 `this.#event(`）。REF1 因这两类各返工一次（契约 r2、r4）。
    - 票里或升级答复里规定具体做法之前，先核平台允不允许。例：已验收的工作项不能修订，只能新建工单补做（REF1 的 E-2）。
    - 新代码守工程规范（`engineering-standards.md`）；数值目标写成建议值，写明「什么情况下算收尾」。
@@ -22,6 +25,7 @@
    - 插件 accepted 只是 HTTP 请求受理；`coagenthub_get_hosted_run` 的 running 表示平台启动输出已确认，ended 提供退出码；Mission 完成以权威视图和交卷证据为准。断流或插件重启后观测为 unknown，先查 Mission/activity 和真实运行者，禁止盲目重试。当前插件同实例抑制重复启动，不承诺跨实例分布式去重。
    - 恢复暂停只清 paused，不负责启动；挂起先走 resume_parked 的目标同步。已有 Mission 的启动读取当前权威 Contract，不用旧本地规格覆盖。历史 origin 不决定承载通路：先核实真实 PlanRun 已停止还是仍运行。
    - 轮次按预计工作量配置，最多100；触顶仍在推进时核实原因再续跑同一 Mission，不能默认新建重跑。互不依赖票可同批验证，改平台源码只在无运行 agent 的空档重启一次；依赖新行为的下一批在服务加载后开跑。
+   - `coagenthub_start_mission` 的 adapter 参数是入口文件 `.../coagent-pi/.../src/agent-entry.ts`，不是目录（传目录会让首跳 ERR_UNSUPPORTED_DIR_IMPORT，首选候选被熔断 5 分钟）；命令行里直接写 Windows 反斜杠会被吞，用 node 把参数写成 JSON 文件再传。托管运行在 Mission 等 L3（升级、待终审）或 hop 退避时就退出；答复升级、发契约修订（待终审时 `revise_contract` 会把 Mission 退回规划）之后要重新 start_mission 才继续，答复后等约 20 秒再续。同时跑的 Mission 不超过两条：并行会抬高全量测试偶发率（Windows 子进程 0xC0000142、FileAgentPoolRepository 两个实例交替追加丢行），红了先隔离复跑再下结论。
    - 候选顺序以平台当前角色配置为权威，每次派发读取；start_mission 的 coordinator/executor 参数只作兼容校验，不覆盖当前配置。提示词及适配器更新安排在 Mission 空档。
 4. coagent-pi 的票要 `--worktrees`，常驻服务托管不支持（#26）：用 coagent-pi 自己的独立状态 `C:/program1/coagent-experiments/roles/state-pi/.coagent-state.json` 独立运行，可与主线并行。独立运行不发布端口，值守用只看日志的 `C:/program1/coagent-experiments/roles/log-watch.mjs --log <运行日志> --max-minutes 25`。适配器按每次派发现读，合入 coagent-pi 集成分支后下一次派发就生效：改协调者 / 执行者提示词或简报的票放到 Mission 之间跑。
 
@@ -39,7 +43,7 @@
 ## 4. 票与票之间
 
 1. 方案运行里的 Mission 由机器 L3 在集成分支验证后自动合入；`run-mission` 跑的由检视者合入（第 5 节）。
-2. 一批跑完、且批里有票改了平台代码（`src/`）：停服务、清锁、标方案源为 done、`--check`、重启服务、再开下一批，让下一批用上新代码。批内不重启；只改测试或文档的不用重启。
+2. 一批跑完、且批里有票改了平台代码（`src/`）：停服务、清锁、标方案源为 done、`--check`、重启服务、再开下一批，让下一批用上新代码。批内不重启；只改测试或文档的不用重启。（2026-10-07 更正）服务从主工作区跑，主工作区检出的是 master：集成分支（如 codex/communication-integration）上的平台代码要等合 master 之后重启才加载，**只重启不会加载**（本批 COM6–COM11 与 PERF1 就是这样，10-07 夜白重启了一次）；pi 适配器相反，每跳从它的集成 worktree 现读，合入即生效。所以平台与适配器相互依赖的改动（PERF1 的前缀匹配与 PI-COM1 的 10Router 额度行）适配器后合：master 带上平台这半并重启之后，再合适配器那半，否则现有平台会把 10Router 多行按「第一条同 provider 行」误读，某个上游用尽就可能把整个 tenrouter 池熔断。
 3. 平台新增的协调者工具要等适配器注册（coagent-pi）合入后，服务才重启到依赖它的代码。
 4. 文档（`.coagent/`、`AGENTS.md`）只在没有 Mission 在跑时提交，只 `git add` 明确的路径。
 5. Mission 在跑时集成分支上不许有任何新提交、主工作区不许留未提交改动——平台合入要求目标 HEAD 等于 Mission 开工时的提交、工作区干净。别的会话（如前端会话）的改动在单独的 worktree / 分支上做，在两个 Mission 之间合入。
@@ -118,3 +122,4 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 - 工单 validation 里的 diffSize 只用在零代码验证单（0/0）。实现单不要设行数硬上限：B4 的 W-489、W-491 各因超了几行被平台判失败、白重派一次，这违背工单标准第 7 条。
 - 执行者自己跑全量会和平台 VR 抢同一批全机共用的 PG 测试库，制造 DUPLICATE_ID 之类的假红；看到红就交 partial 时平台又不跑 VR，会原地打转（B3 的 W-487）。验证单的 requiredBehaviour 要写死「只跑一次定向、交证据、立即交 completed」。
 - pi 协调者还没有读取完整 VR 的工具，每张单验收前都会升级来要全文。L3 按「报告原文 + 来源事件 + Git 关联 + HAOFF1 静态 skip 核对」答复，然后续跑；要等 pi A2 注册、集成代码部署到服务以后，这一来一回才会消失。
+- 2026-10-07 夜：PI-COM1（pi 协调者注册 `coagent_get_validation_report`、契约核对 issues 后不再手动升级、usage 命令报 10Router 各上游额度、`appendXaiQuotaReset` 只认 xAI 行）已在 pi 集成分支的 Mission 里验收完毕，等 master 合入 PERF1 并重启之后再合；合入后协调者可以自读完整 VR，上一条说的那一来一回才真正消失。
