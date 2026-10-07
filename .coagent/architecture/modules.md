@@ -2,7 +2,7 @@
 
 读代码前先看这张表：每个目录负责什么、从哪进、不能越过什么线。检视者维护；协调者交卷里「动了哪些目录、对外接口变化」有新东西时更新。**不随每一跳发送**，按需读。
 
-大文件按方法名搜索定位，别整份读：`orchestrator.ts` 约 3,000 行、`platform.ts` 约 2,500 行（入口外壳，实质用例体在 `platform/` 下）、`web/task.js` 约 1,850 行、`api/server.ts` 约 2,600 行。
+大文件按方法名搜索定位，别整份读：`orchestrator.ts` 约 3,000 行、`platform.ts` 约 2,550 行（入口外壳，实质用例体在 `platform/` 下）、`web/task.js` 约 1,950 行、`api/server.ts` 约 2,600 行。
 
 ## 源码（`src/`）
 
@@ -10,10 +10,11 @@
 |---|---|---|---|
 | `src/kernel/` | 纯领域：Mission / WorkItem / Attempt 状态机，契约、工单、结论等载荷类型 | `mission.ts`、`work-item.ts`、`attempt.ts`、`payloads.ts` | 不 import 任何东西（`test/kernel-imports.test.ts` 钉死） |
 | `src/application/platform.ts` | 所有写命令的唯一用例入口：`Platform` 类的公开方法、构造与字段、context 装配；方法体转调 `platform/` 下的职责模块（REF1，2026-10-02） | `Platform` 的公开方法（`createClassifiedMission`、`reviewExecutionResult`、`finalizeMissionByMachine`…） | 规则写在 `platform.ts` 与 `platform/`，不写在 HTTP handler 或 prompt 里；外部只从 `platform.ts` 引用（各模块的名字由它再导出） |
-| `src/application/platform/` | `Platform` 的实质用例体，按职责分 51 个模块（见下节） | 各模块导出 `(ctx, 原参数)` 形式的函数，`ctx` 是 `context.ts` 的共用状态 / 事务 / 事件 | 只由 `platform.ts` 调用；写事件走 `ctx.event(…)`（与 `#event` 等价，护栏测试两种写法都认） |
+| `src/application/platform/` | `Platform` 的实质用例体，按职责分 54 个模块（见下节） | 各模块导出 `(ctx, 原参数)` 形式的函数，`ctx` 是 `context.ts` 的共用状态 / 事务 / 事件 | 只由 `platform.ts` 调用；写事件走 `ctx.event(…)`（与 `#event` 等价，护栏测试两种写法都认） |
 | `src/application/orchestrator.ts` | 每一跳的调度：唤醒协调者 / 执行者、换候选、检查点、快车道分支、协调者唤醒指令；执行者 wait 期间可选的 impact 监督接线（`impactSupervision`，默认关闭） | `Orchestrator.runMission` | 只调 Platform，不直接改状态；执行者路径只调一次 `run.wait()`，finally 先 `stopAndJoin` |
 | `src/application/change-request*.ts`、`change-impact*.ts`、`impact-supervisor.ts`、`change-receipt*.ts`、`change-coverage*.ts` | 运行中变更：L3 确认的原始请求（B1）、L2 影响判断的 append-only 记录（B2b）、执行者 wait 期间的有界 impact 监督（B2b）、执行者读差异的分层回执（B3：adapter_received / session_consumed / executor_started）、交卷快照与平台 verified（B4：交卷事件带 appliedChanges / snapshotHash，验收门挡未覆盖的 compatible 变更，verified 只经 `recordVerified`）、重派后的工单覆盖声明（COM4-C：`change-coverage*.ts`，L2 把旧 Attempt 的差异并入修订后工单并记录，快照相符才算覆盖） | `ChangeRequestRepository`、`ChangeImpactRepository`、`beginImpactSupervision`、`ChangeReceiptRepository`、`ChangeCoverageRepository` | 只保存判断与回执，不应用；执行侧写不到 verified；pi 轮询与生产入口未接线（见 `specs/runtime-change.md`） |
 | `src/application/contract-history*.ts`、`acceptance-disposition*.ts` | 验收证据（COM4-A+B）：契约验收原文按修订 append-only 留档（有契约的建 Mission 记 r1、reviseContract 每次 +1，与 Mission 状态同一事务）；L2 对受影响条目的验收处置（reuse / revalidate / new_requirement）append-only 记录 | `ContractHistoryRepository`、`AcceptanceDispositionRepository`（内存与 File 两种实现） | 处置只是 L2 的判断，不等于验收通过；交卷门禁默认关闭、生产未开，pi 侧工具未注册；PG 模式明确 unsupported（见 `specs/acceptance-evidence.md`） |
+| `src/application/time-attribution.ts` | 时间归因（COM5）：把活动、验证报告起止与本 Mission 的 hop 投影成阶段耗时（排队、退避、选候选、运行、工具、验证、评审、等待决定、暂停、搁置、未分类），工具取区间并集、验证与运行重叠不双计 | `projectTimeAttribution`（纯函数，无 I/O） | 测不到的一律 null / 未知，不用当前时间、token 或 `hop.updatedAt` 补算；只读展示，不影响调度（见 `specs/time-attribution.md`） |
 | `src/application/plan-*.ts`、`mission-runner.ts` | 方案运行：解析与筛选（`plan-spec`）、分类与路由（`plan-routing`）、逐票驱动（`plan-driver`）、运行记录与升级单（`plan-run`、`plan-run-store`）、装配（`plan-runtime`）、预检（`plan-preflight`）、交接面（`plan-handoff`）、单 Mission 运行与轮次上限（`mission-runner`） | `runPlanOnPlatform`、`MissionRunner.run` | 方案记录是独立 JSON，不进主状态 |
 | `src/application/durable-scheduler.ts`、`candidate-circuit.ts`、`agent-pool.ts`、`runtime-catalog.ts` | 持久队列（租约、代次、五维容量、重试、死信）、候选熔断、候选池、模型清单 | 队列是纯函数 `claimHop` / `renewHop` / `reportHopFailure`；候选池 `AgentPoolRepository` | 候选按平台当前角色有序配置读取；整角色替换核对 revision，在途身份不变 |
 | `src/application/context-builder.ts`、`project-memory.ts`、`context-attribution-report.ts` | 给协调者 / 执行者的简报打包；读 `.coagent/`、生成 VIBE.md、写 memoryDelta；用量归因 | `buildContextBundle`、`readProjectMemory`、`generateVibe` | 简报只放白名单来源 |
@@ -49,6 +50,7 @@
 | 终审与合入 | `final-review`（人 / 检视者终审与知识落地；只有队列 Mission 在合入时跑项目集成验证）、`machine-finalization`（机器终审）、`independent-review`（独立检视）、`ha-validation`、`ha-finalization`、`ha-finalization-helpers` |
 | 运行中变更 | `change-impact`（专属 impact 开 Attempt、读请求、提交判断、未决请求查询、失租旧 Attempt 收尾，同一事务围栏）、`change-receipt`（执行者读发给自己的 compatible 差异、逐层回执，围栏校验代次与活租约）、`change-coverage`（协调者记录重派后的工单覆盖声明，核对 compatible、可修订状态与当前工单哈希） |
 | 验收证据 | `acceptance-disposition`（协调者写验收处置并在同一围栏事务里机械校验：显式 criteria、原文全等、ChangeImpact 点名、报告命令与范围全等；以及门禁开启时交卷与机器终审共用的「受影响条目缺处置」判定） |
+| 时间归因 | `tool-activity`（工具结束事件 `runtime.tool.completed`，与命令开始同一串行队列、按 attemptId+callId 幂等）、`hop-events`（`hop.enqueued` / `hop.claimed` / `hop.backoff`，发生时点在 data，renew 不发）、`time-attribution-view`（`getTimeAttribution` 只读视图：读活动、验证报告起止与本 Mission 的 hop，调用纯投影） |
 | 升级 | `escalations`（升级、契约核对、诊断与答复） |
 | 预算与用量 | `budget-usage`（用量聚合、权威预算）、`usage-helpers`（用量与时间纯辅助）、`ticket-budget`（单票费用上限与每 15 个工作项检查点的门禁） |
 | 视图与简报 | `views`（只读视图）、`agent-view-helpers`（agent 视图纯投影）、`startup-brief`（开跑简报与裁剪审计）、`context-metrics`（摘要净化） |
