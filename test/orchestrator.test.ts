@@ -726,7 +726,11 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal(executorHops.some((hop) => hop.profile.profileId === 'exec-b'), false, 'Q 未启动');
   });
 
-  test('普通执行结果失败不触发候选熔断轮换', async () => {
+  // 这条用例要同时钉住两件**方向相反**的事，所以名字里两个词都必须在：
+  // 「按工作项轮换」——同一张工单上换个候选是允许的；「全局熔断不变」——换了人
+  // 不等于把候选判成故障。只钉住后者（旧断言 every(exec-a)）会挡住前者，只钉住
+  // 前者又会把「no_structured_result 该不该开熔断」这条没人再验。
+  test('普通执行结果失败按工作项轮换候选，但两候选的全局熔断仍不变', async () => {
     const executor = new ScriptedRuntime({ 'executor:W-1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] } });
     const circuits = candidateCircuitRepository();
     current = await harness({ coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor }, circuits);
@@ -734,11 +738,19 @@ describe('调度器：整条 Mission 自己走完', () => {
     const orchestrator = current.makeOrchestrator();
     await orchestrator.runMission('M-ordinary-failure', { projectRoot: process.cwd() });
     const executorHops = orchestrator.hops.filter((hop) => hop.role === 'executor');
-    assert.ok(executorHops.length > 0, '发生真实 executor Hop');
-    assert.ok(executorHops.every((hop) => hop.profile.profileId === 'exec-a'));
+    // 局部轮换：exec-a 在自己的最近两次 Attempt 上都没交结构化结果，于是**只在这张
+    // 工单上**被排除，第三跳轮到 exec-b；exec-b 同样两次无结果后跨候选的尾部连续
+    // 次数到顶（4 次），平台不再自动重跑——所以恰好四跳，没有第五跳。
+    assert.deepEqual(
+      executorHops.map((hop) => hop.profile.profileId),
+      ['exec-a', 'exec-a', 'exec-b', 'exec-b'],
+      '按候选配置顺序轮换，且到顶后不多开执行跳',
+    );
     assert.ok(executorHops.every((hop) => hop.endedBy === 'no_structured_result'));
+    // 全局熔断不变：no_structured_result 是「协议不遵从」，不是候选故障。换人
+    // 只是这一张工单上的局部排除，两个候选的健康记录都不该被写。
     assert.deepEqual(await circuits.get('exec-a'), { profileId: 'exec-a', state: 'closed' });
-    assert.equal(executorHops.some((hop) => hop.profile.profileId === 'exec-b'), false, 'Q 未启动');
+    assert.deepEqual(await circuits.get('exec-b'), { profileId: 'exec-b', state: 'closed' });
   });
 
   test('持久候选熔断记录五种真实 Hop 失败分类及未来截止', async () => {
