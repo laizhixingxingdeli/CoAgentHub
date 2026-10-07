@@ -90,7 +90,7 @@ async function harness(
   candidateCircuits?: CandidateCircuitRepository,
   attemptWallClockMs?: number,
   workspace?: WorkspaceManager,
-  options?: { usageReader?: () => Promise<unknown>; provider?: string; loadExecutorCandidates?: () => Promise<readonly ExecutionProfile[]> },
+  options?: { usageReader?: () => Promise<unknown>; provider?: string; loadExecutorCandidates?: () => Promise<readonly ExecutionProfile[]>; now?: () => Date; coordinatorCandidates?: readonly ExecutionProfile[] },
 ) {
   const workspaceManager = workspace ?? new InPlaceWorkspaceManager();
   const clock = new FixedClock();
@@ -114,7 +114,7 @@ async function harness(
   const pools = {
     coordinator: {
       runtime: runtimes.coordinator,
-      candidates: [{ endpoint: 'local' as const, profileId: 'coordinator-a' }],
+      candidates: options?.coordinatorCandidates ?? [{ endpoint: 'local' as const, profileId: 'coordinator-a' }],
     },
     executor: {
       runtime: runtimes.executor,
@@ -143,6 +143,7 @@ async function harness(
         attemptWallClockMs,
         executor: pools.executor,
         usageReader: options?.usageReader,
+        now: options?.now,
       }),
     makeRunner: () =>
       new MissionRunner({
@@ -677,6 +678,126 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal(orchestrator.hops.some((hop) => hop.profile.profileId === 'exec-a'), false);
   });
 
+  test('候选额度同次筛选只读一次，60 秒实例缓存跨跳复用、过期重读', async () => {
+    // 假时钟只喂 usage 缓存：hop 时钟是 FixedClock，与这里互不干扰。
+    let clockAt = Date.parse('2026-01-01T00:00:00.000Z');
+    const now = () => new Date(clockAt);
+    const sameProvider = (ids: readonly string[]) => ids.map((profileId) => ({
+      endpoint: 'local' as const,
+      profileId,
+      facts: [{ key: 'provider', value: 'tenrouter' }],
+    }));
+    const coordinatorPool = sameProvider(['coordinator-a', 'coordinator-b', 'coordinator-c']);
+    const executorPool = sameProvider(['exec-a', 'exec-b', 'exec-c']);
+    // 行不带 modelPrefix：走 no-prefix 兜底，三个同 provider 候选命中同一行。
+    const usageRows = () => [{ provider: 'tenrouter', status: 'ok' as const, remainingPercent: 50 }];
+
+    const reads: number[] = [];
+    const executorScripted = new ScriptedRuntime(EXECUTOR_HAPPY);
+    const executor: AgentRuntime = {
+      kind: executorScripted.kind,
+      start: async (spec) => {
+        if (spec.role === 'executor') {
+          // 下一跳的筛选已经跑过（缓存期内），到这里计数还是 1。
+          assert.equal(reads.length, 1, '同次筛选 N 个候选只读一次，下一跳筛选复用缓存');
+          // 推进 60 秒：让随后第三跳的筛选看到缓存已过期。
+          clockAt += 60_000;
+        }
+        return executorScripted.start(spec);
+      },
+    };
+    current = await harness(
+      { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor },
+      candidateCircuitRepository(),
+      undefined,
+      undefined,
+      {
+        usageReader: async () => { reads.push(1); return usageRows(); },
+        coordinatorCandidates: coordinatorPool,
+        loadExecutorCandidates: async () => executorPool,
+        now,
+      },
+    );
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-cache', contract: CONTRACT });
+    const result = await current.makeOrchestrator().runMission('M-usage-cache', { projectRoot: process.cwd() });
+    assert.deepEqual(result, { kind: 'awaiting_l3_review' }, '三跳整票仍走完');
+    assert.equal(reads.length, 2, '过期后重读一次');
+
+    // available:false 与抛异常：归一化成未知，**不写缓存**，所以三次筛选各读一次。
+    for (const [index, [label, reader]] of ([
+      ['available:false', async () => ({ available: false })],
+      ['抛异常', async () => { throw new Error('upstream usage unreachable'); }],
+    ] as const).entries()) {
+      const readsDegraded: number[] = [];
+      const missionId = `M-usage-degraded-${index}`;
+      current = await harness(
+        { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor: new ScriptedRuntime(EXECUTOR_HAPPY) },
+        candidateCircuitRepository(),
+        undefined,
+        undefined,
+        {
+          usageReader: async () => { readsDegraded.push(1); return reader(); },
+          coordinatorCandidates: coordinatorPool,
+          loadExecutorCandidates: async () => executorPool,
+        },
+      );
+      await current.platform.createMission({ projectId: 'P', missionId, contract: CONTRACT });
+      const degraded = await current.makeOrchestrator().runMission(missionId, { projectRoot: process.cwd() });
+      assert.deepEqual(degraded, { kind: 'awaiting_l3_review' }, `${label} 时整票仍交卷`);
+      assert.equal(readsDegraded.length, 3, `${label} 不缓存，三次筛选各读一次`);
+    }
+
+    // 没有 provider fact 的候选不触发读取。
+    const readsNoFact: number[] = [];
+    current = await harness(
+      { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor: new ScriptedRuntime(EXECUTOR_HAPPY) },
+      candidateCircuitRepository(),
+      undefined,
+      undefined,
+      {
+        usageReader: async () => { readsNoFact.push(1); return []; },
+        loadExecutorCandidates: async () => [{ endpoint: 'local', profileId: 'exec-a' }],
+      },
+    );
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-no-fact', contract: CONTRACT });
+    await current.makeOrchestrator().runMission('M-usage-no-fact', { projectRoot: process.cwd() });
+    assert.equal(readsNoFact.length, 0, '没有 provider fact 不读取');
+  });
+
+  test('同 provider 双上游按 modelPrefix 匹配额度：耗尽上游开 quota，另一上游照常执行', async () => {
+    const resetAt = new Date(Date.now() + 3_600_000).toISOString();
+    const tenrouterPool: readonly ExecutionProfile[] = [
+      { endpoint: 'local', profileId: 'exec-cbcn', facts: [{ key: 'provider', value: 'tenrouter' }, { key: 'model', value: 'cbcn/deepseek-v3' }] },
+      { endpoint: 'local', profileId: 'exec-ag', facts: [{ key: 'provider', value: 'tenrouter' }, { key: 'model', value: 'ag/gpt-5' }] },
+    ];
+    const executor = new ScriptedRuntime(EXECUTOR_HAPPY);
+    const circuits = candidateCircuitRepository();
+    current = await harness(
+      { coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor },
+      circuits,
+      undefined,
+      undefined,
+      {
+        loadExecutorCandidates: async () => tenrouterPool,
+        usageReader: async () => [
+          { provider: 'tenrouter', status: 'ok', modelPrefix: 'cbcn', remainingPercent: 0, usedPercent: 100, resetAt },
+          { provider: 'tenrouter', status: 'ok', modelPrefix: 'ag', remainingPercent: 42, usedPercent: 58 },
+        ],
+      },
+    );
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-usage-tenrouter', contract: CONTRACT });
+    const orchestrator = current.makeOrchestrator();
+    await orchestrator.runMission('M-usage-tenrouter', { projectRoot: process.cwd() });
+    const gated = await circuits.get('exec-cbcn');
+    assert.equal(gated.state, 'open', '耗尽上游开 quota 熔断');
+    if (gated.state === 'open') {
+      assert.equal(gated.failureClass, 'quota');
+      assert.equal(gated.openUntil, resetAt, '熔断到该上游的 resetAt');
+    }
+    assert.equal(executor.specs.some((spec) => spec.profile.profileId === 'exec-cbcn'), false, '耗尽上游不派发');
+    assert.equal(executor.specs.some((spec) => spec.profile.profileId === 'exec-ag'), true, '同 provider 的另一上游照常执行');
+  });
+
   test('持久 Hop 的平台不可达保留原熔断记录且不轮换候选', async () => {
     const scripted = new ScriptedRuntime({ 'executor:W-1': { steps: [] } });
     const platformUnavailable: AgentRuntime = {
@@ -726,7 +847,11 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.equal(executorHops.some((hop) => hop.profile.profileId === 'exec-b'), false, 'Q 未启动');
   });
 
-  test('普通执行结果失败不触发候选熔断轮换', async () => {
+  // 这条用例要同时钉住两件**方向相反**的事，所以名字里两个词都必须在：
+  // 「按工作项轮换」——同一张工单上换个候选是允许的；「全局熔断不变」——换了人
+  // 不等于把候选判成故障。只钉住后者（旧断言 every(exec-a)）会挡住前者，只钉住
+  // 前者又会把「no_structured_result 该不该开熔断」这条没人再验。
+  test('普通执行结果失败按工作项轮换候选，但两候选的全局熔断仍不变', async () => {
     const executor = new ScriptedRuntime({ 'executor:W-1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] } });
     const circuits = candidateCircuitRepository();
     current = await harness({ coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor }, circuits);
@@ -734,11 +859,19 @@ describe('调度器：整条 Mission 自己走完', () => {
     const orchestrator = current.makeOrchestrator();
     await orchestrator.runMission('M-ordinary-failure', { projectRoot: process.cwd() });
     const executorHops = orchestrator.hops.filter((hop) => hop.role === 'executor');
-    assert.ok(executorHops.length > 0, '发生真实 executor Hop');
-    assert.ok(executorHops.every((hop) => hop.profile.profileId === 'exec-a'));
+    // 局部轮换：exec-a 在自己的最近两次 Attempt 上都没交结构化结果，于是**只在这张
+    // 工单上**被排除，第三跳轮到 exec-b；exec-b 同样两次无结果后跨候选的尾部连续
+    // 次数到顶（4 次），平台不再自动重跑——所以恰好四跳，没有第五跳。
+    assert.deepEqual(
+      executorHops.map((hop) => hop.profile.profileId),
+      ['exec-a', 'exec-a', 'exec-b', 'exec-b'],
+      '按候选配置顺序轮换，且到顶后不多开执行跳',
+    );
     assert.ok(executorHops.every((hop) => hop.endedBy === 'no_structured_result'));
+    // 全局熔断不变：no_structured_result 是「协议不遵从」，不是候选故障。换人
+    // 只是这一张工单上的局部排除，两个候选的健康记录都不该被写。
     assert.deepEqual(await circuits.get('exec-a'), { profileId: 'exec-a', state: 'closed' });
-    assert.equal(executorHops.some((hop) => hop.profile.profileId === 'exec-b'), false, 'Q 未启动');
+    assert.deepEqual(await circuits.get('exec-b'), { profileId: 'exec-b', state: 'closed' });
   });
 
   test('持久候选熔断记录五种真实 Hop 失败分类及未来截止', async () => {
@@ -1246,6 +1379,57 @@ describe('协调者唤醒：完整简报优先与合法补修交接', () => {
     assert.match(wake, /coagent_get_work_item 取详情/);
     assert.deepEqual(view.workItems[0]?.order?.allowedScope, ['src/bar.ts'], '修订要可见地改到工单正文');
     assert.equal(view.workItems[0]?.order?.orderRevision, 'r2', '修订号必须递增，否则重派会被挡');
+  });
+
+  test('首次派发与机器续做都优先用开跑简报的工单，不再要求先取工单', async () => {
+    // 「简报优先」没有外部可见的症状（执行者拿到的工单内容一模一样，界面也一模一样），
+    // 只能从 instructions 捕获的原文证明：首次派发与 partial 自动续做都不再把
+    // coagent_get_work_order 当默认第一步，而且都说清了缺正文时才调工具。
+    const PREVIOUS_SUMMARY = '只改了一半：foo() 的边界还没处理';
+    const coordinator = new ScriptedRuntime({
+      'coordinator:-:0': COORDINATOR_HAPPY['coordinator:-:0'],
+    });
+    const executor = new ScriptedRuntime({
+      'executor:W-1': {
+        steps: [
+          {
+            tool: 'coagent_submit_evidence',
+            body: { kind: 'test', summary: '改了一半', command: 'node --test', exitCode: 0 },
+          },
+          {
+            tool: 'coagent_submit_execution_result',
+            body: (previous) => ({
+              outcome: 'partial',
+              summary: PREVIOUS_SUMMARY,
+              changedFiles: ['src/foo.ts'],
+              evidenceIds: [previous.evidenceId],
+              notes: '还在改边界',
+            }),
+          },
+        ],
+      },
+    });
+    current = await harness({ coordinator, executor });
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-brief-exec', contract: CONTRACT });
+
+    // maxRounds=3：开局派发 + 首次执行者 + 一次 partial 自动续做，正好两跳执行者。
+    await current.makeOrchestrator().runMission('M-brief-exec', {
+      projectRoot: process.cwd(),
+      maxRounds: 3,
+    });
+
+    const instructions = executor.instructions;
+    assert.equal(instructions.length, 2, `首次派发 + 一次自动续做：${instructions.length}`);
+    for (const instruction of instructions) {
+      assert.match(instruction, /开跑简报/);
+      assert.match(instruction, /你的工单/);
+      assert.match(instruction, /才调用 coagent_get_work_order/);
+      assert.doesNotMatch(instruction, /先调用 coagent_get_work_order/);
+    }
+    // 续做那一跳还要保留「冻结工单才是权威」与上一轮说明。
+    assert.match(instructions[1]!, /冻结工单才是权威/);
+    assert.match(instructions[1]!, /下面的说明只是补充/);
+    assert.match(instructions[1]!, /只改了一半/);
   });
 });
 

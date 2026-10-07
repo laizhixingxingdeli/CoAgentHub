@@ -205,6 +205,49 @@ export function stageName(events, ctx) {
   return parts.length > 0 ? parts.join('、') : '协调';
 }
 
+/* ============================ 这一跳用的模型 ============================ */
+
+/**
+ * 一跳实际用的模型 → 文案。
+ *
+ * 判据只认 profile.facts 里那两条不透明键值（适配层写进去的），**不查当前
+ * 候选池、也不看 profile.resolved**：候选表之后会被改，查当前池等于拿今天的
+ * 配置去解释昨天那一跳；resolved 是运行时报回来的实际身份，与「发牌那一刻
+ * 选的是哪条候选」不是同一个问题，混用会让历史归因静默错位。
+ *
+ * 取不到 model 就回 null，不在这里编一句「未知模型」：null 由调用方翻成人话
+ * （环节头说「模型 · 未记录」，详情说「未记录」，两处的句子不一样），编在一处
+ * 就等于把两种场合的语气绑死。
+ *
+ * 只回纯字符串（不拼 HTML、不 esc、不碰 DOM）：转义是调用方的事，这样 node 里
+ * 能直接喂假 profile 断言文案。
+ */
+export function modelLabel(profile) {
+  const p = profile && typeof profile === 'object' ? profile : {};
+  const facts = Array.isArray(p.facts) ? p.facts : [];
+  const fact = (key) => {
+    const hit = facts.find((f) => f && text(f.key) === key);
+    return hit ? text(hit.value) : '';
+  };
+
+  const model = fact('model');
+  if (!model) return null;
+  const reasoning = fact('reasoning');
+  const provider = fact('provider');
+  const profileId = text(p.profileId);
+
+  const label = model + (reasoning ? ` · 思考 ${reasoning}` : '');
+  // title 逐项拼、缺哪项略哪项：缺失项写成空串或「undefined」，人就会以为那一跳
+  // 真有一个空候选 / 空提供方。
+  const title = [
+    profileId ? `候选 ${profileId}` : '',
+    provider ? `${provider} / ${model}` : model,
+    reasoning ? `思考 ${reasoning}` : '',
+  ].filter(Boolean).join(' · ');
+
+  return { text: label, title };
+}
+
 /* ============================ 用量卡文案 ============================ */
 
 /**

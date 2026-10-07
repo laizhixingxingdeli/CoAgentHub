@@ -10,7 +10,9 @@
 
 ## 协调者唤醒与工单交接
 
-协调者每跳先使用开跑简报，不要求完整简报场景重复调用 `coagent_get_mission`。只有缺必要详情、发现并发变化或平台拒绝时才按需查询：工单正文、证据和评审用 `coagent_get_work_item`，契约验收原文用 `coagent_get_contract`，需要全量索引才用 `coagent_get_mission`。
+协调者每跳先使用开跑简报，不要求完整简报场景重复调用 `coagent_get_mission`。只有缺必要详情、发现并发变化或平台拒绝时才按需查询：工单正文、证据和评审用 `coagent_get_work_item`，契约验收原文用 `coagent_get_contract`，需要全量索引才用 `coagent_get_mission`。非开局跳的全新会话前缀也遵循此规则。
+
+执行者首次派发与机器续做均直接使用开跑简报「你的工单」一节；只有简报缺工单正文时才调用 `coagent_get_work_order`。续做仍保留冻结工单权威声明与上一轮说明，简报优先不改变平台派发、提交和验收的权威校验。
 
 工单要求引用上层 Contract 验收时，`requiredBehaviour` 或 `contextRefs` 必须提供相关验收原文或完整对应表；只带相关条目，不要求执行者自行取得无权限契约。
 
