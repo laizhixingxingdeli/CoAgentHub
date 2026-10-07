@@ -8,9 +8,19 @@
 
 ## 完整工单修订
 
-协调者可通过 `coagent_revise_work_order`（`POST /api/agent/coagent_revise_work_order`）提交新的完整工单，策略只授予 coordinator。created、rejected、blocked 可修订；dispatched、submitted、accepted、retired 拒绝且错误指出下一步。每次成功修订递增 `orderRevision`（旧工单视为 r1），持久化进现有工单快照，并产生带修订号与变更字段列表的 `work_item.order_revised` 事件；事件有网页可读翻译。执行者交 partial 或报 blocked 后，若工单修订号未变化，同一工作项不可原样重新 dispatch；错误提示修订工单、作废或升级给 L3。正常 completed 后 reject 及 L3 send_back 的 accepted 重派不受此门禁影响。
+协调者可通过 `coagent_revise_work_order`（`POST /api/agent/coagent_revise_work_order`）提交新的完整工单，策略只授予 coordinator。created、rejected、blocked 可修订；dispatched、submitted、accepted、retired 拒绝且错误指出下一步。每次成功修订递增 `orderRevision`（旧工单视为 r1），持久化进现有工单快照，并产生带修订号与变更字段列表的 `work_item.order_revised` 事件；事件有网页可读翻译。执行者交 partial 或报 blocked，以及平台可信收尾转 blocked 后，若工单修订号未变化，同一工作项不可原样重新 dispatch，抛出 WORK_ORDER_REVISION_REQUIRED。应核对工单是否过大或不清楚，修订后再派发；作废只表示不用做了或已被取代，不是重启卡住工作的办法。正常 completed 后 reject 及 L3 send_back 的 accepted 重派不受此门禁影响。
 
 经协调者 create/revise 工具提交工单时，`allowedScope` 超过两个文件或只有目录、`verification` 超过两条命令、`contextRefs` 为空，会在工具响应中收到指向违规项及拆细建议的警告，现有创建/修订事件同步审计警告；这不是拒绝，工单照常建立或修订。直接调用 `Platform.createWorkItem` 的既有路径不受这层工具警告或硬校验影响。适配器工具注册及网页编辑工单不属于此能力的平台实现。
+
+## 已验收补修与平台可信收尾
+
+accepted 项不能修订；要补做就新建补修单，在 requiredBehaviour 引用原工作项 id 与已满足的验收，只写尚缺部分，原验收记录保持不动。目标、验收、范围不变无需升级 L3，发生变化才升级。retired 项不能修订或派发；作废表示不用做了或已被取代，新的不同内容需新建引用原 id 的工单，不能通过作废重启卡住工作。accepted 与 retired 仍不能作废。
+
+dispatched 项仍不能修订。平台内部可信收尾只用于 Standard，在同一围栏事务中确认当前仍 dispatched、所有执行者 Attempt 已结束、最新 Attempt 与工单修订号匹配调用快照后，使用既有 recordBlocked 转 blocked，不新增状态边。条件不成立或已经 blocked 时返回未转换及原因，无副作用；迟到调用不能收掉新执行跳。
+
+调用来源只有两处：墙钟强杀完成进程退出等待、Attempt 收尾与令牌吊销后（runaway）；COM8 同一项连续无结果封顶或候选局部排除耗尽、交回协调者前（no_result_limit）。普通无结果、killed_idle、上游失败仍按原规则重试；runaway 的停机等待语义不变，不回滚工作区，不处理半成品恢复。
+
+平台填写 BlockedRecord，列明来源、次数或分钟数、尝试 id 与结束原因，并提示核对工单后 coagent_revise_work_order 再派发。写独立事件 work_item.platform_blocked，data 含 source、orderRevision、attemptId、reason；不复用 blocked.reported，不计入验收标准连续失败计数。该事件参与未修订不得原样重派门禁，修订同一张单后可再派发。网页以「平台」徽章显示来源与原因。
 
 ## 契约验收标准关联与连续失败停派
 

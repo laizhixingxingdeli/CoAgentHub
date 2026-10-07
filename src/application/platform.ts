@@ -34,6 +34,9 @@ import * as lightweightValidation from './platform/lightweight-validation.ts';
 import * as lightweightDispatch from './platform/lightweight-dispatch.ts';
 import * as executorSubmissions from './platform/executor-submissions.ts';
 import * as workItemDispatch from './platform/work-item-dispatch.ts';
+import { blockStalledWorkItem } from './platform/stalled-work-item.ts';
+export type { StalledSource, StalledWorkItemInput, StalledWorkItemResult } from './platform/stalled-work-item.ts';
+export { PLATFORM_BLOCKED_EVENT_KIND } from './platform/stalled-work-item.ts';
 import * as workItemReview from './platform/work-item-review.ts';
 import * as workOrders from './platform/work-orders.ts';
 import * as startupBrief from './platform/startup-brief.ts';
@@ -1416,6 +1419,33 @@ export class Platform {
     workItemIds: readonly string[],
   ): Promise<{ dispatched: readonly string[] }> {
     return workItemDispatch.dispatchWorkItems(this.#context, (mission) => this.#requireNoOpenDiagnosticEscalation(mission), (mission, project) => this.#acquireMutationSlotForDispatch(mission, project), missionId, attemptId, workItemIds);
+  }
+
+  /**
+   * 平台把「已无活执行者的 dispatched 工作项」收成 blocked（W-523）。
+   *
+   * 只在 Standard、工作项仍 dispatched、所有执行者尝试都已结束、且调用方快照
+   * （最后一次尝试 id + 工单修订号）仍然成立时写；任一不成立返回 converted:false
+   * 与原因，**不留任何事件或领域写入**。理由用平台口吻写，needsFromUpstream
+   * 指明下一步是修订再派或作废。
+   *
+   * 内部方法：不接 HTTP / 工具 / policy，由编排器在收尾路径上调用。不调用
+   * reportBlocked，也不跑 criteriaFailureStop——平台收尾不是执行者说某条验收
+   * 过不了，计入那条连续失败计数会让升级凭空变多。
+   */
+  async blockStalledWorkItem(
+    input: {
+      readonly missionId: string;
+      readonly workItemId: string;
+      readonly source: 'runaway' | 'no_result_limit';
+      readonly expectedAttemptId: string;
+      readonly orderRevision: string;
+      readonly consecutive?: number;
+      readonly minutes?: number;
+    },
+    claim?: QueueClaimIdentity,
+  ): Promise<{ converted: boolean; reason: string }> {
+    return blockStalledWorkItem(this.#context, input, claim);
   }
 
   async reviewExecutionResult(
