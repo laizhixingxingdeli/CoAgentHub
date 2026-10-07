@@ -480,10 +480,6 @@ function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
   return base;
 }
 
-/**
- * 命令能不能直接交给 execFile 的判据。运行时（报告里）与前置（收单时）共用这一份：
- * 收单时不挡，坏 argv 会在验收阶段才发现，那时执行者已经白跑一整跳。
- */
 export function invalidArgvReason(argv: readonly string[]): string | undefined {
   if (argv.length === 0) return 'invalid argv: empty';
   if (argv.some((a) => a === '')) return 'invalid argv: empty string entry';
