@@ -61,7 +61,7 @@
 
 - **现在能不能测**：能测，且这是目前最可靠的一段。
 - **事件 kind 与字段**：`attempt.started` / `attempt.ended`（`src/application/platform/attempts.ts:151`）。`ended` 带 `endedBy`、`usage`（`input`/`output`/`total`/`quality`）、可选 `contextMetrics`（工具**次数**，**没有耗时**）。
-- **文件:行**：`attempts.ts:24` 与 `:151`；重启收尾会再 append 一条 `attempt.ended` 且 `endedBy=interrupted`（`src/application/platform/reconcile.ts:128`）。
+- **文件:行**：`attempts.ts:24` 与 `:151`；重启收尾会再 append 一条 `attempt.ended`（`src/application/reconcile.ts:123-130`，其中 `:130` 的 `data.endedBy` 为 `interrupted`）。
 - **COM4-AB 真实示例**：
   - `W-503.exec-1`：`2026-10-07T03:00:06.628Z` → `2026-10-07T03:04:04.086Z`，`usage.total=1235016`，`quality=reported`。
   - 重启收尾：`W-502.exec-2` 在 `2026-10-06T20:22:34.954Z` 有 `endedBy=interrupted`，**该跳没有 `usage`**。
@@ -78,8 +78,8 @@
 ### 2.5 平台验证
 
 - **现在能不能测**：验证窗的**起止在报告仓储里有**，但**活动流里只有时点**；**现网页算不出验证与运行的重叠**。
-- **事件 kind 与字段**：`ValidationCheckResult` / `ValidationReport` 有 `startedAt`/`endedAt`（`src/kernel/payloads.ts:396-455`；`src/application/.../engine.ts:82` 起逐 check 记时）。activity 只有 `validation.reported`（`src/web/narrate.js` 约 820 行），字段 `reportId`、`passed`。网页简版 `ValidationReportView`（`src/application/platform/types.ts:508`）只有 `durationMs`，**没有起止**。
-- **文件:行**：`kernel/payloads.ts:396-455`；`engine.ts:82` 起；`narrate.js` 约 `820`；`platform/types.ts:508`。
+- **事件 kind 与字段**：`ValidationCheckResult` / `ValidationReport` 有 `startedAt`/`endedAt`（`src/kernel/payloads.ts:396-455`；`src/application/validation/engine.ts:82` 是 `validate` 报告窗的 `startedAt`，**不是**逐 check 记时——逐 check 的起止另见已有的 `ValidationCheckResult`）。activity 只有 `validation.reported`（`src/web/narrate.js:841`），字段 `reportId`、`passed`。网页简版 `ValidationReportView`（`src/application/platform/types.ts:508`）只有 `durationMs`，**没有起止**。
+- **文件:行**：`src/kernel/payloads.ts:396-455`；`src/application/validation/engine.ts:82`；`src/web/narrate.js:841`；`src/application/platform/types.ts:508`。
 - **COM4-AB 真实示例**：
   - `VR-203`：attempt `W-502.exec-5`，`attempt.ended` `2026-10-07T02:51:51.926Z`；报告窗 `2026-10-07T02:51:53.050Z`–`02:51:53.884Z`（**834ms**），command check **536ms**，与该次运行**不重叠**；activity 上 `validation.reported` 在 `02:51:54.191Z`。
   - `VR-205`：报告窗 `2026-10-07T03:43:05.568Z`–`03:45:29.587Z`（**144019ms**），在 `W-504.exec-14` ended `03:43:04.411Z` 之后；activity 到 `03:45:29.921Z` 才 `validation.reported`。
@@ -89,7 +89,7 @@
 
 - **现在能不能测**：**不能**。
 - **事件 kind 与字段**：`review.recorded` 是**时点**（带 `verdict`），**不是区间**；**没有 `review.started`**。
-- **文件:行**：`review.recorded` 的具体落点是「未知」（本票未核实该行号，不编造）。
+- **文件:行**：`src/application/platform/work-item-review.ts:82`（`kind` 在 `:83`，`data` 含 `verdict`）。
 - **COM4-AB 真实示例**：`coord-4`：`attempt.started` `02:53:21.022Z` → `review.recorded` `02:59:17.622Z` → `attempt.ended` `02:59:22.934Z`。
 - **不可靠或缺失**：整跳含**调查、规划、派发**，**不能当成评审耗时**。**评审时长现在缺失**，必须标未知，禁止用协调者 attempt 墙钟冒充。
 
@@ -130,7 +130,7 @@
 
 ### 3.2 环节顺序
 
-`stageListHtml`（`task.js:487-490`）按**首次时间升序**。架构红线要求任务内进度**按发生顺序**，不是最新在顶。契约验收括号里的「最新在顶上」与红线和现码**不一致**。本方案**沿用现有发生顺序，不倒序**；请 L3 冻结实现票时确认。任务列表的倒序不在本方案改。
+按**契约 r2**：任务内环节沿用 `task.js:484-490` 的 `firstAt` 升序，**该升序即发生顺序**，不倒序。**最新在上**只用于任务表之类**跨任务**的竖向列表，不用在任务内环节上。本方案只在阶段头**追加阶段耗时与已有 token**，**不改排序**、**不新增第二条时间线**。任务列表本身的倒序不在本方案改。
 
 ### 3.3 数据形状（拟议接口，**不是已实现**）
 
