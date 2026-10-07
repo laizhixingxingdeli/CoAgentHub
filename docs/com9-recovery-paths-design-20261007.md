@@ -21,9 +21,17 @@
 |---|---|---|---|---|
 | ① | accepted 工作项需要补做 | 不能修订（`WORK_ITEM_NOT_REVISABLE`），也不能退休 | Application `work-order-helpers.ts:13` | **不需要**（技术路径） |
 | ② | rejected 工作项不能直接 accept | kernel 抛 `ILLEGAL_TRANSITION` | kernel 状态机（不变量 A） | **不需要**（技术路径） |
-| ③ | retired 工作项的目标仍要完成 | retired 单不能修订；新单承接须授权 | Application `work-order-helpers.ts:14` + 规则出处 | **需要**（谁承担未完成责任） |
-| ④ | Attempt `killed_wall_clock` 后 item 仍锁在 dispatched | 不能修订，插件无收尾入口 | Application：无 killed 的可信收尾 | **需要**（谁有权宣布执行者已停） |
-| ⑤ | 被杀执行者留下的未提交半成品 | 后续精确小单的 checkpoint **必然失败** | `workspace.ts:453` 普通 `Error` | **需要**（半成品怎么保存） |
+| ③ | retired 工作项的目标仍要完成 | retired 单不能修订；同目标需**新建引用原 id 的替代单**承接 | Application `work-order-helpers.ts:14` + 规则出处 | 历史实例**曾需 L3 特批**；L3 一次冻结规则后，同目标/验收/范围内的替代补修属 L2 技术恢复，**不再逐案需要 L3** |
+| ④ | Attempt `killed_wall_clock` 后 item 仍锁在 dispatched | 不能修订，插件无收尾入口 | Application：无 killed 的可信收尾 | 停止证据**须由可信平台提供**；平台具备该能力后同类收尾属规则内技术恢复，不必逐案 L3 |
+| ⑤ | 被杀执行者留下的未提交半成品 | 后续精确小单的 checkpoint **必然失败** | `workspace.ts:453` 普通 `Error` | 快照保存**须由可信平台**按原授权路径与原字节执行；规则冻结后同范围内不需逐案 L3 |
+
+**历史 vs 未来规则（本次修正，必须区分）**：③④⑤ 在 2026-10-04/05 的实例里确实由 L3 **逐案特批**过（原始记录见 §1），但这**不等于**未来每一例都要 L3 介入。L3 把规则**一次性冻结**之后：
+
+- ③「retired 单的目标仍要完成」：只要目标、验收、范围都不变，协调者**新建引用原 id 的替代/补修单**是 L2 技术恢复，**不需要逐案升级**。
+- ④ 停止与 revoke 必须由**可信平台**证明（执行者已停止、token 已吊销、无活写者、该 item 未提交且仍是 `dispatched`），**不能由 L2 自己口头宣布**；证据齐备即按规则收尾，不必逐案 L3。
+- ⑤ 半成品保存必须由**可信平台**证明来源（原 Mission 授权路径）与原字节，并在**旧写者已退出**的条件下持久保存责任，**不需要逐案批准**。
+
+反之，**来源未知、目标/验收/范围变化、或规则未覆盖**（例如证明不了执行者已停、证明不了快照来源）时，仍一律升级 L3。下面 §2 每类的「L3 必要性」统一按这条口径写成「历史曾需 / 未来规则内不需」两段。
 
 **不要新增解锁状态边**：①③④⑤ 都能用「新建引用原 id 的单 / 阻断自愈 / 先持久 intent」在**不改 kernel 流转表**的前提下合法化。撤销或新增 `accepted→created` 之类的边会破坏不变量 A 与「未经 L3 不得 completed」的历史语义。
 
@@ -115,28 +123,29 @@
 
 ### ③ retired 的目标仍要完成
 
-- **L3 必要性**：**需要**。这里的关键不是技术路径，而是**「谁承担未完成的责任」**：把 retired 单的目标搬到新单，意味着新单必须承接同一目标并接受验收。这正是 L3 在 `COM3` `05:17:31.944Z` 明确授权的「合法替代」。
-- **合法路径**：保持原单 `retired` 不动（保留「为什么作废」的历史），**另建一张替代/补修单**，`contextRefs` 引用原 id（`W-472`）+ 该次 L3 答复编号；同目标未完成部分在新单里接受验收。历史 HTTP 里 L3 给的拆单维度是「按可独立验证调用点」（application fenced 用例+测试 / HTTP 限权入口+真实 HTTP 测试 / 可信 issuer 装配），并允许合并强耦合调用点，但**禁止原样 15 文件重派**。
-- **最小改动 / 层级**：**零 kernel 改动**。若要让 Application 的提示不再把协调者引向「复活退休单」，只需把 `work-order-helpers.ts:14` 的 `retired` 提示与 `work-item-dispatch.ts` 的门禁文案改成「retired 不能修订；要完成同一目标请新建引用原 id 的替代单，并在升级里取得 L3 授权」。**不要**为了「就地续做」把 `retired` 加进可修订集合——那会抹掉「为什么作废」的记录。
+- **L3 必要性**：**历史曾需特批，未来规则内不需逐案**。把 retired 单的目标搬到新单，历史上（`COM3` `05:17:31.944Z`）是 L3 逐案授权的「合法替代」；但一旦 L3 把「retired 单不复活、同目标新建引用原 id 的替代单」这条规则**一次冻结**，此后**同目标、同验收、同范围**的替代补修就只是 L2 技术恢复，不必每例再取一次授权。真正的责任判断只剩下「有没有改变目标/验收/范围」——变了才升级。
+- **合法路径**：保持原单 `retired` 不动（保留「为什么作废」的历史），**另建一张替代/补修单**，`contextRefs` 引用原 id（`W-472`）与该次 L3 答复编号；同目标未完成部分在新单里接受验收。历史 HTTP 里 L3 给的拆单维度是「按可独立验证调用点」（application fenced 用例+测试 / HTTP 限权入口+真实 HTTP 测试 / 可信 issuer 装配），并允许合并强耦合调用点，但**禁止原样 15 文件重派**。规则冻结后，这条路径**不再逐次升级**——直接在允许范围内新建替代单即可。
+- **最小改动 / 层级**：**零 kernel 改动**。若要让 Application 的提示不再把协调者引向「复活退休单」，只需把 `work-order-helpers.ts:14` 的 `retired` 提示与 `work-item-dispatch.ts` 的门禁文案改成「retired 不能修订；要完成同一目标请新建引用原 id 的替代单」。**不写「并在升级里取得 L3 授权」**——规则冻结后同目标/验收/范围的替代补修不需要逐案授权，写进去反而把技术恢复误述成每次都要特批。**不要**为了「就地续做」把 `retired` 加进可修订集合——那会抹掉「为什么作废」的记录。
 - **不变量 / 既有测试**：`WORK_ITEMS_UNFINISHED` 只放行 `accepted`/`retired`（`mission-control.ts`），所以「retired 当完成」是被允许的**计数**语义，但**不等于目标已达成**——替代单必须真验收。`kernel` 允许 `retired→dispatched`（`work-item.ts:74`）是给「L3 判断它其实还要做」的出口，**不构成协调者绕过修订门禁的路径**。
 - **风险 / 非目标**：不要把「retired 被计入未完成=0」当成目标已完成；共享脏文件必须串行并如实声明来源（COM3 里 L3 的原话）。非目标：不复活退休单、不自动换候选、不放宽预算与 checkpoint。
 
 ### ④ killed Attempt 后 item 锁在 dispatched
 
-- **L3 必要性**：**需要**。判据是「执行者是否真的已停止、有没有活执行者」，这是可信性判断，不该由协调者自己宣布——L3 在 `COM3` `08:52:34.567Z` 明确「不能直接改状态或伪造 blocked」。
-- **合法路径（待冻结）**：**可信调度器/平台**在确认「执行者已停止 / token 已吊销、无活执行者、且该 item 仍是 `dispatched` 且未 `submit`」之后，用**现有**的 `item.recordBlocked(...)`（`work-item.ts:288–294`，`dispatched→blocked`）转 `blocked`，并记录**平台侧恢复原因**（例如「请求的运行已结束且无活动执行者」）。这样 item 离开 `dispatched`，修订门禁解锁（`blocked` 不在 `REVISE_BLOCKED_HINT` 里），之后**必须先修订再重派**，并过 `WORK_ORDER_REVISION_REQUIRED`（`work-item-dispatch.ts:62`）。
+- **L3 必要性**：**历史曾需特批，未来由可信平台证明后不需逐案**。判据是「执行者是否真的已停止、有没有活执行者」，这是**可信性判断**，不该由协调者自己口头宣布——L3 在 `COM3` `08:52:34.567Z` 明确「不能直接改状态或伪造 blocked」。未来这条证明责任落在**可信平台**身上：平台在确认（见下）后按规则收尾，**不需要 L2 逐案升级**；只有当平台**证明不了**（拿不到停止/revoke 证据）时才升级。
+- **合法路径（待冻结）**：**可信调度器/平台**（不是 L2 的口头宣布）证明「执行者已停止、token 已吊销、无活写者、该 item 未 `submit` 且仍是 `dispatched`」之后，用**现有**的 `item.recordBlocked(...)`（`work-item.ts:288–294`，`dispatched→blocked`）转 `blocked`，并记录**平台侧恢复原因**与**证明来源**（例如「请求的运行已结束、token 已吊销、无活动执行者」）。**不得以 L2 的叙述替代这套平台证明。**这样 item 离开 `dispatched`，修订门禁解锁（`blocked` 不在 `REVISE_BLOCKED_HINT` 里），之后**必须先修订再重派**，并过 `WORK_ORDER_REVISION_REQUIRED`（`work-item-dispatch.ts:62`）。
 - **最小改动 / 层级**：Application 层小改——在 `src/application/platform/attempts.ts` 的 `finishAttempt`（:64–177，状态写在 :129–133）里判定「`endedBy` ∈ `KILLED_BY_US`（`attempt.ts:51`）且该 item 仍 `dispatched`」时触发收尾，或抽一个**小 helper**（例如 `recoverKilledExecutorAttempt`）由 `platform.ts` 少量接线 + orchestrator 的 `finally`（`orchestrator.ts:2454–2502`，`killed_wall_clock` 在 :2469）可信调用。**不动 `kernel.recordBlocked`**（它已经支持该边）。禁止伪造「执行者 reportBlocked」——这是两回事：一个是执行者的判断，一个是平台对失联执行者的收尾。
 - **不变量 / 既有测试**：不变量 B（同一 item 只有一个 `in_progress` executor，`work-item.ts:178–190` 的 `CONCURRENT_EXECUTOR_ATTEMPT`）；单写者事务（`context.ts:100–150` 的 `tx`/`txFenced`，`attemptWrite` 的 `QUEUE_CLAIM_REQUIRED`）；`test/orchestrator.test.ts:3200–3290`（墙钟强杀：`endedBy='killed_wall_clock'`、不虚报 complete）、`test/command-transaction.test.ts:59–120`（事务回滚不留半截）。**不碰 `submitted`/`accepted`、不自愈已提交的 item、不自动换候选、不解除预算**。
 - **风险 / 非目标**：**停止/吊销 token 与写状态的顺序必须先冻结**（否则会出现「宣布已停但 token 还能写」）。迟到 claim 必须无副作用。非目标：不新增 kernel 状态边、不改 `killed_wall_clock` 的 Attempt 语义、不把 `failed` Attempt 记成 `succeeded`。
 
 ### ⑤ 未提交半成品让精确小单 checkpoint 必失败
 
-- **L3 必要性**：**需要**。半成品**属于哪张单、来源是否清晰、能不能进仓库**是责任判断；COM3 里是 L3 批准「保存一次未验收 Git 恢复快照」的。
+- **L3 必要性**：**历史曾需特批，未来由可信平台证明后不需逐案**。半成品**属于哪张单、来源是否清晰、能不能进仓库**是责任判断；COM3 里是 L3 逐案批准「保存一次未验收 Git 恢复快照」的。未来这套保存由**可信平台**执行并**持久保存责任**（原 Mission 授权路径可证、原字节落库、旧写者已退出），规则冻结后同范围内不需逐案 L3；只有**来源不可证 / 范围变化 / 旧写者未退出**才升级。
 - **合法路径（待冻结）**：**可信 WorkspaceManager** 保存一次**未验收恢复快照**，要求：
-  1. 路径**全部属于原契约**（`allowedPaths`）且来源清晰；
-  2. 记录原 Attempt id、路径 + hash、保存前后的 HEAD、**未验收清单**；
-  3. 顺序：**先持久 intent → 再 Git commit → 最后完成事件**；崩溃后核对 commit/hash 做**幂等补账**；
-  4. 未知来源或越界 → **fail-closed 升级**，不猜。
+  1. 路径**全部属于原 Mission 授权路径**（原契约 `allowedPaths`）且来源清晰；
+  2. **旧写者（被杀执行者）已退出**才能保存，否则不碰；
+  3. 记录原 Attempt id、路径 + hash、保存前后的 HEAD、**未验收清单**，**责任随快照持久化**；
+  4. 顺序：**先持久 intent → 再 Git commit → 最后完成事件**；崩溃后核对 commit/hash 做**幂等补账**；
+  5. 未知来源或越界 → **fail-closed 升级**，不猜。
   这份快照**不是功能提交、不是 accepted、不是 VR**，不改 Mission `baseRevision`；后续正常每单 baseline/checkpoint，最终从 Mission 原基线累计 diff 验收**快照全部路径**，未验收清单不能漏。
 - **最小改动 / 层级**：`src/application/workspace.ts`——扩 `WorkspaceManager` 接口（:133–150 区，现有可选 `checkpoint` 在 :150）或从中抽**小模块**（例如 `RecoverySnapshotStore`），`GitWorktreeManager`（:426–465）实现；orchestrator（`:2504–2527`）可信接线；快照事件走**平台现有事件 + 现有 File 事务**（不新增 writer）。为了让「越界」可判别，建议给 `workspace.ts:453` 那条普通 `Error` 一个**业务码**（或新增一个明确的错误类型），由平台层映射——**但这是建议，未冻结**。
 - **不变量 / 既有测试**：单写者事务（`context.ts:100–150`）；`test/workspace.test.ts:61–90`（`checkpoint` 只提交授权路径、越界拒且不删文件——:76–80 的 `未授权` 断言、`:81–83` 的 `checkpoint rejects outside changes`）；`test/orchestrator.test.ts:354–468`（checkpoint 成功一次 / 抛错停靠且不回滚——:397–436 的 `checkpoint-denied` 组）。**注意**：`test/workspace.test.ts:80` 用正则 `/未授权/` 匹配 message，若改文案/错误类型要同步核对。
@@ -161,7 +170,7 @@
 
 - 这句话**在本工作区任何源码/文档/测试/ADR 中都不存在**，因此**不能**声称它出自 ADR、全局平台门禁或某份 Contract 原文。**当前 COM3 r5 Contract 里没有这句原话**。原用户消息与历史 r2 原文**未验证**（不在本工作区，无法取证）。
 - 它在平台里**只能追踪到协调者升级文本**（最早可证 `2026-10-04T06:06:49.011Z` AC4；与替代单挂钩的是 `2026-10-05T05:16:55.230Z` COM3），以及 **L3 对它的解释性答复**（`2026-10-05T05:17:31.944Z`）。
-- **它和替代单的关系**：按 L3 的解释，这条规则的**作用范围是「可修订的已有单」**，**不延伸到「退休单」**——退休单不复活，替代单是**新增一张单**，但因为它承接的是「同一 Mission 里原权威路径未完成」的部分，所以属于**已授权的技术恢复**，不算「独立新需求」。「只有独立新工作才新增」的**反例边界**正在这里：如果新单是承接同一目标未完成部分（引用原 id + 授权答复），它是恢复；如果它是另一个目标，才需要走新需求流程。
+- **它和替代单的关系**：按 L3 的解释，这条规则的**作用范围是「可修订的已有单」**，**不延伸到「退休单」**——退休单不复活，替代单是**新增一张单**，但因为它承接的是「同一 Mission 里原权威路径未完成」的部分，所以属于**技术恢复**，不算「独立新需求」。「只有独立新工作才新增」的**反例边界**正在这里：如果新单是承接同一目标未完成部分（引用原 id），它是恢复；如果它是另一个目标，才需要走新需求流程。**历史实例里**（`W-474`）替代单还引用了 L3 那次授权答复编号——那是当时规则尚未冻结的逐案特批，**不构成未来每次新建替代单都要再取一次授权的先例**（见 §0 与 §2③）。
 
 ---
 
@@ -171,36 +180,36 @@
 
 ### 草案 A：合法恢复路径的提示/规则（最轻）
 
-- **目录范围（`allowedScope`）**：`src/application/platform/work-order-helpers.ts`、`src/application/platform/work-item-dispatch.ts`。
+- **目录范围（`allowedScope`）**：`src/application/platform/work-order-helpers.ts`、`src/application/platform/work-item-dispatch.ts`、`test/platform.test.ts`。
 - **真实函数/接缝**：`REVISE_BLOCKED_HINT`（`work-order-helpers.ts:10–15`）新增/改写 `accepted`、`retired` 的提示文案；`dispatchWorkItems` 里 `NOT_DISPATCHABLE` 抛错处（`work-item-dispatch.ts:32–38`）的文案。**依赖**：无（可并行）。
-- **测试接缝**：`test/platform.test.ts`（现有 W-292 组 :1044–1130 同文件）。**关于「最多两个用例」**：协调者的分法是 ①③ 关联补修不改旧记录、② `rejected` 重交且来源是新 Attempt；**但 ①②③ 的用例是否该落在同一个 `describe` 需 L2 定**（本报告不用例）。
-- **关键测试（1–2 条）**：①「accepted 单被要求补做时，新建引用原 id 的补修单不改动原单状态」；②「rejected 单直接 accept 被拒后，走 revise→dispatch→submit→accept 成功且来源是新 Attempt」。
-- **验证命令**：`node --test test/platform.test.ts`。
+- **测试接缝**：`test/platform.test.ts`（现有 W-292 组 :1044–1130 同文件）。测试装配**用现有平台接缝即可**（现有平台测试已能构造 `accepted`/`retired`/`rejected` 工作项并观察状态），**不需要为描述块另定归属**。
+- **关键测试（1–2 条）**：① 「accepted 单要求补做 / retired 单要求替代时，都走新建引用原 id 的补修单，且**原单旧记录（原状态与已有证据）保持不变**」——一条用例同时覆盖 accepted 补修与 retired 替代；② 「rejected 单直接 accept 被拒后，走 revise→dispatch→submit→accept 成功且来源是新 Attempt」。
+- **验证命令（不超两条）**：`node --test test/platform.test.ts`。
 - **依赖顺序**：无真依赖，可与 B 并行。
 - **五维（L2 预审）**：设计=复用现有载荷（`contextRefs`/`requiredBehaviour`），零 kernel 边；功能=提高合法路径的可发现性；复杂度=低；测试=平台外部可观测状态；命名=文案里**禁止出现「解锁」**（那会把「新增单」误述成「改状态」）。**结论：可行。**
 - **未验证**：文案改动是否影响任何断言 message 匹配（需在实施时核对 `test/platform.test.ts` 是否有对 `NOT_DISPATCHABLE` 原文的匹配）。
 
 ### 草案 B：可信 killed 收尾
 
-- **目录范围（`allowedScope`）**：`src/application/platform/attempts.ts`、`src/application/orchestrator.ts`（+ 若抽 helper 则含其新文件）。
-- **真实函数/接缝**：`finishAttempt`（`attempts.ts:64–177`，状态写在 :129–133），或抽**小恢复 helper**（例如 `recoverKilledExecutorAttempt`）由 `platform.ts` 少量接线；orchestrator `finally` 可信调用（`:2454–2502`，`killed_wall_clock` 在 :2469）。**`kernel.recordBlocked` 不改**（`work-item.ts:288–294` 已可用）。
+- **目录范围（`allowedScope`）**：`src/application/platform/attempts.ts`、`src/application/platform.ts`、`src/application/orchestrator.ts`，以及**待新增的候选小 helper** `src/application/platform/killed-executor-recovery.ts`（仅候选路径，**不是现有函数**）。
+- **真实函数/接缝**：`finishAttempt`（`attempts.ts:64–177`，状态写在 :129–133）或抽出上面那个**小恢复 helper**，由 `platform.ts` 少量接线；orchestrator `finally` 可信调用（`:2454–2502`，`killed_wall_clock` 在 :2469）。**`kernel.recordBlocked` 不改**（`work-item.ts:288–294` 已可用）。
 - **测试接缝**：`test/orchestrator.test.ts` 的 `ScriptedRuntime`（:3200–3290 已有墙钟强杀组）与 `test/command-transaction.test.ts`（:59–120、:228–277 事务组）。
-- **关键测试（1–2 条）**：①「killed 且未提交 → item 转 `blocked`，且在修订前拒绝重派」；②「迟到的旧 claim 调用无副作用，事务回滚」。
-- **验证命令**：`node --test test/orchestrator.test.ts`、`node --test test/command-transaction.test.ts`。
+- **关键测试（1–2 条）**：① 「killed 且未提交 → item 转 `blocked`，且在修订前拒绝重派」；② 「迟到的旧 claim 调用无副作用，事务回滚」。
+- **验证命令（不超两条）**：`node --test test/orchestrator.test.ts`、`node --test test/command-transaction.test.ts`。
 - **依赖顺序**：无真依赖，可与 A 并行；**但 C 依赖 B**（C 需要 B 保证旧写者已退出）。
 - **五维（L2 预审）**：设计=可信收尾；功能=不触已提交/预算；复杂度=抽 helper 避免 `attempts.ts` 继续膨胀；测试=生命周期 + 事务；命名=必须解释「Attempt 失败」与「工单状态」是两件事。**结论：可行，但停止/revoke 顺序必须冻结。**
 - **未验证**：停止与吊销 token 的先后、迟到 claim 的具体触发路径**未验证**。
 
 ### 草案 C：未验收恢复快照（最重）
 
-- **目录范围（`allowedScope`）**：`src/application/workspace.ts`、`src/application/orchestrator.ts`（+ 抽小模块）。
-- **真实函数/接缝**：`WorkspaceManager` 接口（`workspace.ts:133–150`，现有可选 `checkpoint` 在 :150）/ `GitWorktreeManager`（:426–465）抽小模块（例如 `RecoverySnapshotStore`）；orchestrator 可信接线（:2504–2527）；Platform 事件 + **现有 File 事务**（不新 writer）。`:453` 的普通 `Error` 是否给业务码**待冻结**。
+- **目录范围（`allowedScope`，范围候选）**：`src/application/workspace.ts`、**待新增的恢复模块候选** `src/application/recovery-snapshot.ts`、`src/application/orchestrator.ts`、`src/application/platform.ts`、`src/application/platform/context.ts`，以及**拟议的 intent 持久层** `src/application/file-store.ts`；对应测试 `test/workspace.test.ts`、`test/orchestrator.test.ts`。
+- **真实函数/接缝**：`WorkspaceManager` 接口（`workspace.ts:133–150`，现有可选 `checkpoint` 在 :150）/ `GitWorktreeManager`（:426–465）抽小模块（例如 `RecoverySnapshotStore`）；orchestrator 可信接线（:2504–2527）；Platform 事务/事件走 `platform.ts` 与 `platform/context.ts` 的 `tx`/`txFenced`（:100–150），**不新 writer**；intent 存储拟议落在文件存储层 `file-store.ts`（**具体数据形状未定**）。`:453` 的普通 `Error` 是否给业务码**待冻结**。
 - **测试接缝**：`test/workspace.test.ts`（临时 Git，:61–90）与 `test/orchestrator.test.ts` 集成。
-- **关键测试（1–2 条）**：①「跨组 dirty 保存原字节后，精确单 `checkpoint` 成功，且累计 diff 仍含保存路径」；②「越界或崩溃重入不漏未验收清单」。
-- **验证命令**：`node --test test/workspace.test.ts`、`node --test test/orchestrator.test.ts`。
-- **依赖顺序**：**依赖 B**。
+- **关键测试（1–2 条）**：① 「跨组 dirty 保存原字节后，精确单 `checkpoint` 成功，且累计 diff 仍含保存路径」；② 「越界或崩溃重入不漏未验收清单」。
+- **验证命令（不超两条）**：`node --test test/workspace.test.ts`、`node --test test/orchestrator.test.ts`。
+- **依赖顺序**：**依赖 B 的 accepted**（旧写者退出/收尾可信后再动）。
 - **五维（L2 预审）**：设计=保存与验收分开；功能=保留责任；复杂度=最高，**必须抽模块**；测试=真实 Git + 重入；命名=显式写「未验收恢复快照」。**结论：有条件可冻结。**
-- **未验证**：intent 存储位置、幂等事件接口、**累计未验收闸门**均**未验证**，待 L3 确认。
+- **未验证 / 待 L3 冻结**：现有事务如何复用、intent **持久接口与数据形状**、PG 兼容性，以及**累计未验收闸门**均**未验证**；这些是**范围候选**，**不是已可执行工单**——**当前仅有条件可冻结**，**不得由 L1 自行选定存储协议**。
 
 **注**：A/B/C 的「函数 ≤ 40 行、文件 ≤ 400 行」是**建议值**，不为机械凑数删注释；大文件只做少量接线，逻辑多的抽模块。
 
