@@ -69,7 +69,11 @@ after(() => {
 async function harness(
   coordinator: ScriptedRuntime,
   executor: ScriptedRuntime,
-  options?: { attemptWallClockMs?: number },
+  options?: {
+    attemptWallClockMs?: number;
+    /** 执行者候选。缺省仍是单个 `e`，既有用例的行为一个字节都不变。 */
+    executorCandidates?: { endpoint: string; profileId: string }[];
+  },
 ) {
   const clock = new FixedClock();
   const ids = new SequentialIds();
@@ -95,7 +99,10 @@ async function harness(
     baseUrl,
     workspace: new InPlaceWorkspaceManager(),
     coordinator: { runtime: coordinator, candidates: [{ endpoint: 'l', profileId: 'c' }] },
-    executor: { runtime: executor, candidates: [{ endpoint: 'l', profileId: 'e' }] },
+    executor: {
+      runtime: executor,
+      candidates: options?.executorCandidates ?? [{ endpoint: 'l', profileId: 'e' }],
+    },
     attemptWallClockMs: options?.attemptWallClockMs,
   });
   return { platform, deliveries, orchestrator };
@@ -328,6 +335,140 @@ describe('多工作项', () => {
     assert.match(wake, /coagent_get_mission/);
     // 开局那一跳没有"上一跳"，说这句只会让人以为前面发生过什么。
     assert.doesNotMatch(coordinator.instructions[0], /全新的会话/);
+  });
+});
+
+/**
+ * 交回协调者时收尾的协调者脚本：读一眼 Mission，然后交一份 blocked 结果。
+ *
+ * 不用「什么也不交」当收尾：那会撞上既有的「协调者连续两轮无结构化提交就停」，
+ * 于是这条用例测的就不再是「执行者轮换」而是那条无关规则。
+ */
+const HANDOFF_AND_BLOCK: ScriptTable = {
+  'coordinator:-:0': PLAN_AND_DISPATCH['coordinator:-:0']!,
+  'coordinator:-': {
+    steps: [
+      { tool: 'coagent_get_mission', body: {} },
+      {
+        tool: 'coagent_submit_mission_result',
+        body: {
+          outcome: 'blocked',
+          summary: '平台把工作项交回来了：同一张工单一直在空转，先交回给人',
+          acceptanceEvidence: [],
+          memoryDelta: [],
+          openRisks: [],
+        },
+      },
+    ],
+  },
+};
+
+describe('同一工作项的无结构化结果不许无界重跑首候选', () => {
+  test('首候选连两次没交结果，第三次执行跳换第二个候选并交卷', async () => {
+    // 第一次和第二次都是 e1 跑完什么都没交；第三次该轮到 e2，并且它真的交卷。
+    // 候选顺序必须保持配置顺序：不换人不是因为不想换，是因为还没到两次。
+    const executor = new ScriptedRuntime({
+      'executor:W-1:0': { steps: [{ tool: 'coagent_get_work_order', body: {} }] },
+      'executor:W-1:1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] },
+      'executor:W-1:2': {
+        steps: [
+          { tool: 'coagent_get_work_order', body: {} },
+          {
+            tool: 'coagent_submit_evidence',
+            body: { kind: 'test', summary: 'node --test 全绿', command: 'node --test', exitCode: 0 },
+          },
+          {
+            tool: 'coagent_submit_execution_result',
+            body: {
+              outcome: 'completed' as const,
+              summary: '做完了',
+              changedFiles: ['src/foo.ts'],
+              evidenceIds: [],
+              notes: '无',
+            },
+          },
+        ],
+      },
+    });
+    const { platform, orchestrator } = await harness(
+      new ScriptedRuntime(PLAN_AND_DISPATCH),
+      executor,
+      { executorCandidates: [{ endpoint: 'l', profileId: 'e1' }, { endpoint: 'l', profileId: 'e2' }] },
+    );
+    await platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+
+    // 轮 0 派发，轮 1/2 两次 e1，轮 3 e2 交卷；再往后没有第 4 跳可跑。
+    await orchestrator.runMission('M1', { projectRoot: process.cwd(), maxRounds: 4 });
+
+    assert.deepEqual(
+      executor.specs.filter((spec) => spec.role === 'executor').map((spec) => spec.profile.profileId),
+      ['e1', 'e1', 'e2'],
+      '执行跳必须按候选配置顺序：前两次 e1，第三次轮到 e2',
+    );
+    const view = await platform.getMissionView('M1');
+    assert.equal(view.workItems[0].status, 'submitted', '第二候选交回了结构化结果');
+    assert.equal(view.workItems[0].hasResult, true);
+  });
+
+  test('排除耗尽与跨候选到顶都把工作项交回协调者，且不多开执行跳', async () => {
+    // 单一候选：它连两次没交结果之后就没有别人可试了。**不等 4 次**——
+    // 继续派一个已经被排除的人，就是「换个名字再赌一轮」。
+    const single = new ScriptedRuntime({
+      'executor:W-1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] },
+    });
+    const coordinatorA = new ScriptedRuntime(HANDOFF_AND_BLOCK);
+    const { platform: platformA, orchestrator: orchestratorA } = await harness(
+      coordinatorA,
+      single,
+      { executorCandidates: [{ endpoint: 'l', profileId: 'e1' }] },
+    );
+    await platformA.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const resultA = await orchestratorA.runMission('M1', {
+      projectRoot: process.cwd(),
+      maxRounds: 6,
+    });
+
+    assert.equal(
+      orchestratorA.hops.filter((hop) => hop.role === 'executor').length,
+      2,
+      '单候选两次就排除耗尽，不该再开第三次执行跳',
+    );
+    assert.equal(resultA.kind, 'blocked', '协调者真的被叫起来，并把 Mission 收尾成 blocked');
+    // 协调者必须**看得见**为什么被交回：次数与涉及候选都在唤醒语里。
+    const handoff = coordinatorA.instructions.at(-1) ?? '';
+    assert.match(handoff, /连续次数 2/);
+    assert.match(handoff, /e1/);
+    const viewA = await platformA.getMissionView('M1');
+    assert.equal(viewA.workItems[0].status, 'dispatched', '平台不许伪造执行者 blocked 或结构化结果');
+
+    // 两个候选都不交结果：到顶是 4 次（跨候选），第 5 跳不许发生。
+    const both = new ScriptedRuntime({
+      'executor:W-1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] },
+    });
+    const coordinatorB = new ScriptedRuntime(HANDOFF_AND_BLOCK);
+    const { platform: platformB, orchestrator: orchestratorB } = await harness(
+      coordinatorB,
+      both,
+      { executorCandidates: [{ endpoint: 'l', profileId: 'e1' }, { endpoint: 'l', profileId: 'e2' }] },
+    );
+    await platformB.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
+    const resultB = await orchestratorB.runMission('M1', {
+      projectRoot: process.cwd(),
+      maxRounds: 8,
+    });
+
+    assert.deepEqual(
+      both.specs.filter((spec) => spec.role === 'executor').map((spec) => spec.profile.profileId),
+      ['e1', 'e1', 'e2', 'e2'],
+      '两个候选各轮一次、到 4 次封顶，不许出现第 5 跳',
+    );
+    assert.equal(resultB.kind, 'blocked');
+    const handoffB = coordinatorB.instructions.at(-1) ?? '';
+    assert.match(handoffB, /连续次数 4/);
+    assert.match(handoffB, /e1/);
+    assert.match(handoffB, /e2/);
+    const viewB = await platformB.getMissionView('M1');
+    assert.equal(viewB.workItems[0].status, 'dispatched');
   });
 });
 

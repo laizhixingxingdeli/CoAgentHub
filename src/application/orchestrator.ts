@@ -149,6 +149,26 @@ const HEARTBEAT_MS = 15_000;
  */
 const ATTEMPT_WALL_CLOCK_MS = 30 * 60 * 1000;
 
+/**
+ * 同一工作项「尾部连续 no_structured_result」的封顶次数。
+ *
+ * 执行者跑完一跳没交结构化结果，平台以前会把同一个候选原样再叫起来（实测一个
+ * 候选连跑 12 次，每次只交一条开工证据）。换个候选再赌能产生新信息，这一点和
+ * 上游失败一样；但**赌的次数要有界**——封顶之后交回协调者，由它判断工单本身是
+ * 不是有问题，而不是继续烧配额。
+ *
+ * 数的是**跨候选**的尾部连续次数：换了人还是没结果，说明问题多半不在人身上。
+ */
+const WORK_ITEM_NO_RESULT_LIMIT = 4;
+
+/**
+ * 单个候选在同一工作项上连续两次没有结构化结果，就在**这个工作项上**被本地排除。
+ *
+ * 只作用在这个工作项的下一次执行跳，不写候选熔断、不写冷却——同一个人在别的工作
+ * 项上照样能用，而全局熔断的语义（哪类失败才算候选故障）一点都不改。
+ */
+const CANDIDATE_NO_RESULT_LIMIT = 2;
+
 export interface OrchestratorDeps {
   platform: Platform;
   tokens: RunTokenIssuer;
@@ -282,6 +302,7 @@ function coordinatorInstruction(view: {
   workItems: { id: string; status: string }[];
   promotions?: readonly { triggerRule: string }[];
   conflictFiles?: readonly string[];
+  waitDetail?: string;
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -290,7 +311,15 @@ function coordinatorInstruction(view: {
     view.workItems.length === 0 &&
     view.escalationLog.length === 0 &&
     !view.finalReview;
-  const body = coordinatorBody(view);
+  const body = [
+    // 同一工作项无结果到顶 / 排除后没人：平台把这一跳的**唯一**原因写在这里。
+    // 不写的话，协调者看到的只是一个仍是 dispatched 的工作项与一句泛泛的
+    // 「按简报决定下一步」——它会以为是普通的空闲轮回，而不是这次执行被拦住。
+    view.waitDetail ? `**执行者已经被挡住：** ${view.waitDetail}` : '',
+    coordinatorBody(view),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   const freshBody = opening ? body : [FRESH_SESSION_PREFIX, '', body].join('\n');
   if (!view.conflictFiles?.length) return freshBody;
   return [
@@ -716,6 +745,15 @@ export class Orchestrator {
                 (!activeConflicts || !oldDispatchedIds.includes(item.id)),
             )
           : [];
+      // 交回协调者的等待原因（只在本轮尾部用）：同一工作项的无结果已经到顶、或
+      // 局部排除后已无可用候选。**不新造 waitReason**，复用 attempt_limit_reached。
+      // 之所以要一个局部标志而不是直接 return：这一批里还有别的 pending，先让它们
+      // 各自跑完；最后再让 Standard pending 分支落入既有协调者段。
+      let noResultHandoff: string | undefined;
+      // 同一个原因要传给协调者那一跳：它只能看见工作项还是 dispatched，不知道
+      // 平台刚把这张工单挡住了。用独立的变量而不是复用 noResultHandoff，是因为
+      // 后者会在跨轮次时残留，而这一跳的原因必须只属于这一轮。
+      let noResultWaitDetail: string | undefined;
       if (pending.length > 0) {
         for (const item of pending) {
           // 同轮第二个执行者也要过这道闸：第一个花到 cap 之后，同一轮剩下的工单不能照跑。
@@ -724,6 +762,25 @@ export class Orchestrator {
           // 冻结工单带了 validation.commands 才需要机器验证，也才需要基线：给没命令的项记
           // 基线等于凭空多一批事件，而 W-321 的入口对空命令本来就是 no-op。
           const needsStandardValidation = (item.order?.validation?.commands?.length ?? 0) > 0;
+          // **同一工作项的无结果不许无界重跑首候选。**
+          //
+          // 判据只能从持久 Attempt 历史推导：this.hops 是本进程的内存记录，重启或
+          // 换个进程接手就空了，而这条上限必须跨进程成立——否则每次重跑都把计数
+          // 清零，等于没有上限（实测一个候选在同一张工单上连跑了 12 次）。
+          const rotation = await this.#noResultRotation(missionId, item.attemptIds);
+          if (rotation.consecutive >= WORK_ITEM_NO_RESULT_LIMIT) {
+            noResultHandoff = this.#noResultHandoffDetail({
+              workItemId: item.id,
+              consecutive: rotation.consecutive,
+              profileIds: rotation.profileIds,
+              excludedProfileIds: rotation.excludedProfileIds,
+              exhausted: false,
+            });
+            // 不开下一次执行跳：再赌一轮既换不回新信息，又正好是这条规则要挡的事。
+            continue;
+          }
+          const excludedProfileIds =
+            rotation.excludedProfileIds.length > 0 ? rotation.excludedProfileIds : undefined;
           // 这一跳是不是「接着上一轮做」：退回原因和上轮说明持久化在事件里，断线重启也读得
           // 回来；读到了就写进唤醒语，并把 partial 的续跑句柄原样交给运行时。
           const handoff = await this.#platform.getStandardAutoRedispatchHandoff(
@@ -740,6 +797,7 @@ export class Orchestrator {
               ? executorContinuationInstruction(handoff)
               : '平台派给你一个工作项：工单已在开跑简报的「你的工单」一节里，直接照它执行；只有简报里没有工单正文时才调用 coagent_get_work_order。',
             ...(handoff?.resumeRef !== undefined ? { resumeRef: handoff.resumeRef } : {}),
+            ...(excludedProfileIds ? { excludedProfileIds } : {}),
             ...(needsStandardValidation
               ? {
                   // 基线要在执行者真起来之前落盘：那时候 cwd 的 HEAD 才是这条工单的
@@ -764,6 +822,19 @@ export class Orchestrator {
             break;
           }
           if (!hop || 'exhausted' in hop) {
+            // 局部排除把候选滤空之后**不许**当成「候选在冷却」：人其实是有的，
+            // 只是在这个工作项上被挡了。差别不是措辞——前者等一等就好，后者要
+            // 协调者去看这张工单本身是不是有问题。同一工作项四个候选全试过也一样。
+            if (hop && hop.exhausted === 'no_available_agent' && excludedProfileIds?.length) {
+              noResultHandoff = this.#noResultHandoffDetail({
+                workItemId: item.id,
+                consecutive: rotation.consecutive,
+                profileIds: rotation.profileIds,
+                excludedProfileIds,
+                exhausted: true,
+              });
+              continue;
+            }
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
             await this.#platform.setWaitReason(missionId, reason, detail);
@@ -794,7 +865,11 @@ export class Orchestrator {
           // blocked / 触顶都返回 false，原样交给 L2。
           await this.#autoRedispatchStandard(missionId, item.id);
         }
-        continue;
+        // 有工单交回协调者时不 continue：掉进下面的协调者段，让它在简报里
+        // 看到次数与候选。工作项仍是 dispatched——平台不替它判工单是否成立。
+        if (!noResultHandoff) continue;
+        noResultWaitDetail = noResultHandoff;
+        await this.#platform.setWaitReason(missionId, 'attempt_limit_reached', noResultHandoff);
       }
 
       // 补验：重启续跑、或上一轮验完没落盘时，工作项已 submitted 但还没有报告。放在协调
@@ -841,7 +916,13 @@ export class Orchestrator {
         missionId,
         cwd,
         pool: this.#coordinator,
-        instruction: coordinatorInstruction({ ...view, conflictFiles: activeConflicts }),
+        instruction: coordinatorInstruction({
+          ...view,
+          conflictFiles: activeConflicts,
+          // 这一轮刚写下的交回原因。view 是循环开头拍的，看不见它；而 runMission
+          // 开头已经把上一次的旧原因清掉了，所以在这里现读只会读到陈货。
+          ...(noResultWaitDetail ? { waitDetail: noResultWaitDetail } : {}),
+        }),
       });
       if (hop && 'alreadyCompleted' in hop) continue;
       if (hop && 'retrySameSlot' in hop) continue;
@@ -1476,9 +1557,23 @@ export class Orchestrator {
     }
   }
 
-  /** 现在还能用的候选。全在冷却 = 没有可用 agent（S14.4）。 */
-  async #availableCandidates(pool: RolePool, now: number): Promise<ExecutionProfile[]> {
-    const candidates = await this.#poolCandidates(pool);
+  /**
+   * 现在还能用的候选。全在冷却 = 没有可用 agent（S14.4）。
+   *
+   * `excludedProfileIds` 是**只对这个工作项**生效的局部排除（Standard 执行者按
+   * 工作项轮换「连续两次没交结构化结果」的候选）。它在原配置的有序循环之前滤掉：
+   * 不改候选顺序，不动候选健康查询——剩下的候选照旧逐个查自己的熔断/冷却，
+   * 所以全局熔断、冷却和候选健康记录一个字节都不受影响。其它调用不传，默认无排除。
+   */
+  async #availableCandidates(
+    pool: RolePool,
+    now: number,
+    excludedProfileIds?: readonly string[],
+  ): Promise<ExecutionProfile[]> {
+    const excluded = excludedProfileIds?.length ? new Set(excludedProfileIds) : undefined;
+    const candidates = (await this.#poolCandidates(pool)).filter(
+      (profile) => !excluded?.has(profile.profileId),
+    );
     if (!this.#candidateCircuits) {
       return candidates.filter((profile) => (this.#cooldown.get(profile.profileId) ?? 0) <= now);
     }
@@ -1712,6 +1807,91 @@ export class Orchestrator {
       : { kind: 'waiting', reason, detail };
   }
 
+  /**
+   * 同一工作项的「无结构化结果」轮换依据。
+   *
+   * 从**持久 Attempt 历史**推导，不读 this.hops：内存记录在重启/换进程后就空了，
+   * 而这条上限必须跨进程成立——否则每次重跑都把计数清零，等于没有上限。
+   *
+   * 两件事一起算：
+   *   - `consecutive`：尾部连续 no_structured_result 次数（跨候选）。到顶就把整张
+   *     工单交回协调者。
+   *   - `excludedProfileIds`：某个候选在自己最近两次 Attempt 上都没交结构化结果。
+   *     **只对这一张工单的这一跳生效**——不写候选熔断、不写冷却；那个人在别的工作
+   *     项上照旧能用，而后来的一次成功也不解除排除（规格：其他候选尝试不解除排除）。
+   *
+   * 读不到某一次 Attempt 时按「未知」处理，不数进尾部连续：宁可少挡一次，也不能
+   * 把「读不到」当成「无结果」——后者会导致一次满员封顶，而它并不成立。
+   */
+  async #noResultRotation(
+    missionId: string,
+    attemptIds: readonly string[],
+  ): Promise<{ consecutive: number; profileIds: string[]; excludedProfileIds: string[] }> {
+    const byProfile = new Map<string, string[]>();
+    const timeline: { endedBy: string | undefined; profileId: string | undefined }[] = [];
+    for (const attemptId of attemptIds) {
+      const detail = await this.#platform
+        .getAttemptDetail(missionId, attemptId)
+        .catch(() => undefined);
+      const endedBy = detail?.endedBy;
+      const profileId = detail?.profile?.profileId;
+      timeline.push({ endedBy, profileId });
+      if (profileId) {
+        const seen = byProfile.get(profileId) ?? [];
+        seen.push(endedBy ?? 'unknown');
+        byProfile.set(profileId, seen);
+      }
+    }
+    let consecutive = 0;
+    for (let i = timeline.length - 1; i >= 0; i -= 1) {
+      if (timeline[i]!.endedBy !== 'no_structured_result') break;
+      consecutive += 1;
+    }
+    const profileIds: string[] = [];
+    for (let i = timeline.length - consecutive; i < timeline.length; i += 1) {
+      const id = timeline[i]!.profileId;
+      if (id && !profileIds.includes(id)) profileIds.push(id);
+    }
+    const excludedProfileIds: string[] = [];
+    for (const [profileId, endedBys] of byProfile) {
+      const last = endedBys.slice(-CANDIDATE_NO_RESULT_LIMIT);
+      if (
+        last.length === CANDIDATE_NO_RESULT_LIMIT &&
+        last.every((endedBy) => endedBy === 'no_structured_result')
+      ) {
+        excludedProfileIds.push(profileId);
+      }
+    }
+    return { consecutive, profileIds, excludedProfileIds };
+  }
+
+  /**
+   * 工作项交回协调者时写进等待通路的那句话。
+   *
+   * 必须带上：工作项 id、连续次数、涉及候选，以及是「到顶」还是「排除后没人」——
+   * 协调者只能看到这一个工作项还是 dispatched，缺哪一项它都得自己去猜。
+   */
+  #noResultHandoffDetail(input: {
+    workItemId: string;
+    consecutive: number;
+    profileIds: readonly string[];
+    excludedProfileIds: readonly string[];
+    exhausted: boolean;
+  }): string {
+    const profiles = input.profileIds.length > 0 ? input.profileIds.join('、') : '（无记录）';
+    const excluded = input.excludedProfileIds.length > 0 ? input.excludedProfileIds.join('、') : '无';
+    const why = input.exhausted
+      ? `按工作项排除后已没有可用执行者候选（被排除：${excluded}）`
+      : `同一工作项连续 ${input.consecutive} 次没有结构化结果，到达上限 ${WORK_ITEM_NO_RESULT_LIMIT}`;
+    return (
+      `工作项 ${input.workItemId}：${why}。` +
+      `连续次数 ${input.consecutive}，涉及候选 ${profiles}，上限 ${WORK_ITEM_NO_RESULT_LIMIT}。` +
+      '平台不再自动重跑——同一张工单换个候选再赌不产生新信息。工单仍是 dispatched，' +
+      '交给你处置：确认工单本身有问题就 coagent_revise_work_order 改对再派发，' +
+      '不用做了就 coagent_retire_work_item 作废。'
+    );
+  }
+
   /** 把停机原因翻译成人能直接照做的一句话。 */
   #stallDetail(reason: WaitReason, workItemId?: string): string {
     const where = workItemId ? `工作项 ${workItemId}` : '协调者';
@@ -1813,6 +1993,11 @@ export class Orchestrator {
     instruction: string;
     resumeRef?: string;
     /**
+     * 只对这一跳生效的候选排除（Standard 执行者的工作项内轮换）。
+     * 不写熔断、不写冷却，也不进候选配置——下一跳/别的工作项照旧能用这些候选。
+     */
+    excludedProfileIds?: readonly string[];
+    /**
      * 执行者真要起来之前调一次（协调者、快车道都不传）。
      *
      * 验证基线必须落在这一刻，不能由调用方在 #runHop 之前自己记：候选耗尽、
@@ -1860,7 +2045,7 @@ export class Orchestrator {
     if (input.purpose === 'impact') this.#requireImpactCapability();
 
     const now = this.#now().getTime();
-    const usable = await this.#availableCandidates(input.pool, now);
+    const usable = await this.#availableCandidates(input.pool, now, input.excludedProfileIds);
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
       // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
