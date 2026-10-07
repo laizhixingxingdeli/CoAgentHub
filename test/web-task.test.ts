@@ -558,6 +558,54 @@ describe('环节分组', () => {
     }
   });
 
+  test('环节头显示阶段耗时、未知/未分类，单时间线与既有展开数量不变', async () => {
+    const { stageListHtml } = await loaded;
+    // 一条后端算好的归因投影（形状来自 GET /api/missions/:id 的 timeAttribution）：
+    // 已测的 agent_run / tool，未知的 unclassified（相关工具缺结束事件），
+    // 以及 durationMs 为 null 的验证窗——三种在环节头必须说得出区别。
+    const ctx = {
+      ...W4_CTX,
+      timeAttribution: {
+        schemaVersion: 1,
+        coverage: 'partial',
+        totalOccupiedMs: 120000,
+        phases: [
+          { kind: 'agent_run', attemptId: 'W-1649.exec-1', workItemId: 'W-1649', durationMs: 120000, countedInTotal: true, overlaps: [], quality: 'measured' },
+          { kind: 'tool', attemptId: 'W-1649.exec-1', durationMs: 30000, countedInTotal: true, overlaps: [], quality: 'measured' },
+          { kind: 'unclassified', attemptId: 'W-1649.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown', note: '相关工具时长未知，未分类时长未知' },
+          { kind: 'validation', attemptId: 'W-1649.exec-1', workItemId: 'W-1649', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
+        ],
+      },
+    };
+    // 另加一条命令开始 + 它的工具结束（同 callId）：命令计数只认 command.started，
+    // 工具结束事件不许被数成又一条命令。
+    const rows = [
+      ...w4Activity(),
+      { at: '2026-03-04T05:25:00.000Z', kind: 'runtime.command.started', attemptId: 'W-1650.exec-1', data: { callId: 'c1' } },
+      { at: '2026-03-04T05:25:30.000Z', kind: 'runtime.tool.completed', attemptId: 'W-1650.exec-1', data: { callId: 'c1', name: 'bash' } },
+    ];
+    const html = stageListHtml(rows, null, null, ctx);
+    // 单时间线、既有环节数量不变：只往现有 stage-head 里加一栏，不新开容器。
+    // 数环节容器（<details class="stage ...>）而不是所有 <details>：命令清单本来
+    // 也有一个折叠块，混在一起数会把「多了一条命令」看成「多了一个环节」。
+    assert.equal((html.match(/<details class="stage /g) || []).length, 6, '不许新增第二条时间线或多余环节');
+    assert.equal((html.match(/<ul class="evt-list">/g) || []).length, 6, '环节容器仍是一组一个');
+    // 该跳的阶段栏：已测的两段给毫秒，未分类与验证给「未知」——不拿事件间隔凑数。
+    assert.match(html, /class="stage-phase">阶段耗时 · 运行 2 分 0 秒 · 工具 30 秒 · 未分类 未知 · 验证 未知</, html);
+    // 没有归因投影的环节按「未知」显示，不编造。
+    assert.ok(html.includes('阶段耗时 · 未知'), html);
+    assert.ok(html.includes('跑了 1 条命令'), html);
+    assert.equal(html.includes('跑了 2 条命令'), false, '工具结束事件被数成了第二条命令');
+    // 既有发生顺序（组内首事件升序）不受影响：收尾组的首条是 mission.created（t(0)），
+    // 所以它仍在最前——新加的那一栏不许把排序改掉。
+    const order = [...html.matchAll(/data-attempt-id="([^"]*)"/g)].map((m) => m[1]);
+    assert.deepEqual(order, ['', 'coord-1', 'W-1649.exec-1', 'coord-2', 'W-1650.exec-1', 'coord-3']);
+    // 线要接上：真 GET 的任务详情确实带 timeAttribution，否则这一栏永远是「未知」。
+    const { base } = await seedMission();
+    const view = (await (await fetch(`${base}/api/missions/M-task`)).json()) as Record<string, unknown>;
+    assert.ok('timeAttribution' in view, 'GET 任务详情没带 timeAttribution');
+  });
+
   test('没有 attempt.ended 的环节说清为什么没有用量，不给孤零零的 —', async () => {
     const { stageListHtml } = await loaded;
     const rows = [

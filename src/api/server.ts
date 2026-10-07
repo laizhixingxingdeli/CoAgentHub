@@ -2194,7 +2194,14 @@ export function createApi(deps: ApiDeps): Server {
     const missionMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
     if (method === 'GET' && missionMatch) {
       await requireControl(req, POLICY_ACTION.missionRead);
-      return send(res, 200, await platform.getMissionView(missionMatch[1]));
+      const id = missionMatch[1];
+      // timeAttribution 与 mission 视图同级只读（同一 missionRead 授权）：
+      // 页面一张时间线要阶段耗时，而耗时来自报告仓储与 hop 行，不在 MissionView 里。
+      // 另开一个接口会让首屏多一次往返，且授权要再讲一遍。
+      return send(res, 200, {
+        ...(await platform.getMissionView(id)),
+        timeAttribution: await platform.getTimeAttribution(id),
+      });
     }
 
     // 完整 ValidationReport 按 id 另取：Mission 视图只带简版投影，报告正文的 checks 可能很长，

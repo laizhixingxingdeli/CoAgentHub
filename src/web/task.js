@@ -472,6 +472,8 @@ function eventRowHtml(event, index, selectedKey, ctx) {
  *
  * 环节头那一行自足：环节名 + 角色徽章 + 耗时 + 这一跳的 token 与费用 +
  * 一句话摘要，不展开也看得懂这一段是什么、跑了多久、花了多少、在干什么。
+ * 另加一栏阶段耗时（见 stagePhaseLine）：它与 `.stage-dur` 是两回事——后者只是
+ * 组内首末事件在墙上跨了多久，答不了「这些时间花在哪一类阶段上、哪一段根本没测到」。
  *
  * 左侧色条、环节头、角色徽章三处同源（都走 roleTone），与 projects.js
  * stageTone 同一套 `--status-*` 令牌——同一环节在任务页与项目页是一个颜色。
@@ -481,6 +483,77 @@ function eventRowHtml(event, index, selectedKey, ctx) {
  * open，重画一次就把人刚点开的那一组折回去，组内逐条事件永远看不到。
  * 不传（首屏）时一个 open 都不写。
  */
+/* ===================== 时间归因（后端算好的阶段投影） ===================== */
+
+/**
+ * 归因阶段的 kind → 中文。闭集与后端 TIME_PHASE_KINDS 对齐；认不出的 kind
+ * 落回 kind 原文，不另编一个类别——编出来的类别会让人以为那一段已经测清了。
+ */
+const PHASE_KIND_LABELS = {
+  queue: '排队',
+  hop_backoff: '退避等待',
+  schedule_select: '调度选候选',
+  agent_run: '运行',
+  tool: '工具',
+  validation: '验证',
+  l2_review: '评审',
+  waiting_decision: '等待决定',
+  pause: '暂停',
+  park: '搁置',
+  unclassified: '未分类',
+};
+
+/**
+ * 毫秒 → 人话时长。起点给 epoch 的 ISO 而不是数字 0：formatDuration 走
+ * `Date.parse(String(x))`，传数字 0 会被解析成 2000 年，整段差三十年。
+ */
+function durationFromMs(ms) {
+  return formatDuration(new Date(0).toISOString(), new Date(ms).toISOString());
+}
+
+/**
+ * 这一组的归因阶段。有 attemptId 就按它关联（后端本来也是按 attempt 归的）。
+ *
+ * 无 attemptId 的收尾组（平台 / L3）只在**工单对得上、且起止都能定下来**时才认：
+ * 不设这两道，一段没有归属的真实耗时会被挂到「平台」头上，看起来像平台自己在跑，
+ * 比不显示更误导。
+ */
+function phasesOfGroup(group, attribution) {
+  const phases = (attribution && attribution.phases) || [];
+  const attemptId = group && group.attemptId;
+  if (attemptId) return phases.filter((p) => p && p.attemptId === attemptId);
+  const workItemIds = new Set(
+    (group && group.events || [])
+      .map((e) => (e && e.workItemId !== undefined && e.workItemId !== null ? String(e.workItemId) : ''))
+      .filter((id) => id !== ''),
+  );
+  if (workItemIds.size === 0) return [];
+  return phases.filter((p) => p && !p.attemptId
+    && p.workItemId !== undefined && p.workItemId !== null && workItemIds.has(String(p.workItemId))
+    && typeof p.start === 'string' && typeof p.end === 'string');
+}
+
+/**
+ * 环节头的阶段耗时一栏。
+ *
+ * 与 `.stage-dur`（组内首末事件的跨度）是两回事：后者答「这一跳在墙上跨了多久」，
+ * 答不了「这些时间花在哪一类阶段上、哪一段根本没测到」。所以这里只渲染后端
+ * 已经算好的投影，**不在浏览器重新归因**——两份算法一定会漂。
+ *
+ * `durationMs === null` 一律说「未知」；没有投影也说「未知」，不按事件间隔
+ * 凑一个数出来。阶段投影不用当前时间闭合（所以这里不读 ctx.nowIso）。
+ */
+function stagePhaseLine(group, ctx) {
+  const phases = phasesOfGroup(group, ctx && ctx.timeAttribution);
+  if (phases.length === 0) return '阶段耗时 · 未知';
+  const parts = phases.map((p) => {
+    const label = PHASE_KIND_LABELS[p.kind] || String(p.kind);
+    const dur = (p.durationMs === null || p.durationMs === undefined) ? '未知' : durationFromMs(p.durationMs);
+    return label + ' ' + dur;
+  });
+  return '阶段耗时 · ' + parts.join(' · ');
+}
+
 export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, expandedIds) {
   const groups = groupActivity(activity).sort((a, b) => {
     const left = Date.parse(firstAt(a.events)), right = Date.parse(firstAt(b.events));
@@ -521,6 +594,7 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
         +   '<span class="stage-clock mono">' + esc(formatClock(firstAt(g.events))) + ' → ' + esc(g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) ? '进行中' : formatClock(lastAt(g.events))) + '</span>'
         +   '<span class="stage-dur mono">'
         +     esc(formatDuration(firstAt(g.events), g.attemptId && !g.events.some(e => e.kind === 'attempt.ended') && !isTerminal(context.status) && context.nowIso ? context.nowIso : lastAt(g.events))) + '</span>'
+        +   '<span class="stage-phase">' + esc(stagePhaseLine(g, context)) + '</span>'
         +   '<span class="stage-usage">' + esc(stageUsageLine(g.events, g, context)) + '</span>'
         +   (cmds.length > 0
           ? '<span class="stage-cmds">' + esc('跑了 ' + commandCountLabel(cmds.length)) + '</span>'
@@ -1324,6 +1398,10 @@ function detailCtx(st) {
     status: v.status,
     nowIso: new Date().toISOString(),
     usageByAttempt: st.live.usageByAttempt,
+    // 阶段投影由后端算好随 GET /api/missions/:id 一起下来（v.timeAttribution）。
+    // 浏览器只渲染，不在这一层重新归因：两份算法一定会漂，而漂了之后
+    // 页面上的耗时与后端记录的就对不上了。
+    timeAttribution: v.timeAttribution,
   };
 }
 

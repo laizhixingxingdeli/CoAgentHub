@@ -2088,6 +2088,16 @@ export class Orchestrator {
               }
               // activityClass === 'other' → no command-start fact
             }
+          } else if (event.kind === 'tool.completed') {
+            // COM5 T2：工具结束是无条件事实，不看 activityClass，也不进命令计数。
+            // 与 command.started 共用同一条串行落盘队列：两条事实的相对顺序就是
+            // 「开始 → 结束」，并行写会让他们在存储层乱序，工具耗时正负翻转。
+            enqueueCommandDurable(() =>
+              this.#platform.recordToolCompleted(input.missionId, attemptId, {
+                callId: event.callId,
+                name: event.name,
+              }),
+            );
           } else if (event.kind === 'usage') {
             streamedUsage = event.usage;
             void this.#live.append({ ...base, kind: 'usage', usage: event.usage });
@@ -2770,7 +2780,20 @@ export class Orchestrator {
     | { kind: 'completed'; hop: QueuedHop }
     | { kind: 'waiting'; hop: QueuedHop; wait: QueuedHopWait }
   > {
+    // enqueue 前邻接快照：用来区分「本次插入新行」与「幂等命中旧行」。
+    // 放在 enqueue 紧前面，早取会和别的 runner 的入队之间出错。
+    const preEnqueueKeyed = new Set(
+      (await this.#queuedHops!.list()).map((row) => row.idempotencyKey),
+    );
     const hop = await this.#hopScheduler!.enqueue(input);
+    // COM5 T3：入队事件只在**本次真的插入了新行**时发。幂等命中旧行不补事件——
+    // 补一条等于把「这次没人入队」讲成「入队了」，而这正是排障要分辨的那件事。
+    if (!preEnqueueKeyed.has(input.idempotencyKey)) {
+      await this.#platform.recordHopEnqueued(input.missionId, hop);
+    }
+    // 认领事件只认 queued/retry_wait → claimed 那一次迁移。续租会改 updatedAt，
+    // 过期接管的 claimed 行是重新认领而不是首次认领，都不发这条。
+    const claimablePrior = hop.status === 'queued' || hop.status === 'retry_wait';
     if (hop.status === 'completed') return { kind: 'completed', hop };
     const parked = parkedQueuedHopWait(hop, nowIso);
     if (parked) return parked;
@@ -2808,7 +2831,12 @@ export class Orchestrator {
       // 仓储不得把非 eligible 行领走。若仍发生，不得 complete（会丢掉别人的工作）。
       return { kind: 'waiting', hop, wait: 'lease' };
     }
-    if (result.kind === 'claimed') return result;
+    if (result.kind === 'claimed') {
+      // claimedAt 取**本次认领返回行**的 updatedAt：随后 renew 会把它覆盖，
+      // 所以事件必须在这里、用返回行写下来，事后再读行就永远拿不到认领时点。
+      if (claimablePrior) await this.#platform.recordHopClaimed(input.missionId, result.hop);
+      return result;
+    }
     if (result.kind === 'waiting') return result;
     const latest = (await this.#queuedHops!.get(hop.id)) ?? hop;
     if (latest.status === 'completed') return { kind: 'completed', hop: latest };
@@ -2967,7 +2995,7 @@ export class Orchestrator {
   }): Promise<QueuedHop> {
     // 报告失败不得 catch 后假装成功：仓储缺方法或围栏拒写都必须冒出来，
     // 否则会走回 complete / 换槽，把同一失败再计一次或把 hop 放掉。
-    return this.#hopScheduler!.reportFailure({
+    const reported = await this.#hopScheduler!.reportFailure({
       id: input.hop.id,
       claimGeneration: input.hop.claimGeneration!,
       attemptId: input.attemptId,
@@ -2976,6 +3004,13 @@ export class Orchestrator {
       disposition: input.disposition,
       retryable: input.retryable,
     });
+    // 只有真的进了退避才写 backoff：dead_letter 不发（它不是等待），
+    // 幂等重放返回同一行也不补第二条。
+    if (reported.status === 'retry_wait') {
+      await this.#platform.recordHopBackoff(input.hop.missionId, reported);
+    }
+    // 原样返回仓储结果：错误不吞，状态也不改写成别的。
+    return reported;
   }
 
   /**
