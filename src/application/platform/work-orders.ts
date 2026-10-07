@@ -1,7 +1,7 @@
 import type { WorkOrder } from '../../kernel/index.ts';
 import type { WorkOrderStandardWarning } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
-import { REVISE_BLOCKED_HINT, orderChangedFields, checkWorkOrderCriteria, checkWorkOrderStandard } from './work-order-helpers.ts';
+import { REVISE_BLOCKED_HINT, orderChangedFields, checkWorkOrderCriteria, checkWorkOrderValidationArgv, checkWorkOrderStandard } from './work-order-helpers.ts';
 import { enforceMissionTicketGates } from './ticket-budget.ts';
 
 export async function createWorkItem(
@@ -20,6 +20,7 @@ export async function createWorkItem(
     }
     // 先校验再生成 id / 落状态：不合法就整份拒绝，不留下一半变更。
     checkWorkOrderCriteria(input.order, mission);
+    checkWorkOrderValidationArgv(input.order);
     const workItemId = input.workItemId ?? ctx.ids.next('W');
     mission.createWorkItem({ id: workItemId, title: input.title, order: input.order });
     // 软警告只经两个 coordinator HTTP 工具路径：直接调用不传该标志，保持原语义。
@@ -66,6 +67,7 @@ export async function reviseWorkOrder(
     }
     // 同上：校验先行，不合法时工单与修订号都不动。
     checkWorkOrderCriteria(order, mission);
+    checkWorkOrderValidationArgv(order);
     // 差异取调用方提交的整份工单 vs 修订前的整份工单；orderRevision 是
     // kernel 机械递增的，不算「协调者改了哪个字段」，单独由 revision 事件字段给出。
     const changedFields = orderChangedFields(item.order, order);

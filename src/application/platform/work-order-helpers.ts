@@ -1,5 +1,6 @@
 import { ACCEPTANCE_STATUSES } from '../../kernel/index.ts';
 import type { AcceptanceResult, Mission, WorkOrder, WorkItemStatus } from '../../kernel/index.ts';
+import { invalidArgvReason } from '../validation/engine.ts';
 import type { WorkOrderStandardWarning } from './types.ts';
 import { PlatformRuleError } from './context.ts';
 
@@ -11,8 +12,11 @@ export const REVISE_BLOCKED_HINT: Partial<Record<WorkItemStatus, string>> = {
   // 平台收尾（work_item.platform_blocked）会把跑飞 / 连续无结果的工作项转成 blocked，
   // 那时 dispatched 就不成立了。提示里必须说清这条恢复路径，否则协调者会为了改工单
   // 而把一张还得做的工作项作废掉。
+  // 收尾被拒时状态还是 dispatched：那一刻平台手里还有活执行者或快照已过期，
+  // 修订会把两份工单同时摆在执行者面前。提示必须说清「等它收尾」，否则协调者
+  // 会以为改不动而走作废，把一张还得做的工作项扔掉。
   dispatched:
-    '正在执行中，改不了；执行者已被平台终止或平台不再重跑的，平台会把它转为卡住，转后即可修订同一张单再派发——不要为了改工单而作废它。',
+    '正在执行中，改不了；平台不再自动重跑的会先被平台收尾成卡住，转后即可修订同一张单再派发（先验收这次结果），不要为了改工单而作废它。',
   submitted: '已有执行结果待验收，先 review_execution_result 收掉这次结果，再决定是否修订。',
   accepted:
     '已验收不能修订；要补做就新建一张补修单，在 requiredBehaviour 里引用原工作项 id 与它已满足的验收、只写还缺的部分，原单的验收记录保持不动；目标、验收、范围不变就不需要升级给 L3，变了才升级。',
@@ -81,6 +85,33 @@ export function checkWorkOrderCriteria(order: WorkOrder, mission: Mission): void
 
 
 
+
+/**
+ * 工单 `validation.commands[*].argv` 合法性校验（COM13 / W-525）。
+ *
+ * 判据复用共享的那一份（不是抄一份正则）：收单时不挡，坏 argv 只会在验收阶段
+ * 才发现，那时执行者已经按这张单白跑一整跳。省略 validation 合法：旧工单走
+ * `verification` 字符串，没有结构化命令可查。
+ *
+ * 报错必须给到能照做的位置与改法：下标 + 可执行文件 + 原始原因，否则协调者只能
+ * 猜是哪一条命令坏了、猜怎么改成不经 shell 的形式。
+ */
+export function checkWorkOrderValidationArgv(order: WorkOrder): void {
+  const commands = order.validation?.commands;
+  if (commands === undefined) return;
+  for (let i = 0; i < commands.length; i += 1) {
+    const argv = (commands[i] ?? ({} as { argv?: readonly string[] })).argv ?? [];
+    const reason = invalidArgvReason(argv);
+    if (reason === undefined) continue;
+    const bin = argv.length === 0 ? '（空：commands[' + String(i) + '].argv 一项都没有）' : argv[0];
+    throw new PlatformRuleError(
+      'WORK_ORDER_VALIDATION_ARGV',
+      `工单 validation.commands[${String(i)}] 的 argv 不合法：可执行文件 ${JSON.stringify(bin)}（${reason}）。` +
+        '验证命令不经 shell，直接写可执行文件与参数，例如 ["node","--test"] 或 ' +
+        '["node","--import","tsx","--test","src/*.test.ts"]（glob 由 Node 自己展开）。',
+    );
+  }
+}
 
 /**
  * 纯校验：工单是否超出「工单标准」又不至于硬拒。
