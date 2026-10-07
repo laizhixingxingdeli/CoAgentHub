@@ -394,7 +394,10 @@ let pgDsn = '';
 
 before(async () => {
   try {
-    const target = await ensureTestDatabase();
+    // 这组要 TRUNCATE agent_pool，必须另建隔离库（见 helpers/pg.ts）：缺省库是
+    // 所有并行测试进程共用的，两个进程同时跑这组时互相清表，会零星红在别人的
+    // 用例上，而单独复跑又全绿 —— 症状看起来像偶发，实际是抢同一张表。
+    const target = await ensureTestDatabase('agent_pool');
     if (!target) return;
     pgDsn = target;
     pgStore = await PgStateStore.open({ connectionString: pgDsn });
