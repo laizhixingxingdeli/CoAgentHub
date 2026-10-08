@@ -28,6 +28,8 @@ const tools = [
       revision: generation, baseHash: text, changes, generation }, ['documentId', 'action', 'reviewer', 'reason', 'revision', 'baseHash']) },
   { name: 'coagenthub_flush_documents', description: '只在空档提交已批准文档；工作区脏或基线变化时保留队列',
     inputSchema: schema({ projectId: text, reviewer: text, generation }, ['projectId']) },
+  { name: 'coagenthub_candidate_reset', description: '人工复位一个候选的熔断，留审计记录；一次只复位一个已核实的候选',
+    inputSchema: schema({ profileId: text, reviewer: text, reason: text }, ['profileId', 'reviewer', 'reason']) },
 ];
 
 function validate(name: string, args: Record<string, unknown>) {
@@ -66,7 +68,8 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
     else if (name === 'coagenthub_list_documents') path = `/api/projects/${encodeURIComponent(String(projectId))}/documents`;
     else {
       method = 'POST';
-      path = name === 'coagenthub_reviewer_duty' ? `/api/projects/${encodeURIComponent(String(projectId))}/reviewer-duty`
+      path = name === 'coagenthub_candidate_reset' ? `/api/pools/${encodeURIComponent(String(args.profileId))}/circuit/reset`
+        : name === 'coagenthub_reviewer_duty' ? `/api/projects/${encodeURIComponent(String(projectId))}/reviewer-duty`
         : name === 'coagenthub_reviewer_todo_decide' ? `/api/reviewer/todos/${encodeURIComponent(String(todoId))}`
         : name === 'coagenthub_propose_document' ? `/api/projects/${encodeURIComponent(String(projectId))}/documents`
         : name === 'coagenthub_decide_document' ? `/api/documents/${encodeURIComponent(String(documentId))}/decide`
@@ -77,7 +80,8 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
       headers: { 'content-type': 'application/json', ...(args.generation ? {
         'x-coagent-reviewer': String(args.owner ?? args.reviewer ?? args.decidedBy),
         'x-coagent-reviewer-generation': String(args.generation) } : {}) },
-      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) });
+      ...(method === 'POST' ? { body: JSON.stringify(name === 'coagenthub_candidate_reset'
+        ? { reason: `[${String(args.reviewer)}] ${String(args.reason)}` } : body) } : {}) });
     const value = await response.json();
     if (!response.ok) throw new Error(value.error ?? `HTTP_${response.status}`);
     return { content: [{ type: 'text', text: JSON.stringify(value) }] };
