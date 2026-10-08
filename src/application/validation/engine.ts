@@ -480,7 +480,7 @@ function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
   return base;
 }
 
-function invalidArgvReason(argv: readonly string[]): string | undefined {
+export function invalidArgvReason(argv: readonly string[]): string | undefined {
   if (argv.length === 0) return 'invalid argv: empty';
   if (argv.some((a) => a === '')) return 'invalid argv: empty string entry';
   const bin = argv[0]!;
