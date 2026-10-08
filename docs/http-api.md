@@ -61,7 +61,7 @@ curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/plan-runs/R/decide
 curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/master-brief'
 ```
 
-可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十一个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
 
 ### GET /api/projects/:projectId/documents
 

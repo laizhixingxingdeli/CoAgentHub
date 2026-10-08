@@ -117,7 +117,7 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
   assert.ok((await invoke('tools/list', undefined, 1))?.error);
   await invoke('initialize', { protocolVersion: '2025-11-25' }, 2);
   assert.equal(await invoke('notifications/initialized'), undefined);
-  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 10);
+  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 11);
   await invoke('tools/call', { name: 'coagenthub_reviewer_todos', arguments: { projectId: 'P' } }, 4);
   assert.equal(calls[0].url, 'http://127.0.0.1:3101/api/reviewer/todos?projectId=P');
   assert.equal(calls[0].init?.method, 'GET');
@@ -127,6 +127,14 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
     reason: '审阅差异', revision: 1, baseHash: 'hash' } }, 6);
   assert.equal(calls[1].url, 'http://127.0.0.1:3101/api/documents/DOC%3AM%3AA%3A0/decide');
   assert.equal(calls[1].init?.headers?.['x-coagent-reviewer-generation'], '2');
+  const profileId = 'exec/qdc:1';
+  await invoke('tools/call', { name: 'coagenthub_candidate_reset', arguments: { profileId, reviewer: 'L3', reason: '已核实额度恢复' } }, 7);
+  assert.equal(calls[2].url, 'http://127.0.0.1:3101/api/pools/' + encodeURIComponent(profileId) + '/circuit/reset');
+  assert.equal(calls[2].init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(calls[2].init?.body)), { reason: '[L3] 已核实额度恢复' });
+  assert.ok(!Object.keys(calls[2].init?.headers ?? {}).some((key) => key.startsWith('x-coagent-reviewer')));
+  const noReason = await invoke('tools/call', { name: 'coagenthub_candidate_reset', arguments: { profileId, reviewer: 'L3' } }, 8);
+  assert.equal(noReason?.result.isError, true); assert.equal(calls.length, 3);
   assert.throws(() => createReviewerMcpHandler('http://example.invalid'), /LOOPBACK/);
 });
 
