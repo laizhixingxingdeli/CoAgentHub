@@ -209,7 +209,7 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 - **spawn-env-filter** — 子进程环境过滤（Spawn env filter）
   `SpawnRuntime` 拉起的 agent / query 子进程**不得**继承整份宿主 `process.env`。未声明透传名单时 fail-closed；显式声明「一个都不透传」时只留 OS/代理基线。
 - **standard-work-item-validation** — Standard 工作项交卷后的机器验证报告
-  Standard 工作项的冻结工单带 `validation.commands` 时，执行者交卷后、下一跳协调者评审前，平台在可信 Mission 工作目录用现有 `ValidationEngine` 执行命令（argv、不经 shell、
+  冻结与修订工单时平台拒绝以 shell 包装（cmd、cmd.exe、sh、bash、powershell、pwsh）起头的 validation.commands（WORK_ORDER_VALIDATION_ARGV），校验引擎的同一规则
 - **startup-reconciliation** — 启动收敛（RECON-002B）
   平台接手时把上一次残留的在途状态收干净：判死无人收尾的 Attempt、回收孤儿 worktree、补裁它们的实时输出。
 - **time-attribution** — 时间归因
