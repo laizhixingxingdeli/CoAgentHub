@@ -271,3 +271,78 @@ describe('同一条验收标准连续三个工作项没过（AC1）', () => {
     assert.equal((await platform.getMissionView('M1')).escalations, 0, '无关联项重复失败仍不参与计数');
   });
 });
+
+describe('工单 validation.commands 的 argv 前置校验（COM13）', () => {
+  test('无效 argv 在建单与修订时整份拒绝，正常 / 无 validation 照通过', async () => {
+    const { platform, activity, coord } = await bootstrap();
+    const kindCount = async (kind: string) =>
+      (await activity.list('M1')).filter((e) => e.kind === kind).length;
+
+    // 正常 argv：建单与修订都通过——不经 shell，glob 交给 Node 自己展开。
+    const id = (await platform.createWorkItem('M1', coord, {
+      title: 'V',
+      order: order([1], { validation: { commands: [{ argv: ['node', '--test'], timeoutMs: 1000 }] } }),
+    })).workItemId;
+    assert.equal((await platform.getAgentWorkItem('M1', id)).orderRevision, 'r1');
+    await platform.reviseWorkOrder('M1', coord, id, order([1], {
+      validation: { commands: [{ argv: ['node', '--import', 'tsx', '--test', 'src/*.test.ts'], timeoutMs: 1000 }] },
+    }));
+    const after = await platform.getAgentWorkItem('M1', id);
+    assert.equal(after.orderRevision, 'r2', '正常 argv 的修订照常推进修订号');
+    // 没有 validation 的旧工单不受影响（兼容性）。
+    await platform.createWorkItem('M1', coord, { title: 'no-validation', order: order([1]) });
+
+    // 坏命令一律放在 commands[1]：下标不对就说明报错指错了那一条。
+    const badArgv: readonly (readonly string[])[] = [
+      [],
+      [''],
+      ['cmd'],
+      ['cmd.exe'],
+      ['sh'],
+      ['bash'],
+      ['powershell'],
+      ['pwsh'],
+      ['C:\\Windows\\System32\\cmd.exe'],
+      ['/usr/bin/bash'],
+      ['CMD.EXE'],
+      ['Bash'],
+    ];
+    const itemsBefore = (await platform.getMissionView('M1')).workItems.length;
+    const createdBefore = await kindCount('work_item.created');
+    const revisedBefore = await kindCount('work_item.order_revised');
+    const orderBefore = after.order;
+
+    for (const argv of badArgv) {
+      const bad = order([1], {
+        validation: {
+          commands: [
+            { argv: ['node', '--test'], timeoutMs: 1000 },
+            { argv: [...argv], timeoutMs: 1000 },
+          ],
+        },
+      });
+      // 空 argv 没有可执行文件可报，报错里要明说它是空的。
+      const needle = argv.length === 0 ? '空' : JSON.stringify(argv[0]);
+      const check = (e: unknown) => {
+        if (!isRuleError(e, 'WORK_ORDER_VALIDATION_ARGV')) return false;
+        const msg = (e as Error).message;
+        return (
+          msg.includes('commands[1]') &&
+          msg.includes(needle) &&
+          msg.includes('invalid argv') &&
+          msg.includes('["node","--test"]')
+        );
+      };
+      await assert.rejects(() => platform.createWorkItem('M1', coord, { title: 'bad', order: bad }), check);
+      await assert.rejects(() => platform.reviseWorkOrder('M1', coord, id, bad), check);
+    }
+
+    // 被拒的建单 / 修订不留任何状态与事件副作用。
+    const rejected = await platform.getAgentWorkItem('M1', id);
+    assert.equal((await platform.getMissionView('M1')).workItems.length, itemsBefore, '被拒的建单不得新增工作项');
+    assert.deepEqual(rejected.order, orderBefore, '被拒的修订不得改动工单正文');
+    assert.equal(rejected.orderRevision, 'r2', '被拒的修订不得推进修订号');
+    assert.equal(await kindCount('work_item.created'), createdBefore, '被拒的建单不得写 created 事件');
+    assert.equal(await kindCount('work_item.order_revised'), revisedBefore, '被拒的修订不得写 order_revised 事件');
+  });
+});

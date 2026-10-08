@@ -1966,9 +1966,10 @@ export class Orchestrator {
     return (
       `工作项 ${input.workItemId}：${why}。` +
       `连续次数 ${input.consecutive}，涉及候选 ${profiles}，上限 ${WORK_ITEM_NO_RESULT_LIMIT}。` +
-      '平台不再自动重跑——同一张工单换个候选再赌不产生新信息。工单仍是 dispatched，' +
-      '交给你处置：确认工单本身有问题就 coagent_revise_work_order 改对再派发，' +
-      '不用做了就 coagent_retire_work_item 作废。'
+      '平台不再自动重跑——同一张工单换个候选再赌不产生新信息。先看工作项状态：' +
+      '已是 blocked 说明平台已收尾，确认工单本身有问题就 coagent_revise_work_order 改对再派发，' +
+      '不用做了或已被取代才 coagent_retire_work_item 作废（不要用作废来重启它）；' +
+      '仍是 dispatched 说明平台收尾被拒（还有活执行者或快照过期），此时不能修订，等它收尾或升级。'
     );
   }
 

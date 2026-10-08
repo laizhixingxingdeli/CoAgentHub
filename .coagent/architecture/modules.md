@@ -18,7 +18,7 @@
 | `src/application/plan-*.ts`、`mission-runner.ts` | 方案运行：解析与筛选（`plan-spec`）、分类与路由（`plan-routing`）、逐票驱动（`plan-driver`）、运行记录与升级单（`plan-run`、`plan-run-store`）、装配（`plan-runtime`）、预检（`plan-preflight`）、交接面（`plan-handoff`）、单 Mission 运行与轮次上限（`mission-runner`） | `runPlanOnPlatform`、`MissionRunner.run` | 方案记录是独立 JSON，不进主状态 |
 | `src/application/durable-scheduler.ts`、`candidate-circuit.ts`、`agent-pool.ts`、`runtime-catalog.ts` | 持久队列（租约、代次、五维容量、重试、死信）、候选熔断、候选池、模型清单；用量行匹配 `findUsageRow`（provider + modelPrefix，最长前缀、无前缀兜底，编排器与网页健康投影共用，PERF1） | 队列是纯函数 `claimHop` / `renewHop` / `reportHopFailure`；候选池 `AgentPoolRepository` | 候选按平台当前角色有序配置读取；整角色替换核对 revision，在途身份不变 |
 | `src/application/context-builder.ts`、`project-memory.ts`、`context-attribution-report.ts` | 给协调者 / 执行者的简报打包；读 `.coagent/`、生成 VIBE.md、写 memoryDelta；用量归因 | `buildContextBundle`、`readProjectMemory`、`generateVibe` | 简报只放白名单来源 |
-| `src/application/validation/`、`promotion/`、`task-classifier.ts`、`classified-mission-intake.ts`、`query-run.ts`、`query-promotion.ts` | 机器验证（跑命令、查改动范围、改动量）；快车道晋升判定；确定性分类；只读问答 | `ValidationEngine`、`classifyTask` | 验证命令不经 shell；分类只认事实，不认 caller 自填路由 |
+| `src/application/validation/`、`promotion/`、`task-classifier.ts`、`classified-mission-intake.ts`、`query-run.ts`、`query-promotion.ts` | 机器验证（跑命令、查改动范围、改动量）；快车道晋升判定；确定性分类；只读问答 | `ValidationEngine`、`classifyTask` | 验证命令不经 shell（判据 `invalidArgvReason` 由 `validation/engine.ts` 导出，冻结 / 修订工单时平台也用它前置拒绝，COM13）；分类只认事实，不认 caller 自填路由 |
 | `src/application/decision-*.ts`、`jev-*.ts`、`post-execution-*.ts`、`phase2-shadow-exit-evaluator.ts` | Jev 决策引擎接入，只在影子模式记录 | `decision-shadow-runner.ts` | 无执行权威（ADR-0002） |
 | `src/application/ports.ts`、`in-memory.ts`、`file-store.ts`、`pg-store.ts`、`artifact-store.ts`、`live.ts`、`delivery.ts` | 仓储接口与三种实现、大输出外置、实时输出、投递收件箱 | `FileStateStore`、`PgStateStore` | 第三方依赖只在 `pg-store.ts` |
 | `src/application/reconcile.ts`、`lock.ts`、`loopback-*.ts`、`token-issuer.ts` | 启动与周期修复、主锁（单写者）、常驻服务本机回环、run token | `acquireLock`、`probeLocalWriter` | 单机单写者 |
@@ -43,7 +43,7 @@
 | 共用底座 | `context`（共用状态、事务、事件）、`types`（公开视图与依赖类型）、`mutation-lane`（改动名额、快车道校验） |
 | Mission 生命周期 | `mission-intake`（创建、分类、重跑）、`mission-lifecycle`（生命周期控制）、`mission-control`（作废、交卷控制）、`planning`（规划更新） |
 | Attempt | `attempts`（开跑、收尾、心跳） |
-| 工作项与工单 | `work-orders`（建单、修订）、`work-order-helpers`（工单校验）、`work-item-dispatch`（派发）、`work-item-review`（评审）、`executor-submissions`（执行者证据、结果、blocked）、`standard-redispatch`（Standard 续派）、`redispatch-helpers`（续派纯辅助）、`conflict-dispatch`（冲突派发屏障）、`stalled-work-item`（平台可信收尾：把已无活执行者的 dispatched 项收成 blocked，一次围栏事务核对最后一次尝试 id 与工单修订号，独立事件 `work_item.platform_blocked`，不计入验收连续失败，COM12） |
+| 工作项与工单 | `work-orders`（建单、修订）、`work-order-helpers`（工单校验；`checkWorkOrderValidationArgv` 在冻结与修订时前置拒绝壳层包装的 validation argv，COM13）、`work-item-dispatch`（派发）、`work-item-review`（评审）、`executor-submissions`（执行者证据、结果、blocked）、`standard-redispatch`（Standard 续派）、`redispatch-helpers`（续派纯辅助）、`conflict-dispatch`（冲突派发屏障）、`stalled-work-item`（平台可信收尾：把已无活执行者的 dispatched 项收成 blocked，一次围栏事务核对最后一次尝试 id 与工单修订号，独立事件 `work_item.platform_blocked`，不计入验收连续失败，COM12） |
 | 机器验证 | `standard-validation`（Standard 机器验证）、`validation-report-views`（验证报告投影）、`integration-verification`（合并结果验证） |
 | 快车道 | `lightweight-dispatch`、`lightweight-submission`、`lightweight-validation`、`promotion`（晋升 Standard） |
 | 交卷 | `mission-result-attachments`（平台自采的交卷附件：最后一次全量结果行、diff 统计、验收与工单对应）、`mission-result-criteria`（交卷 criteria 校验与闸门诊断） |

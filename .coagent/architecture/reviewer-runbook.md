@@ -14,7 +14,7 @@
    - 纯搬家 / 重构票：先找出所有读源码文本的测试（`grep -rln "readFileSync" test/`，看哪些读 `src/`），分两类在票里写明怎么适配——钉死文件路径的、钉死调用写法的（如只认 `this.#event(`）。REF1 因这两类各返工一次（契约 r2、r4）。
    - 票里或升级答复里规定具体做法之前，先核平台允不允许。例：已验收的工作项不能修订，只能新建工单补做（REF1 的 E-2）。
    - 解析外部数据的票（读别的服务的返回：账户额度、日志、第三方接口）：夹具必须取真实返回的形状（匿名化后），契约里写明真实形状的要点（桶的标记、数值怎么配平、各上游的差异），不凭想象造样例。合入前 L3 用只读脚本对真实数据跑一次修复前后对比：只放行对本机服务的 GET、凭据读取注入成空、输出只含白名单字段、不印账号信息。PI-COM1 反例：虚构样例全绿，真实 CodeBuddy 每账号 26 个桶（总池 Total Points + 每月礼包 + Bonus Pack 1…24，没有 detailOnly / aggregate 标记）被取最小，整个 cbcn 报「剩余 0%、恢复时间 11-02（其实是小包过期日）」，平台据此给 3 个协调者候补开了额度熔断；PI-COM2 改用真实形状夹具修好，合入前后对比 cbcn 0% → 64.82%。
-   - 工单 `validation.commands` 的 argv 不得是 cmd / sh / bash / powershell / pwsh 的壳层包装：校验引擎判 `invalid_argv`，永远红，而验证简版只显示一个没有输出的红（`ValidationReportCommandView` 丢了原因，读完整 VR 才看得到）。全量命令直接写 `["node","--import","tsx","--test","src/*.test.ts"]`（pi）或 `["node","--test"]`（本仓），glob 由 Node 自己展开。PI-COM2 的 W-520 因协调者写了 `bash -lc` 白烧一个执行者来回和一个协调者跳，契约里要点明。
+   - 工单 `validation.commands` 的 argv 不得是 cmd / sh / bash / powershell / pwsh 的壳层包装：校验引擎判 `invalid_argv`，永远红，而验证简版只显示一个没有输出的红（`ValidationReportCommandView` 丢了原因，读完整 VR 才看得到）。全量命令直接写 `["node","--import","tsx","--test","src/*.test.ts"]`（pi）或 `["node","--test"]`（本仓），glob 由 Node 自己展开。PI-COM2 的 W-520 因协调者写了 `bash -lc` 白烧一个执行者来回和一个协调者跳，契约里要点明。COM13 上线后（合 master 并重启服务后）冻结与修订工单时平台直接拒绝这类 argv（错误码 `WORK_ORDER_VALIDATION_ARGV`，消息给出命令下标与改法）；在那之前仍要在契约里点明。
    - 新代码守工程规范（`engineering-standards.md`）；数值目标写成建议值，写明「什么情况下算收尾」。
 3. 写进方案文件（`missions/PLAN-*.json`，本地文件、不进 git）：why、acceptance、constraints、nonGoals、allowedScope（到目录级，全量测试命令里的路径要被范围覆盖）；会触发分类器禁止副作用的措辞（删、迁移、真实外部调用）配上副作用声明。
 4. 开跑前把票单给用户确认。
@@ -44,6 +44,7 @@
 5. runaway 的恢复：先核实真实承载者是 PlanRun 还是 run-mission，不凭历史 origin 选决策口。暂停 Mission，查实际尝试及租约；作废卡住的工单并保留成果，按调用点或用例组重划，写明真实接口、fixture、定向命令与交卷条件。确认旧执行者退出且租约不再有效后才恢复同一 Mission；原样重派不算恢复。技术拆单由 L3 判断，需求变更或超预算交用户。检查点误答使用显式 `checkpoint approve`，必须带真实 reviewer/reason，费用门禁不变；不编辑状态文件。
 6. 为止损往启动脚本里加环境变量之前，先想它会进哪里：服务拉起的所有子进程都继承，包括平台的校验命令。10-07 为止损设的 `COAGENT_TENROUTER_URL=http://127.0.0.1:9`（让适配器查不到额度、平台当未知放行）使 pi 的 `usage.test.ts` 断言「默认地址」的既有测试在平台校验里红了（VR-228；执行者自己复现，并把那条测试改成不读宿主环境）。先 grep 测试里读该变量的地方；止损用完立刻删，修复合入后重启生效。
 7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件目前没有复位工具，只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），所以每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。缺口：需要一个插件工具。
+8. 常驻服务是用户会话里的控制台进程：用户关机、注销、睡眠（哪怕关机被别的应用否决后改成睡眠）都会把它杀掉，而且不留崩溃记录。10-08 02:53 用户点了关机，微信否决后系统转入睡眠又恢复，服务当时就没了（心跳停在 02:53:18，`service.err` 无记录，系统事件里是 Kernel-Power 42 / 107 与 User32 1074）；待终审的交卷在状态里没丢，12:52 重启即恢复。长时间等待（待终审、等用户）后每次醒来先核 3101 监听与 `holder.json` 心跳，别只信托管运行的退出码；重启按「2026-10-06 补充」的做法。
 
 ## 4. 票与票之间
 
@@ -69,9 +70,10 @@
    `git worktree add <临时目录> master`，
    `git -C <临时目录> merge --no-ff auto/harness-remaining -m "合并 auto/harness-remaining → master：<n> 张票（<m> 个提交）——用户 <日期> 签字合入 …"`，
    核对与集成分支内容一致（`git diff auto/harness-remaining HEAD` 为空），再 `git worktree remove <临时目录>`。
-   主工作区本身检出的就是 master 时（同一分支不能在两个 worktree 检出），直接在主工作区 `git merge --no-ff <集成分支>`，同样核对 diff 为空、工作区干净。前置验证要绑定集成分支当前 HEAD：之后哪怕只有文档提交，也要重跑平台全量（有测试读 `.coagent/project.md`）；用零代码验证 Mission 跑，它没有改动，收尾不产生新提交（2026-10-07 的 MASTER-PRECHECK）。
+   主工作区本身检出的就是 master 时（同一分支不能在两个 worktree 检出），直接在主工作区 `git merge --no-ff <集成分支>`，同样核对 diff 为空、工作区干净。前置验证要绑定集成分支当前 HEAD：之后哪怕只有文档提交，也要重跑平台全量（有测试读 `.coagent/project.md`）；用零代码验证 Mission 跑，它没有改动，收尾不产生新提交（2026-10-07 的 MASTER-PRECHECK）。没有 Mission 在跑、机器空闲时，也可以由检视者直接在集成 worktree 的该 HEAD 上跑一次全量 `node --test`（2026-10-08 合 da4ab5d 就是这样：145 秒、一次绿；偶发红整轮复跑），把结果行写进简报和合并提交说明。
    合完在没有在跑的 agent 时重启服务加载新代码：核实持锁 pid 与 3101 监听者一致后 `taskkill /F /T /PID`，等心跳超过 120 秒，再用隐藏启动脚本起服务，平台自动接管并写审计；起来后用一个已有 Mission 的 HTTP 视图确认新行为生效。
-4. 本仓没有远端，不推送。记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）。
+4. 本仓没有远端，不推送。记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）、630656d（10-07 夜，COM6–COM11 与 PERF1，用户「合」）、da4ab5d（10-08，COM9 / COM10 / COM12，用户「按现在的执行池，合master」）。
+5. coagent-pi 仓库的 master（主检出 `C:/program1/coagent-pi`，分支 master；集成分支 `auto/harness-remaining` 在 `.coagent-worktrees/integration`）同样只在用户说「合」之后合：简报前先 `git merge-tree --write-tree master auto/harness-remaining` 试合（无冲突时结果树应等于集成分支的树），在集成 worktree 对该 HEAD 跑 `node --import tsx --test src/*.test.ts` 全绿；合并在主检出里 `git merge --no-ff auto/harness-remaining`，再核对 `git diff auto/harness-remaining master` 为空。不用重启服务（托管运行读的是集成 worktree），只是让默认适配器目录（资源池页读额度）与 master 一致。
 
 ## 7. 停服务与清锁
 
