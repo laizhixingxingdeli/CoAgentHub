@@ -2,6 +2,14 @@
 
 用户 2026-10-02：「步骤都要作为平台的流程，保存下来」。这里记的是检视者（L3）驱动平台时的固定步骤；三层分工见 ADR-0007，检视者规则见仓库根目录 `AGENTS.md`。其中「合 master 简报与合并前检查」「值守」等以后由平台自己做（RV2、RV5），做之前按这里人工执行。
 
+## 0. 检视者能直接写什么，什么必须开 Mission（用户 2026-10-08 认可）
+
+`AGENTS.md` 说检视者不写功能代码。划线如下，出线的一律开 Mission：
+
+- **可以直接做**：①`.coagent/` 下的文档（在两个 Mission 之间提交）；②运维——重启服务、改服务启动器与隐藏启动 VBS、经插件配置执行池、登记 pi 的模型路由、跑全量测试做合前验证；③合入集成分支（经插件，我签）与用户说「合」之后合 master；④调用**已批准工具**的胶水脚本，放在工具包 `C:\program1\coagent-l3-kit`（`claude/`、`ops/`、`templates/`，README 有用法）：只许调用现有插件 / MCP / HTTP 路由、读取并整理它们的返回，不新增平台能力。
+- **必须开 Mission**：产品仓库（v5、coagent-pi 等）里的任何代码与测试；已批准工具面的任何新增或改动（新增 MCP 工具、插件工具、HTTP 路由）；规格要求的行为变化。例：10-08 的候选熔断复位工具走 L3MCP1；`rmcp.mjs` 只是既有 reviewer MCP 的客户端，属于胶水，直接写。
+- 拿不准归哪边就开 Mission；胶水脚本一旦长出判断逻辑（不再只是转发和整理），也改走 Mission。
+
 ## 1. 冻结票
 
 1. 照 to-spec 的结构过一遍：要解决什么、方案、实现决定（改动落在哪一层、接口和数据形状怎么变）、测试接缝（在哪一层验证、参照哪个已有测试）、会碰到哪些既有测试与不变量、不做什么。
@@ -22,7 +30,7 @@
 ## 2. 开跑
 
 1. 只读检查：`node src/run-plan.ts … --check`。**只在常驻服务停着时跑**——它整份读状态文件。
-2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。Windows 使用现有隐藏 VBS 包装器经 `explorer.exe` 启动 cmd，包装器采用窗口样式 0，避免弹出终端；不用 WMI 或 Start-Process。启动前核实持锁进程退出、端口空闲，显式设置原 `COAGENT_STATE`、工作目录及日志；不得重复启动。已核实的包装器是 `C:/Users/echo/AppData/Local/Temp/coagenthub-start-service-hidden.vbs`，路径失效时先核实既有启动器，不盲目替换状态路径。派发设置 `COAGENT_AGENT_ENV_PASSTHROUGH=-`；本会话不使用定时任务。
+2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。Windows 使用现有隐藏 VBS 包装器经 `explorer.exe` 启动 cmd，包装器采用窗口样式 0，避免弹出终端；不用 WMI 或 Start-Process。启动前核实持锁进程退出、端口空闲，显式设置原 `COAGENT_STATE`、工作目录及日志；不得重复启动。已核实的包装器是 `C:/Users/echo/AppData/Local/Temp/coagenthub-start-service-hidden.vbs`（副本在工具包 `C:/program1/coagent-l3-kit/ops/`，丢了从那里还原），路径失效时先核实既有启动器，不盲目替换状态路径。派发设置 `COAGENT_AGENT_ENV_PASSTHROUGH=-`；本会话不使用定时任务。
 3. 新票通过新版 CoAgentHub v5 L3 插件开跑（0.2.2，2026-10-04）：先 `coagenthub_get_platform_status` 核实服务持锁身份、当前占用；冻结完整 Contract 后 `coagenthub_create_mission`，Delivery recipient 使用当前真实 Codex root 会话；再 `coagenthub_start_mission`，指定独立集成 worktree、已验收的 adapter 路径和 maxRounds。启动不直读状态文件，不另起 CLI 写者或终端，环境透传声明固定为 `-`。生产 run-plan 已退役，不对历史 PlanRun 原样续跑。
    - 插件 accepted 只是 HTTP 请求受理；`coagenthub_get_hosted_run` 的 running 表示平台启动输出已确认，ended 提供退出码；Mission 完成以权威视图和交卷证据为准。断流或插件重启后观测为 unknown，先查 Mission/activity 和真实运行者，禁止盲目重试。当前插件同实例抑制重复启动，不承诺跨实例分布式去重。
    - 恢复暂停只清 paused，不负责启动；挂起先走 resume_parked 的目标同步。已有 Mission 的启动读取当前权威 Contract，不用旧本地规格覆盖。历史 origin 不决定承载通路：先核实真实 PlanRun 已停止还是仍运行。
@@ -43,7 +51,7 @@
 4. 到线（15 个工作项、单项 4 次）时看原因：在推进就放开那一条线继续，在空转就作废、改票或停。
 5. runaway 的恢复：先核实真实承载者是 PlanRun 还是 run-mission，不凭历史 origin 选决策口。暂停 Mission，查实际尝试及租约；作废卡住的工单并保留成果，按调用点或用例组重划，写明真实接口、fixture、定向命令与交卷条件。确认旧执行者退出且租约不再有效后才恢复同一 Mission；原样重派不算恢复。技术拆单由 L3 判断，需求变更或超预算交用户。检查点误答使用显式 `checkpoint approve`，必须带真实 reviewer/reason，费用门禁不变；不编辑状态文件。
 6. 为止损往启动脚本里加环境变量之前，先想它会进哪里：服务拉起的所有子进程都继承，包括平台的校验命令。10-07 为止损设的 `COAGENT_TENROUTER_URL=http://127.0.0.1:9`（让适配器查不到额度、平台当未知放行）使 pi 的 `usage.test.ts` 断言「默认地址」的既有测试在平台校验里红了（VR-228；执行者自己复现，并把那条测试改成不读宿主环境）。先 grep 测试里读该变量的地方；止损用完立刻删，修复合入后重启生效。
-7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件目前没有复位工具，只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），所以每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。缺口：需要一个插件工具。
+7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件没有复位工具；v5 自带的 reviewer MCP 在 L3MCP1（10-08）之后有 `coagenthub_candidate_reset`，合 master 并重启服务后才可用：`node C:/program1/coagent-l3-kit/claude/rmcp.mjs coagenthub_candidate_reset '{"profileId":"…","reviewer":"…","reason":"…"}'`，reviewer 署名会前缀进审计里的 reason（生产里审计的 actor 恒为 operator），一次只复位一个已核实的候选。在它可用之前只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），那样每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。
 8. 常驻服务是用户会话里的控制台进程：用户关机、注销、睡眠（哪怕关机被别的应用否决后改成睡眠）都会把它杀掉，而且不留崩溃记录。10-08 02:53 用户点了关机，微信否决后系统转入睡眠又恢复，服务当时就没了（心跳停在 02:53:18，`service.err` 无记录，系统事件里是 Kernel-Power 42 / 107 与 User32 1074）；待终审的交卷在状态里没丢，12:52 重启即恢复。长时间等待（待终审、等用户）后每次醒来先核 3101 监听与 `holder.json` 心跳，别只信托管运行的退出码；重启按「2026-10-06 补充」的做法。
 
 ## 4. 票与票之间
@@ -94,7 +102,7 @@
 
 值守通过 `/api/projects/:id/reviewer-duty` claim 领取五分钟租约，每分钟 renew。handoff 递增代次，旧会话不能续约或守候；L3 写操作须携带真实 owner 与 generation。值守不是鉴权，D1d 仍暂缓。显式守候脚本 `node scripts/reviewer-watch.ts <projectId> <会话ID>` 只打印变化；不创建定时任务，本会话按用户要求不启动守候。
 
-可选 `node scripts/reviewer-mcp.ts` 提供十个工作流工具，仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
+可选 `node scripts/reviewer-mcp.ts` 提供十一个工作流工具（含 L3MCP1 的候选熔断复位 `coagenthub_candidate_reset`），仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
 
 `/api/projects/:id/master-brief` 只提供简报，不执行 master 合并。没有当前 HEAD 的可信平台全量报告时 ready=false，直接实施批的终端测试日志不会被伪造为平台报告。用户签名仍是合 master 的前置。
 
