@@ -9,8 +9,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { isDirectEntry } from './direct-entry.ts';
 import {
   CONTEXT_ATTRIBUTION_ERROR_CODE,
   buildContextAttributionReport,
@@ -77,13 +76,7 @@ function main(): void {
 }
 
 function isDirectRun(): boolean {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  try {
-    return import.meta.url === pathToFileURL(resolve(entry)).href;
-  } catch {
-    return false;
-  }
+  return isDirectEntry(process.argv[1], import.meta.url);
 }
 
 if (isDirectRun()) main();

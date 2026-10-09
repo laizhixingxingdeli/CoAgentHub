@@ -9,9 +9,9 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { API_VERSION, createApi } from './api/server.ts';
+import { isDirectEntry } from './direct-entry.ts';
 import { loadRoleProfiles } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
 import { resolveRunAdapter } from './application/default-adapter-entry.ts';
@@ -470,7 +470,7 @@ async function main() {
   releaseLock();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isDirectEntry(process.argv[1], import.meta.url)) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.stack : String(error));
     process.exit(1);

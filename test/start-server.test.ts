@@ -6,7 +6,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix as pathPosix, resolve, win32 as pathWin32 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -2199,7 +2199,7 @@ if (isDirectMainEntry(process.argv[1], import.meta.url)) {
       writeFileSync(expectedDefault, JSON.stringify({}));
       const present = await spawnStub(env);
       assert.equal(present.code, 0, present.out + present.err);
-      assert.equal(present.out.trim(), `STATE=${expectedDefault}`);
+      assert.equal(present.out.trim(), `STATE=${resolve(realpathSync(repo), '.coagent-state.json')}`);
 
       const explicitPath = join(elsewhere, 'explicit.json');
       const expl = await spawnStub({ ...env, COAGENT_STATE: explicitPath });

@@ -10,7 +10,7 @@
 // 也不碰 ~/.pi 与任何凭据。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -545,7 +545,16 @@ async function main(argv) {
 function isDirectExecution() {
   if (typeof process.argv[1] !== 'string' || process.argv[1].length === 0) return false;
   try {
-    const invoked = pathToFileURL(resolve(process.argv[1])).href;
+    // 先 realpath：仓库在符号链接 / 联接点下时 argv[1] 与主模块 URL 才对得上。
+    // 必须用 JS 版（与 Node 加载器一致，不展开 8.3 短名）；失败退回原值。
+    const lexical = resolve(process.argv[1]);
+    let canonical = lexical;
+    try {
+      canonical = realpathSync(lexical);
+    } catch {
+      canonical = lexical;
+    }
+    const invoked = pathToFileURL(canonical).href;
     if (invoked === import.meta.url) return true;
     // Windows 上同一路径可能只差盘符大小写。
     return WINDOWS && invoked.toLowerCase() === import.meta.url.toLowerCase();

@@ -1,7 +1,7 @@
 /** Mission 清单只是提交输入；全部状态与调度由持锁服务中的 Mission 承载。 */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { isDirectEntry } from './direct-entry.ts';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -39,6 +39,6 @@ async function main() {
   console.log(JSON.stringify({ projectId: result.projectId, revision: result.revision, missions: result.entries.map((row: { missionId: string }) => row.missionId) }, null, 2));
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectEntry(process.argv[1], import.meta.url)) {
   main().catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
 }
