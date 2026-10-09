@@ -1,0 +1,25 @@
+{
+  "name": "coagenthub-codex",
+  "version": "0.2.2",
+  "description": "Bind Codex to CoAgentHub v5 as an L3 reviewer with durable Delivery Inbox callbacks.",
+  "author": {
+    "name": "CoAgentHub contributors"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "CoAgentHub v5 L3",
+    "shortDescription": "Review CoAgentHub v5 Missions from Codex.",
+    "longDescription": "Binds a Codex session to the CoAgentHub v5 durable Delivery Inbox and provides Mission evidence, lifecycle control, escalation and final-review tools.",
+    "developerName": "CoAgentHub contributors",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Show CoAgentHub v5 Missions waiting for L3 review.",
+      "Inspect the latest CoAgentHub v5 Delivery and handle it as L3.",
+      "Review this Mission against its contract and diff."
+    ]
+  },
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}
