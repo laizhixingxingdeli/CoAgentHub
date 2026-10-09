@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Windows is where the project is developed and verified, so it is the required job.
+# Linux and macOS are experimental until someone has run the suite there: failures are reported but do not fail the workflow.
+jobs:
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os != 'windows-latest' }}
+    env:
+      # Tests create commits in temporary repositories; runners have no global git identity.
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.invalid
+      GIT_COMMITTER_NAME: ci
+      GIT_COMMITTER_EMAIL: ci@example.invalid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The platform needs no install: tests that need Postgres skip themselves when it is absent.
+      - run: node --test
+
+  adapter-and-mcp:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm test -w adapters/pi
+      - run: npm run build -w integrations/codex/mcp-server
+      - run: npm test -w integrations/codex/mcp-server

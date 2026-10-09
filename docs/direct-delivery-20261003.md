@@ -12,6 +12,6 @@
 | 规则与运维 | AGENTS.md 承载全文，CLAUDE.md 引用它；补工单尺寸建议、runaway 收窄与租约检查、隐藏启动和停止进程树说明。 |
 | PI 提示词 | 相邻 coagent-pi 仅改 roles.ts 的协调者段和已有 roles.test.ts；简单任务短单、真实接线/fixture 示例、复杂任务先调查，不加搜索或时间硬门禁。提交 `7f49e90`，集成合并 `2b3f4f6`。 |
 
-最终主仓全量命令 `node --test`：tests 2346 / pass 2339 / fail 0 / skipped 7 / cancelled 0，耗时 186145ms；七项均为既有 HAOFF1 跳过。日志：`C:/Users/echo/AppData/Local/Temp/coagent-direct-final-test-20261003.log`。AC4 与 shadow 定向 47 项通过。coagent-pi `node --import tsx --test src/roles.test.ts`：12 pass / 0 fail；提示词收益尚未通过真实任务性能比较验证。
+最终主仓全量命令 `node --test`：tests 2346 / pass 2339 / fail 0 / skipped 7 / cancelled 0，耗时 186145ms；七项均为既有 HAOFF1 跳过。日志：`<用户目录>/AppData/Local/Temp/coagent-direct-final-test-20261003.log`。AC4 与 shadow 定向 47 项通过。coagent-pi `node --import tsx --test src/roles.test.ts`：12 pass / 0 fail；提示词收益尚未通过真实任务性能比较验证。
 
 度量命令 `node scripts/code-metrics.ts --changed 18317a4` 返回 0，报告 123 条近似告警及未分析说明；没有为消除告警修改既有业务。Git whitespace 检查通过。代码交付完成不等于真实平台记录 completed；服务没有重启加载本批代码，后续恢复前仍须核实原状态、运行承载者、租约与集成基线。

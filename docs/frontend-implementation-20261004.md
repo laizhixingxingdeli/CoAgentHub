@@ -13,7 +13,7 @@
 - 布局：中文主导航三个入口，完整契约与累计用量折叠展示；800×600 不产生整页横向溢出。
 
 ## 验证
-定向界面测试 190 项通过；导航兼容专项 85 项通过；末轮任务/刷新/工作台测试 78 项通过。最终全量 `node --test --test-timeout=300000`：2365 项，2358 通过、0 失败、仅 HAOFF1 既有 7 skip；最终任务/刷新/工作台 78 项复跑也通过。日志：`C:/Users/echo/AppData/Local/Temp/frontend-full-final-20261004.log`。真实 HTTP 版本冲突测试使用 buildPlatform 内存实例，验证候选次序、停用项与事实保留、旧 revision 返回 409。浏览器通过正式 createApi 静态服务与独立内存数据验证项目切换、模型排序保存、当前定位、历史选择与刷新恢复、输出独立性；控制台 error 为空。截图是隔离演示数据，不能作为真实 Mission 已运行或投递成功的证据。
+定向界面测试 190 项通过；导航兼容专项 85 项通过；末轮任务/刷新/工作台测试 78 项通过。最终全量 `node --test --test-timeout=300000`：2365 项，2358 通过、0 失败、仅 HAOFF1 既有 7 skip；最终任务/刷新/工作台 78 项复跑也通过。日志：`<用户目录>/AppData/Local/Temp/frontend-full-final-20261004.log`。真实 HTTP 版本冲突测试使用 buildPlatform 内存实例，验证候选次序、停用项与事实保留、旧 revision 返回 409。浏览器通过正式 createApi 静态服务与独立内存数据验证项目切换、模型排序保存、当前定位、历史选择与刷新恢复、输出独立性；控制台 error 为空。截图是隔离演示数据，不能作为真实 Mission 已运行或投递成功的证据。
 
 ![任务详情桌面](frontend-evidence-20261004/task-desktop.jpg)
 ![小屏布局](frontend-evidence-20261004/task-small.jpg)

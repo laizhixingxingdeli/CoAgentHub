@@ -10,7 +10,7 @@ Git 成功而队列确认丢失时，提交标记与文档内容支持重入，�
 
 四个 HTTP 文档入口及四个 MCP 工具已接线；补充 MCP 总计十个工具，已安装 L3 插件及 Codex 配置未修改。CLI 读面支持只有 changes 的新交卷，不对缺省 body 调 split，不写状态。coagent-pi 独立分支 `codex/document-diff` 只改 tools.ts 与既有 tools.test.ts，将整份正文改为可选、增加差异字段，并取消工具说明中的自动随代码落地承诺；未升级 SDK 或依赖。
 
-验证：Hub 全量 `node --test` 为 2353 tests / 2346 pass / 0 fail / 7 skip，198375.3442 ms，skip 仅既有 HAOFF1。日志 `C:/Users/echo/AppData/Local/Temp/coagent-document-queue-final-20261003.log`。末次 CLI 读面修复后又跑文档队列 2 条关键测试，包含临时状态的真实 CLI show、状态字节不变、审批/排队/持久恢复/编辑撤回/归档保护/漂移/脏工作区/master 拒写/Git 确认丢失恢复，2 pass / 0 fail；日志 `document-queue-cli-read.log`。适配器 tools.test.ts 10 pass / 0 fail；日志 `coagent-pi-document-test.log`。接口文档和事件叙事覆盖通过，`git diff --check` 通过。
+验证：Hub 全量 `node --test` 为 2353 tests / 2346 pass / 0 fail / 7 skip，198375.3442 ms，skip 仅既有 HAOFF1。日志 `<用户目录>/AppData/Local/Temp/coagent-document-queue-final-20261003.log`。末次 CLI 读面修复后又跑文档队列 2 条关键测试，包含临时状态的真实 CLI show、状态字节不变、审批/排队/持久恢复/编辑撤回/归档保护/漂移/脏工作区/master 拒写/Git 确认丢失恢复，2 pass / 0 fail；日志 `document-queue-cli-read.log`。适配器 tools.test.ts 10 pass / 0 fail；日志 `coagent-pi-document-test.log`。接口文档和事件叙事覆盖通过，`git diff --check` 通过。
 
 本批没有在真实 AC4 运行上操作或重启服务，也没有把直接测试日志冒充平台 ValidationReport。文档提交会推进 HEAD，旧提交全量报告仍不能满足 master 简报的当前 HEAD 前置检查。
 

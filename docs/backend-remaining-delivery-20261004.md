@@ -12,7 +12,7 @@
 
 ## 验证与边界
 
-最终在隔离 worktree 执行 node --test --test-timeout=300000：tests 2361 / pass 2354 / fail 0 / skipped 7。唯一 skip 是 HAOFF1 既有7项；PG 测试实际运行通过。timeout 只是测试等待护栏，不改变产品的费用或执行门禁。完整输出：C:/Users/echo/AppData/Local/Temp/backend-final-green-20261004.log。git diff --check 通过。
+最终在隔离 worktree 执行 node --test --test-timeout=300000：tests 2361 / pass 2354 / fail 0 / skipped 7。唯一 skip 是 HAOFF1 既有7项；PG 测试实际运行通过。timeout 只是测试等待护栏，不改变产品的费用或执行门禁。完整输出：<用户目录>/AppData/Local/Temp/backend-final-green-20261004.log。git diff --check 通过。
 
 零依赖近似度量仅告警；两条依赖环涉及 context.ts/types.ts 的 import type 回到平台接口，不形成运行时循环。大文件与复杂分支告警不作为硬门禁，新调度职责已放独立模块；没有新增依赖或内核修改。API、模块地图、QueryRun 规格、ADR-0007、project.md、AGENTS 与运行手册已同步，既有规则保留。
 

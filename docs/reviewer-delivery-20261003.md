@@ -10,7 +10,7 @@
 | RV5 后端 | 只读真实 Git 生成合 master 简报；当前 HEAD 的可信平台全量报告、干净集成分支及运行状态作为前置，缺证据即拒绝标就绪；绝不执行 master 合并 |
 | 文档 | 增补 HTTP 路由、模块地图、运行手册及稳定规格；AGENTS 记录本次继续实施授权，未截短旧规格 |
 
-最终全量 `node --test`：2351 tests / 2344 pass / 0 fail / 7 skip，197867.6266 ms。skip 均为既有 HAOFF1；日志 `C:/Users/echo/AppData/Local/Temp/coagent-reviewer-final-test-20261003.log`。HTTP 文档覆盖、事件叙事及关键场景均通过；`git diff --check` 通过。无新增依赖，内核没有改动。
+最终全量 `node --test`：2351 tests / 2344 pass / 0 fail / 7 skip，197867.6266 ms。skip 均为既有 HAOFF1；日志 `<用户目录>/AppData/Local/Temp/coagent-reviewer-final-test-20261003.log`。HTTP 文档覆盖、事件叙事及关键场景均通过；`git diff --check` 通过。无新增依赖，内核没有改动。
 
 真实服务未启动，未声称新增接口已在真实 AC4 运行上生效；MCP 未写入 Codex 配置或安装到插件，实际 Delivery 投递未作为本批验证目标。直接批测试日志没有被冒充为可信平台报告，当前真实项目 master-brief 可能因缺报告 ready=false，这是预期行为。
 

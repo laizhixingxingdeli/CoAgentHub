@@ -1,150 +1,96 @@
-# CoAgentHub v5
+# CoAgentHub
 
-Agent-First 架构基线的实现。
+[中文](README.md) | [English](README_EN.md)
 
-## 运行环境
+**让多个 AI 编码 agent 按三层分工完成同一个需求，并且每一步都有证据可查。**
 
-Node 24+，靠原生类型剥离直接跑 TypeScript，**没有构建步骤**。
+CoAgentHub 是一个本机运行的 agent-first 软件工程 harness。你把需求交给一个“检视者”，平台把它变成有边界的变更（Mission），由协调者拆成工单，再由便宜、快速的执行者模型照着工单干活；平台自己跑验证、存证据、守门禁，出了问题能恢复，最后由检视者签字合入。
+
+它不绑定任何一家 agent 或模型：**检视者可以是任何你开着的 agent 会话**（Claude Code、Codex、或任何能跑命令的 agent），**协调者和执行者可以是 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 支持的任何模型**（Anthropic、OpenAI、Google、DeepSeek、xAI、OpenRouter、Ollama、本地 llama.cpp……）。
+
+> 状态：预览版。开发与测试都在 Windows 11 上完成；代码按跨平台写，但 Linux / macOS 还没有真机验证，欢迎反馈。HTTP 接口没有鉴权，只监听 127.0.0.1，见 [docs/security.md](docs/security.md)。
+
+## 三层分工
+
+| 层 | 是谁 | 管什么 | 不碰什么 |
+|---|---|---|---|
+| **L3 检视者** | 你开着的 agent 会话 | 吃透需求和架构，把需求切成“票”（契约），开跑，值守，终审并签字合入 | 不写功能代码，不在代码层面验收，只看协调者的结构化结论 |
+| **L2 协调者** | 平台拉起的模型会话 | 在一个 Mission 内规划、拆工作项、写冻结工单，逐项验收执行者的交付 | 不改需求（契约只由 L3 改） |
+| **L1 执行者** | 平台拉起的（通常是便宜的）模型会话 | 只执行冻结工单，交代码改动和证据 | 不自验收，不重新定义目标，工单以外的不看不改 |
+
+核心模型是 **Project → Mission → WorkItem → Attempt**：项目承载长期事实，Mission 是一次有边界的变更，WorkItem 是可派发的执行单元，Attempt 是某次模型会话。
 
 ```
-node --test
+你 ──需求──▶ L3 检视者 ──票(契约)──▶ 平台 ──▶ L2 协调者 ──冻结工单──▶ L1 执行者
+                ▲                     │  ▲                              │
+                │ 终审签字合入          │  └──── 证据 + 平台自己跑的验证 ◀──┘
+                └──── 交卷 + 逐条验收 ◀──┘
 ```
 
-测试用 `node:test` + `node:assert/strict`。测试文件命名 `test/*.test.ts`，
-从 `src/` 用相对路径带 `.ts` 后缀导入（`import { x } from "../src/kernel/y.ts"`）。
+几条贯穿始终的设计：
 
-## 存储
+- **看证据，不看措辞。** 执行者说“测试过了”不算数，平台自己跑工单里的验证命令，协调者按证据逐条验收。
+- **能用工具层挡住的，不靠提示词。** 只读问答靠工具白名单；执行者的工具表里没有改契约的口；子进程环境默认只传基线变量，不透传你的密钥。
+- **贵模型只做贵的判断。** 执行者用便宜模型，由上两层把工单写到“照着做就能完成”。
+- **未经 L3 不得 completed，合入 master 一律要你签字。**
 
-两个实现并存，由 `COAGENT_STORE` 选（缺省 `file`）。
+## 快速开始
 
-| | 文件 | Postgres |
-|---|---|---|
-| 依赖 | 无 | `pg` + 一个跑着的 Postgres |
-| 并发写 | 靠进程锁，同时只有一个写者 | 版本号挡冲突，多进程可并行 |
-| 活动日志 | 每记一条重写整份状态 | 一条 INSERT |
-| 发号 | 读-加一-写，跨进程有竞态 | 原子自增，按号段预取 |
-| 实时输出 | 持久 Activity 与 cursor Live 轮询 | 有 |
+需要：**Node 24+**、**git**、**npm**（只有 `setup` 用到）、一个 pi 支持的模型账号或 API key、一个能当检视者的 agent。
 
 ```bash
-COAGENT_STORE=pg node src/main.ts
+git clone https://github.com/laizhixingxingdeli/CoAgentHub.git
+cd CoAgentHub
+node scripts/coagent.mjs setup     # 装适配层和 MCP 服务器的依赖（平台本体零依赖，不需要 npm install）
+node scripts/coagent.mjs doctor    # 只读自检，告诉你还差什么
+node scripts/coagent.mjs start     # 启动平台，浏览器打开 http://127.0.0.1:3101
 ```
 
-连接串走 `COAGENT_PG`，缺省 `postgresql://postgres:postgres@localhost:5432/coagenthub_v5`；
-表在启动时自动建。
+然后做两件事，各有一页文档：
 
-周期投递修复由 `COAGENT_RECONCILE_INTERVAL_MS` 控制（缺省 60000 毫秒；`0` 关闭）。
-只补可核实的缺失投递，不把启动时的 Attempt / worktree 收敛改成周期任务。
-`server.close` 与 `run-plan` 退出会先停周期任务再释锁；stop 或关 HTTP 失败不会丢掉另一个错误，告警回调抛错也不会让调度停住。
+1. **接模型（L2 / L1）**：用 pi 登录一个模型账号，在网页“资源池”里添加候选。→ [docs/models.md](docs/models.md)
+2. **接检视者（L3）**：给你的 agent 装上 MCP 服务器和操作手册。→ [docs/l3-agents.md](docs/l3-agents.md)
 
-**文件版不会被删掉。** 它守着一条性质：clone 下来什么都不装就能跑通全部测试。
-第三方依赖只允许出现在 `src/application/pg-store.ts`，`test/source-constraints.test.ts`
-盯着这条——`pg` 一旦漏进用例层，"换存储不改用例层"就失效了，而那种泄漏是悄无声息的。
+两样都就绪后，照 [docs/getting-started.md](docs/getting-started.md) 在你自己的仓库上跑第一个 Mission。
 
-### 换存储踩到的坑（都已修，留作记录）
+## 文档
 
-四个，前三个是同一类错误：**某条不变式的前提悄悄依赖了"只有一个写者"**。
+| 想知道 | 看 |
+|---|---|
+| 从零到第一个 Mission | [docs/getting-started.md](docs/getting-started.md) |
+| 怎么接不同的模型给协调者 / 执行者，怎么调思考档位和顺序 | [docs/models.md](docs/models.md) |
+| 检视者用 Claude Code / Codex / 别的 agent，或者只有命令行 | [docs/l3-agents.md](docs/l3-agents.md) |
+| 写给检视者 agent 读的操作手册（可直接当它的指令） | [docs/l3-guide.md](docs/l3-guide.md) |
+| 接入别的 agent 运行时（不用 pi） | [docs/adapter-protocol.md](docs/adapter-protocol.md) |
+| 安全边界与已知限制 | [docs/security.md](docs/security.md) |
+| 出错了 | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| HTTP 接口全表 | [docs/http-api.md](docs/http-api.md) |
+| 模块地图与架构决定 | [.coagent/architecture/modules.md](.coagent/architecture/modules.md)、[.coagent/architecture/decisions/](.coagent/architecture/decisions/) |
+| 存储、租约、归因链的设计记录 | [docs/design-notes.md](docs/design-notes.md) |
 
-- **启动收敛。** 它假设"我刚起来，所以没有任何 attempt 还活着"——只在单写者下成立。
-  共用数据库之后，重启一次只读的观测面，就把正在跑的 attempt 判死并写回库，
-  当场搞坏一条 Mission。现在两道防线：收敛要显式开启且按 missionId 限定范围，
-  并且 attempt 带**租约**（见下）。
-- **flush 重叠会自己跟自己撞。** 两个并发 flush 捏着同一个期望版本去写，后到的
-  命中 0 行，报出一个纯属自制的"并发冲突"（真实并发根本没发生）。现在 flush 串行化。
-- **一次写回全部 Project 会互相毒化。** 一个不相干的过期 Project 能把后续每一次写
-  都顶成冲突。现在按内容判定，只写真的变了的那些。
-- **测试 TRUNCATE 的是开发库。** 于是常驻服务器、正在跑的 Mission 和测试互相踩，
-  症状是整套并行跑时零星红在**毫不相干的**测试上（git worktree、调度器主链），
-  隔离复跑又全绿。测试现在用独立库 `coagenthub_v5_test`（`test/helpers/pg.ts`），
-  不存在就建。
+## 仓库布局
 
-### 租约（多进程下"谁还活着"）
-
-在途 attempt 上带 `heartbeatAt` + `leaseOwner`。跑它的调度器每 15 秒续一次租，
-心跳**落库**——不落库的话别的进程看到的仍是"从没心跳过"，租约等于没做。
-
-启动收敛只回收心跳过期（默认 90 秒）或从没心跳过的 attempt。"从没心跳过一律回收"
-是刻意的：老数据和不打心跳的运行时行为要和加租约之前完全一致，否则升级之后
-那些 attempt 永远收不掉，不变量 B 会把对应的 Mission 永久焊死。
-
-## 分层
-
-- `src/kernel/` —— 纯领域。**不得 import 任何第三方包**，不得出现
-  provider / model / session / HTTP / SQL 这类概念。
-- `src/application/` —— 用例层。工具的真实实现、调度、工作区、持久化。
-- `src/runtime/` —— AgentRuntime 端口的实现。`spawn` 走真 agent，
-  `scripted` 走脚本。**两个实现从第一天就并存**，"预留接第二个 agent 的能力"
-  这句话才是可证伪的。
-- `src/api/` —— HTTP 面（agent 工具端点 + 观测面）。
-
-## 开跑简报：agent 开口之前就该知道的
-
-托管 agent 启动时**直接拿到**契约或工单、架构红线、L3 的打回理由（S09.1）——
-适配层在模型第一次开口之前取一次，塞进 system prompt，不走工具。
-
-不这么做的代价不是"多一轮调用"：**执行者的工具表里根本没有读架构红线的口**，
-不主动给，它就永远看不到，而红线是项目层面不可协商的东西。
-
-按角色给不同的东西：协调者要契约与规划，执行者只要工单——给它契约只会诱导它
-去重新定义目标，而那不是它的职责。
-
-## 归因链：一跳到底记了什么
-
-问"这一跳当时到底跑的是什么、花了多少"，答案必须**全在状态里**，不能靠回查
-任何一张会变的表。
-
-- 适配层那张 profileId → 实际身份的映射带版本号（`PROFILE_TABLE_REVISION`），
-  改任何一行都要 +1。
-- 每跳结束时，运行时把**解析结果**报回来，冻在 Attempt 上（S13.3）。
-  冻的是通用的键值列表，不是写死的 provider/model 两个字段——换一个运行时
-  可能是三个轴或一个，写死就等于把今天这个运行时的词汇刻进领域模型。
-- 用量按 Project / Mission / Role / 上面那些键值聚合（S11.5，`/api/usage`）。
-  没冻过身份的 attempt 进 `unattributed` 单列，**不摊给任何一家**——摊给谁都是编的。
-
-## 与基线文档的偏离
-
-只有一处，且是刻意的。
-
-S15.2 把 **Recovery Reconciler** 列入推迟项，但 `reconcileInterruptedAttempts`
-仍然在启动时跑了一遍。理由：不变量 B 规定同一 Mission 同时只能有一个在途
-协调者尝试，于是**进程崩在半路上的那次尝试会把 Mission 永久焊死**——没有
-任何别的出口，人手工改状态文件是唯一办法。
-
-推迟项指的是常驻的、持续扫描并修复 Attempt / 调度状态的子系统；启动收敛仍
-只跑一次，把"进程已经不在了却还是 in_progress"的尝试标成 `interrupted`
-（可重试）。另有可关闭的周期投递补建（`COAGENT_RECONCILE_INTERVAL_MS`），
-只补可核实的缺失投递，不是 DurableScheduler。
-
-以下为早期基线记录；后续熔断、fencing 等实现以 `.coagent/specs/` 和模块地图为准。其余当时推迟项（每 WorkItem 独立 worktree、自动语义冲突解决、完整 Circuit
-Breaker、Fencing Token、Transactional Outbox、Saga、exactly-once、自主
-Provider 路由、跨机器迁移、完整 Shell Sandbox、改 pi agent-core）都没有碰。
-
-## 安装、启动与开发
-
-CoAgentHub 把需求拆成 Mission、WorkItem 与 Attempt，保存工单、证据、验收和恢复记录。Node 24+ 可直接运行文件存储版本；Postgres 版本先执行 `npm ci` 并准备独立数据库。规则入口是 [AGENTS.md](AGENTS.md)，模块职责见 [.coagent/architecture/modules.md](.coagent/architecture/modules.md)。
-
-三层分工为 L3 冻结需求与签字、L2 规划并逐项验收、L1 执行冻结工单；用户明确授权直接开发时按 AGENTS.md 的本批例外执行。`src/l3.ts` 是检视者控制入口，查看命令用 `node src/l3.ts --help`；服务运行时进度通过插件或观测 HTTP 读取。
-
-PowerShell 启动示例（新建状态必须显式指定路径，已有环境务必复用原状态）：
-
-```powershell
-$env:COAGENT_STATE = 'C:/path/to/coagent-state.json'
-$env:COAGENT_AGENT_ENV_PASSTHROUGH = '-'
-node src/main.ts
+```
+src/            平台本体：kernel（纯领域）/ application（用例）/ runtime（跑 agent 的端口）/ api（HTTP）/ web（网页，原生 ES module，无构建）
+adapters/pi/    L2 / L1 的 pi 适配层：平台通过 stdin / stdout 协议拉起它，平台本身不 import 任何 agent SDK
+integrations/   L3 接入：MCP 服务器（任何 agent 可用）、Codex 插件钩子、Claude Code 的技能和配置
+scripts/        启动器 coagent.mjs，以及只读 MCP / 值守脚本
+examples/       Mission 契约、候选池、pi 模型配置的示例
+.coagent/       项目自己的长期记忆：规格、架构决定、模块地图（这个项目用自己开发自己）
+docs/           使用文档
+test/           测试，`node --test`
 ```
 
-默认观测页面为 `http://127.0.0.1:3101`，健康入口 `/api/health`；完整路由、参数、鉴权与 curl 示例见 [docs/http-api.md](docs/http-api.md)。未显式指定状态且默认状态不存在时，启动会拒绝静默新建，以免分裂状态。观测页面不代替检视者验收或消费其 Delivery。
+平台本体**没有构建步骤、没有第三方依赖**（Postgres 存储是可选项，只有它需要 `pg`）：
 
-```powershell
-node src/run-mission.ts C:/path/to/mission.json --cwd C:/path/to/repo --adapter C:/path/to/agent-entry.ts --max-rounds 20
-node src/run-plan.ts C:/path/to/plan.json --cwd C:/path/to/repo --adapter C:/path/to/agent-entry.ts --max-rounds 40
-node --test
-npm run metrics -- --changed HEAD
+```bash
+node --test          # 全量测试，不装任何东西即可运行
 ```
 
-服务持锁时 CLI 转交运行请求；不得另开写者直接加载主状态。`run-plan --check` 仅服务停止时运行。开发验证优先一两条对应测试，交付前运行全量 `node --test`；本批只允许 HAOFF1 既有 7 条跳过，任何新增跳过需解释。度量为零依赖近似告警，默认扫描 src，`--changed` 限制告警到指定基线后的改动，不参与合入判定；复杂签名和不可读取文件单列未分析。
+## 参与开发
 
-## 部署与恢复
+这个仓库用 CoAgentHub 开发自己，规则入口是 [AGENTS.md](AGENTS.md)（维护者的检视者规则）和 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-文件模式保持一个真实状态写者；备份状态与 `.coagent/`、Git 版本，并保留运行日志。Postgres 模式设置 `COAGENT_STORE=pg` 与 `COAGENT_PG`，不要将开发库和测试库混用。控制面可注入授权解析器，部署前按 HTTP 文档核实读写权限；示例请求头不代表内置认证配置。
+## 许可证
 
-Windows 常驻运行使用现有隐藏 VBS 包装器调用 cmd，再由 `explorer.exe` 启动；仅在持锁进程已退出且 3101 空闲时执行，避免重复启动。换代码前先暂停 Mission，核实执行者退出，再停止服务。进程已死、端口空闲、锁心跳超过 120 秒时由平台自动接管；不编辑状态文件恢复任务。具体停服、检查点批准和 runaway 处置见 [.coagent/architecture/reviewer-runbook.md](.coagent/architecture/reviewer-runbook.md)。
+见 [LICENSE](LICENSE)。

@@ -3,7 +3,7 @@
 - 调查对象：集成分支 `codex/communication-integration` HEAD `c096b1b`。
 - 本文件性质：**接线调查**。它是设计与接口调查，**不是运行时完成证据**；本票**不实现代码**（`src/`、`test/` 均未改动）。真正的实现接口由 L3 冻结后再写代码。
 - 契约起点与实码的差异：契约文本起点写「协议只有 tool.started」，实码已经有 `tool.completed`（`src/application/ports.ts:232`、`src/runtime/spawn.ts:69-70` 已把它解析成 RuntimeEvent）。**以实码为准**，本文所有盘点基于实码。
-- 样例来源说明：第 2 节的时间戳样例来自主工作区运行中的文件状态 `C:/program1/coagenthub-v5/.coagent-state.json`（Work Truth，不在 git 里），证据集标记为 `COM4-AB-acceptance-evidence-20261007`。本文只引用时点、kind、callId 计数与 `usage.total/quality`；不引用 `failureMessage`、命令文本、profile，也不引用 token 以外的用量明细。
+- 样例来源说明：第 2 节的时间戳样例来自主工作区运行中的文件状态 `<本机>/coagenthub-v5/.coagent-state.json`（Work Truth，不在 git 里），证据集标记为 `COM4-AB-acceptance-evidence-20261007`。本文只引用时点、kind、callId 计数与 `usage.total/quality`；不引用 `failureMessage`、命令文本、profile，也不引用 token 以外的用量明细。
 - 只写「未知」或「未验证」，不编造新的行号或新的 Mission 数字。
 
 ## 验收对照表

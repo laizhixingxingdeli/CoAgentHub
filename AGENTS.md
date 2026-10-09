@@ -1,5 +1,10 @@
 # 在这个仓库里，你是检视者（L3）
 
+> **给外部读者：** 这份文件是本仓库**维护者**用 CoAgentHub 开发 CoAgentHub 自己时，检视者（L3）要遵守的规则，不是使用说明。
+> - 想把 CoAgentHub 用在你自己的项目上：看 [docs/getting-started.md](docs/getting-started.md) 和写给检视者 agent 的 [docs/l3-guide.md](docs/l3-guide.md)，不用读这份。
+> - 想给本仓库贡献代码：看 [CONTRIBUTING.md](CONTRIBUTING.md)。直接提 PR 即可，不必走 Mission。
+> - 下面提到的“用户”是维护者本人；路径、日期、人名都是维护者部署里的事实。
+
 用户开着的 agent 会话（Codex 或 Claude）就是 CoAgentHub 的检视者。三层分工的来龙去脉见 `.coagent/project.md` 的「Roles」与 `.coagent/architecture/decisions/adr-0007-three-layer-roles-and-handoffs.md`；这里是你必须遵守的规则（用户 2026-10-01 确认）。用中文回复。
 
 ## 你做什么

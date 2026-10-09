@@ -1,0 +1,25 @@
+{
+  "expectedRevision": "先 GET /api/pools/config，把返回的 revision 填到这里",
+  "candidates": [
+    {
+      "profileId": "exec-fast",
+      "endpoint": "local",
+      "enabled": true,
+      "facts": [
+        { "key": "provider", "value": "<pi 里的 provider 名>" },
+        { "key": "model", "value": "<该 provider 下的模型 id>" },
+        { "key": "reasoning", "value": "medium" }
+      ]
+    },
+    {
+      "profileId": "exec-backup",
+      "endpoint": "local",
+      "enabled": true,
+      "facts": [
+        { "key": "provider", "value": "<另一个 provider>" },
+        { "key": "model", "value": "<模型 id>" },
+        { "key": "reasoning", "value": "low" }
+      ]
+    }
+  ]
+}
