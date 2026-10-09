@@ -13,7 +13,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import pg from 'pg';
 
 import { buildPlatform } from '../src/main.ts';
 import {
@@ -40,7 +39,7 @@ import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ValidationEngine } from '../src/application/validation/engine.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
+import { connectPgClient, ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -308,7 +307,7 @@ describe('PG：迁移回填、换唯一约束、可重复执行（独立库，�
   });
 
   async function legacySchema(connectionString: string): Promise<void> {
-    const client = new pg.Client({ connectionString });
+    const client = await connectPgClient(connectionString);
     await client.connect();
     try {
       // 回到加键之前的形状：没有 idempotency_key 列，唯一约束是 (mission_id, outcome)。

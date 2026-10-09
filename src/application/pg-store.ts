@@ -19,7 +19,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import pg from 'pg';
+import type pg from 'pg';
 import { Project } from '../kernel/index.ts';
 import type { ProjectSnapshot } from '../kernel/index.ts';
 import { claimHop, claimHopWithCandidate, cloneQueuedHop, completeHop, decideCapacityClaim, holdsCurrentClaim, renewHop, reportHopFailure, validateEnqueueHop } from './durable-scheduler.ts';
@@ -380,7 +380,10 @@ export class PgStateStore implements CommandTransaction, FencedCommandTransactio
   }
 
   static async open(options?: PgOptions): Promise<PgStateStore> {
-    const pool = new pg.Pool({
+    // 运行时值按需取：没装 pg 时文件版仍可加载本模块（上面的类型导入会被剥掉），
+    // 只有真去 open 一个 PG store 才会要求驱动存在。
+    const pgRuntime = (await import('pg')).default;
+    const pool = new pgRuntime.Pool({
       connectionString: options?.connectionString ?? pgConnectionString(),
       // 平台是单写者 + 少量读者，连接开太多只会让 Postgres 那边排队。
       max: 8,
