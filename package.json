@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "CoAgentHub v5 — Agent-First 架构基线的实现。",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "adapters/pi",
+    "integrations/codex/mcp-server"
+  ],
   "scripts": {
     "test": "node --test",
     "metrics": "node scripts/code-metrics.ts"
