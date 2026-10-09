@@ -6,7 +6,7 @@
  */
 
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 export const HA_AUTHORITY_ENV = 'COAGENT_HA_AUTHORITY_FILE';
 
@@ -108,6 +108,16 @@ export async function loadHaAuthorityConfig(input: {
       'HA 放行拒绝（HA_AUTHORITY_FILE_MISSING）：授权文件不存在。',
     );
   }
+  let lexicalCanonical: string;
+  try {
+    lexicalCanonical = join(await realpath(dirname(lexical)), basename(lexical));
+  } catch {
+    throw new HaAuthorityError(
+      HA_AUTHORITY_CODE.PATH_UNRESOLVABLE,
+      'HA 放行拒绝（HA_AUTHORITY_PATH_UNRESOLVABLE）：授权文件路径无法解析为真实路径。',
+    );
+  }
+
   let physical: string;
   try {
     physical = await realpath(lexical);
@@ -118,7 +128,7 @@ export async function loadHaAuthorityConfig(input: {
     );
   }
 
-  const lexicalInside = containedByAny(lexical, repoReal, worktreeReals);
+  const lexicalInside = containedByAny(lexicalCanonical, repoReal, worktreeReals);
   const physicalInside = containedByAny(physical, repoReal, worktreeReals);
   if (!lexicalInside && physicalInside) {
     throw new HaAuthorityError(
@@ -133,7 +143,7 @@ export async function loadHaAuthorityConfig(input: {
   // git worktree list 把主工作区（仓库根）也列成一条 worktree。先判仓库根，
   // 并从附加 worktree 集合里去掉与仓库根同一路径的条目，否则仓库内文件会被
   // 错报成 HA_AUTHORITY_PATH_IN_WORKTREE，两个拒绝码就分不开了。
-  if (pathContainedBy(repoReal, physical) || pathContainedBy(repoReal, lexical)) {
+  if (pathContainedBy(repoReal, physical) || pathContainedBy(repoReal, lexicalCanonical)) {
     throw new HaAuthorityError(
       HA_AUTHORITY_CODE.PATH_IN_REPO,
       'HA 放行拒绝（HA_AUTHORITY_PATH_IN_REPO）：授权文件不能放在仓库内。',
@@ -141,7 +151,7 @@ export async function loadHaAuthorityConfig(input: {
   }
   const additionalWorktrees = worktreeReals.filter((root) => !sameNormalizedPath(root, repoReal));
   const worktreeHit = additionalWorktrees.find(
-    (root) => pathContainedBy(root, physical) || pathContainedBy(root, lexical),
+    (root) => pathContainedBy(root, physical) || pathContainedBy(root, lexicalCanonical),
   );
   if (worktreeHit) {
     throw new HaAuthorityError(

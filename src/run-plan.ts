@@ -4,8 +4,8 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { API_VERSION } from './api/server.ts';
+import { isDirectEntry } from './direct-entry.ts';
 import { resolveRunAdapter } from './application/default-adapter-entry.ts';
 import { probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
@@ -420,7 +420,7 @@ async function main() {
 
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectEntry(process.argv[1], import.meta.url)) {
   main().catch((error) => {
     // AggregateError.stack 不含内部错误；展开后主流程与清理错误都能看见。
     console.error(formatErrorForLog(error));

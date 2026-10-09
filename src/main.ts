@@ -11,10 +11,11 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { API_VERSION, createApi, drainApi, type ApiDeps } from './api/server.ts';
+import { isDirectEntry } from './direct-entry.ts';
 import type { ControlPrincipalResolver } from './api/control-auth.ts';
 import { RunTokenRegistry } from './api/run-tokens.ts';
 import {
@@ -1330,15 +1331,7 @@ export function isDirectMainEntry(
   argv1: string | undefined = process.argv[1],
   selfUrl: string = import.meta.url,
 ): boolean {
-  if (typeof argv1 !== 'string' || argv1.length === 0) return false;
-  try {
-    const invoked = pathToFileURL(resolve(argv1)).href;
-    if (invoked === selfUrl) return true;
-    // Windows 上同一路径可能只差盘符大小写；当成同一入口，否则直接 node 不启动。
-    return process.platform === 'win32' && invoked.toLowerCase() === selfUrl.toLowerCase();
-  } catch {
-    return false;
-  }
+  return isDirectEntry(argv1, selfUrl);
 }
 
 /**

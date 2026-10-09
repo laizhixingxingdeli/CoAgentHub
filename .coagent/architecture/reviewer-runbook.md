@@ -23,6 +23,8 @@
    - 票里或升级答复里规定具体做法之前，先核平台允不允许。例：已验收的工作项不能修订，只能新建工单补做（REF1 的 E-2）。
    - 解析外部数据的票（读别的服务的返回：账户额度、日志、第三方接口）：夹具必须取真实返回的形状（匿名化后），契约里写明真实形状的要点（桶的标记、数值怎么配平、各上游的差异），不凭想象造样例。合入前 L3 用只读脚本对真实数据跑一次修复前后对比：只放行对本机服务的 GET、凭据读取注入成空、输出只含白名单字段、不印账号信息。PI-COM1 反例：虚构样例全绿，真实 CodeBuddy 每账号 26 个桶（总池 Total Points + 每月礼包 + Bonus Pack 1…24，没有 detailOnly / aggregate 标记）被取最小，整个 cbcn 报「剩余 0%、恢复时间 11-02（其实是小包过期日）」，平台据此给 3 个协调者候补开了额度熔断；PI-COM2 改用真实形状夹具修好，合入前后对比 cbcn 0% → 64.82%。
    - 工单 `validation.commands` 的 argv 不得是 cmd / sh / bash / powershell / pwsh 的壳层包装：校验引擎判 `invalid_argv`，永远红，而验证简版只显示一个没有输出的红（`ValidationReportCommandView` 丢了原因，读完整 VR 才看得到）。全量命令直接写 `["node","--import","tsx","--test","src/*.test.ts"]`（pi）或 `["node","--test"]`（本仓），glob 由 Node 自己展开。PI-COM2 的 W-520 因协调者写了 `bash -lc` 白烧一个执行者来回和一个协调者跳，契约里要点明。COM13 上线后（合 master 并重启服务后）冻结与修订工单时平台直接拒绝这类 argv（错误码 `WORK_ORDER_VALIDATION_ARGV`，消息给出命令下标与改法）；在那之前仍要在契约里点明。
+   - 凡是把「词法路径」和 realpath / git 打印的路径 / `import.meta.url` 放在一起比较的票（含：入口判断、包含检查、worktree 定位、状态文件定位），以及票里新增的涉路径测试：冻结时就把「临时目录是别名」当作一种必测环境——TEMP / TMP / TMPDIR 设成指向真实目录的联接点（`fs.symlinkSync(real, link, 'junction')`，免管理员；对应 macOS 的 `/var`→`/private/var`），再设成 8.3 短名（`dir /x` 查，对应 Windows 运行机的 `RUNNER~1`），各跑一遍相关测试甚至全量。REL3 的教训：首轮 GitHub CI 三平台全红（Windows 12 条、macOS 13 条），原因全是运行机的临时目录是别名，而作者机器的用户名短、没有短名，一直是绿的；REL3 冻结时只核了入口判断，漏核 `test/start-server.test.ts` 的期望值也按别名写法拼，被全量验证单撞出来，多了一份契约 r2。路径口径要点明：对齐 Node 加载器（`import.meta.url`）用 JS 版 `realpathSync`（不展开 8.3 短名），对齐 git 的输出与 `fs/promises` 的 `realpath` 用 native 版（展开短名）；两者别混。
+   - 「先写红测试再修」的拆法要考虑平台只认退出码 0：红测试不能单独成一张验证命令是它自身的工单（REL3 的 W-581 因此被机器退回过，协调者自己改成静态检查才解开）。契约里写成「执行者先跑一次确认红，作为证据提交，再改代码」，由同一张或最后一张带全量验证的工单收口。
    - 新代码守工程规范（`engineering-standards.md`）；数值目标写成建议值，写明「什么情况下算收尾」。
 3. 写进方案文件（`missions/PLAN-*.json`，本地文件、不进 git）：why、acceptance、constraints、nonGoals、allowedScope（到目录级，全量测试命令里的路径要被范围覆盖）；会触发分类器禁止副作用的措辞（删、迁移、真实外部调用）配上副作用声明。
 4. 开跑前把票单给用户确认。
@@ -80,7 +82,8 @@
    核对与集成分支内容一致（`git diff auto/harness-remaining HEAD` 为空），再 `git worktree remove <临时目录>`。
    主工作区本身检出的就是 master 时（同一分支不能在两个 worktree 检出），直接在主工作区 `git merge --no-ff <集成分支>`，同样核对 diff 为空、工作区干净。前置验证要绑定集成分支当前 HEAD：之后哪怕只有文档提交，也要重跑平台全量（有测试读 `.coagent/project.md`）；用零代码验证 Mission 跑，它没有改动，收尾不产生新提交（2026-10-07 的 MASTER-PRECHECK）。没有 Mission 在跑、机器空闲时，也可以由检视者直接在集成 worktree 的该 HEAD 上跑一次全量 `node --test`（2026-10-08 合 da4ab5d 就是这样：145 秒、一次绿；偶发红整轮复跑），把结果行写进简报和合并提交说明。
    合完在没有在跑的 agent 时重启服务加载新代码：核实持锁 pid 与 3101 监听者一致后 `taskkill /F /T /PID`，等心跳超过 120 秒，再用隐藏启动脚本起服务，平台自动接管并写审计；起来后用一个已有 Mission 的 HTTP 视图确认新行为生效。
-4. 推送到远端（GitHub）是对外操作，必须用户明确说「推」，合入 master 与推送是两件事。合入记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）、630656d（10-07 夜，COM6–COM11 与 PERF1，用户「合」）、da4ab5d（10-08，COM9 / COM10 / COM12，用户「按现在的执行池，合master」）。
+4. 推送到远端（GitHub）是对外操作，必须用户明确说「推」，合入 master 与推送是两件事。合入记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）、630656d（10-07 夜，COM6–COM11 与 PERF1，用户「合」）、da4ab5d（10-08，COM9 / COM10 / COM12，用户「按现在的执行池，合master」）、f6cddd2（10-09，REL1 / REL2 与发布整理，用户「合并 master 并推送」；这是**首次公开发布**：`git push --force-with-lease=main:<远端旧 tip> origin master:main`，用 v5 整个替换了 GitHub 上 v4 的 main，旧 tip cb511326 不再可达）。
+   推送后看 CI：Actions 页面匿名看不到日志（「Sign in to view logs」），用已登录的 `gh` 只读下载：`gh api repos/<owner>/<repo>/actions/jobs/<jobId>/logs`（jobId 来自 `gh api repos/<owner>/<repo>/actions/runs/<runId>/jobs`）。首轮 CI（ci #1）三平台全红，原因是运行机的临时目录是别名路径，修复见 REL3（合入集成分支 c93dafb）；本机复现方法见 §1 路径别名那条。Windows 是必过项，Linux / macOS 在 `ci.yml` 里标 `continue-on-error`。
 5. 〔历史，2026-10-09 之前〕coagent-pi 曾是独立仓库，它的 master 合入流程与本节相同；并入 `adapters/pi` 之后没有这一步。
 
 ## 7. 停服务与清锁
