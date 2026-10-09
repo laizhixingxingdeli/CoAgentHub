@@ -14,6 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { API_VERSION, createApi } from './api/server.ts';
 import { loadRoleProfiles } from './application/agent-pool.ts';
 import type { AgentPoolCandidate } from './application/agent-pool.ts';
+import { resolveRunAdapter } from './application/default-adapter-entry.ts';
 import { LockBusyError, probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
@@ -206,9 +207,7 @@ async function main() {
     };
   };
   const cwd = resolve(arg('--cwd') ?? process.cwd());
-  const adapter = resolve(
-    arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts',
-  );
+  const adapter = resolveRunAdapter(arg('--adapter'));
 
   // 在 createMission / listen / 探测转发之前就确认透传名单：名单未声明时不应留下「半截
   // Mission + 已监听端口」——失败必须发生在任何副作用之前。空字符串是合法封锁。

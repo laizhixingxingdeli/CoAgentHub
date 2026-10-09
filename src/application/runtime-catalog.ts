@@ -18,7 +18,8 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -107,7 +108,18 @@ let latestAdapterDir: string | undefined;
 export function rememberAdapterDir(dir: string): void { latestAdapterDir = resolve(dir); }
 
 /**
- * 适配层所在目录。没配就找项目的同级目录。
+ * 仓内适配层目录的默认位置：repoRoot/adapters/pi 存在就用它，
+ * 否则退回旧的仓库同级 ../coagent-pi（兼容未迁移的目录布局）。
+ */
+export function defaultAdapterDir(repoRoot?: string): string {
+  const root = repoRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const bundled = resolve(root, 'adapters', 'pi');
+  if (existsSync(bundled)) return bundled;
+  return resolve(root, '..', 'coagent-pi');
+}
+
+/**
+ * 适配层所在目录。没配就先找仓内 adapters/pi，再退回项目的同级目录。
  *
  * 相对**本文件**定位，不是相对进程 cwd。从 Mission 的 worktree 里起服务时
  * cwd 是 `.coagent-worktrees/<mission>/`，按 cwd 猜会去找
@@ -117,12 +129,7 @@ export function rememberAdapterDir(dir: string): void { latestAdapterDir = resol
 export function adapterDir(): string {
   if (process.env.COAGENT_ADAPTER_DIR) return resolve(process.env.COAGENT_ADAPTER_DIR);
   if (latestAdapterDir) return latestAdapterDir;
-  // src/application/ → 上三层是项目根的同级。
-  const fromModule = new URL('../../../coagent-pi/', import.meta.url).pathname.replace(
-    /^\/([A-Za-z]:)/,
-    '$1',
-  );
-  return resolve(fromModule);
+  return defaultAdapterDir();
 }
 
 export async function getRuntimeUsage(dir = adapterDir(), runner = run): Promise<RuntimeUsage> {
@@ -151,7 +158,7 @@ export async function listRuntimeModels(dir = adapterDir()): Promise<RuntimeCata
   if (!existsSync(dir)) {
     return {
       available: false,
-      note: `找不到适配层目录 ${dir}。用 COAGENT_ADAPTER_DIR 指到 coagent-pi 那个目录。`,
+      note: `找不到适配层目录 ${dir}。请确认仓库内 adapters/pi 已就位，或用 COAGENT_ADAPTER_DIR 指向适配层目录，或先运行 node scripts/coagent.mjs setup。`,
     };
   }
   try {

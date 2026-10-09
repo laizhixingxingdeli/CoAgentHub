@@ -1365,7 +1365,7 @@ export function resolveDirectMainStatePath(
       path,
       message:
         `默认状态文件不存在：${path}\n` +
-        `拒绝静默新建以免平台状态分裂。请设置 COAGENT_STATE 指向要使用的状态文件（不存在时允许新建）。`,
+        `拒绝静默新建以免平台状态分裂。请设置 COAGENT_STATE 指向要使用的状态文件（不存在时允许新建）。 首次运行可用 node scripts/coagent.mjs start（它显式指定状态文件）。`,
     };
   }
   return { ok: true, path };

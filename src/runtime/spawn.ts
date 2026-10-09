@@ -224,7 +224,7 @@ export interface SpawnRuntimeOptions {
   readonly kind: string;
   /** 可执行文件，例如 npx。 */
   readonly command: string;
-  /** 参数，例如 ['tsx', 'C:/program1/coagent-pi/src/agent-entry.ts']。 */
+  /** 参数，例如 ['tsx', 'adapters/pi/src/agent-entry.ts']。 */
   readonly args: readonly string[];
   /** 子进程工作目录（不是 Mission worktree —— 那个走 spec.cwd）。 */
   readonly cwd?: string;

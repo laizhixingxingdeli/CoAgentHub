@@ -11,7 +11,7 @@
  * 会让这个仓库变难上手。
  */
 
-import pg from 'pg';
+import type pg from 'pg';
 
 const ADMIN =
   process.env.COAGENT_PG_ADMIN ?? 'postgresql://postgres:postgres@localhost:5432/postgres';
@@ -28,6 +28,22 @@ export function testConnectionString(isolated?: string): string {
   return `${base}/${name}`;
 }
 
+/** 按需取 pg 运行时；没装 pg 时返回 undefined。模块顶层不静态引用驱动。 */
+async function loadPg(): Promise<typeof pg | undefined> {
+  try {
+    return (await import('pg')).default;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 另起一个客户端连测试库。仅在确实要连库的用例里调用；没装 pg 直接抛错。 */
+export async function connectPgClient(dsn: string): Promise<pg.Client> {
+  const runtime = await loadPg();
+  if (!runtime) throw new Error('pg 未安装，无法连接 Postgres');
+  return new runtime.Client({ connectionString: dsn });
+}
+
 /**
  * 确保测试库存在。返回连接串；连不上 Postgres 时返回 undefined。
  *
@@ -37,9 +53,12 @@ export function testConnectionString(isolated?: string): string {
 export async function ensureTestDatabase(isolated?: string): Promise<string | undefined> {
   const target = testConnectionString(isolated);
   const name = target.slice(target.lastIndexOf('/') + 1);
+  const runtime = await loadPg();
+  // 没装 pg 与连不上 Postgres 同一种下场：调用方现有的跳过逻辑照旧。
+  if (!runtime) return undefined;
   let admin: pg.Client | undefined;
   try {
-    admin = new pg.Client({ connectionString: ADMIN });
+    admin = new runtime.Client({ connectionString: ADMIN });
     await admin.connect();
     const { rowCount } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [name]);
     if (rowCount === 0) {
