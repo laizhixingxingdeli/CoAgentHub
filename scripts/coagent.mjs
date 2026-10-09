@@ -11,7 +11,6 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -199,11 +198,48 @@ function spawnInherited(args, env) {
   return child;
 }
 
+/**
+ * 从 startDir 逐级向上查找 node_modules/<name>/package.json 所在的包目录。
+ * 只认 package.json 是否存在：ESM-only 的包只导出 import 条件，
+ * require.resolve 会抛 ERR_PACKAGE_PATH_NOT_EXPORTED，不能用来判断装没装。
+ * name 整段（含 @scope/）作为 path.resolve 的一个参数，不自己拆分。
+ */
+export function findPackageDir(startDir, name) {
+  let dir = resolve(startDir);
+  for (;;) {
+    const pkgDir = resolve(dir, 'node_modules', name);
+    if (existsSync(resolve(pkgDir, 'package.json'))) return pkgDir;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/**
+ * pi 模型清单的体检分级：0 项要告诉新人怎么登录 / 登记，>= 1 项才算可用。
+ * 返回 { level: 'warn' | 'ok', text }，由调用方决定打 ! 还是 ✓。
+ */
+export function classifyModelCount(n) {
+  if (n === 0) {
+    return {
+      level: 'warn',
+      text: 'pi 模型清单 0 项。先在 npx pi 里用 /login 登录一个 provider，或在 ~/.pi/agent/models.json 登记兼容端点。见 docs/models.md',
+    };
+  }
+  return { level: 'ok', text: `pi 模型清单可用（${n} 项）` };
+}
+
+/** Windows 上 npm 是 .cmd：整条命令字符串交给 shell；POSIX 仍走 argv、不开 shell。 */
+function spawnNpm(args, options) {
+  if (WINDOWS) return spawnSync(args.join(' '), { ...options, shell: true });
+  return spawnSync(args[0], args.slice(1), options);
+}
+
 function runSetup(argv) {
   const force = argv.includes('--force');
   const skipMcp = argv.includes('--skip-mcp');
 
-  const git = spawnSync('git', ['--version'], { stdio: 'ignore', shell: WINDOWS });
+  const git = spawnSync('git', ['--version'], { stdio: 'ignore' });
   if (git.error || git.status !== 0) {
     console.error('✗ git 不可用：`git --version` 失败，请先安装 git。');
     process.exitCode = 1;
@@ -214,11 +250,7 @@ function runSetup(argv) {
     console.log('! 根 node_modules 已存在，跳过 npm ci（--force 可强制重来）。');
   } else {
     console.log('→ npm ci：工作区依赖一次装进根 node_modules…');
-    const install = spawnSync('npm', ['ci'], {
-      cwd: repoRoot,
-      stdio: 'inherit',
-      shell: WINDOWS,
-    });
+    const install = spawnNpm(['npm', 'ci'], { cwd: repoRoot, stdio: 'inherit' });
     if (install.error || install.status !== 0) {
       console.error('✗ npm ci 失败，setup 中止。');
       process.exitCode = install.status ?? 1;
@@ -233,10 +265,9 @@ function runSetup(argv) {
     console.log('! MCP server 产物已存在，跳过构建（--force 可强制重建）。');
   } else {
     console.log('→ 构建 MCP server（integrations/codex/mcp-server）…');
-    const build = spawnSync('npm', ['run', 'build', '-w', 'integrations/codex/mcp-server'], {
+    const build = spawnNpm(['npm', 'run', 'build', '-w', 'integrations/codex/mcp-server'], {
       cwd: repoRoot,
       stdio: 'inherit',
-      shell: WINDOWS,
     });
     if (build.error || build.status !== 0) {
       console.error('✗ MCP server 构建失败。');
@@ -299,18 +330,14 @@ async function runDoctor(argv) {
   if (versionError) bad(`Node.js：${versionError}`);
   else ok(`Node.js ${process.version}（主版本 >= 24）`);
 
-  const git = spawnSync('git', ['--version'], { shell: WINDOWS, encoding: 'utf8' });
+  const git = spawnSync('git', ['--version'], { encoding: 'utf8' });
   if (git.error || git.status !== 0) bad('git 不可用：`git --version` 失败');
   else ok('git 可用');
 
-  const piRequire = createRequire(resolve(repoRoot, 'adapters/pi/package.json'));
+  const piDir = resolve(repoRoot, 'adapters/pi');
   const missingPiDeps = [];
   for (const name of ['tsx', '@earendil-works/pi-coding-agent']) {
-    try {
-      piRequire.resolve(name);
-    } catch {
-      missingPiDeps.push(name);
-    }
+    if (findPackageDir(piDir, name) === undefined) missingPiDeps.push(name);
   }
   if (missingPiDeps.length > 0) {
     bad(`adapters/pi 依赖缺失：${missingPiDeps.join('、')}（先跑 node scripts/coagent.mjs setup）`);
@@ -339,7 +366,9 @@ async function runDoctor(argv) {
 
   const declaredPassthrough = nonEmpty(process.env.COAGENT_AGENT_ENV_PASSTHROUGH);
   if (declaredPassthrough === undefined) {
-    warn('COAGENT_AGENT_ENV_PASSTHROUGH 未声明（spawn 会 fail-closed；设成 - 表示不额外透传）');
+    warn(
+      'COAGENT_AGENT_ENV_PASSTHROUGH 未声明（用 scripts/coagent.mjs 的 start / run 会自动设为 -；直接 node src/main.ts 或 src/run-mission.ts 则必须自己设）',
+    );
   } else if (declaredPassthrough === '-') {
     ok("COAGENT_AGENT_ENV_PASSTHROUGH 已声明不额外透传（'-'）");
   } else {
@@ -366,7 +395,9 @@ async function runDoctor(argv) {
     }
   }
   if (typeof modelCount === 'number') {
-    ok(`pi 模型清单可用（${modelCount} 项）`);
+    const verdict = classifyModelCount(modelCount);
+    if (verdict.level === 'warn') warn(verdict.text);
+    else ok(verdict.text);
   } else {
     const reason = models.error
       ? models.error.code === 'ETIMEDOUT'

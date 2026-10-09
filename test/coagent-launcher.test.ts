@@ -1,11 +1,20 @@
 // scripts/coagent.mjs 的纯函数守卫：环境/参数计算、Node 版本门槛、watch 签名比较。
-// 恰好三个 test()；launcher 的真实进程行为由 CLI 自检覆盖，不在这里拉起子进程。
+// 恰好四个 test()；launcher 的真实进程行为由 CLI 自检覆盖，不在这里拉起子进程。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { nodeVersionError, planLaunch, watchChanges, watchSignature } from '../scripts/coagent.mjs';
+import {
+  classifyModelCount,
+  findPackageDir,
+  nodeVersionError,
+  planLaunch,
+  watchChanges,
+  watchSignature,
+} from '../scripts/coagent.mjs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const defaultStatePath = resolve(repoRoot, '.coagent-state.json');
@@ -139,4 +148,42 @@ test('watchSignature / watchChanges：收口与升级算变化，中间态不算
     openEscalations: [{ attemptId: 'A-9', question: 'need a decision' }],
   });
   assert.ok(watchChanges(dispatched, escalatedByAttempt).length > 0);
+});
+
+test('findPackageDir / classifyModelCount：向上找到 ESM-only 包，0 模型告警、非 0 可用', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'coagent-pkgdir-'));
+  try {
+    const nested = resolve(root, 'a', 'b', 'c');
+    mkdirSync(nested, { recursive: true });
+
+    // 无 main、无 exports 的包：require.resolve 会报错，目录查找必须找到。
+    const plainPkg = resolve(root, 'node_modules', 'esm-only-pkg');
+    mkdirSync(plainPkg, { recursive: true });
+    writeFileSync(
+      resolve(plainPkg, 'package.json'),
+      JSON.stringify({ name: 'esm-only-pkg', type: 'module' }),
+    );
+    const scopedPkg = resolve(root, 'node_modules', '@scope', 'esm-only');
+    mkdirSync(scopedPkg, { recursive: true });
+    writeFileSync(
+      resolve(scopedPkg, 'package.json'),
+      JSON.stringify({ name: '@scope/esm-only', type: 'module' }),
+    );
+
+    assert.equal(findPackageDir(nested, 'esm-only-pkg'), plainPkg);
+    assert.equal(findPackageDir(nested, '@scope/esm-only'), scopedPkg);
+    assert.equal(findPackageDir(nested, 'not-installed'), undefined);
+    assert.equal(findPackageDir(nested, '@scope/not-installed'), undefined);
+
+    const zero = classifyModelCount(0);
+    assert.equal(zero.level, 'warn');
+    for (const needle of ['npx pi', '/login', 'models.json', 'docs/models.md']) {
+      assert.ok(zero.text.includes(needle), `0 模型文案应包含「${needle}」`);
+    }
+    const several = classifyModelCount(3);
+    assert.equal(several.level, 'ok');
+    assert.ok(several.text.includes('3'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
