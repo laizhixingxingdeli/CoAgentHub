@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "coagenthub": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/mcp-server/dist/index.js"
+      ],
+      "env": {
+        "COAGENTHUB_API_BASE": "http://127.0.0.1:3101/api",
+        "COAGENTHUB_REVIEWER_ID": "Codex L3"
+      }
+    }
+  }
+}

@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { API_VERSION } from './api/server.ts';
+import { resolveRunAdapter } from './application/default-adapter-entry.ts';
 import { probeLocalWriter, type LockInfo } from './application/lock.ts';
 import { loopbackRunRequest } from './application/loopback-control-client.ts';
 import { parseMaxRounds } from './application/mission-runner.ts';
@@ -381,7 +382,7 @@ async function main() {
     return;
   }
 
-  const adapter = resolve(arg('--adapter') ?? 'C:/program1/coagent-pi/src/agent-entry.ts');
+  const adapter = resolveRunAdapter(arg('--adapter'));
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
   const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   const storeFlag = arg('--store') ?? (usePg ? 'pg' : 'file');

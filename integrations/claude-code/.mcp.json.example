@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "coagenthub": {
+      "command": "node",
+      "args": ["/绝对路径/CoAgentHub/integrations/codex/mcp-server/dist/index.js"],
+      "env": {
+        "COAGENTHUB_API_BASE": "http://127.0.0.1:3101/api",
+        "COAGENTHUB_REVIEWER_ID": "claude-code-l3",
+        "COAGENTHUB_REVIEW_CONFIRMED_BY": "<你的名字>：集成分支合入由检视者签，合 main 需我签字"
+      }
+    }
+  }
+}

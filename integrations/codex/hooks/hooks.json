@@ -1,0 +1,19 @@
+{
+  "description": "Bind the current Codex root session to the CoAgentHub v5 L3 delivery bridge.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/mcp-server/dist/session-hook.js\"",
+            "timeout": 5,
+            "statusMessage": "Binding CoAgentHub v5 L3 session",
+            "additionalContextLimit": 1200
+          }
+        ]
+      }
+    ]
+  }
+}

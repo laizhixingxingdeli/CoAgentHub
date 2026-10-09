@@ -11,7 +11,6 @@
 
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import pg from 'pg';
 
 import { FixedClock } from '../src/application/in-memory.ts';
 import {
@@ -30,7 +29,7 @@ import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ValidationEngine } from '../src/application/validation/engine.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
+import { connectPgClient, ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -74,7 +73,7 @@ beforeEach(async () => {
 
 /** 另一个连接：看库里真有什么，或者扮演别的写者。 */
 async function sql<T extends Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
-  const client = new pg.Client({ connectionString: dsn! });
+  const client = await connectPgClient(dsn!);
   await client.connect();
   try {
     return (await client.query<T>(text, params)).rows;

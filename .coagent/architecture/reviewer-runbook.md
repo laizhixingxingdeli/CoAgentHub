@@ -6,7 +6,7 @@
 
 `AGENTS.md` 说检视者不写功能代码。划线如下，出线的一律开 Mission：
 
-- **可以直接做**：①`.coagent/` 下的文档（在两个 Mission 之间提交）；②运维——重启服务、改服务启动器与隐藏启动 VBS、经插件配置执行池、登记 pi 的模型路由、跑全量测试做合前验证；③合入集成分支（经插件，我签）与用户说「合」之后合 master；④调用**已批准工具**的胶水脚本，放在工具包 `C:\program1\coagent-l3-kit`（`claude/`、`ops/`、`templates/`，README 有用法）：只许调用现有插件 / MCP / HTTP 路由、读取并整理它们的返回，不新增平台能力。
+- **可以直接做**：①`.coagent/` 下的文档（在两个 Mission 之间提交）；②运维——重启服务、改服务启动器与隐藏启动 VBS、经插件配置执行池、登记 pi 的模型路由、跑全量测试做合前验证；③合入集成分支（经插件，我签）与用户说「合」之后合 master；④调用**已批准工具**的胶水脚本，放在维护者本机的 L3 工具包里（不在本仓）：只许调用现有插件 / MCP / HTTP 路由、读取并整理它们的返回，不新增平台能力。
 - **必须开 Mission**：产品仓库（v5、coagent-pi 等）里的任何代码与测试；已批准工具面的任何新增或改动（新增 MCP 工具、插件工具、HTTP 路由）；规格要求的行为变化。例：10-08 的候选熔断复位工具走 L3MCP1；`rmcp.mjs` 只是既有 reviewer MCP 的客户端，属于胶水，直接写。
 - 拿不准归哪边就开 Mission；胶水脚本一旦长出判断逻辑（不再只是转发和整理），也改走 Mission。
 
@@ -30,18 +30,18 @@
 ## 2. 开跑
 
 1. 只读检查：`node src/run-plan.ts … --check`。**只在常驻服务停着时跑**——它整份读状态文件。
-2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。Windows 使用现有隐藏 VBS 包装器经 `explorer.exe` 启动 cmd，包装器采用窗口样式 0，避免弹出终端；不用 WMI 或 Start-Process。启动前核实持锁进程退出、端口空闲，显式设置原 `COAGENT_STATE`、工作目录及日志；不得重复启动。已核实的包装器是 `C:/Users/echo/AppData/Local/Temp/coagenthub-start-service-hidden.vbs`（副本在工具包 `C:/program1/coagent-l3-kit/ops/`，丢了从那里还原），路径失效时先核实既有启动器，不盲目替换状态路径。派发设置 `COAGENT_AGENT_ENV_PASSTHROUGH=-`；本会话不使用定时任务。
+2. 常驻服务：`node src/main.ts`（端口 3101）；平台代码有新合入就先重启（见第 4 节）。Windows 使用现有隐藏 VBS 包装器经 `explorer.exe` 启动 cmd，包装器采用窗口样式 0，避免弹出终端；不用 WMI 或 Start-Process。启动前核实持锁进程退出、端口空闲，显式设置原 `COAGENT_STATE`、工作目录及日志；不得重复启动。已核实的包装器是维护者本机的隐藏启动 VBS（副本在其 L3 工具包的 ops/ 里）；路径失效时先核实既有启动器，不盲目替换状态路径。不是维护者的部署，直接用 `node scripts/coagent.mjs start` 即可。派发设置 `COAGENT_AGENT_ENV_PASSTHROUGH=-`；本会话不使用定时任务。
 3. 新票通过新版 CoAgentHub v5 L3 插件开跑（0.2.2，2026-10-04）：先 `coagenthub_get_platform_status` 核实服务持锁身份、当前占用；冻结完整 Contract 后 `coagenthub_create_mission`，Delivery recipient 使用当前真实 Codex root 会话；再 `coagenthub_start_mission`，指定独立集成 worktree、已验收的 adapter 路径和 maxRounds。启动不直读状态文件，不另起 CLI 写者或终端，环境透传声明固定为 `-`。生产 run-plan 已退役，不对历史 PlanRun 原样续跑。
    - 插件 accepted 只是 HTTP 请求受理；`coagenthub_get_hosted_run` 的 running 表示平台启动输出已确认，ended 提供退出码；Mission 完成以权威视图和交卷证据为准。断流或插件重启后观测为 unknown，先查 Mission/activity 和真实运行者，禁止盲目重试。当前插件同实例抑制重复启动，不承诺跨实例分布式去重。
    - 恢复暂停只清 paused，不负责启动；挂起先走 resume_parked 的目标同步。已有 Mission 的启动读取当前权威 Contract，不用旧本地规格覆盖。历史 origin 不决定承载通路：先核实真实 PlanRun 已停止还是仍运行。
    - 轮次按预计工作量配置，最多100；触顶仍在推进时核实原因再续跑同一 Mission，不能默认新建重跑。互不依赖票可同批验证，改平台源码只在无运行 agent 的空档重启一次；依赖新行为的下一批在服务加载后开跑。
    - `coagenthub_start_mission` 的 adapter 参数是入口文件 `.../coagent-pi/.../src/agent-entry.ts`，不是目录（传目录会让首跳 ERR_UNSUPPORTED_DIR_IMPORT，首选候选被熔断 5 分钟）；命令行里直接写 Windows 反斜杠会被吞，用 node 把参数写成 JSON 文件再传。托管运行在 Mission 等 L3（升级、待终审）或 hop 退避时就退出；答复升级、发契约修订（待终审时 `revise_contract` 会把 Mission 退回规划）之后要重新 start_mission 才继续，答复后等约 20 秒再续。同时跑的 Mission 不超过两条：并行会抬高全量测试偶发率（Windows 子进程 0xC0000142、FileAgentPoolRepository 两个实例交替追加丢行），红了先隔离复跑再下结论。
    - 候选顺序以平台当前角色配置为权威，每次派发读取；start_mission 的 coordinator/executor 参数只作兼容校验，不覆盖当前配置。提示词及适配器更新安排在 Mission 空档。
-4. coagent-pi 的票要 `--worktrees`，常驻服务托管不支持（#26）：用 coagent-pi 自己的独立状态 `C:/program1/coagent-experiments/roles/state-pi/.coagent-state.json` 独立运行，可与主线并行。独立运行不发布端口，值守用只看日志的 `C:/program1/coagent-experiments/roles/log-watch.mjs --log <运行日志> --max-minutes 25`。适配器按每次派发现读，合入 coagent-pi 集成分支后下一次派发就生效：改协调者 / 执行者提示词或简报的票放到 Mission 之间跑。
+4. `adapters/pi`（pi 适配器）2026-10-09 起并入本仓，它的 Mission 与平台的 Mission 走**同一个项目、同一个集成分支**，不再有独立的 coagent-pi 状态和值守脚本。适配器按每次派发现读，合入集成分支后下一次派发就生效：改协调者 / 执行者提示词或简报的票放到 Mission 之间跑。适配层的依赖经根 `package.json` 的 npm workspaces 装在根 `node_modules`，Mission 的 worktree 沿父目录能解析到；适配层的测试文件叫 `*.spec.ts`（根目录的 `node --test` 会捡走任何位置的 `*.test.ts`），验证命令写 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`。此前 coagent-pi 是独立仓库，其历史 Mission 仍留在状态里。
 
 ## 3. 值守
 
-1. 挂守候脚本：`node C:/program1/coagent-experiments/roles/duty-watch.mjs --log <运行日志> [--base <端口>]`；有升级单、合入、挂起、超限（单票 $10、15 个工作项、单项执行 4 次）或运行结束就醒。答复升级后等 20 秒再挂，避开答复还没生效的空档。
+1. 挂守候脚本：`node scripts/coagent.mjs watch <missionId>`（走 HTTP 读，退出即唤醒）；有升级单、合入、挂起、超限（单票 $10、15 个工作项、单项执行 4 次）或运行结束就醒。答复升级后等 20 秒再挂，避开答复还没生效的空档。
 2. 服务开着时看进度只用 HTTP：`/api/missions/<id>`、`/api/missions/<id>/activity`、`/api/missions/<id>/attempts/<attemptId>`、`/api/plan-runs`、`/api/pools`。不跑 `l3 show` / `l3 plan`。
 3. 升级单：
    - 协调者问「已验收的项要补做 / 作废的项怎么办」：不再属于升级范围（ADR-0007 补充，2026-10-07），答复引用那一条并让它直接新建引用原 id 的补修单；执行者被杀（墙钟强杀）或平台放弃重跑（无结果到顶、候选排除耗尽）后工作项卡在 dispatched 的：COM12 上线后平台自己把它收成 blocked（事件 `work_item.platform_blocked`，只 Standard、只执行者跳），协调者修订同一张单再派发，不用作废重建；上线前只能由我作废并另建（作废只当「不用做了」用，不是重启办法）。
@@ -51,7 +51,7 @@
 4. 到线（15 个工作项、单项 4 次）时看原因：在推进就放开那一条线继续，在空转就作废、改票或停。
 5. runaway 的恢复：先核实真实承载者是 PlanRun 还是 run-mission，不凭历史 origin 选决策口。暂停 Mission，查实际尝试及租约；作废卡住的工单并保留成果，按调用点或用例组重划，写明真实接口、fixture、定向命令与交卷条件。确认旧执行者退出且租约不再有效后才恢复同一 Mission；原样重派不算恢复。技术拆单由 L3 判断，需求变更或超预算交用户。检查点误答使用显式 `checkpoint approve`，必须带真实 reviewer/reason，费用门禁不变；不编辑状态文件。
 6. 为止损往启动脚本里加环境变量之前，先想它会进哪里：服务拉起的所有子进程都继承，包括平台的校验命令。10-07 为止损设的 `COAGENT_TENROUTER_URL=http://127.0.0.1:9`（让适配器查不到额度、平台当未知放行）使 pi 的 `usage.test.ts` 断言「默认地址」的既有测试在平台校验里红了（VR-228；执行者自己复现，并把那条测试改成不读宿主环境）。先 grep 测试里读该变量的地方；止损用完立刻删，修复合入后重启生效。
-7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件没有复位工具；v5 自带的 reviewer MCP 在 L3MCP1（10-08）之后有 `coagenthub_candidate_reset`，合 master 并重启服务后才可用：`node C:/program1/coagent-l3-kit/claude/rmcp.mjs coagenthub_candidate_reset '{"profileId":"…","reviewer":"…","reason":"…"}'`，reviewer 署名会前缀进审计里的 reason（生产里审计的 actor 恒为 operator），一次只复位一个已核实的候选。在它可用之前只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），那样每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。
+7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件没有复位工具；v5 自带的 reviewer MCP 在 L3MCP1（10-08）之后有 `coagenthub_candidate_reset`，合 master 并重启服务后才可用：经 reviewer MCP（`node scripts/reviewer-mcp.ts`）调用 `coagenthub_candidate_reset '{"profileId":"…","reviewer":"…","reason":"…"}'`，reviewer 署名会前缀进审计里的 reason（生产里审计的 actor 恒为 operator），一次只复位一个已核实的候选。在它可用之前只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），那样每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。
 8. 常驻服务是用户会话里的控制台进程：用户关机、注销、睡眠（哪怕关机被别的应用否决后改成睡眠）都会把它杀掉，而且不留崩溃记录。10-08 02:53 用户点了关机，微信否决后系统转入睡眠又恢复，服务当时就没了（心跳停在 02:53:18，`service.err` 无记录，系统事件里是 Kernel-Power 42 / 107 与 User32 1074）；待终审的交卷在状态里没丢，12:52 重启即恢复。长时间等待（待终审、等用户）后每次醒来先核 3101 监听与 `holder.json` 心跳，别只信托管运行的退出码；重启按「2026-10-06 补充」的做法。
 
 ## 4. 票与票之间
@@ -80,8 +80,8 @@
    核对与集成分支内容一致（`git diff auto/harness-remaining HEAD` 为空），再 `git worktree remove <临时目录>`。
    主工作区本身检出的就是 master 时（同一分支不能在两个 worktree 检出），直接在主工作区 `git merge --no-ff <集成分支>`，同样核对 diff 为空、工作区干净。前置验证要绑定集成分支当前 HEAD：之后哪怕只有文档提交，也要重跑平台全量（有测试读 `.coagent/project.md`）；用零代码验证 Mission 跑，它没有改动，收尾不产生新提交（2026-10-07 的 MASTER-PRECHECK）。没有 Mission 在跑、机器空闲时，也可以由检视者直接在集成 worktree 的该 HEAD 上跑一次全量 `node --test`（2026-10-08 合 da4ab5d 就是这样：145 秒、一次绿；偶发红整轮复跑），把结果行写进简报和合并提交说明。
    合完在没有在跑的 agent 时重启服务加载新代码：核实持锁 pid 与 3101 监听者一致后 `taskkill /F /T /PID`，等心跳超过 120 秒，再用隐藏启动脚本起服务，平台自动接管并写审计；起来后用一个已有 Mission 的 HTTP 视图确认新行为生效。
-4. 本仓没有远端，不推送。记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）、630656d（10-07 夜，COM6–COM11 与 PERF1，用户「合」）、da4ab5d（10-08，COM9 / COM10 / COM12，用户「按现在的执行池，合master」）。
-5. coagent-pi 仓库的 master（主检出 `C:/program1/coagent-pi`，分支 master；集成分支 `auto/harness-remaining` 在 `.coagent-worktrees/integration`）同样只在用户说「合」之后合：简报前先 `git merge-tree --write-tree master auto/harness-remaining` 试合（无冲突时结果树应等于集成分支的树），在集成 worktree 对该 HEAD 跑 `node --import tsx --test src/*.test.ts` 全绿；合并在主检出里 `git merge --no-ff auto/harness-remaining`，再核对 `git diff auto/harness-remaining master` 为空。不用重启服务（托管运行读的是集成 worktree），只是让默认适配器目录（资源池页读额度）与 master 一致。
+4. 推送到远端（GitHub）是对外操作，必须用户明确说「推」，合入 master 与推送是两件事。合入记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）、630656d（10-07 夜，COM6–COM11 与 PERF1，用户「合」）、da4ab5d（10-08，COM9 / COM10 / COM12，用户「按现在的执行池，合master」）。
+5. 〔历史，2026-10-09 之前〕coagent-pi 曾是独立仓库，它的 master 合入流程与本节相同；并入 `adapters/pi` 之后没有这一步。
 
 ## 7. 停服务与清锁
 

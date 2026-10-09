@@ -7,7 +7,9 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import type { IncomingMessage } from 'node:http';
 import type { Server } from 'node:http';
@@ -24,7 +26,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform } from '../src/application/platform.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
-import { getRuntimeUsage, adapterDir, rememberAdapterDir, findUsageRow } from '../src/application/runtime-catalog.ts';
+import { getRuntimeUsage, adapterDir, rememberAdapterDir, findUsageRow, defaultAdapterDir } from '../src/application/runtime-catalog.ts';
 import type { RuntimeCatalog, UsageRow } from '../src/application/runtime-catalog.ts';
 
 const SUCCESS: RuntimeCatalog = {
@@ -128,6 +130,18 @@ describe('运行时用量读取', () => {
     } finally {
       if (old === undefined) delete process.env.COAGENT_ADAPTER_DIR;
       else process.env.COAGENT_ADAPTER_DIR = old;
+    }
+
+    // 默认目录：仓内 adapters/pi 存在就用它，否则退回旧的仓库同级 coagent-pi。
+    const withAdapters = mkdtempSync(join(tmpdir(), 'runtime-catalog-bundled-'));
+    const withoutAdapters = mkdtempSync(join(tmpdir(), 'runtime-catalog-legacy-'));
+    try {
+      mkdirSync(join(withAdapters, 'adapters', 'pi'), { recursive: true });
+      assert.equal(defaultAdapterDir(withAdapters), resolve(withAdapters, 'adapters', 'pi'));
+      assert.equal(defaultAdapterDir(withoutAdapters), resolve(withoutAdapters, '..', 'coagent-pi'));
+    } finally {
+      rmSync(withAdapters, { recursive: true, force: true });
+      rmSync(withoutAdapters, { recursive: true, force: true });
     }
   });
 });

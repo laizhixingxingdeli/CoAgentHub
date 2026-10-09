@@ -64,9 +64,9 @@
 | `scripts/` | 离线用量报告 `context-replay-report.mjs`；只告警的源码度量 `code-metrics.ts` |
 | `.coagent/` | 本文件、project.md、specs/、architecture/decisions/ |
 
-## 相邻仓库：coagent-pi（pi 适配器）
+## 适配层：`adapters/pi`（pi 适配器）
 
-`C:/program1/coagent-pi`，平台用的是它集成分支上的 `src/agent-entry.ts`。
+原为独立仓库 coagent-pi，2026-10-09 并入本仓 `adapters/pi/`；平台用的是 `adapters/pi/src/agent-entry.ts`。下表的文件路径相对 `adapters/pi/`。
 
 | 文件 | 负责什么 |
 |---|---|

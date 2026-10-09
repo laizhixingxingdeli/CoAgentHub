@@ -1,0 +1,21 @@
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://localhost:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        { "id": "qwen2.5-coder:7b" }
+      ]
+    },
+    "my-gateway": {
+      "baseUrl": "https://gateway.example.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$MY_GATEWAY_API_KEY",
+      "models": [
+        { "id": "vendor-a/model-x" },
+        { "id": "vendor-b/model-y" }
+      ]
+    }
+  }
+}

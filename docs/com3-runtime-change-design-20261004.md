@@ -77,7 +77,7 @@
 
 ### 1.5 coagent-pi：EOF 启动 + subscribe 观测 + 单次 prompt
 
-【已核实，路径 `C:/program1/coagent-pi/.coagent-worktrees/integration/`】
+【已核实，路径 `<本机>/coagent-pi/.coagent-worktrees/integration/`】
 
 - `src/agent-entry.ts:18 readStdin()` 读到 EOF；`src/agent-entry.ts:25` `const raw = await readStdin();` —— 入口**读完 stdin 直到 EOF 才解析 spec 并 `startRun`**。与 1.4 的 `stdin.end()` 正好配对：平台写完整份 spec 就关，适配器读到 EOF 就知道 spec 到齐了。
 - `src/runtime.ts:705`：`const { session } = await createAgentSession({ cwd, model, thinkingLevel, modelRuntime, resourceLoader, sessionManager, tools: toolAllowlist(spec.role) });`
@@ -91,7 +91,7 @@
 
 【已核实，仅本地只读解析，无网络】
 
-- 解析路径（本地 node_modules）：`C:/program1/coagent-pi/node_modules/@earendil-works/pi-coding-agent/`。
+- 解析路径（本地 node_modules）：`<本机>/coagent-pi/node_modules/@earendil-works/pi-coding-agent/`。
 - 版本：`package.json` → `"name": "@earendil-works/pi-coding-agent"`，`"version": "0.87.1"`；`coagent-pi/package.json:11` 依赖锁定 `"@earendil-works/pi-coding-agent": "0.87.1"`。
 - `dist/core/agent-session.d.ts`：
   - `prompt(text: string, options?: PromptOptions): Promise<void>`；
@@ -273,7 +273,7 @@ child.stdin?.end(JSON.stringify(spec));   // spawn.ts:321 —— 写完整份 sp
 
 #### 1.10.6 当前 SDK（`@earendil-works/pi-coding-agent@0.87.1`）的 prompt / steer / subscribe
 
-引用位置（本地只读，无网络）：`C:/program1/coagent-pi/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:152-163`（`PromptOptions`）、`:305`（`subscribe`）、`:417`（`prompt`）、`:427-437`（`steer` 注释与签名）；`dist/core/agent-session.js:1207`（`prompt` 主体）、`:1216-1224`（extension 命令提前 return）、`:1230-1234`（`_runInputHandlers` 返回 falsy 时提前 return）、`:1245`（streaming 未指定 behavior 时抛错）、`:1247-1255`（入队后 return）、`:1331`（非 streaming 走 `await this._runAgentPrompt(messages)`）、`:1416`（`steer` → `_queueUserInput(..., "steer", ...)`）。适配器侧本节未改：`…/integration/src/runtime.ts:705`（`createAgentSession`）/ `:758`（`session.subscribe`）/ `:833`（`session.prompt(spec.instruction)`）。
+引用位置（本地只读，无网络）：`<本机>/coagent-pi/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:152-163`（`PromptOptions`）、`:305`（`subscribe`）、`:417`（`prompt`）、`:427-437`（`steer` 注释与签名）；`dist/core/agent-session.js:1207`（`prompt` 主体）、`:1216-1224`（extension 命令提前 return）、`:1230-1234`（`_runInputHandlers` 返回 falsy 时提前 return）、`:1245`（streaming 未指定 behavior 时抛错）、`:1247-1255`（入队后 return）、`:1331`（非 streaming 走 `await this._runAgentPrompt(messages)`）、`:1416`（`steer` → `_queueUserInput(..., "steer", ...)`）。适配器侧本节未改：`…/integration/src/runtime.ts:705`（`createAgentSession`）/ `:758`（`session.subscribe`）/ `:833`（`session.prompt(spec.instruction)`）。
 
 ```ts
 // 源码结构示例，非实际调用记录 —— agent-session.d.ts
@@ -517,7 +517,7 @@ new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'f
 
 【已核实】
 
-- `C:/program1/coagent-pi/src/reviewer-extension.ts:76` 从环境读 `hub` / `state` / `reviewer` / ... 配置；`reviewerConfigFromEnv` 里 `hub: env[REVIEWER_ENV.hub] ?? ""`、`state: env[REVIEWER_ENV.state] ?? ""`。
+- `<本机>/coagent-pi/src/reviewer-extension.ts:76` 从环境读 `hub` / `state` / `reviewer` / ... 配置；`reviewerConfigFromEnv` 里 `hub: env[REVIEWER_ENV.hub] ?? ""`、`state: env[REVIEWER_ENV.state] ?? ""`。
 - `reviewer-tools.ts:29 L3_SCRIPT = "src/l3.ts"`、`:30 RUN_MISSION_SCRIPT`；工具执行经 `nodeCommand(config, [L3_SCRIPT, ...])` 调 CLI（如 `coagent_get_mission` → `l3 show`、inbox → `l3 inbox --recipient ... --state ...`）。**这里 `hub`/`projectRepo` 是 repo 路径/工作目录语义，不是 HTTP endpoint。**
 - **CLI 写转发由 lock 动态端口**：Hub `src/l3.ts:243 forwardWriteCommand(holder, ...)` → `loopbackControlRequest(identity, ...)`，`identity` 来自 `requireLiveIdentity(holder)`（`l3.ts:145`），要求 `holder.port / instanceId / stateId / apiVersion` 齐全且 `apiVersion === API_VERSION`（`src/api/server.ts:74 API_VERSION = 'v1'`）。端口来自**锁文件里的活写者**，**不是硬编码**。
 - **CLI 只读直接 state 不是权威运行查询**：`l3.ts:430` 起，`isMainStateWrite = MAIN_STATE_WRITES.has(command)`；**只读命令不抢锁**、直接读 state 文件，与写命令转发到活写者不同。只读直接读文件**绕过了活写者的实时状态**，因此**不是**权威运行查询，也**不能**替代 §4.0 的"唯一服务暴露"。
@@ -552,7 +552,7 @@ new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'f
 
 #### 4.2-A2 草案 A2：pi 侧 `coagent_get_validation_report` 注册
 
-- **目录范围**：`C:/program1/coagent-pi/.coagent-worktrees/integration/src/tools.ts`（`coordinator` 的 SPECS，工具名清单见 `:94-268`；`coagentTools` `:519`、`coagentToolNames` `:559`）。**不改** `roles.ts` 的角色集合——`coordinator` 已在 `Role` 联合里，`toolAllowlist` 自动带出。
+- **目录范围**：`<本机>/coagent-pi/.coagent-worktrees/integration/src/tools.ts`（`coordinator` 的 SPECS，工具名清单见 `:94-268`；`coagentTools` `:519`、`coagentToolNames` `:559`）。**不改** `roles.ts` 的角色集合——`coordinator` 已在 `Role` 联合里，`toolAllowlist` 自动带出。
 - **真实接口 / 数据流**：新增一个 `ToolSpec`（**proposed**），`execute` 里与其它工具一样走 `client.call(spec.name, body)`（`tools.ts:534`）→ `PlatformClient.call`（`platform-client.ts:56`）→ `POST /api/agent/coagent_get_validation_report`。pi 侧**不做**归属/角色判断（规则只有 Hub 一份）。
 - **不借 control**：不进 `REVIEWER_TOOL_NAMES`、不碰 `reviewer-tools.ts`，只进 `coagent_*` 工具面。
 - **依赖**：无新增（`typebox` 已在用）。
