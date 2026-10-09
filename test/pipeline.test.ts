@@ -106,14 +106,14 @@ const INVESTIGATE_ONLY = {
 };
 
 /** 规划 + 派发，会去抢改动名额。 */
-function planAndDispatch(workItemId: string) {
+function planAndDispatch() {
   return {
     'coordinator:-:0': {
       steps: [
         { tool: 'coagent_update_plan', body: PLAN },
         { tool: 'coagent_create_work_item', body: { title: 'W', ...ORDER } },
         { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '测试契约已核对' } },
-        { tool: 'coagent_dispatch_work_item', body: { workItemIds: [workItemId] } },
+        { tool: 'coagent_dispatch_work_item', body: (previous) => ({ workItemIds: [previous.workItemId] }) },
       ],
     },
     'coordinator:-': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
@@ -133,7 +133,7 @@ describe('流水线', () => {
       ],
       (id) =>
         id === 'A'
-          ? make(new ScriptedRuntime(planAndDispatch('W-1')), new ScriptedRuntime({}))()
+          ? make(new ScriptedRuntime(planAndDispatch()), new ScriptedRuntime({}))()
           : make(new ScriptedRuntime(INVESTIGATE_ONLY), new ScriptedRuntime({}))(),
       { maxRetries: 0 },
     );
@@ -152,7 +152,7 @@ describe('流水线', () => {
     await platform.createMission({ projectId: 'P', missionId: 'B', contract: CONTRACT });
 
     // 先让 A 占住名额。
-    await make(new ScriptedRuntime(planAndDispatch('W-1')), new ScriptedRuntime({}))().runMission(
+    await make(new ScriptedRuntime(planAndDispatch()), new ScriptedRuntime({}))().runMission(
       'A',
       { projectRoot: process.cwd(), maxRounds: 1 },
     );
@@ -160,7 +160,7 @@ describe('流水线', () => {
 
     const [result] = await runPipeline(
       [{ missionId: 'B', options: { projectRoot: process.cwd(), maxRounds: 2 } }],
-      () => make(new ScriptedRuntime(planAndDispatch('W-2')), new ScriptedRuntime({}))(),
+      () => make(new ScriptedRuntime(planAndDispatch()), new ScriptedRuntime({}))(),
       { maxRetries: 1 },
     );
 
@@ -181,14 +181,14 @@ describe('流水线', () => {
     const { platform, make } = await harness();
     await platform.createMission({ projectId: 'P', missionId: 'A', contract: CONTRACT });
     await platform.createMission({ projectId: 'P', missionId: 'B', contract: CONTRACT });
-    await make(new ScriptedRuntime(planAndDispatch('W-1')), new ScriptedRuntime({}))().runMission(
+    await make(new ScriptedRuntime(planAndDispatch()), new ScriptedRuntime({}))().runMission(
       'A',
       { projectRoot: process.cwd(), maxRounds: 1 },
     );
 
     const [result] = await runPipeline(
       [{ missionId: 'B', options: { projectRoot: process.cwd(), maxRounds: 2 } }],
-      () => make(new ScriptedRuntime(planAndDispatch('W-2')), new ScriptedRuntime({}))(),
+      () => make(new ScriptedRuntime(planAndDispatch()), new ScriptedRuntime({}))(),
       { maxRetries: 2 },
     );
     // maxRetries=2 表示首轮之外再试 2 次，所以最多跑 3 轮、让位 3 次。
@@ -208,7 +208,7 @@ describe('流水线', () => {
       ],
       (id) =>
         make(
-          new ScriptedRuntime(planAndDispatch(id === 'A' ? 'W-1' : 'W-2')),
+          new ScriptedRuntime(planAndDispatch()),
           new ScriptedRuntime({}),
         )(),
       { maxRetries: 0 },
