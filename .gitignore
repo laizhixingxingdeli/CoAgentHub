@@ -18,3 +18,6 @@ node_modules/
 .coagent-worktrees/
 .coagent-artifacts/
 .coagent-runs/
+
+# IDE 本地配置，不进仓库。
+.idea/

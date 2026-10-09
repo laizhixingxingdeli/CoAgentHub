@@ -87,6 +87,8 @@ test/           测试，`node --test`
 node --test          # 全量测试，不装任何东西即可运行
 ```
 
+没有 Postgres 的机器上，约 90 条需要数据库的测试会显示为 skipped（跳过不算通过，但也不算失败）。
+
 ## 参与开发
 
 这个仓库用 CoAgentHub 开发自己，规则入口是 [AGENTS.md](AGENTS.md)（维护者的检视者规则）和 [CONTRIBUTING.md](CONTRIBUTING.md)。

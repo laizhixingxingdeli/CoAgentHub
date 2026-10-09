@@ -16,6 +16,12 @@
 **全新克隆里 `node --test` 一片红，报 `Cannot find package 'pg'`**
 平台本体应该零依赖，只有 Postgres 存储需要 `pg`。如果你看到这个错，说明用的是旧版本；更新到最新，或临时 `npm ci`。
 
+**`setup` 里 `npm ci` 很慢或超时**
+锁文件里的下载地址是官方 npm 源（registry.npmjs.org）；npm 会按你配置的 registry 替换主机。网络访问官方源慢的话，先配镜像再 `setup`，例如 `npm config set registry https://registry.npmmirror.com`。
+
+**`doctor` 说“模型清单为空”**
+这是还没登录任何模型的正常状态，不是错误。`npx pi` 里 `/login` 登录一个 provider（见 [models.md](models.md)）后再跑 `doctor`。
+
 ## 模型与适配层
 
 **资源池页的模型下拉是空的，或提示“运行时不可用”**

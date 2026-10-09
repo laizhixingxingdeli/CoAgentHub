@@ -14,9 +14,11 @@
 git clone https://github.com/laizhixingxingdeli/CoAgentHub.git
 cd CoAgentHub
 node scripts/coagent.mjs setup     # 装适配层与 MCP 服务器的依赖；平台本体零依赖
-node scripts/coagent.mjs doctor    # 只读自检，逐项告诉你还差什么
+node scripts/coagent.mjs doctor    # 只读自检，逐项告诉你还差什么（✓ 好了，! 提醒，✗ 必须先解决）
 node scripts/coagent.mjs start     # 启动，打印将使用的状态文件和网址
 ```
+
+第一次的 `doctor` 里出现“模型清单为空”“平台未运行”“状态文件不存在”这几条 `!` 是正常的——你还没登录模型、还没启动、还没第一次创建状态文件。
 
 打开 <http://127.0.0.1:3101>。`start` 替你做了三件事，都可以用选项或环境变量改：
 

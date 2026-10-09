@@ -45,6 +45,8 @@ The platform has no build step and no third-party dependency (Postgres storage i
 node --test          # full test suite, nothing to install first
 ```
 
+On a machine without Postgres, about 90 database tests show up as skipped (skipped is neither pass nor fail).
+
 ## Layout
 
 ```
