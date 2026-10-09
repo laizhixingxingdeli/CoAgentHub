@@ -17,6 +17,11 @@ import { ensureTestDatabase } from './pg.ts';
 const missionId = process.argv[2];
 const useTestDb = process.argv.includes('--test-db');
 
+if (!missionId && !useTestDb) {
+  console.error('reconcile-probe 是手动探针，需要 <missionId> 或 --test-db；被 node --test 当测试文件运行时直接退出。');
+  process.exit(0);
+}
+
 const store = await PgStateStore.open(
   useTestDb ? { connectionString: (await ensureTestDatabase()) as string } : undefined,
 );
