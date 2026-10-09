@@ -28,6 +28,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
+import { canonicalPath } from './canonical-path.ts';
+
 const run = promisify(execFile);
 
 interface WorktreeListEntry {
@@ -623,7 +625,7 @@ ${dirty}` };
     protectedMissionIds: ReadonlySet<string> | readonly string[],
   ): Promise<WorktreeReconcileResult> {
     const repo = resolve(projectRoot);
-    const targetRoot = resolve(this.#rootFor(projectRoot));
+    const targetRoot = await canonicalPath(this.#rootFor(projectRoot));
     const protectedIds =
       protectedMissionIds instanceof Set
         ? protectedMissionIds
@@ -654,7 +656,7 @@ ${dirty}` };
     }
 
     for (const entry of parseWorktreePorcelain(porcelain)) {
-      const abs = resolve(entry.path);
+      const abs = await canonicalPath(entry.path);
       if (!isDirectChild(targetRoot, abs)) continue;
       const missionId = missionIdFromBranch(entry.branch);
       if (!missionId) continue;
