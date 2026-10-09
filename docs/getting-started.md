@@ -105,7 +105,7 @@ node scripts/coagent.mjs run examples/playground/mission.json \
   --cwd ~/coagent-playground-integration --max-rounds 30
 ```
 
-`--cwd` 必须是目标项目的集成 worktree（启动器不让你省略它，免得把任务派到平台自己的仓库上）。平台正在运行时，这条命令会把请求交给它托管并一直打印进度。
+`--cwd` 必须是目标项目的集成 worktree（启动器不让你省略它，免得把任务派到平台自己的仓库上）。平台正在运行时，这条命令会把请求交给它托管并一直打印进度。如果你启动平台时用了 `--state` 自定义状态文件，这里也要带同一个 `--state`，命令才找得到那个平台。
 
 ## 6. 看它跑
 
