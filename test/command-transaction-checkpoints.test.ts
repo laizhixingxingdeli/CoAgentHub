@@ -15,7 +15,6 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import pg from 'pg';
 
 import { FixedClock } from '../src/application/in-memory.ts';
 import {
@@ -42,7 +41,7 @@ import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ValidationEngine } from '../src/application/validation/engine.ts';
 import type { BudgetEvaluation } from '../src/application/budget-usage.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
+import { connectPgClient, ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -554,7 +553,7 @@ describe('崩溃注入 · PG：第 k 次记事件时崩，新开 store 读库恰
   });
 
   async function sql<T extends Record<string, unknown>>(text: string): Promise<T[]> {
-    const client = new pg.Client({ connectionString: dsn! });
+    const client = await connectPgClient(dsn!);
     await client.connect();
     try {
       return (await client.query<T>(text)).rows;

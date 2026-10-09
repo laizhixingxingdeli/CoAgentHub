@@ -13,7 +13,10 @@
   ],
   "scripts": {
     "test": "node --test",
-    "metrics": "node scripts/code-metrics.ts"
+    "metrics": "node scripts/code-metrics.ts",
+    "setup": "node scripts/coagent.mjs setup",
+    "start": "node scripts/coagent.mjs start",
+    "doctor": "node scripts/coagent.mjs doctor"
   },
   "dependencies": {
     "pg": "^8.23.0"
