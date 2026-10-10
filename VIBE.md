@@ -103,6 +103,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 测试尽量少，只加在关键地方：只写验收点名的关键场景，每条验收一到两条；不为每个分支、每种写法、每种错误各写一条（用户 2026-09-30）。
 - 要改表结构或 TRUNCATE 的 PG 测试，用 `test/helpers/pg.ts` 的 `ensureTestDatabase('<独立名字>')` 另建隔离库；PG 不可用时这类测试跳过，跳过不算验证通过。否则测试之间互相踩数据，或者把「没跑」当成「通过」。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
+- `adapters/pi`（pi 适配层）和 `integrations/codex/mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器先构建再测：`["node","node_modules/typescript/bin/tsc","-p","integrations/codex/mcp-server/tsconfig.json"]`，然后 `["node","node_modules/vitest/vitest.mjs","run","--root","integrations/codex/mcp-server"]`。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
 
 ### 仓库
 
@@ -230,6 +231,7 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 - **adr-0005-execution-budget-authority** — 执行预算：权威求值与 hard/soft 语义
 - **adr-0006-ha-release-authority** — HA 放行权威：人或显式配置的高保证 Principal
 - **adr-0007-three-layer-roles-and-handoffs** — 三层分工与交接：检视者管需求与架构，协调者管方案与验收，执行者只执行
+- **adr-0008-single-repo-release-layout** — 单仓发布布局：适配层与 L3 接入并入本仓，依赖走 npm workspaces
 
 ## 给 Agent 的规则
 

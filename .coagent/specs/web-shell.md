@@ -24,7 +24,7 @@
 
 - 事件流每条三部分：角色流转徒章、动作短语、一行细节，出自 `narrateEvent`。机器 kind 不得出现在事件流/环节头/详情第一眼；技术 ID 留在详情区「技术信息」一行。未知 kind：标明「未翻译」并显示 kind 本身，不要空白。
 - 平台真实 kind `escalated` 与契约表里的 `escalation.raised` 映同一套文案。
-- 平台活动事件由 `test/web-event-coverage.test.ts` 从 `src/application/platform.ts` 的 `#event` 调用以及 `query-promotion.ts`、`reconcile.ts`、`decision-shadow-runner.ts`、`post-execution-shadow.ts` 的 `ActivityLog.append` 写入点收集 kind；不能解析的新表达式和未翻译的非命令 kind 必须使测试失败。`runtime.command.*` / `runtime.command_tracking.*` 不逐条叙述：按所属环节汇总实际命令次数，命令明细在可折叠清单里展示可用的命令文本和退出码。
+- 平台活动事件由 `test/web-event-coverage.test.ts` 从 `src/application/platform.ts` 的 `#event` 调用以及 `query-promotion.ts`、`reconcile.ts`、`decision-shadow-runner.ts`、`post-execution-shadow.ts` 的 `ActivityLog.append` 写入点收集 kind；不能解析的新表达式和未翻译的非命令 kind 必须使测试失败。`runtime.command.*` / `runtime.command_tracking.*` / `runtime.tool.completed` 明细不显示在环节头或展开事件列表；所属环节仍汇总实际命令次数，提交证据中的 command/exitCode、验证报告与上下文指标继续展示。不由工具结束推断成功。timeAttribution 仅在展示时省略 kind=tool 的逐项碎片，保留其它归因及权威总耗时；API 与平台记录不变。
 - `formatAttemptId`：`W-465.exec-1` → 「工作项 W-465 · 执行者第 1 次尝试」；`coord-2` → 「协调者第 2 次尝试」。原始 ID 放括号或 title。
 - `usageLine`：拆「新增」（total-cacheRead）与「缓存命中」，给占比与费用；占比≥50% 加「缓存部分计费便宜得多」。项目表、任务页用量卡、资源池用量卡口径一致。资源池走 `GET /api/usage` 的 `total`。
 - 内部词标签：attempt→尝试，causationId→由哪一跳引发，profileId→候选，ExecutionProfile→运行时，WorkItem→工作项；`revisionLabel` → 「规划 rN」「契约 rN」。技术 ID 仍可见，只是不再是第一眼。
@@ -66,7 +66,7 @@
 
 一个环节 = 同一个 `attemptId` 下的所有事件。`groupActivity(activity)` 按 attemptId **首次出现顺序**成组，不是「一变就新开一组」的连续分段。**没有 attemptId 的事件依角色归属分组，平台与 L3 可辨认；L1/L2 orphan 不得冒充 L3**。任务结束时 L3 收尾组从 `finalReview` 展示终审结论与合入 SHA，不再显示「这一跳还没结束」。
 
-每个环节一个 `<details>`，**默认不写 open**。环节头一行自足：环节名 + 角色徒章 + 具体模型 + 耗时 + 这一跳 token/费用 + 一句话摘要。协调者与执行者的具体模型来源是该环节 `attempt.started` 的 `data.profile`，缺失显示「未记录」；L3 与平台组不显示模型栏。命令族在所属环节头汇总「跑了 N 条命令」，明细可折叠，不作普通事件行。
+每个环节一个 `<details>`，**默认不写 open**。环节头一行自足：环节名 + 角色徒章 + 具体模型 + 耗时 + 这一跳 token/费用 + 一句话摘要。协调者与执行者的具体模型来源是该环节 `attempt.started` 的 `data.profile`，缺失显示「未记录」；L3 与平台组不显示模型栏。命令族在所属环节头仅汇总「跑了 N 条命令」，不展示工具明细折叠或普通事件行。
 
 环节名从组内 kind 推（`stageName` 在 narrate.js），不是硬编码顺序：
 
@@ -105,13 +105,13 @@
 
 ### 实时输出
 
-右下常驻，不是 tab。`GET .../live?cursor=N`，游标按 missionId 记。`shouldFollow` 在**追加之前**量（阈值 32px）。离页停表。
+左侧常驻当前实时输出，不是 tab，也不随右侧所选环节切换归属。`GET .../live?cursor=N`，游标按 missionId 记，保留 chunk 的 attemptId、seq、at、kind、text。身份来自当前 Mission 的 attempt.started/profile 或可靠 Attempt/Activity 归属，不用当前资源池推历史身份；后到的身份可补齐缓存行。正文角色名称可识别，协调者蓝、执行者绿、检视者紫、平台灰，缺失或未知身份明确标为未知且用灰色，不能默认协调者。字体颜色仅用任务输出专属变量/类，不改 stage tone 或全站状态色。kind=tool 不进实时正文及可见行数，不按 read/bash 等文本前缀删模型正文。`shouldFollow` 在**追加之前**量（阈值 32px）。离页停表，不同任务/会话不得串色。
 
 可见且未终态时每 3 秒重拉 MissionView 和 activity，有变化才重画且保留展开/选中；实时输出每秒轮询。页面隐藏时暂停全部轮询，恢复可见立即补拉；任务终态停止 view/activity/live 轮询，首屏已终态也不请求 live。离页不写过期结果。
 
 `kind === 'note'` 的行（后端裁剪痕迹，排在末尾）拢成终端**上方**横幅，不混在正文里—混在末尾会被读成「后面还有」，而它说的是「前面没了」。`kind === 'usage'` 不当终端行。
 
-终态空态：有行就正常显示；真没有说「这一跳没有在这里留下输出行」。**不要**说「完整输出在下面的原始输出里」—原始数据 tab 已删。所选历史跳的 attempt detail `output` 仅在环节详情折叠区展示「历史输出末尾」，不补入当前实时输出。历史尾部最多 200 行且存储前由平台现有脱敏规则处理。
+终态空态：有行就正常显示；真没有说「这一跳没有在这里留下输出行」。**不要**说「完整输出在下面的原始输出里」—原始数据 tab 已删。所选历史跳的 attempt detail `output` 仅在 attemptId 匹配、已明确结束且保存输出非空时，于环节详情显示默认折叠的「历史输出末尾/已保存原始尾部」，按该会话真实角色着色；活跃、缺失或错 id 不显示入口。结束须有 succeeded/failed 或匹配 attempt.ended 等明确证据，缺 status 本身不是结束证据。终态无活跃会话仍可回看已结束 Attempt。只拉所选 Attempt，不新增接口/N+1，不补入当前实时输出，不借用其它 Attempt 的 output/executionResult。历史混合原文不按工具前缀清洗，不冒充结构化工具面板。历史尾部最多 200 行且存储前由平台现有脱敏规则处理。
 
 ### 上下文指标与改动
 
