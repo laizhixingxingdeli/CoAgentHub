@@ -151,9 +151,10 @@ export function createOutputIdentity(context) {
  * **非空**。少一条就会出现「点了个还在跑的环节，旁边却摆着一段已保存输出」，
  * 人会把上一跳的结尾当成这一跳正在进行的东西。
  *
- * `status === undefined` 放行是刻意的：真实接口 (getAttemptDetail) 一定回 status，
- * 所以生产里「在跑」永远被 `in_progress` 挡掉；只有手工夹具/旧形状会缺 status，
- * 那时按「没有相反证据」处理，不假装它一定没结束。
+ * 缺身份或缺状态**不能**当成已结束。以前空 status 直接放行，理由是「没有相反证据」；
+ * 但「拿不到 status」和「已经结束了」是两件事：缺字段的行常常正是还在写的那一跳，
+ * 于是点开一个进行中的环节，旁边就摆着一段旧保存输出，被读成这一跳正在进行的内容。
+ * 结束必须由 `succeeded` / `failed` 或这一组已 ended 明说，推断不出来就不给入口。
  */
 export function savedTailEligible(input) {
   const it = input || {};
@@ -163,7 +164,7 @@ export function savedTailEligible(input) {
   if (text(it.attemptOutput) === '') return false;
   const status = text(it.attemptStatus);
   if (status === 'in_progress') return false;
-  return status === 'succeeded' || status === 'failed' || status === '' || Boolean(it.groupEnded);
+  return status === 'succeeded' || status === 'failed' || Boolean(it.groupEnded);
 }
 
 /**

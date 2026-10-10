@@ -1590,6 +1590,10 @@ describe('会话身份着色与历史尾部', () => {
     // 反例四：环节本身还没结束。
     const running = [{ at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } }];
     assert.equal(out(running, { attemptId: 'W-1.exec-1', status: 'in_progress', evidence: [], output: '还在滚' }).includes('历史输出末尾'), false);
+    // 反例五：缺 status 不能当成已结束——本组只有 started 时按进行中藏起来。
+    assert.equal(out(running, { attemptId: 'W-1.exec-1', evidence: [], output: '还在滚' }).includes('历史输出末尾'), false);
+    // 正例补：仍缺 status，但本组已有 attempt.ended，结束证据明确，可展示。
+    assert.ok(out(endedRows, { attemptId: 'W-1.exec-1', evidence: [], output: '已结束的尾巴' }).includes('历史输出末尾'), '本组已 ended 时缺 status 仍应展示');
   });
 });
 
