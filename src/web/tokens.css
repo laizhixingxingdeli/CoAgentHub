@@ -88,3 +88,32 @@
   --sidebar-foreground: oklch(0.956 0.005 228.819);
   --sidebar-accent: oklch(0.75 0.112 205.427);
 }
+
+/*
+ * 任务输出区的会话身份色（Contract AC1）。
+ *
+ * 为什么另起一组 --session-output-*，而不是复用上面那三个 --role-*：
+ *   --role-* 说的是「谁在干」（左侧环节色条、角色徽章、用量卡的颜色轴），
+ *   而输出正文要的是「这行字是谁吐的」——两个轴在同一个颜色里混起来之后，
+ *   改左边那一套会顺手把终端里的可读性改坏（--role-coordinator 是橙的，
+ *   在深色终端底上远不如蓝的读得清）。所以这里单开一组，互不牵连。
+ *
+ * 亮暗两个主题里 pre.term 都是深色的（它模拟的是终端），所以两套都按
+ * 「深底上的字」取值；暗色主题只是把亮度再抬一档，不换色相。
+ * 未知和平台共用同一种灰：认不出身份时**不能**默认协调者，否则一行没认出来的
+ * 输出就理直气壮地冒充 L2 的结论，而屏幕上完全看不出那是猜的。
+ */
+:root {
+  --session-output-coordinator: oklch(0.75 0.11 250);
+  --session-output-executor: oklch(0.78 0.14 155);
+  --session-output-reviewer: oklch(0.75 0.13 305);
+  --session-output-platform: oklch(0.7 0.02 250);
+  --session-output-unknown: oklch(0.7 0.02 250);
+}
+:root[data-theme="dark"] {
+  --session-output-coordinator: oklch(0.8 0.11 250);
+  --session-output-executor: oklch(0.83 0.14 155);
+  --session-output-reviewer: oklch(0.8 0.13 305);
+  --session-output-platform: oklch(0.75 0.02 250);
+  --session-output-unknown: oklch(0.75 0.02 250);
+}

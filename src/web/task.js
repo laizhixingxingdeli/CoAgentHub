@@ -40,7 +40,6 @@ import {
   narrateEvent,
   newFileLabel,
   nowDoing,
-  outputTailTitle,
   pendingMemoryNote,
   PLATFORM_ROLE_LABEL,
   reasonText,
@@ -53,6 +52,17 @@ import {
   usageLine,
   usageTypeLine,
 } from './narrate.js';
+import {
+  createOutputIdentity,
+  normalizeLiveLine,
+  outputRoleClass,
+  outputRoleFromKind,
+  outputRoleLabel,
+  savedTailEligible,
+  savedTailNote,
+  savedTailText,
+  savedTailTitle,
+} from './session-output.js';
 
 const DASH = '—';
 
@@ -911,6 +921,11 @@ export function stageDetailHtml(group, ctx, attempt) {
   const role = shown.role;
   const kinds = new Set(events.map((e) => (e && e.kind) || ''));
   const blocks = [];
+  // 拉来的明细必须是**这一跳的**。普通流程里 loadAttempt 只回给选中的那一跳，
+  // 但这个函数是纯函数、谁都能喂——错 id 的 attempt 一旦进来，执行者正文、
+  // 用量与「本环节输出」就全变成别的一跳的，而屏幕上完全看不出错位。
+  const matched = group.attemptId && attempt && String(attempt.attemptId) === String(group.attemptId)
+    ? attempt : null;
 
   if (role === 'reviewer') {
     // L3 自己动手的那一组：发起任务、改契约、最终检视，以及对升级的答复。
@@ -928,7 +943,7 @@ export function stageDetailHtml(group, ctx, attempt) {
       blocks.push(dispatchBlock(context, events.filter((e) => e && e.kind === 'work_item.dispatched')));
     }
     if (kinds.has('review.recorded')) blocks.push(reviewBlock(context, events));
-    if (role === 'executor') blocks.push(executorBlock(context, events, attempt));
+    if (role === 'executor') blocks.push(executorBlock(context, events, matched));
     if (kinds.has('escalated') || kinds.has('escalation.raised')) {
       blocks.push(escalationBlock(context.escalationLog, group.attemptId));
     }
@@ -941,7 +956,7 @@ export function stageDetailHtml(group, ctx, attempt) {
   }
   const causation = (events.find((e) => e && e.causationId) || {}).causationId;
   const endedUsageEvent = [...events].reverse().find((e) => e && e.kind === 'attempt.ended' && e.data && e.data.usage);
-  const observedUsage = endedUsageEvent?.data.usage || attempt?.usage;
+  const observedUsage = endedUsageEvent?.data.usage || matched?.usage;
   const stepTokens = observedUsage && observedUsage.quality !== 'unknown' ? formatUsage(observedUsage).total : null;
   // 非 L3 的无 attemptId 不能套 L3 那句「自己动手」——那是谎。
   // 不新写叙事：就用 formatAttemptId 对空 id 的已有说明。
@@ -984,7 +999,53 @@ export function stageDetailHtml(group, ctx, attempt) {
     + usageFieldsHtml(observedUsage)
     + (contextMetricsFromEvents(events) ? contextMetricsBlockHtml(events) : '')
     + (blocks.length > 0 ? blocks.join('') : '<div class="note">这一跳还没有把正文写回平台。</div>')
-    + (attempt?.output ? '<details class="detail-block"><summary>本环节输出</summary><pre class="term">' + esc(String(attempt.output).slice(-20000)) + '</pre></details>' : '');
+    + savedTailBlock(group, events, matched, savedTailRoleOf(group, matched));
+}
+
+/**
+ * 历史尾部用哪个角色。看的是**这一跳自己的** `attempt.started.data.kind`，
+ * 不是环节徽章（徽章对 unrecognized 形状默认协调者，用在这里就是替别人认领结论），
+ * 也不是右侧当前选中的环节（那会让别的会话的输出跟着新选中的环节变色）。
+ */
+function savedTailRoleOf(group, matched) {
+  const started = (group && group.events || []).find((e) => e && e.kind === 'attempt.started');
+  return outputRoleFromKind(started && started.data && started.data.kind)
+    || outputRoleFromKind(matched && matched.kind)
+    || 'unknown';
+}
+
+/**
+ * 右侧「历史输出末尾」入口（Contract AC3）。
+ *
+ * 出现条件由 session-output.savedTailEligible 判定：**id 必须是这一跳的**、
+ * 这一跳**已经结束**、保存的 output **非空**。少一条就会变成「点了个还在跑的
+ * 环节，旁边却摆着一段已保存输出」，人会把上一跳的结尾当成这一跳正在进行的东西。
+ *
+ * 默认**折叠**（不写 open）：尾部动辄两万字符，默认摊开会把环节沟通挤到屏幕外，
+ * 而多数时候人打开这一页要看的是「两个 agent 之间说了什么」。
+ *
+ * 颜色优先取自本组 `attempt.started.data.kind`（权威），其次取自拉回来的 Attempt
+ * 明细的 kind（同一份数据的另一个取件口），都取不到就是未知灰。**不**退回
+ *「环节徽章的角色」：那个对认不出的形状默认协调者，而这里一旦默认，一段没
+ * 认出身份的历史尾部就冒充 L2 的结论。
+ */
+function savedTailBlock(group, events, matched, role) {
+  const ended = (events || []).some((e) => e && e.kind === 'attempt.ended');
+  const text = savedTailText(matched && matched.output);
+  if (!savedTailEligible({
+    groupAttemptId: group && group.attemptId,
+    attemptId: matched && matched.attemptId,
+    attemptStatus: matched && matched.status,
+    groupEnded: ended,
+    attemptOutput: text,
+  })) return '';
+  return '<details class="detail-block">'
+    + '<summary>' + esc(savedTailTitle()) + '</summary>'
+    + '<div class="note so-tail-note">' + esc(savedTailNote()) + '</div>'
+    + '<pre class="term ' + esc(outputRoleClass(role))
+    +   '"><span class="so-who">' + esc(outputRoleLabel(role)) + '</span>\n'
+    +   esc(text) + '</pre>'
+    + '</details>';
 }
 
 /* ===================== 上下文采集（attempt.ended.contextMetrics） ===================== */
@@ -1223,16 +1284,27 @@ export function changesCardHtml(payload) {
  *     下面的原始输出里」——原始数据 tab 已经删了，那句会把人指向一个空处。
  *   - 还可能开跑：一句话告诉人这一块不是坏的。
  * 两种情况都不能留空白：黑空的一块看起来像坏了。
+ *
+ * `presentation`（任务输出身份上下文）是可选的：历史调用点与纯渲染测试会给
+ * 空。缺它时每行是「未知」灰——**不能**退回协调者，否则一行没认出身份的正文
+ * 在屏幕上就和 L2 的结论长得一模一样，而没人看得出那是猜的。
  */
-export function liveLinesHtml(chunks, running) {
+export function liveLinesHtml(chunks, running, presentation) {
   const lines = liveTextLines(chunks);
   if (lines.length === 0) {
     return running === false
       ? '<span class="t">这一跳没有在这里留下输出行。</span>'
       : '<span class="t">还没有实时输出。agent 跑起来时这里会一行行出现。</span>';
   }
+  const identity = presentation && presentation.roleOf ? presentation : null;
   return lines
-    .map((c) => '<span class="t">' + esc(formatClock(c.at)) + '</span>  ' + esc(c.text))
+    .map((c) => {
+      const role = identity ? identity.roleOf(c) : 'unknown';
+      return '<span class="so-line ' + esc(outputRoleClass(role)) + '">'
+        + '<span class="so-who">' + esc(outputRoleLabel(role)) + '</span>'
+        + '<span class="t">' + esc(formatClock(c.at)) + '</span>  ' + esc(c.text)
+        + '</span>';
+    })
     .join('\n');
 }
 
@@ -1278,31 +1350,21 @@ function liveTextLines(chunks) {
   return lines;
 }
 
-function historicalOutputText(live) {
-  if (!live) return '';
-  const raw = live.historicalOutput;
-  if (raw === undefined || raw === null) return '';
-  const s = String(raw);
-  return s.trim() === '' ? '' : s;
-}
-
 /**
  * 实时输出的外框：勾选框 + 元信息 + 裁剪横幅 + 终端块。
  *
  * 只有首帧整块建；之后 pushLive 逐次只重写 pre / 元信息 / 横幅里面。外框每秒
  * 重建一次，「自动滚动」勾选框和它的焦点就每秒被丢一次，人正要点它时永远点不中。
+ *
+ * 终端里**只有**当前实时行。曾经这里有一条退路：没有实时行时把某一跳已保存的
+ * `output` 填进来。它把「已经跑完的一跳说了什么」摆进「当前在途输出」那一块，
+ * 人分不出屏幕上这段是还在滚的、还是早就结束的；已保存的尾巴现在只在右侧
+ * 那个明确标注的历史入口里看（见 stageDetailHtml）。
  */
-export function livePanelHtml(live) {
+export function livePanelHtml(live, presentation) {
   const lines = (live && live.lines) || [];
-  const hasLive = liveTextLines(lines).length > 0;
-  // 有实时行就只画实时：旧跳的 output 不是当前在途输出，塞进终端会让人以为还在跑。
-  const historical = hasLive ? '' : historicalOutputText(live);
-  const note = historical
-    ? '<div class="live-note"><div>' + esc(outputTailTitle()) + '</div></div>'
-    : liveNoteHtml(lines);
-  const term = historical
-    ? esc(historical)
-    : liveLinesHtml(lines, !live || live.running !== false);
+  const term = liveLinesHtml(lines, !live || live.running !== false, presentation);
+  const note = liveNoteHtml(lines);
   return '<div class="live-bar">'
     +   '<label class="auto-scroll"><input type="checkbox" data-autoscroll'
     +     (live && live.autoScroll === false ? '' : ' checked') + ' /> 自动滚动</label>'
@@ -1492,6 +1554,21 @@ function detailCtx(st) {
 }
 
 /**
+ * 任务输出的身份上下文：本页活动流 + 已经拉到 kind 的 Attempt。
+ *
+ * 每次渲染现造、**不往行上写**（见 session-output.js 文件头）。实时行往往先于
+ * 活动流到位，那一刻只能判未知；活动流一到就得重新判，缓存住的话先到的那些行
+ * 会永远停在灰色。
+ */
+function outputPresentation(st) {
+  return createOutputIdentity({
+    missionId: st.missionId,
+    activity: st.activity || [],
+    attemptKinds: st.attemptKinds,
+  });
+}
+
+/**
  * 用户展开过的环节（attemptId 集合）。
  *
  * 原生 `<details>` 的 open 只活在浏览器里，而环节列表是整块 innerHTML 重画的。
@@ -1580,14 +1657,6 @@ function pullMissionChanges(st) {
   return st.changesInflight;
 }
 
-function attemptOutputText(attempt) {
-  if (!attempt) return '';
-  const raw = attempt.output;
-  if (raw === undefined || raw === null) return '';
-  const s = String(raw);
-  return s.trim() === '' ? '' : s;
-}
-
 /**
  * 这一跳还能不能开跑。终态（结束/中止）、等待停机、暂停都不再会来新输出，
  * 所以终端空着的时候该说「这里没留下输出」，而不是「还没开始」。
@@ -1604,8 +1673,8 @@ function paintLive(st) {
     Object.assign({
       autoScroll: st.autoScroll,
       running: stillRunning(st),
-      historicalOutput: '',
     }, st.live),
+    outputPresentation(st),
   );
   const term = st.els.live.querySelector('[data-term]');
   if (term) term.scrollTop = term.scrollHeight - term.clientHeight;
@@ -1617,6 +1686,9 @@ function paintLive(st) {
  * 判据必须在写入**之前**量：追加会先抬高 scrollHeight，写完再量会把
  * 「刚才还贴底」误判成「离底很远」。外框也不重建：那会每秒把
  * 「自动滚动」勾选框与它的焦点丢一次，人正要点它时永远点不中。
+ *
+ * 行是**原地重写**的，所以身份解析每次现算：活动流后到、或切了任务，
+ * 已经画出来的那批行的颜色跟着变，而不是停在先到时的「未知」。
  */
 function pushLive(st) {
   const term = st.els.live.querySelector('[data-term]');
@@ -1627,7 +1699,7 @@ function pushLive(st) {
     clientHeight: term.clientHeight,
     scrollHeight: term.scrollHeight,
   });
-  term.innerHTML = liveLinesHtml(st.live.lines, stillRunning(st));
+  term.innerHTML = liveLinesHtml(st.live.lines, stillRunning(st), outputPresentation(st));
   const meta = st.els.live.querySelector('[data-live-meta]');
   if (meta) meta.innerHTML = liveMetaHtml(st.live);
   const banner = st.els.live.querySelector('[data-live-note]');
@@ -1644,6 +1716,9 @@ function pushLive(st) {
  * 没有 attemptId（L3 那一组）就不发这个请求：拿 undefined 去拼 URL 会打到
  * /attempts/undefined，返回的是 UNKNOWN_ATTEMPT 错误——一次没必要的 500。
  * 也不在进页时把每个 attempt 挨个拉一遍（N+1）。
+ *
+ * 拿回来的 `kind` 记进 st.attemptKinds：它是「这一跳是谁」的权威来源之一，
+ * 活动流里还没有这一跳（深链进来的）时，靠它才能给实时行认身份。
  */
 async function loadAttempt(st, attemptId) {
   st.attempt = null;
@@ -1663,9 +1738,14 @@ async function loadAttempt(st, attemptId) {
   // await 期间人可能又点了别的环节，或者整页都换了一条 Mission。
   if (st.epoch !== epoch || st.selectedAttemptId !== attemptId) return;
   st.attempt = detail && detail.error ? null : detail;
+  if (st.attempt && st.attempt.kind && attemptId) {
+    st.attemptKinds[attemptId] = st.attempt.kind;
+    // 身份补上了，已经画出来的实时行要跟着变色。这里只重写行，不重建外框：
+    // 外框一重建，勾选框与它的焦点就丢一次，而这是上一句 await 之后发生的，
+    // 人很可能正把鼠标放在那个勾选框上。
+    pushLive(st);
+  }
   paintDetail(st);
-  // 实时还在滚就别重建终端外框（勾选框焦点会丢）；只有空着时才用这一跳的脱敏尾部填。
-  if (liveTextLines(st.live && st.live.lines).length === 0) paintLive(st);
 }
 
 function isPageVisible() {
@@ -1777,7 +1857,9 @@ async function pollLive(st) {
         if (c.attemptId && c.usage) st.live.usageByAttempt[c.attemptId] = c.usage;
         continue;
       }
-      st.live.lines.push({ at: c && c.at, kind: (c && c.kind) || 'text', text: (c && c.text) || '' });
+      // attemptId/seq 是这一行「属于谁、第几条」的凭据：丢了就再也没法把行归到某一跳，
+      // 也就没法按会话身份着色（见 session-output.js）。
+      st.live.lines.push(normalizeLiveLine(c));
     }
     if (st.live.lines.length > MAX_LINES) {
       st.live.lines.splice(0, st.live.lines.length - MAX_LINES);
@@ -1840,6 +1922,9 @@ function pullView(st) {
       paintUsage(st);
       paintStages(st, expanded);
       paintDetail(st);
+      // 活动流里新出现了某一跳的 kind：已经画出来的实时行要跟着认领身份。
+      // 不重建外框（勾选框与它的焦点会丢），只原地重写行。
+      pushLive(st);
       void pullMissionChanges(st);
     }
     if (unchanged) refreshStageSignals(st);
@@ -2012,6 +2097,9 @@ export async function renderTaskPage(container, missionId, selectedStep = null) 
     // 用户展开过的环节。首屏是空的：默认全部收起。
     expanded: new Set(),
     attempt: null,
+    // 已经拉到 kind 的 Attempt（id → kind）。活动流里还没出现这一跳时，
+    // 它是实时行认身份的另一份权威来源（见 loadAttempt）。
+    attemptKinds: Object.create(null),
     hideHistory: false,
     autoScroll: true,
     live: liveStateOf(missionId),

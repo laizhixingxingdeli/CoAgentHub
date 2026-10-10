@@ -735,15 +735,26 @@ describe('环节分组', () => {
 
     // 原始命令文本不再上屏，但**证据**里的 command 照旧要转义后展示：
     // 「已修复」必须有可验证证据，不能以「工具明细降级」为理由把证据一起隐掉。
-    const { groupActivity, stageDetailHtml } = await loaded;
+    const { groupActivity, stageDetailHtml, livePanelHtml } = await loaded;
     const group = groupActivity(rows)[0];
+    // 拉回来的明细必须是这一跳自己的（attemptId 与 group.attemptId 对得上）。
     const detail = stageDetailHtml(group, { workItems: [{ id: 'W-1', title: 'x' }] }, {
+      attemptId: 'W-1.exec-1',
+      status: 'failed',
       evidence: [{ kind: 'test', summary: '跑了定向测试', command: 'rm ' + evil, exitCode: 1 }],
     });
     assert.ok(detail.includes('跑了定向测试'), detail);
     assert.ok(detail.includes('退出码 1'), detail);
     assert.equal(detail.includes('<img'), false, detail);
     assert.ok(detail.includes('&lt;img'), '证据里的 command 要转义后展示');
+    // 输出退路已经移走：左侧当前实时输出**永远**不填某一跳已保存的 output。
+    const live = livePanelHtml({
+      lines: [],
+      running: false,
+      historicalOutput: '脱敏后的尾巴',
+    });
+    assert.equal(live.includes('脱敏后的尾巴'), false, '左侧不再回退到 attempt.output');
+    assert.match(live, /没有在这里留下输出行/);
   });
 
   test('合并场景：末条工具结束不进摘要/清单，工具归因消失，正文 read/bash 不误删', async () => {
@@ -1483,23 +1494,102 @@ describe('任务改动卡', () => {
 describe('输出末尾退路', () => {
   const loaded = import('../src/web/task.js');
 
-  test('没有实时行时用 attempt.output；有实时行不把旧跳当当前输出', async () => {
+  test('左侧当前实时输出永不填已保存输出；右侧入口才是历史尾部', async () => {
     const { livePanelHtml } = await loaded;
+    // 左侧是「当前实时输出」：把某一跳已保存的 output 填进来，人分不出屏幕上
+    // 这段是还在滚的、还是早就结束的。所以这一块**没有**退路。
     const hist = livePanelHtml({
       lines: [],
       running: false,
       historicalOutput: '脱敏后的尾巴\n第二行',
     });
-    assert.ok(hist.includes('输出末尾（已脱敏）'), hist);
-    assert.ok(hist.includes('脱敏后的尾巴'), hist);
-    assert.equal(hist.includes('还没有实时输出'), false, hist);
+    assert.equal(hist.includes('脱敏后的尾巴'), false, '左侧填了历史 output');
+    assert.equal(hist.includes('输出末尾（已脱敏）'), false, hist);
+    assert.match(hist, /没有在这里留下输出行/);
     const live = livePanelHtml({
       lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '正在滚' }],
       historicalOutput: '旧跳不该出现',
     });
     assert.ok(live.includes('正在滚'), live);
     assert.equal(live.includes('旧跳不该出现'), false, live);
-    assert.equal(live.includes('输出末尾（已脱敏）'), false, live);
+  });
+});
+
+describe('会话身份着色与历史尾部', () => {
+  const loaded = import('../src/web/task.js');
+  const identityModule = import('../src/web/session-output.js');
+
+  /** 本 Mission 的活动流：四类身份各一条，另加一个显式认不出的 kind。 */
+  const act = [
+    { attemptId: 'coord-1', kind: 'attempt.started', data: { kind: 'coordinator' } },
+    { attemptId: 'W-1.exec-1', kind: 'attempt.started', data: { kind: 'executor' } },
+    { attemptId: 'ir-1', kind: 'attempt.started', data: { kind: 'independent_reviewer' } },
+    { attemptId: 'p-1', kind: 'attempt.started', data: { kind: 'platform' } },
+    { attemptId: 'weird', kind: 'plan.updated', data: {} },
+  ];
+
+  test('实时正文按真实会话角色上色；未知不默认协调者；身份随数据补齐', async () => {
+    const { liveLinesHtml } = await loaded;
+    const { createOutputIdentity } = await identityModule;
+    const identity = createOutputIdentity({ missionId: 'M-1', activity: act });
+    const html = liveLinesHtml([
+      { at: '2026-03-04T05:00:01.000Z', kind: 'text', text: '协', attemptId: 'coord-1' },
+      { at: '2026-03-04T05:00:02.000Z', kind: 'text', text: '执', attemptId: 'W-1.exec-1' },
+      { at: '2026-03-04T05:00:03.000Z', kind: 'text', text: '检', attemptId: 'ir-1' },
+      { at: '2026-03-04T05:00:04.000Z', kind: 'text', text: '台', attemptId: 'p-1' },
+      { at: '2026-03-04T05:00:05.000Z', kind: 'text', text: '谜', attemptId: 'weird' },
+      { at: '2026-03-04T05:00:06.000Z', kind: 'note', text: '裁剪说明', attemptId: 'coord-1' },
+      { at: '2026-03-04T05:00:07.000Z', kind: 'tool', text: 'bash: node --test', attemptId: 'coord-1' },
+    ], true, identity);
+    for (const [cls, who] of [['so-coordinator', '协调者'], ['so-executor', '执行者'], ['so-reviewer', '检视者'], ['so-platform', '平台']]) {
+      assert.ok(html.includes('class="so-line ' + cls + '"'), `${cls} 没上屏：${html}`);
+      assert.ok(html.includes('>' + who + '<'), who + ' 没上屏：' + html);
+    }
+    assert.ok(html.includes('class="so-line so-unknown"'), html);
+    assert.ok(html.includes('>未知<'), html);
+    // note（裁剪说明）与 tool（工具碎片）照旧不进正文，实时的都保留。
+    assert.equal(html.includes('裁剪说明'), false, 'note 混进正文');
+    assert.equal(html.includes('bash: node --test'), false, '工具碎片进了正文');
+    // 身份随数据补齐：同一批行先在没有活动流时判未知，活动流一到就变色，
+    // 而且**没有**往行上写死（这正是不能缓存角色到 chunk 上的原因）。
+    const lines = [{ at: '', kind: 'text', text: 'x', attemptId: 'W-1.exec-1' }];
+    const before = liveLinesHtml(lines, true, createOutputIdentity({ missionId: 'M-1', activity: [] }));    assert.ok(before.includes('so-unknown'), '无活动流时不能默认协调者：' + before);
+    const after = liveLinesHtml(lines, true, createOutputIdentity({ missionId: 'M-1', activity: act }));
+    assert.ok(after.includes('so-executor'), after);
+    assert.equal(lines[0].role, undefined, '角色不能缓存在行对象上');
+  });
+
+  test('历史尾部只在 id 匹配、已结束且非空时给出默认折叠入口', async () => {
+    const { stageDetailHtml, groupActivity } = await loaded;
+    const endedRows = [
+      { at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } },
+      { at: '2026-03-04T05:01:00.000Z', kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: { endedBy: 'structured_submit' } },
+    ];
+    const ctx = { workItems: [{ id: 'W-1', title: 'x' }] };
+    const out = (rows: Record<string, any>[], attempt: Record<string, any> | null) =>
+      stageDetailHtml(groupActivity(rows)[0], ctx, attempt);
+
+    // 正例：id 对得上、已结束、output 非空。
+    const html = out(endedRows, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [], output: 'read a.ts\n第二行' });
+    assert.ok(html.includes('历史输出末尾') && html.includes('已保存原始尾部'), html);
+    assert.ok(html.includes('脱敏'), '要说清这是脱敏后的原始尾部');
+    assert.ok(html.includes('read a.ts'), '整份混合原文都要在，不按 read/bash 删行');
+    assert.ok(html.includes('第二行'), html);
+    assert.ok(html.includes('so-executor'), '历史尾部按同一套会话角色色');
+    // 默认**折叠**：入口不带 open。
+    assert.equal(/<details[^>]*open/.test(html), false, html);
+
+    // 反例一：还在跑（Attempt.status=in_progress）。
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-1', status: 'in_progress', evidence: [], output: '尾巴' }).includes('历史输出末尾'), false);
+    // 反例二：id 不是这一跳的（拿别的 Attempt 的输出顶进来）。
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-2', status: 'succeeded', evidence: [], output: '别人的尾巴' }).includes('历史输出末尾'), false);
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-2', status: 'succeeded', evidence: [], output: '别人的尾巴' }).includes('别人的尾巴'), false);
+    // 反例三：output 空 / 只有空白——不出现一个空折叠。
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [], output: '   \n' }).includes('历史输出末尾'), false);
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [] }).includes('历史输出末尾'), false);
+    // 反例四：环节本身还没结束。
+    const running = [{ at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } }];
+    assert.equal(out(running, { attemptId: 'W-1.exec-1', status: 'in_progress', evidence: [], output: '还在滚' }).includes('历史输出末尾'), false);
   });
 });
 
@@ -1522,7 +1612,12 @@ describe('转义', () => {
         finalReview: { verdict: evil, reasons: [evil], mergedInto: evil },
       }, { evidence: [{ kind: evil, summary: evil, command: evil, exitCode: 1, output: evil }] }), true],
       [livePanelHtml({ lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: evil }, { kind: 'note', text: evil }] }), true],
-      [livePanelHtml({ lines: [], running: false, historicalOutput: evil }), true],
+      // 历史尾部：整份混合原文（可能含工具名）一并通过 esc 上屏，不按 read/bash 删行。
+      [stageDetailHtml(
+        groupActivity([{ at: '', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } }, { at: '', kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: {} }])[0],
+        { workItems: [{ id: 'W-1', title: 'x' }] },
+        { attemptId: 'W-1.exec-1', status: 'failed', evidence: [], output: 'read a.ts\n' + evil + '\nbash: node --test' },
+      ), true],
       [changesCardHtml({ stat: evil, files: [evil], pendingMemory: [evil] }), true],
       [changesCardHtml({ error: evil }), true],
       [contextMetricsBlockHtml([{ kind: 'attempt.ended', data: { contextMetrics: { brief: { renderedUtf8Bytes: 1 }, tools: [{ kind: evil, returnedUtf8Bytes: 3 }] } } }]), true],
