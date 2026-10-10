@@ -644,6 +644,70 @@ describe('任务页刷新：请求、间隔、终态、可见性', () => {
     assert.equal(head && head.innerHTML, saved, '轮询失败把已有内容清空了');
   });
 
+  test('实时行身份：live 先到先判未知，activity 一到原地补齐；切环节不改；换任务不串', async () => {
+    // 活动流只有协调者那一跳，实时行却是另一个还没出现在活动流里的执行者。
+    seed('M-so', {}, [
+      { at: '2026-01-01T00:00:00.000Z', kind: 'mission.created' },
+      { at: '2026-01-01T00:00:01.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: { kind: 'coordinator' } },
+    ]);
+    liveById.set('M-so', { cursor: 7, chunks: [
+      { seq: 7, missionId: 'M-so', attemptId: 'W-9.exec-1', at: '2026-01-01T00:00:02.000Z', kind: 'text', text: '执行者第一行' },
+    ] });
+    const box = mount('M-so');
+    await renderTaskPage(box, 'M-so');
+    await settle();
+
+    const term = box.querySelector('[data-term]');
+    assert.ok(term, '终端块要在');
+    // 活动流里还没出现这一跳：未知，**不能**默认协调者。
+    assert.ok(term.innerHTML.includes('so-unknown'), term.innerHTML);
+    assert.equal(term.innerHTML.includes('so-coordinator'), false, term.innerHTML);
+    assert.ok(term.innerHTML.includes('执行者第一行'), term.innerHTML);
+
+    // 外框（含「自动滚动」勾选框）不能被重建：那是每秒丢焦点的那种错。
+    const checkbox = box.querySelector('[data-autoscroll]');
+    assert.ok(checkbox);
+
+    // activity 后到：新出现了这一跳的显式 kind。已缓存的那些行要跟着认领身份，
+    // 而且是**原地**重写行，不重建外框。
+    activityById.set('M-so', [
+      { at: '2026-01-01T00:00:00.000Z', kind: 'mission.created' },
+      { at: '2026-01-01T00:00:01.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: { kind: 'coordinator' } },
+      { at: '2026-01-01T00:00:02.000Z', kind: 'attempt.started', attemptId: 'W-9.exec-1', workItemId: 'W-9', data: { kind: 'executor' } },
+    ]);
+    requests.length = 0;
+    tick(3000);
+    await settle();
+    assert.ok(term.innerHTML.includes('so-executor'), term.innerHTML);
+    assert.equal(term.innerHTML.includes('执行者第一行'), true, '补齐身份把行弄丢了：' + term.innerHTML);
+    assert.equal(box.querySelector('[data-autoscroll]'), checkbox, '外框被重建了（勾选框换了个节点）');
+
+    // 切环节：已缓存的行仍按**它自己那一跳**上色，不被新选中的环节重新认领。
+    const head = box.querySelector('[data-stage-select]');
+    assert.ok(head);
+    dispatchClick(head);
+    await settle();
+    assert.ok(term.innerHTML.includes('so-executor'), '切环节把已缓存行的身份改了：' + term.innerHTML);
+    assert.equal(term.innerHTML.includes('so-coordinator'), false, term.innerHTML);
+    assert.ok(term.innerHTML.includes('执行者第一行'), term.innerHTML);
+
+    // 换任务：另一条 Mission 的输出不能串过来。
+    seed('M-other', {}, [
+      { at: '2026-01-01T00:00:00.000Z', kind: 'attempt.started', attemptId: 'coord-1', data: { kind: 'coordinator' } },
+    ]);
+    liveById.set('M-other', { cursor: 3, chunks: [
+      { seq: 3, missionId: 'M-other', attemptId: 'coord-1', at: '2026-01-01T00:00:03.000Z', kind: 'text', text: '另一条任务的协调者输出' },
+    ] });
+    await renderTaskPage(box, 'M-other');
+    await settle();
+    const term2 = box.querySelector('[data-term]');
+    assert.ok(term2);
+    assert.ok(term2.innerHTML.includes('另一条任务的协调者输出'), term2.innerHTML);
+    assert.equal(term2.innerHTML.includes('执行者第一行'), false, '换任务后旧任务的行还在：' + term2.innerHTML);
+    assert.ok(term2.innerHTML.includes('so-coordinator'), term2.innerHTML);
+    assert.equal(term2.innerHTML.includes('so-executor'), false, term2.innerHTML);
+  });
+
   test('离页后断开的节点上，定时器不再发请求', async () => {
     seed('M-gone');
     const box = mount('M-gone');

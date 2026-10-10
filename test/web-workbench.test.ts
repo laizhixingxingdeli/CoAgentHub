@@ -40,7 +40,7 @@ test('任务输出常驻独立区域，缺失用量不计作零，真实零值�
   assert.ok(!unknown.includes('>0</dd>'));
   assert.equal((unknown.match(/未知/g) || []).length, 6);
   const group = groupActivity([{ kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1' }])[0];
-  const history = stageDetailHtml(group, { workItems: [{ id: 'W-1', attemptIds: ['W-1.exec-1', 'W-1.exec-2'], executionResult: { summary: '最新尝试独有正文' } }] }, { attemptId: 'W-1.exec-1', evidence: [], output: '历史输出' });
+  const history = stageDetailHtml(group, { workItems: [{ id: 'W-1', attemptIds: ['W-1.exec-1', 'W-1.exec-2'], executionResult: { summary: '最新尝试独有正文' } }] }, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [], output: '历史输出' });
   assert.ok(!history.includes('最新尝试独有正文'));
   assert.ok(history.includes('本次历史交回正文未保留'));
   assert.ok(history.includes('历史输出'));

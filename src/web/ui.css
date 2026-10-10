@@ -257,4 +257,37 @@ button:focus-visible,a:focus-visible,select:focus-visible{outline:3px solid var(
 
 .mission-process{display:block}.mission-process .task-head{margin-bottom:12px}.mission-process .task-right{grid-column:auto;grid-row:auto}.mission-process .task-cols{display:grid}.mission-process .stage-summary{font-size:12px}.mission-process .step-usage-grid div:nth-child(2){background:color-mix(in oklch,var(--card) 90%,var(--role-reviewer))}.mission-process .step-usage-grid div:nth-child(3){background:color-mix(in oklch,var(--card) 90%,var(--status-done))}
 .mission-process #task-contract{white-space:pre-wrap;overflow-wrap:anywhere}.mission-process .task-head{min-height:0}.mission-process .task-head .stop-btn{display:none}
+/* 任务输出的会话身份色。只作用于任务输出区（.current-output 下的 pre.term），
+   不碰 --role-*、不碰 stage tone、也不碰全站状态色：那三根轴各有各的用途，
+   把其中一根改成这里的颜色，项目的阶段配色会跟着一起漂。 */
+.mission-process .current-output .term{color:var(--terminal-fg)}
+.mission-process .current-output .term .so-line{color:var(--session-output-unknown)}
+.mission-process .current-output .term .so-coordinator{color:var(--session-output-coordinator)}
+.mission-process .current-output .term .so-executor{color:var(--session-output-executor)}
+.mission-process .current-output .term .so-reviewer{color:var(--session-output-reviewer)}
+.mission-process .current-output .term .so-platform{color:var(--session-output-platform)}
+.mission-process .current-output .term .so-unknown{color:var(--session-output-unknown)}
+/* 行首那个角色名跟着本行的颜色走，它是「这一行是谁」的第一眼。 */
+.mission-process .current-output .term .so-who{font-weight:600;margin-right:6px}
+.mission-process .current-output .term .so-coordinator .so-who{color:var(--session-output-coordinator)}
+.mission-process .current-output .term .so-executor .so-who{color:var(--session-output-executor)}
+.mission-process .current-output .term .so-reviewer .so-who{color:var(--session-output-reviewer)}
+.mission-process .current-output .term .so-platform .so-who{color:var(--session-output-platform)}
+.mission-process .current-output .term .so-unknown .so-who{color:var(--session-output-unknown)}
+/* 历史尾部同样是这一跳的正文，用同一份角色色；它不在 .current-output 里，
+   所以单独给一条，而不是把上面的选择器括大——括大就会连环节证据里的 pre 一起上色。
+   注意角色类是**挂在 pre.term 自己身上**的（savedTailBlock 里 `<pre class="term so-executor">`），
+   不是它里面的一层；写成后代选择器（`pre.term .so-executor`）就一条也匹配不上，
+   尾部会一直用终端的兜底色——看着像「着色没生效」，但测试只查类名，查不出来。 */
+.mission-process .detail-block pre.term.so-coordinator{color:var(--session-output-coordinator)}
+.mission-process .detail-block pre.term.so-executor{color:var(--session-output-executor)}
+.mission-process .detail-block pre.term.so-reviewer{color:var(--session-output-reviewer)}
+.mission-process .detail-block pre.term.so-platform{color:var(--session-output-platform)}
+.mission-process .detail-block pre.term.so-unknown{color:var(--session-output-unknown)}
+.mission-process .detail-block pre.term.so-coordinator .so-who{color:var(--session-output-coordinator)}
+.mission-process .detail-block pre.term.so-executor .so-who{color:var(--session-output-executor)}
+.mission-process .detail-block pre.term.so-reviewer .so-who{color:var(--session-output-reviewer)}
+.mission-process .detail-block pre.term.so-platform .so-who{color:var(--session-output-platform)}
+.mission-process .detail-block pre.term.so-unknown .so-who{color:var(--session-output-unknown)}
+.mission-process .detail-block .so-tail-note{font-size:12px}
 @media(max-width:1000px){.shell{grid-template-columns:minmax(0,1fr)}.nav{height:auto;position:static;display:flex;flex-direction:row;flex-wrap:wrap}.nav .brand{width:100%}.nav .spacer,.nav .foot{display:none}.mission-process{display:flex;flex-direction:column;align-items:stretch}.mission-process .task-cols{display:contents}.mission-process .current-output{order:1}.mission-process .timeline-panel{order:2}.mission-process .task-right{order:3}.mission-process>details{order:4}.mission-process .task-head{order:0}.view{padding:12px}.mission-process .task-head .task-title{font-size:18px}}

@@ -585,8 +585,9 @@ describe('环节分组', () => {
   test('环节头显示阶段耗时、未知/未分类，单时间线与既有展开数量不变', async () => {
     const { stageListHtml } = await loaded;
     // 一条后端算好的归因投影（形状来自 GET /api/missions/:id 的 timeAttribution）：
-    // 已测的 agent_run / tool，未知的 unclassified（相关工具缺结束事件），
-    // 以及 durationMs 为 null 的验证窗——三种在环节头必须说得出区别。
+    // 已测的 agent_run，工具的两段（已测 + 未知），未知的 unclassified，
+    // 以及 durationMs 为 null 的验证窗——
+    // 展示时工具碎片（含未知工具）一律省略，其余归因与总耗时不动。
     const ctx = {
       ...W4_CTX,
       timeAttribution: {
@@ -596,6 +597,7 @@ describe('环节分组', () => {
         phases: [
           { kind: 'agent_run', attemptId: 'W-1649.exec-1', workItemId: 'W-1649', durationMs: 120000, countedInTotal: true, overlaps: [], quality: 'measured' },
           { kind: 'tool', attemptId: 'W-1649.exec-1', durationMs: 30000, countedInTotal: true, overlaps: [], quality: 'measured' },
+          { kind: 'tool', attemptId: 'W-1649.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
           { kind: 'unclassified', attemptId: 'W-1649.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown', note: '相关工具时长未知，未分类时长未知' },
           { kind: 'validation', attemptId: 'W-1649.exec-1', workItemId: 'W-1649', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
         ],
@@ -610,12 +612,16 @@ describe('环节分组', () => {
     ];
     const html = stageListHtml(rows, null, null, ctx);
     // 单时间线、既有环节数量不变：只往现有 stage-head 里加一栏，不新开容器。
-    // 数环节容器（<details class="stage ...>）而不是所有 <details>：命令清单本来
-    // 也有一个折叠块，混在一起数会把「多了一条命令」看成「多了一个环节」。
+    // 数环节容器（<details class="stage ...>）而不是所有 <details>：
+    // 混在一起数会把别的折叠块看成「多了一个环节」。
     assert.equal((html.match(/<details class="stage /g) || []).length, 6, '不许新增第二条时间线或多余环节');
     assert.equal((html.match(/<ul class="evt-list">/g) || []).length, 6, '环节容器仍是一组一个');
-    // 该跳的阶段栏：已测的两段给毫秒，未分类与验证给「未知」——不拿事件间隔凑数。
-    assert.match(html, /class="stage-phase">阶段耗时 · 运行 2 分 0 秒 · 工具 30 秒 · 未分类 未知 · 验证 未知</, html);
+    // 该跳的阶段栏：运行段给毫秒，未分类与验证给「未知」——不拿事件间隔凑数；
+    // 工具两段（已测 30 秒与未知）都不出现，且不因为它们被省略而改总耗时。
+    assert.match(html, /class="stage-phase">阶段耗时 · 运行 2 分 0 秒 · 未分类 未知 · 验证 未知</, html);
+    assert.equal(html.includes('工具 30 秒'), false, '已测的工具片段不该堆到环节头');
+    assert.equal(html.includes('工具 未知'), false, '未知的工具片段同样不展示');
+    assert.equal(ctx.timeAttribution.totalOccupiedMs, 120000, '省略展示不改后端算好的总耗时');
     // 没有归因投影的环节按「未知」显示，不编造。
     assert.ok(html.includes('阶段耗时 · 未知'), html);
     assert.ok(html.includes('跑了 1 条命令'), html);
@@ -695,7 +701,7 @@ describe('环节分组', () => {
     assert.equal(l3.includes('事件记录 · 不单独计量'), true, '检视记录不冒充运行尝试');
   });
 
-  test('命令族不逐条上屏：环节头汇总、清单可折叠、callId 去重、文本转义', async () => {
+  test('命令族与工具结束都不逐条上屏：只留计数，原始命令文本不展示，转义仍守', async () => {
     const { stageListHtml } = await loaded;
     const evil = '<img src=x onerror="alert(1)">';
     const rows = [
@@ -704,23 +710,99 @@ describe('环节分组', () => {
       { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
       { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
       { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: evil, command: 'rm ' + evil, exitCode: 1 } },
+      { kind: 'runtime.tool.completed', attemptId: 'W-1.exec-1', data: { callId: evil, name: 'bash' } },
       { kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: { endedBy: 'structured_submit' } },
     ];
     const html = stageListHtml(rows, 'W-1.exec-1', null, { workItems: [{ id: 'W-1', title: 'x' }] });
     assert.equal(html.includes('runtime.command.started'), false, html);
     assert.equal(html.includes('runtime.command_tracking'), false, html);
+    assert.equal(html.includes('runtime.tool.completed'), false, html);
+    // 命令总数保留（callId 去重：same 两条算一条，evil 那条算一条）。
     assert.ok(html.includes('跑了 2 条命令'), html);
-    assert.match(html, /<details class="cmd-fold">/);
-    assert.equal(/<details class="cmd-fold"[^>]*open/.test(html), false, '命令清单默认收起');
-    assert.ok(html.includes('class="cmd-fold-head">2 条命令'), html);
-    assert.ok(html.includes('same'), html);
-    assert.ok(html.includes('命令 rm &lt;img'), html, '可用命令文字要上屏且转义');
-    assert.ok(html.includes('退出码 1'), html);
+    assert.equal(html.includes('跑了 3 条命令'), false, 'callId 去重没生效');
+    assert.equal(html.includes('跑了 1 条命令'), false, '工具结束被当成命令或命令被漏数');
+    // 原始命令明细（command 文本 / callId / 退出码）一律不上屏——
+    // 连纠不成标签的 callId 也不露：能拿到这些字段就够了。
+    assert.equal(html.includes('same'), false, html);
+    assert.equal(html.includes('命令 rm'), false, html);
+    assert.equal(html.includes('退出码 1'), false, html);
+    assert.equal(html.includes('cmd-fold'), false, '命令明细面板已移除');
+    // 不分错：即使命令文本里带了标签形状，也不再有机会被当标签解析。
     assert.equal(html.includes('<img'), false, html);
-    assert.ok(html.includes('&lt;img'), html);
-    // tracking / 命令族不得占普通 evt 行。
+    // 工具明细 / 命令族不得占普通 evt 行：只乘 attempt.started 与 attempt.ended。
     const evtCount = (html.match(/class="evt"/g) || []).length;
     assert.equal(evtCount, 2, html);
+
+    // 原始命令文本不再上屏，但**证据**里的 command 照旧要转义后展示：
+    // 「已修复」必须有可验证证据，不能以「工具明细降级」为理由把证据一起隐掉。
+    const { groupActivity, stageDetailHtml, livePanelHtml } = await loaded;
+    const group = groupActivity(rows)[0];
+    // 拉回来的明细必须是这一跳自己的（attemptId 与 group.attemptId 对得上）。
+    const detail = stageDetailHtml(group, { workItems: [{ id: 'W-1', title: 'x' }] }, {
+      attemptId: 'W-1.exec-1',
+      status: 'failed',
+      evidence: [{ kind: 'test', summary: '跑了定向测试', command: 'rm ' + evil, exitCode: 1 }],
+    });
+    assert.ok(detail.includes('跑了定向测试'), detail);
+    assert.ok(detail.includes('退出码 1'), detail);
+    assert.equal(detail.includes('<img'), false, detail);
+    assert.ok(detail.includes('&lt;img'), '证据里的 command 要转义后展示');
+    // 输出退路已经移走：左侧当前实时输出**永远**不填某一跳已保存的 output。
+    const live = livePanelHtml({
+      lines: [],
+      running: false,
+      historicalOutput: '脱敏后的尾巴',
+    });
+    assert.equal(live.includes('脱敏后的尾巴'), false, '左侧不再回退到 attempt.output');
+    assert.match(live, /没有在这里留下输出行/);
+  });
+
+  test('合并场景：末条工具结束不进摘要/清单，工具归因消失，正文 read/bash 不误删', async () => {
+    const { stageListHtml, groupActivity, liveLinesHtml, livePanelHtml, liveMetaHtml } = await loaded;
+    // 一跳：末尾就是工具结束（没有别的非工具事件排在它后面）。
+    const rows = [
+      { at: '2026-03-04T05:10:00.000Z', kind: 'attempt.started', attemptId: 'W-9.exec-1', workItemId: 'W-9', data: {} },
+      { at: '2026-03-04T05:10:01.000Z', kind: 'evidence.submitted', attemptId: 'W-9.exec-1', workItemId: 'W-9', data: { kind: 'test', exitCode: 0 } },
+      { at: '2026-03-04T05:10:02.000Z', kind: 'runtime.command.started', attemptId: 'W-9.exec-1', data: { callId: 'c1' } },
+      { at: '2026-03-04T05:10:03.000Z', kind: 'runtime.tool.completed', attemptId: 'W-9.exec-1', data: { callId: 'c1', name: 'bash' } },
+    ];
+    const ctx = {
+      workItems: [{ id: 'W-9', title: '后端' }],
+      timeAttribution: { schemaVersion: 1, coverage: 'partial', totalOccupiedMs: 20000, phases: [
+        { kind: 'agent_run', attemptId: 'W-9.exec-1', durationMs: 20000, countedInTotal: true, overlaps: [], quality: 'measured' },
+        { kind: 'tool', attemptId: 'W-9.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
+      ] },
+    };
+    const html = stageListHtml(rows, null, null, ctx);
+    // 末条工具结束不当这一跳的摘要（「工具结束：bash」不是「干了什么」）。
+    assert.equal(html.includes('工具结束'), false, html);
+    assert.equal(html.includes('runtime.tool.completed'), false, html);
+    assert.equal(html.includes('▸'), false, html);
+    // 展开事件列表里也没有它（只剩开关门和证据。）。
+    assert.equal((html.match(/class="evt"/g) || []).length, 2, html);
+    // 命令总数照旧（callId 去重）。
+    assert.ok(html.includes('跑了 1 条命令'), html);
+    // 未知的工具归因不展示，其它归因与总耗时不动。
+    assert.match(html, /class="stage-phase">阶段耗时 · 运行 20 秒<\/span>/, html);
+    assert.equal(html.includes('工具'), false, html);
+
+    // 正文里以 read / bash 开头的**模型文本**不能因为名字像工具就被删。
+    const body = [
+      { at: '2026-03-04T05:10:04.000Z', kind: 'text', text: 'read src/web/task.js 这一段要改' },
+      { at: '2026-03-04T05:10:05.000Z', kind: 'text', text: 'bash 里跑定向测试' },
+      { at: '2026-03-04T05:10:06.000Z', kind: 'note', text: '实时输出已裁剪：只保留最后 500 行。' },
+      { at: '2026-03-04T05:10:07.000Z', kind: 'usage', usage: { total: 99 } },
+      { at: '2026-03-04T05:10:08.000Z', kind: 'tool', text: 'bash: node --test' },
+    ];
+    const live = livePanelHtml({ lines: body, usage: { total: 99 } });
+    assert.ok(live.includes('read src/web/task.js 这一段要改'), '正文里的 read 开头文本被误删');
+    assert.ok(live.includes('bash 里跑定向测试'), '正文里的 bash 开头文本被误删');
+    assert.ok(live.includes('只保留最后 500 行'), 'note 横幅不变');
+    assert.match(live, /词元 99/, '用量不变');
+    assert.equal(live.includes('bash: node --test'), false, '工具碎片进了正文');
+    assert.match(liveMetaHtml({ lines: body }), /2 行/, '可见行数只数正文');
+    assert.equal(liveLinesHtml(body).includes('class="tool"'), false);
+    assert.equal(groupActivity(rows).length, 1);
   });
 
   test('LQ1 字面量 65 事件 stageListHtml 零未翻译，终态 L3 展示 SHA', async () => {
@@ -1252,8 +1334,8 @@ describe('实时输出', () => {
     assert.match(html, /1 行/);
   });
 
-  test('usage chunk 不当终端行；工具行有形状；勾选框默认开着', async () => {
-    const { livePanelHtml, liveLinesHtml } = await loaded;
+  test('usage chunk 不当终端行；tool 明细不进正文也不计行数；勾选框默认开着', async () => {
+    const { livePanelHtml, liveLinesHtml, liveMetaHtml } = await loaded;
     const empty = livePanelHtml({ lines: [] });
     assert.match(empty, /还没有实时输出/, '黑空一块看起来像坏了');
     assert.match(empty, /data-autoscroll/, '要能关掉自动滚动');
@@ -1269,7 +1351,24 @@ describe('实时输出', () => {
     assert.ok(withUsage.includes('第一行'));
     assert.equal(withUsage.includes('undefined'), false, 'usage chunk 被当终端行拼进来了');
     assert.match(withUsage, /词元 1,234/);
-    assert.match(liveLinesHtml([{ kind: 'tool', text: 'read a.ts' }]), /▸ read a\.ts/);
+
+    // tool chunk：既不进实时正文，也不进可见行数（AC2：工具调用先不展示明细）。
+    const toolLines = [
+      { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: 'read 了工单' },
+      { at: '2026-03-04T05:06:08.000Z', kind: 'tool', text: 'read a.ts' },
+      { at: '2026-03-04T05:06:09.000Z', kind: 'tool', text: 'bash: node --test' },
+    ];
+    const toolHtml = liveLinesHtml(toolLines);
+    assert.ok(toolHtml.includes('read 了工单'), toolHtml);
+    assert.equal(toolHtml.includes('read a.ts'), false, '工具碎片不该进实时正文');
+    assert.equal(toolHtml.includes('bash: node --test'), false, '工具碎片不该进实时正文');
+    assert.match(liveMetaHtml({ lines: toolLines }), /1 行/, '行数不把 tool 算进去');
+    // 只有工具碎片时不唐突：一个碎片也不泄漏到终端（没实时行时沿用既有退路）。
+    const onlyTools = livePanelHtml({ lines: toolLines.slice(1) });
+    assert.equal(onlyTools.includes('read a.ts'), false, onlyTools);
+    assert.match(onlyTools, /还没有实时输出|没有在这里留下输出行/);
+    // 工具的向上箭头形状已经不用了：产出里不再有这一个 span。
+    assert.equal(toolHtml.includes('class="tool"'), false, toolHtml);
   });
 
   test('终态且没有输出行：不再说「这一跳已经结束…原始输出里」', async () => {
@@ -1285,12 +1384,13 @@ describe('实时输出', () => {
 
   test('终端行时间只到钟点', async () => {
     const { liveLinesHtml } = await loaded;
+    // 下一条是 tool 行：它的存在只为了证明工具碎片不会被时间形状带进正文。
     const html = liveLinesHtml([
       { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' },
       { at: '2026-03-04T05:06:09.000Z', kind: 'tool', text: 'read src/a.ts' },
     ]);
     assert.equal(html.includes('"total"'), false);
-    assert.ok(html.includes('▸ read src/a.ts'));
+    assert.equal(html.includes('read src/a.ts'), false, 'tool 行不该进正文');
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z').slice(11)), html);
     assert.equal(html.includes(localStamp('2026-03-04T05:06:07.000Z')), false, '终端行不该带日期');
   });
@@ -1394,23 +1494,106 @@ describe('任务改动卡', () => {
 describe('输出末尾退路', () => {
   const loaded = import('../src/web/task.js');
 
-  test('没有实时行时用 attempt.output；有实时行不把旧跳当当前输出', async () => {
+  test('左侧当前实时输出永不填已保存输出；右侧入口才是历史尾部', async () => {
     const { livePanelHtml } = await loaded;
+    // 左侧是「当前实时输出」：把某一跳已保存的 output 填进来，人分不出屏幕上
+    // 这段是还在滚的、还是早就结束的。所以这一块**没有**退路。
     const hist = livePanelHtml({
       lines: [],
       running: false,
       historicalOutput: '脱敏后的尾巴\n第二行',
     });
-    assert.ok(hist.includes('输出末尾（已脱敏）'), hist);
-    assert.ok(hist.includes('脱敏后的尾巴'), hist);
-    assert.equal(hist.includes('还没有实时输出'), false, hist);
+    assert.equal(hist.includes('脱敏后的尾巴'), false, '左侧填了历史 output');
+    assert.equal(hist.includes('输出末尾（已脱敏）'), false, hist);
+    assert.match(hist, /没有在这里留下输出行/);
     const live = livePanelHtml({
       lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '正在滚' }],
       historicalOutput: '旧跳不该出现',
     });
     assert.ok(live.includes('正在滚'), live);
     assert.equal(live.includes('旧跳不该出现'), false, live);
-    assert.equal(live.includes('输出末尾（已脱敏）'), false, live);
+  });
+});
+
+describe('会话身份着色与历史尾部', () => {
+  const loaded = import('../src/web/task.js');
+  const identityModule = import('../src/web/session-output.js');
+
+  /** 本 Mission 的活动流：四类身份各一条，另加一个显式认不出的 kind。 */
+  const act = [
+    { attemptId: 'coord-1', kind: 'attempt.started', data: { kind: 'coordinator' } },
+    { attemptId: 'W-1.exec-1', kind: 'attempt.started', data: { kind: 'executor' } },
+    { attemptId: 'ir-1', kind: 'attempt.started', data: { kind: 'independent_reviewer' } },
+    { attemptId: 'p-1', kind: 'attempt.started', data: { kind: 'platform' } },
+    { attemptId: 'weird', kind: 'plan.updated', data: {} },
+  ];
+
+  test('实时正文按真实会话角色上色；未知不默认协调者；身份随数据补齐', async () => {
+    const { liveLinesHtml } = await loaded;
+    const { createOutputIdentity } = await identityModule;
+    const identity = createOutputIdentity({ missionId: 'M-1', activity: act });
+    const html = liveLinesHtml([
+      { at: '2026-03-04T05:00:01.000Z', kind: 'text', text: '协', attemptId: 'coord-1' },
+      { at: '2026-03-04T05:00:02.000Z', kind: 'text', text: '执', attemptId: 'W-1.exec-1' },
+      { at: '2026-03-04T05:00:03.000Z', kind: 'text', text: '检', attemptId: 'ir-1' },
+      { at: '2026-03-04T05:00:04.000Z', kind: 'text', text: '台', attemptId: 'p-1' },
+      { at: '2026-03-04T05:00:05.000Z', kind: 'text', text: '谜', attemptId: 'weird' },
+      { at: '2026-03-04T05:00:06.000Z', kind: 'note', text: '裁剪说明', attemptId: 'coord-1' },
+      { at: '2026-03-04T05:00:07.000Z', kind: 'tool', text: 'bash: node --test', attemptId: 'coord-1' },
+    ], true, identity);
+    for (const [cls, who] of [['so-coordinator', '协调者'], ['so-executor', '执行者'], ['so-reviewer', '检视者'], ['so-platform', '平台']]) {
+      assert.ok(html.includes('class="so-line ' + cls + '"'), `${cls} 没上屏：${html}`);
+      assert.ok(html.includes('>' + who + '<'), who + ' 没上屏：' + html);
+    }
+    assert.ok(html.includes('class="so-line so-unknown"'), html);
+    assert.ok(html.includes('>未知<'), html);
+    // note（裁剪说明）与 tool（工具碎片）照旧不进正文，实时的都保留。
+    assert.equal(html.includes('裁剪说明'), false, 'note 混进正文');
+    assert.equal(html.includes('bash: node --test'), false, '工具碎片进了正文');
+    // 身份随数据补齐：同一批行先在没有活动流时判未知，活动流一到就变色，
+    // 而且**没有**往行上写死（这正是不能缓存角色到 chunk 上的原因）。
+    const lines = [{ at: '', kind: 'text', text: 'x', attemptId: 'W-1.exec-1' }];
+    const before = liveLinesHtml(lines, true, createOutputIdentity({ missionId: 'M-1', activity: [] }));    assert.ok(before.includes('so-unknown'), '无活动流时不能默认协调者：' + before);
+    const after = liveLinesHtml(lines, true, createOutputIdentity({ missionId: 'M-1', activity: act }));
+    assert.ok(after.includes('so-executor'), after);
+    assert.equal(lines[0].role, undefined, '角色不能缓存在行对象上');
+  });
+
+  test('历史尾部只在 id 匹配、已结束且非空时给出默认折叠入口', async () => {
+    const { stageDetailHtml, groupActivity } = await loaded;
+    const endedRows = [
+      { at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } },
+      { at: '2026-03-04T05:01:00.000Z', kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: { endedBy: 'structured_submit' } },
+    ];
+    const ctx = { workItems: [{ id: 'W-1', title: 'x' }] };
+    const out = (rows: Record<string, any>[], attempt: Record<string, any> | null) =>
+      stageDetailHtml(groupActivity(rows)[0], ctx, attempt);
+
+    // 正例：id 对得上、已结束、output 非空。
+    const html = out(endedRows, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [], output: 'read a.ts\n第二行' });
+    assert.ok(html.includes('历史输出末尾') && html.includes('已保存原始尾部'), html);
+    assert.ok(html.includes('脱敏'), '要说清这是脱敏后的原始尾部');
+    assert.ok(html.includes('read a.ts'), '整份混合原文都要在，不按 read/bash 删行');
+    assert.ok(html.includes('第二行'), html);
+    assert.ok(html.includes('so-executor'), '历史尾部按同一套会话角色色');
+    // 默认**折叠**：入口不带 open。
+    assert.equal(/<details[^>]*open/.test(html), false, html);
+
+    // 反例一：还在跑（Attempt.status=in_progress）。
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-1', status: 'in_progress', evidence: [], output: '尾巴' }).includes('历史输出末尾'), false);
+    // 反例二：id 不是这一跳的（拿别的 Attempt 的输出顶进来）。
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-2', status: 'succeeded', evidence: [], output: '别人的尾巴' }).includes('历史输出末尾'), false);
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-2', status: 'succeeded', evidence: [], output: '别人的尾巴' }).includes('别人的尾巴'), false);
+    // 反例三：output 空 / 只有空白——不出现一个空折叠。
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [], output: '   \n' }).includes('历史输出末尾'), false);
+    assert.equal(out(endedRows, { attemptId: 'W-1.exec-1', status: 'succeeded', evidence: [] }).includes('历史输出末尾'), false);
+    // 反例四：环节本身还没结束。
+    const running = [{ at: '2026-03-04T05:00:00.000Z', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } }];
+    assert.equal(out(running, { attemptId: 'W-1.exec-1', status: 'in_progress', evidence: [], output: '还在滚' }).includes('历史输出末尾'), false);
+    // 反例五：缺 status 不能当成已结束——本组只有 started 时按进行中藏起来。
+    assert.equal(out(running, { attemptId: 'W-1.exec-1', evidence: [], output: '还在滚' }).includes('历史输出末尾'), false);
+    // 正例补：仍缺 status，但本组已有 attempt.ended，结束证据明确，可展示。
+    assert.ok(out(endedRows, { attemptId: 'W-1.exec-1', evidence: [], output: '已结束的尾巴' }).includes('历史输出末尾'), '本组已 ended 时缺 status 仍应展示');
   });
 });
 
@@ -1433,7 +1616,12 @@ describe('转义', () => {
         finalReview: { verdict: evil, reasons: [evil], mergedInto: evil },
       }, { evidence: [{ kind: evil, summary: evil, command: evil, exitCode: 1, output: evil }] }), true],
       [livePanelHtml({ lines: [{ at: '2026-03-04T05:06:07.000Z', kind: 'text', text: evil }, { kind: 'note', text: evil }] }), true],
-      [livePanelHtml({ lines: [], running: false, historicalOutput: evil }), true],
+      // 历史尾部：整份混合原文（可能含工具名）一并通过 esc 上屏，不按 read/bash 删行。
+      [stageDetailHtml(
+        groupActivity([{ at: '', kind: 'attempt.started', attemptId: 'W-1.exec-1', workItemId: 'W-1', data: { kind: 'executor' } }, { at: '', kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: {} }])[0],
+        { workItems: [{ id: 'W-1', title: 'x' }] },
+        { attemptId: 'W-1.exec-1', status: 'failed', evidence: [], output: 'read a.ts\n' + evil + '\nbash: node --test' },
+      ), true],
       [changesCardHtml({ stat: evil, files: [evil], pendingMemory: [evil] }), true],
       [changesCardHtml({ error: evil }), true],
       [contextMetricsBlockHtml([{ kind: 'attempt.ended', data: { contextMetrics: { brief: { renderedUtf8Bytes: 1 }, tools: [{ kind: evil, returnedUtf8Bytes: 3 }] } } }]), true],
