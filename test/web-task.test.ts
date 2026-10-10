@@ -585,8 +585,9 @@ describe('环节分组', () => {
   test('环节头显示阶段耗时、未知/未分类，单时间线与既有展开数量不变', async () => {
     const { stageListHtml } = await loaded;
     // 一条后端算好的归因投影（形状来自 GET /api/missions/:id 的 timeAttribution）：
-    // 已测的 agent_run / tool，未知的 unclassified（相关工具缺结束事件），
-    // 以及 durationMs 为 null 的验证窗——三种在环节头必须说得出区别。
+    // 已测的 agent_run，工具的两段（已测 + 未知），未知的 unclassified，
+    // 以及 durationMs 为 null 的验证窗——
+    // 展示时工具碎片（含未知工具）一律省略，其余归因与总耗时不动。
     const ctx = {
       ...W4_CTX,
       timeAttribution: {
@@ -596,6 +597,7 @@ describe('环节分组', () => {
         phases: [
           { kind: 'agent_run', attemptId: 'W-1649.exec-1', workItemId: 'W-1649', durationMs: 120000, countedInTotal: true, overlaps: [], quality: 'measured' },
           { kind: 'tool', attemptId: 'W-1649.exec-1', durationMs: 30000, countedInTotal: true, overlaps: [], quality: 'measured' },
+          { kind: 'tool', attemptId: 'W-1649.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
           { kind: 'unclassified', attemptId: 'W-1649.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown', note: '相关工具时长未知，未分类时长未知' },
           { kind: 'validation', attemptId: 'W-1649.exec-1', workItemId: 'W-1649', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
         ],
@@ -610,12 +612,16 @@ describe('环节分组', () => {
     ];
     const html = stageListHtml(rows, null, null, ctx);
     // 单时间线、既有环节数量不变：只往现有 stage-head 里加一栏，不新开容器。
-    // 数环节容器（<details class="stage ...>）而不是所有 <details>：命令清单本来
-    // 也有一个折叠块，混在一起数会把「多了一条命令」看成「多了一个环节」。
+    // 数环节容器（<details class="stage ...>）而不是所有 <details>：
+    // 混在一起数会把别的折叠块看成「多了一个环节」。
     assert.equal((html.match(/<details class="stage /g) || []).length, 6, '不许新增第二条时间线或多余环节');
     assert.equal((html.match(/<ul class="evt-list">/g) || []).length, 6, '环节容器仍是一组一个');
-    // 该跳的阶段栏：已测的两段给毫秒，未分类与验证给「未知」——不拿事件间隔凑数。
-    assert.match(html, /class="stage-phase">阶段耗时 · 运行 2 分 0 秒 · 工具 30 秒 · 未分类 未知 · 验证 未知</, html);
+    // 该跳的阶段栏：运行段给毫秒，未分类与验证给「未知」——不拿事件间隔凑数；
+    // 工具两段（已测 30 秒与未知）都不出现，且不因为它们被省略而改总耗时。
+    assert.match(html, /class="stage-phase">阶段耗时 · 运行 2 分 0 秒 · 未分类 未知 · 验证 未知</, html);
+    assert.equal(html.includes('工具 30 秒'), false, '已测的工具片段不该堆到环节头');
+    assert.equal(html.includes('工具 未知'), false, '未知的工具片段同样不展示');
+    assert.equal(ctx.timeAttribution.totalOccupiedMs, 120000, '省略展示不改后端算好的总耗时');
     // 没有归因投影的环节按「未知」显示，不编造。
     assert.ok(html.includes('阶段耗时 · 未知'), html);
     assert.ok(html.includes('跑了 1 条命令'), html);
@@ -695,7 +701,7 @@ describe('环节分组', () => {
     assert.equal(l3.includes('事件记录 · 不单独计量'), true, '检视记录不冒充运行尝试');
   });
 
-  test('命令族不逐条上屏：环节头汇总、清单可折叠、callId 去重、文本转义', async () => {
+  test('命令族与工具结束都不逐条上屏：只留计数，原始命令文本不展示，转义仍守', async () => {
     const { stageListHtml } = await loaded;
     const evil = '<img src=x onerror="alert(1)">';
     const rows = [
@@ -704,23 +710,88 @@ describe('环节分组', () => {
       { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
       { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: 'same' } },
       { kind: 'runtime.command.started', attemptId: 'W-1.exec-1', data: { callId: evil, command: 'rm ' + evil, exitCode: 1 } },
+      { kind: 'runtime.tool.completed', attemptId: 'W-1.exec-1', data: { callId: evil, name: 'bash' } },
       { kind: 'attempt.ended', attemptId: 'W-1.exec-1', data: { endedBy: 'structured_submit' } },
     ];
     const html = stageListHtml(rows, 'W-1.exec-1', null, { workItems: [{ id: 'W-1', title: 'x' }] });
     assert.equal(html.includes('runtime.command.started'), false, html);
     assert.equal(html.includes('runtime.command_tracking'), false, html);
+    assert.equal(html.includes('runtime.tool.completed'), false, html);
+    // 命令总数保留（callId 去重：same 两条算一条，evil 那条算一条）。
     assert.ok(html.includes('跑了 2 条命令'), html);
-    assert.match(html, /<details class="cmd-fold">/);
-    assert.equal(/<details class="cmd-fold"[^>]*open/.test(html), false, '命令清单默认收起');
-    assert.ok(html.includes('class="cmd-fold-head">2 条命令'), html);
-    assert.ok(html.includes('same'), html);
-    assert.ok(html.includes('命令 rm &lt;img'), html, '可用命令文字要上屏且转义');
-    assert.ok(html.includes('退出码 1'), html);
+    assert.equal(html.includes('跑了 3 条命令'), false, 'callId 去重没生效');
+    assert.equal(html.includes('跑了 1 条命令'), false, '工具结束被当成命令或命令被漏数');
+    // 原始命令明细（command 文本 / callId / 退出码）一律不上屏——
+    // 连纠不成标签的 callId 也不露：能拿到这些字段就够了。
+    assert.equal(html.includes('same'), false, html);
+    assert.equal(html.includes('命令 rm'), false, html);
+    assert.equal(html.includes('退出码 1'), false, html);
+    assert.equal(html.includes('cmd-fold'), false, '命令明细面板已移除');
+    // 不分错：即使命令文本里带了标签形状，也不再有机会被当标签解析。
     assert.equal(html.includes('<img'), false, html);
-    assert.ok(html.includes('&lt;img'), html);
-    // tracking / 命令族不得占普通 evt 行。
+    // 工具明细 / 命令族不得占普通 evt 行：只乘 attempt.started 与 attempt.ended。
     const evtCount = (html.match(/class="evt"/g) || []).length;
     assert.equal(evtCount, 2, html);
+
+    // 原始命令文本不再上屏，但**证据**里的 command 照旧要转义后展示：
+    // 「已修复」必须有可验证证据，不能以「工具明细降级」为理由把证据一起隐掉。
+    const { groupActivity, stageDetailHtml } = await loaded;
+    const group = groupActivity(rows)[0];
+    const detail = stageDetailHtml(group, { workItems: [{ id: 'W-1', title: 'x' }] }, {
+      evidence: [{ kind: 'test', summary: '跑了定向测试', command: 'rm ' + evil, exitCode: 1 }],
+    });
+    assert.ok(detail.includes('跑了定向测试'), detail);
+    assert.ok(detail.includes('退出码 1'), detail);
+    assert.equal(detail.includes('<img'), false, detail);
+    assert.ok(detail.includes('&lt;img'), '证据里的 command 要转义后展示');
+  });
+
+  test('合并场景：末条工具结束不进摘要/清单，工具归因消失，正文 read/bash 不误删', async () => {
+    const { stageListHtml, groupActivity, liveLinesHtml, livePanelHtml, liveMetaHtml } = await loaded;
+    // 一跳：末尾就是工具结束（没有别的非工具事件排在它后面）。
+    const rows = [
+      { at: '2026-03-04T05:10:00.000Z', kind: 'attempt.started', attemptId: 'W-9.exec-1', workItemId: 'W-9', data: {} },
+      { at: '2026-03-04T05:10:01.000Z', kind: 'evidence.submitted', attemptId: 'W-9.exec-1', workItemId: 'W-9', data: { kind: 'test', exitCode: 0 } },
+      { at: '2026-03-04T05:10:02.000Z', kind: 'runtime.command.started', attemptId: 'W-9.exec-1', data: { callId: 'c1' } },
+      { at: '2026-03-04T05:10:03.000Z', kind: 'runtime.tool.completed', attemptId: 'W-9.exec-1', data: { callId: 'c1', name: 'bash' } },
+    ];
+    const ctx = {
+      workItems: [{ id: 'W-9', title: '后端' }],
+      timeAttribution: { schemaVersion: 1, coverage: 'partial', totalOccupiedMs: 20000, phases: [
+        { kind: 'agent_run', attemptId: 'W-9.exec-1', durationMs: 20000, countedInTotal: true, overlaps: [], quality: 'measured' },
+        { kind: 'tool', attemptId: 'W-9.exec-1', durationMs: null, countedInTotal: false, overlaps: [], quality: 'unknown' },
+      ] },
+    };
+    const html = stageListHtml(rows, null, null, ctx);
+    // 末条工具结束不当这一跳的摘要（「工具结束：bash」不是「干了什么」）。
+    assert.equal(html.includes('工具结束'), false, html);
+    assert.equal(html.includes('runtime.tool.completed'), false, html);
+    assert.equal(html.includes('▸'), false, html);
+    // 展开事件列表里也没有它（只剩开关门和证据。）。
+    assert.equal((html.match(/class="evt"/g) || []).length, 2, html);
+    // 命令总数照旧（callId 去重）。
+    assert.ok(html.includes('跑了 1 条命令'), html);
+    // 未知的工具归因不展示，其它归因与总耗时不动。
+    assert.match(html, /class="stage-phase">阶段耗时 · 运行 20 秒<\/span>/, html);
+    assert.equal(html.includes('工具'), false, html);
+
+    // 正文里以 read / bash 开头的**模型文本**不能因为名字像工具就被删。
+    const body = [
+      { at: '2026-03-04T05:10:04.000Z', kind: 'text', text: 'read src/web/task.js 这一段要改' },
+      { at: '2026-03-04T05:10:05.000Z', kind: 'text', text: 'bash 里跑定向测试' },
+      { at: '2026-03-04T05:10:06.000Z', kind: 'note', text: '实时输出已裁剪：只保留最后 500 行。' },
+      { at: '2026-03-04T05:10:07.000Z', kind: 'usage', usage: { total: 99 } },
+      { at: '2026-03-04T05:10:08.000Z', kind: 'tool', text: 'bash: node --test' },
+    ];
+    const live = livePanelHtml({ lines: body, usage: { total: 99 } });
+    assert.ok(live.includes('read src/web/task.js 这一段要改'), '正文里的 read 开头文本被误删');
+    assert.ok(live.includes('bash 里跑定向测试'), '正文里的 bash 开头文本被误删');
+    assert.ok(live.includes('只保留最后 500 行'), 'note 横幅不变');
+    assert.match(live, /词元 99/, '用量不变');
+    assert.equal(live.includes('bash: node --test'), false, '工具碎片进了正文');
+    assert.match(liveMetaHtml({ lines: body }), /2 行/, '可见行数只数正文');
+    assert.equal(liveLinesHtml(body).includes('class="tool"'), false);
+    assert.equal(groupActivity(rows).length, 1);
   });
 
   test('LQ1 字面量 65 事件 stageListHtml 零未翻译，终态 L3 展示 SHA', async () => {
@@ -1252,8 +1323,8 @@ describe('实时输出', () => {
     assert.match(html, /1 行/);
   });
 
-  test('usage chunk 不当终端行；工具行有形状；勾选框默认开着', async () => {
-    const { livePanelHtml, liveLinesHtml } = await loaded;
+  test('usage chunk 不当终端行；tool 明细不进正文也不计行数；勾选框默认开着', async () => {
+    const { livePanelHtml, liveLinesHtml, liveMetaHtml } = await loaded;
     const empty = livePanelHtml({ lines: [] });
     assert.match(empty, /还没有实时输出/, '黑空一块看起来像坏了');
     assert.match(empty, /data-autoscroll/, '要能关掉自动滚动');
@@ -1269,7 +1340,24 @@ describe('实时输出', () => {
     assert.ok(withUsage.includes('第一行'));
     assert.equal(withUsage.includes('undefined'), false, 'usage chunk 被当终端行拼进来了');
     assert.match(withUsage, /词元 1,234/);
-    assert.match(liveLinesHtml([{ kind: 'tool', text: 'read a.ts' }]), /▸ read a\.ts/);
+
+    // tool chunk：既不进实时正文，也不进可见行数（AC2：工具调用先不展示明细）。
+    const toolLines = [
+      { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: 'read 了工单' },
+      { at: '2026-03-04T05:06:08.000Z', kind: 'tool', text: 'read a.ts' },
+      { at: '2026-03-04T05:06:09.000Z', kind: 'tool', text: 'bash: node --test' },
+    ];
+    const toolHtml = liveLinesHtml(toolLines);
+    assert.ok(toolHtml.includes('read 了工单'), toolHtml);
+    assert.equal(toolHtml.includes('read a.ts'), false, '工具碎片不该进实时正文');
+    assert.equal(toolHtml.includes('bash: node --test'), false, '工具碎片不该进实时正文');
+    assert.match(liveMetaHtml({ lines: toolLines }), /1 行/, '行数不把 tool 算进去');
+    // 只有工具碎片时不唐突：一个碎片也不泄漏到终端（没实时行时沿用既有退路）。
+    const onlyTools = livePanelHtml({ lines: toolLines.slice(1) });
+    assert.equal(onlyTools.includes('read a.ts'), false, onlyTools);
+    assert.match(onlyTools, /还没有实时输出|没有在这里留下输出行/);
+    // 工具的向上箭头形状已经不用了：产出里不再有这一个 span。
+    assert.equal(toolHtml.includes('class="tool"'), false, toolHtml);
   });
 
   test('终态且没有输出行：不再说「这一跳已经结束…原始输出里」', async () => {
@@ -1285,12 +1373,13 @@ describe('实时输出', () => {
 
   test('终端行时间只到钟点', async () => {
     const { liveLinesHtml } = await loaded;
+    // 下一条是 tool 行：它的存在只为了证明工具碎片不会被时间形状带进正文。
     const html = liveLinesHtml([
       { at: '2026-03-04T05:06:07.000Z', kind: 'text', text: '第一行' },
       { at: '2026-03-04T05:06:09.000Z', kind: 'tool', text: 'read src/a.ts' },
     ]);
     assert.equal(html.includes('"total"'), false);
-    assert.ok(html.includes('▸ read src/a.ts'));
+    assert.equal(html.includes('read src/a.ts'), false, 'tool 行不该进正文');
     assert.ok(html.includes(localStamp('2026-03-04T05:06:07.000Z').slice(11)), html);
     assert.equal(html.includes(localStamp('2026-03-04T05:06:07.000Z')), false, '终端行不该带日期');
   });

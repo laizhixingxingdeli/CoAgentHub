@@ -26,7 +26,6 @@ import {
   changesLoadingText,
   changesTitle,
   commandCountLabel,
-  commandDetail,
   contextMetricLegendLine,
   contextMetricsMissingText,
   contextMetricsTitle,
@@ -326,20 +325,38 @@ function stageLabel(group, context) {
   return stageName(fake, context);
 }
 
-/** 组内最能代表这一跳的事件：优先非开关门、也非命令族（命令族折叠，不当摘要）。 */
+/**
+ * 工具调用明细的**呈现过滤**谓词（Contract AC2：工具调用先不显示明细）。
+ *
+ * 命中三类：`runtime.command.*`（单条命令）、`runtime.command_tracking.*`
+ * （跟踪开关）、`runtime.tool.completed`（末条工具结束）。它们都不进环节摘要、
+ * 不进展开事件列表、也不进实时正文——一跳二十几条 started 再加一条结束摘要堆上来，
+ * 人看到的是一屏碎片，反而找不到「这一跳到底干了什么」。
+ *
+ * 这里**只是呈现过滤**：命令总数（startedCommands 的 callId 去重）、证据里的
+ * command / exitCode、上下文指标与用量一律照旧——顺手把计数也滤掉的话，人会
+ * 以为工具压根没跑过，那比多显示几条更糟。也因为它只管显示，所以不放进
+ * narrate.js：翻译表那层仍要认得这些 kind（覆盖测试对命令族豁免单条翻译）。
+ */
+function isToolDetailKind(kind) {
+  const k = kind === undefined || kind === null ? '' : String(kind);
+  return isRuntimeCommand(k) || k === 'runtime.tool.completed';
+}
+
+/** 组内最能代表这一跳的事件：优先非开关门、也非工具调用明细（明细降级，不当摘要）。 */
 function representativeEvent(events) {
   const rows = events || [];
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const kind = rows[i] && rows[i].kind;
     if (!kind || kind === 'attempt.started' || kind === 'attempt.ended') continue;
-    if (isRuntimeCommand(kind)) continue;
+    if (isToolDetailKind(kind)) continue;
     return rows[i];
   }
-  // 只剩开关门时仍用末条（那一跳确实只有开关）；命令族不当代表——
-  // 它们不在翻译表里，拿来当摘要会变成「未翻译」。
+  // 只剩开关门时仍用末条（那一跳确实只有开关）；工具调用明细不当代表——
+  // 拿「工具结束：bash」当这一跳的摘要，等于把末条碎片说成这一跳干了什么。
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const kind = rows[i] && rows[i].kind;
-    if (kind && !isRuntimeCommand(kind)) return rows[i];
+    if (kind && !isToolDetailKind(kind)) return rows[i];
   }
   return null;
 }
@@ -363,18 +380,6 @@ function startedCommands(events) {
     out.push(e);
   }
   return out;
-}
-
-function commandFoldHtml(events) {
-  const cmds = startedCommands(events);
-  if (cmds.length === 0) return '';
-  const items = cmds
-    .map((e) => '<li class="cmd">' + esc(commandDetail(e)) + '</li>')
-    .join('');
-  return '<details class="cmd-fold">'
-    + '<summary class="cmd-fold-head">' + esc(commandCountLabel(cmds.length)) + '</summary>'
-    + '<ul class="cmd-list">' + items + '</ul>'
-    + '</details>';
 }
 
 /** 这一跳的用量一句话。没有 ended 事件时说的是原因，不是一个孤零零的 —。 */
@@ -586,7 +591,11 @@ function phasesOfGroup(group, attribution) {
  * 凑一个数出来。阶段投影不用当前时间闭合（所以这里不读 ctx.nowIso）。
  */
 function stagePhaseLine(group, ctx) {
-  const phases = phasesOfGroup(group, ctx && ctx.timeAttribution);
+  // kind=tool 的逐项碎片只影响展示：时长仍在那条阶段投影里（后端算的总耗时不变），
+  // 但不堆到环节头上说「工具 30 秒」——工具时长已经是「跑了几条命令」之外的另一回事，
+  // 而一屏上同时有命令数、工具时长、未分类时长时，人读不出该看哪一个。
+  const phases = phasesOfGroup(group, ctx && ctx.timeAttribution)
+    .filter((p) => !p || p.kind !== 'tool');
   if (phases.length === 0) return '阶段耗时 · 未知';
   const parts = phases.map((p) => {
     const label = PHASE_KIND_LABELS[p.kind] || String(p.kind);
@@ -617,9 +626,9 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
       const badge = shown.badge;
       const key = stageKey(g);
       const head = representativeEvent(g.events);
-      const summary = head && !isRuntimeCommand(head.kind) ? narrateEvent(head, context).action : '';
+      const summary = head && !isToolDetailKind(head.kind) ? narrateEvent(head, context).action : '';
       const rows = g.events
-        .filter((e) => !isRuntimeCommand(e && e.kind))
+        .filter((e) => !isToolDetailKind(e && e.kind))
         .map((e) => eventRowHtml(e, indexOf.has(e) ? indexOf.get(e) : -1, selectedKey, context))
         .join('');
       const cmds = startedCommands(g.events);
@@ -653,7 +662,6 @@ export function stageListHtml(activity, selectedAttemptId, selectedKey, ctx, exp
         +   (contextMetricsFromEvents(g.events) ? contextMetricsCompactHtml(g.events) : '')
         + '</summary>'
         + '<ul class="evt-list">' + rows + '</ul>'
-        + commandFoldHtml(g.events)
         + '</details>';
     })
     .join('');
@@ -851,7 +859,7 @@ function escalationBlock(log, attemptId) {
  * 终审块会把别人的 SHA 贴到投递/记忆落地上，看起来像平台在放行。
  */
 function platformEventsBlock(events, ctx) {
-  const rows = (events || []).filter((e) => e && !isRuntimeCommand(e.kind));
+  const rows = (events || []).filter((e) => e && !isToolDetailKind(e.kind));
   // 仅命令族时不另开空态 section：下面 stageDetailHtml 已有「还没有把正文写回平台」。
   // 这里再写一句人话就是第二份叙事，和 narrate 会漂。
   if (rows.length === 0) return '';
@@ -1205,6 +1213,11 @@ export function changesCardHtml(payload) {
  * 混在正文末尾会被读成「后面还有」，意思正好反过来，所以拎出去挂横幅
  * （见 liveNoteHtml）。
  *
+ * `kind === 'tool'`（工具调用碎片）同样不进正文，也不计进右上角那个行数：
+ * 工具一条一行地滚过去，会把正文挤得只剩零星几行，而它能告诉人的只是
+ * 「跑过什么」——那件事已经由环节头上的命令总数与证据里的 command 说了。
+ * 注意它**不是**被删掉：chunk 仍留在 st.live.lines 里，只是不画。
+ *
  * 空的时候必须有一句说明，而且要看任务还在不在跑：
  *   - 已经不跑了：输出不会再来，直接说这里没留下行。**不能**再说「完整输出在
  *     下面的原始输出里」——原始数据 tab 已经删了，那句会把人指向一个空处。
@@ -1212,19 +1225,14 @@ export function changesCardHtml(payload) {
  * 两种情况都不能留空白：黑空的一块看起来像坏了。
  */
 export function liveLinesHtml(chunks, running) {
-  const lines = [];
-  for (const c of chunks || []) {
-    if (c && c.kind !== 'usage' && c.kind !== 'note') lines.push(c);
-  }
+  const lines = liveTextLines(chunks);
   if (lines.length === 0) {
     return running === false
       ? '<span class="t">这一跳没有在这里留下输出行。</span>'
       : '<span class="t">还没有实时输出。agent 跑起来时这里会一行行出现。</span>';
   }
   return lines
-    .map((c) => (c.kind === 'tool'
-      ? '<span class="tool">▸ ' + esc(c.text) + '</span>'
-      : '<span class="t">' + esc(formatClock(c.at)) + '</span>  ' + esc(c.text)))
+    .map((c) => '<span class="t">' + esc(formatClock(c.at)) + '</span>  ' + esc(c.text))
     .join('\n');
 }
 
@@ -1246,21 +1254,26 @@ export function liveNoteHtml(chunks) {
 /** 终端块右上角那一行元信息（行数与累计用量）。勾选框不在里面，不被每秒重写。 */
 export function liveMetaHtml(live) {
   const lines = (live && live.lines) || [];
-  const count = lines.filter((c) => c && c.kind !== 'usage' && c.kind !== 'note').length;
+  // 行数与画面上真能数出来的行同源（liveTextLines）：告诉人「14 行」而正文里
+  // 数不出 14 行，比不显示行数更让人以为整块坏了。
+  const count = liveTextLines(lines).length;
   return '<span class="muted">' + esc(num(count)) + ' 行</span>'
     + (live && live.usage ? '<span class="mono muted">词元 ' + esc(num(live.usage.total)) + '</span>' : '');
 }
 
 /**
- * 实时输出的外框：勾选框 + 元信息 + 裁剪横幅 + 终端块。
+ * 实时输出里算作「正文行」的 chunk。note / usage 本就不当行（一个挂横幅、
+ * 一个摆数字，usage 还没有 text，塞进终端会吐出一行 undefined）；tool 是工具
+ * 调用碎片，按 Contract AC2 先不展示明细、也不进可见行数。
  *
- * 只有首帧整块建；之后 pushLive 逐次只重写 pre / 元信息 / 横幅里面。外框每秒
- * 重建一次，「自动滚动」勾选框和它的焦点就每秒被丢一次，人正要点它时永远点不中。
+ * 三处调用（liveLinesHtml 的画、liveMetaHtml 的行数、livePanelHtml / loadAttempt
+ * 的「有没有实时行」）必须走同一个谓词：分开写两份，轻则行数与画面对不上，
+ * 重则只有工具碎片的流被判成「还没输出」而回退到旧跳尾部。
  */
 function liveTextLines(chunks) {
   const lines = [];
   for (const c of chunks || []) {
-    if (c && c.kind !== 'usage' && c.kind !== 'note') lines.push(c);
+    if (c && c.kind !== 'usage' && c.kind !== 'note' && c.kind !== 'tool') lines.push(c);
   }
   return lines;
 }
@@ -1273,6 +1286,12 @@ function historicalOutputText(live) {
   return s.trim() === '' ? '' : s;
 }
 
+/**
+ * 实时输出的外框：勾选框 + 元信息 + 裁剪横幅 + 终端块。
+ *
+ * 只有首帧整块建；之后 pushLive 逐次只重写 pre / 元信息 / 横幅里面。外框每秒
+ * 重建一次，「自动滚动」勾选框和它的焦点就每秒被丢一次，人正要点它时永远点不中。
+ */
 export function livePanelHtml(live) {
   const lines = (live && live.lines) || [];
   const hasLive = liveTextLines(lines).length > 0;
