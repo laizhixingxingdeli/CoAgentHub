@@ -39,6 +39,7 @@ import type {
   QueuedHopRepository,
 } from './ports.ts';
 import type { Platform } from './platform.ts';
+import type { HostedRunRequest } from './platform/auto-resume.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_PASSTHROUGH_VAR,
@@ -295,6 +296,34 @@ function pickHostedCandidates(
 }
 
 /**
+ * 自动续跑（retry-wake）发给托管运行的请求体：和 `POST /api/control/run-mission` 同一形状，
+ * 由下面的 {@link parseHostedMissionBody} 校验。启动参数来自 Mission 上记下的 `mission.run_requested`。
+ *
+ * 环境透传只能是 `-`：托管运行拒绝任何额外变量（HOSTED_AGENT_ENV_UNPROVEN_MESSAGE），
+ * 变量值也从不进事件，所以续跑和首次启动的环境口径一致。
+ */
+export function resumeMissionBody(input: {
+  readonly projectId: string;
+  readonly missionId: string;
+  readonly contract: MissionContract;
+  readonly request: HostedRunRequest;
+  readonly state: string;
+}): Record<string, unknown> {
+  const { request } = input;
+  return {
+    spec: { projectId: input.projectId, missionId: input.missionId, contract: input.contract },
+    cwd: request.cwd,
+    adapter: request.adapter,
+    state: input.state,
+    store: 'file',
+    env: { [SPAWN_ENV_PASSTHROUGH_VAR]: '-' },
+    ...(request.maxRounds !== undefined ? { maxRounds: request.maxRounds } : {}),
+    ...(request.acceptStaleBase ? { acceptStaleBase: true } : {}),
+    ...(request.origin ? { origin: request.origin } : {}),
+  };
+}
+
+/**
  * 校验 CLI 回环过来的 body。失败必须发生在任何 createMission / persist / 开跑之前。
  * 透传名单只看 body 里 CLI 提交的声明，不看服务 process.env。
  * 持锁身份以 heldState 为准，不把 body.state 当权威路径。
@@ -459,6 +488,17 @@ export async function runHostedMission(
     });
   }
   ctx.onStarted?.(parsed.spec.missionId);
+  // 记下续跑要复用的启动参数：Mission 进入退避后托管运行会退出，到点由服务自动接着跑
+  // （retry-wake），服务重启后也要读得回来——这些只有托管入口知道。记不上不挡启动。
+  await platform
+    .recordHostedRunRequest(parsed.spec.missionId, {
+      cwd: parsed.cwd,
+      adapter: parsed.adapter,
+      ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }),
+      acceptStaleBase: parsed.acceptStaleBase,
+      ...(parsed.origin ? { origin: parsed.origin } : {}),
+    })
+    .catch(() => undefined);
   emit('stdout', `Mission ${parsed.spec.missionId}；平台监听 ${ctx.baseUrl}`);
   emit('stdout', `worktree: ${parsed.cwd}`);
   emit('stdout', `适配器  : ${parsed.adapter}`);

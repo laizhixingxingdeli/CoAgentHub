@@ -1,6 +1,7 @@
 import { ACCEPTANCE_STATUSES } from '../../kernel/index.ts';
 import type { AcceptanceResult, Mission, WorkOrder, WorkItemStatus } from '../../kernel/index.ts';
 import { invalidArgvReason } from '../validation/engine.ts';
+import { describeScopeIssues, exactFileScopeIssues } from '../scope-paths.ts';
 import type { WorkOrderStandardWarning } from './types.ts';
 import { PlatformRuleError } from './context.ts';
 
@@ -110,6 +111,36 @@ export function checkWorkOrderValidationArgv(order: WorkOrder): void {
         '["node","--import","tsx","--test","src/*.test.ts"]（glob 由 Node 自己展开）。',
     );
   }
+}
+
+/**
+ * 工单 `allowedScope` 合法性校验（建单 / 修订 / 派发共用，P1 范围前置校验）。
+ *
+ * 执行者交卷之后，检查点只提交范围里点名的精确文件；范围写成目录或通配符，到那时才被拒，
+ * 一整跳执行者白跑、改动还留在工作区里。所以拒绝提前到收单这一刻，并说出哪一条、为什么、
+ * 改成什么。
+ *
+ * 只在装配了检查点的工作区上生效（`enforcing`）：原地模式与内存测试平台没有检查点，
+ * 目录前缀对它们仍是合法的验证器语义——校验必须和它之后要执行的那道检查点一样严，
+ * 不能比它更严。
+ */
+export function checkWorkOrderScope(order: WorkOrder, enforcing: boolean): void {
+  if (!enforcing) return;
+  const scope = order.allowedScope;
+  if (!Array.isArray(scope) || scope.length === 0) {
+    throw new PlatformRuleError(
+      'WORK_ORDER_SCOPE_INVALID',
+      '工单 allowedScope 不能为空：执行者交卷后的检查点只提交范围里点名的文件，空范围会让这一跳白跑。' +
+        '写出这张工单要改的具体文件，例如 ["src/foo.ts", "test/foo.test.ts"]；只读验证单也要给一个会被读到的文件，并把 diffSize 设成 0/0。',
+    );
+  }
+  const issues = exactFileScopeIssues(scope);
+  if (issues.length === 0) return;
+  throw new PlatformRuleError(
+    'WORK_ORDER_SCOPE_INVALID',
+    `工单 allowedScope 有 ${issues.length} 条不能作为授权范围：${describeScopeIssues(issues)}。` +
+      '工单范围必须是相对仓库根的精确文件路径（契约层的范围可以写到目录，工单不行）。',
+  );
 }
 
 /**

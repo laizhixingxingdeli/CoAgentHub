@@ -11,13 +11,16 @@ import { freezeDeep } from '../../kernel/index.ts';
 import type {
   ReviewAuthority,
   ValidationCheckResult,
+  ValidationDiffBinaryFile,
   ValidationDiffSizeUnknownDimension,
+  ValidationDiffUnmeasurable,
   ValidationReport,
   WorkOrderValidationDiffSize,
 } from '../../kernel/index.ts';
 import type { Clock, IdGenerator } from '../ports.ts';
-import type { ChangedPathReader, CommandRunner, DiffFactReader } from './ports.ts';
+import type { ChangedPathReader, CommandRunner, DiffFactReader, DiffLineFacts } from './ports.ts';
 import { redactSecrets } from '../redact.ts';
+import { isEscapePath, normalizeScopePath, scopeMatches } from '../scope-paths.ts';
 
 export const VALIDATION_POLICY_REVISION = 1;
 export const OUTPUT_TAIL_MAX_CHARS = 4096;
@@ -306,58 +309,12 @@ export class ValidationEngine {
 
   async #runDiffSizeCheck(input: ValidationInput): Promise<ValidationCheckResult> {
     const startedAt = this.#clock.now().toISOString();
-    const limitsRaw = input.diffSize!;
-    const limits: {
-      maxChangedFiles?: number;
-      maxChangedLines?: number;
-    } = {};
-    if (limitsRaw.maxChangedFiles !== undefined) {
-      limits.maxChangedFiles = limitsRaw.maxChangedFiles;
-    }
-    if (limitsRaw.maxChangedLines !== undefined) {
-      limits.maxChangedLines = limitsRaw.maxChangedLines;
-    }
-
-    const used: { changedFiles?: number; changedLines?: number } = {};
+    const limits = copyDiffSizeLimits(input.diffSize!);
+    const used: DiffSizeUsed = {};
     const unknown: ValidationDiffSizeUnknownDimension[] = [];
-
-    if (limits.maxChangedFiles !== undefined) {
-      try {
-        const files = await this.#paths.listChanged({
-          missionId: input.missionId,
-          baseRevision: input.baseRevision,
-          projectRoot: input.projectRoot,
-        });
-        used.changedFiles = files.length;
-      } catch {
-        unknown.push('changedFiles');
-      }
-    }
-
-    if (limits.maxChangedLines !== undefined) {
-      if (!this.#diffFacts) {
-        unknown.push('changedLines');
-      } else {
-        try {
-          const facts = await this.#diffFacts.measureLines({
-            missionId: input.missionId,
-            baseRevision: input.baseRevision,
-            projectRoot: input.projectRoot,
-          });
-          if (
-            facts.changedLines === undefined ||
-            facts.unknown.includes('changedLines')
-          ) {
-            unknown.push('changedLines');
-          } else {
-            used.changedLines = facts.changedLines;
-          }
-        } catch {
-          unknown.push('changedLines');
-        }
-      }
-    }
-
+    await this.#countChangedFiles(input, limits, used, unknown);
+    // 文本行数与二进制共用一次读取；没人要求就不读（读一次要遍历整个未跟踪集合）。
+    const facts = await this.#measureLinesAndBinaries(input, limits, used, unknown);
     const endedAt = this.#clock.now().toISOString();
 
     // 上限按字面「最多」：恰好到上限算通过，超过才失败。
@@ -367,52 +324,191 @@ export class ValidationEngine {
     // 却在这一项上被判超限，Lightweight 又没有升级出口，Mission 就停住等人。
     // 预算（budget-usage 的 compareUsage）仍是 `>=`：那是「下一步动作前」的闸，用满额度就不该
     // 再开新的一跳；这里是对已经产出的结果做事后检查，两者语义本来就不同。
-    const over: string[] = [];
-    if (
-      limits.maxChangedFiles !== undefined &&
-      used.changedFiles !== undefined &&
-      used.changedFiles > limits.maxChangedFiles
-    ) {
-      over.push(
-        `changedFiles ${used.changedFiles} > maxChangedFiles ${limits.maxChangedFiles}`,
-      );
-    }
-    if (
-      limits.maxChangedLines !== undefined &&
-      used.changedLines !== undefined &&
-      used.changedLines > limits.maxChangedLines
-    ) {
-      over.push(
-        `changedLines ${used.changedLines} > maxChangedLines ${limits.maxChangedLines}`,
-      );
-    }
-
-    const passed = unknown.length === 0 && over.length === 0;
-    let summary: string;
-    if (unknown.length > 0) {
-      summary = `diff-size unknown measurement: ${unknown.join(', ')}`;
-    } else if (over.length > 0) {
-      summary = `diff-size exceeded: ${over.join('; ')}`;
-    } else {
-      const bits: string[] = [];
-      if (used.changedFiles !== undefined) bits.push(`files=${used.changedFiles}`);
-      if (used.changedLines !== undefined) bits.push(`lines=${used.changedLines}`);
-      summary = bits.length > 0 ? `diff-size within limits (${bits.join(', ')})` : 'diff-size ok';
-    }
-
+    const over = overLimitMessages(limits, used);
     return freezeDeep({
       kind: 'diff-size' as const,
-      passed,
+      passed: unknown.length === 0 && over.length === 0,
       startedAt,
       endedAt,
-      summary,
+      summary: diffSizeSummary(unknown, over, used, facts.unmeasurable),
       diffSize: {
         limits: Object.freeze({ ...limits }),
         used: Object.freeze({ ...used }),
         unknown: Object.freeze([...unknown]) as readonly ValidationDiffSizeUnknownDimension[],
+        ...(facts.binaryFiles !== undefined ? { binaryFiles: facts.binaryFiles } : {}),
+        ...(facts.unmeasurable !== undefined && facts.unmeasurable.length > 0 ? { unmeasurable: facts.unmeasurable } : {}),
       },
     });
   }
+
+  async #countChangedFiles(
+    input: ValidationInput,
+    limits: DiffSizeLimits,
+    used: DiffSizeUsed,
+    unknown: ValidationDiffSizeUnknownDimension[],
+  ): Promise<void> {
+    if (limits.maxChangedFiles === undefined) return;
+    try {
+      const files = await this.#paths.listChanged({
+        missionId: input.missionId,
+        baseRevision: input.baseRevision,
+        projectRoot: input.projectRoot,
+      });
+      used.changedFiles = files.length;
+    } catch {
+      unknown.push('changedFiles');
+    }
+  }
+
+  async #measureLinesAndBinaries(
+    input: ValidationInput,
+    limits: DiffSizeLimits,
+    used: DiffSizeUsed,
+    unknown: ValidationDiffSizeUnknownDimension[],
+  ): Promise<{ binaryFiles?: ValidationDiffBinaryFile[]; unmeasurable?: ValidationDiffUnmeasurable[] }> {
+    const wanted = {
+      lines: limits.maxChangedLines !== undefined,
+      binaryFiles: limits.maxChangedBinaryFiles !== undefined,
+      binaryBytes: limits.maxChangedBinaryBytes !== undefined,
+    };
+    if (!wanted.lines && !wanted.binaryFiles && !wanted.binaryBytes) return {};
+    const facts = await this.#readDiffFacts(input);
+    if (!facts) {
+      // 读取器缺失 / 抛错：要求了的维度一律量不出，fail-closed。
+      if (wanted.lines) unknown.push('changedLines');
+      if (wanted.binaryFiles) unknown.push('changedBinaryFiles');
+      if (wanted.binaryBytes) unknown.push('changedBinaryBytes');
+      return {};
+    }
+    return applyDiffFacts(facts, input.allowedScope, wanted, used, unknown);
+  }
+
+  async #readDiffFacts(input: ValidationInput): Promise<DiffLineFacts | undefined> {
+    if (!this.#diffFacts) return undefined;
+    try {
+      return await this.#diffFacts.measureLines({
+        missionId: input.missionId,
+        baseRevision: input.baseRevision,
+        projectRoot: input.projectRoot,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+type DiffSizeLimits = NonNullable<ValidationCheckResult['diffSize']>['limits'];
+type DiffSizeUsed = {
+  -readonly [K in keyof NonNullable<ValidationCheckResult['diffSize']>['used']]?: number;
+};
+
+/** 只拷贝工单真给了的上限：缺省 = 该维不在 force。 */
+export function copyDiffSizeLimits(raw: WorkOrderValidationDiffSize): DiffSizeLimits {
+  const out: { -readonly [K in keyof DiffSizeLimits]?: number } = {};
+  for (const key of [
+    'maxChangedFiles',
+    'maxChangedLines',
+    'maxChangedBinaryFiles',
+    'maxChangedBinaryBytes',
+  ] as const) {
+    if (raw[key] !== undefined) out[key] = raw[key];
+  }
+  return out;
+}
+
+/**
+ * 把读取器给的事实记进 used / unknown：文本行数、二进制的路径 / 个数 / 字节，
+ * 并标出每个二进制文件是否在工单范围内（未授权的由 changed-paths 判失败）。
+ */
+function applyDiffFacts(
+  facts: DiffLineFacts,
+  allowedScope: readonly string[],
+  wanted: { lines: boolean; binaryFiles: boolean; binaryBytes: boolean },
+  used: DiffSizeUsed,
+  unknown: ValidationDiffSizeUnknownDimension[],
+): { binaryFiles?: ValidationDiffBinaryFile[]; unmeasurable: ValidationDiffUnmeasurable[] } {
+  const unmeasurable = [...(facts.unmeasurable ?? [])];
+  if (wanted.lines) {
+    if (facts.changedLines === undefined || facts.unknown.includes('changedLines')) unknown.push('changedLines');
+    else used.changedLines = facts.changedLines;
+  }
+  if (facts.binaryFiles === undefined) {
+    // 旧读取器看不到二进制：有二进制上限在 force 时不能当 0 通过。
+    if (wanted.binaryFiles) unknown.push('changedBinaryFiles');
+    if (wanted.binaryBytes) unknown.push('changedBinaryBytes');
+    return { unmeasurable };
+  }
+  const scope = allowedScope.map(normalizeScopePath);
+  const binaryFiles = facts.binaryFiles.map((file) => ({
+    ...file,
+    authorized: scope.some((entry) => scopeMatches(entry, normalizeScopePath(file.path))),
+  }));
+  recordBinaryUsage(binaryFiles, wanted, used, unknown);
+  return { binaryFiles, unmeasurable };
+}
+
+function diffSizeSummary(
+  unknown: readonly ValidationDiffSizeUnknownDimension[],
+  over: readonly string[],
+  used: DiffSizeUsed,
+  unmeasurable: readonly ValidationDiffUnmeasurable[] | undefined,
+): string {
+  if (unknown.length > 0) {
+    return `diff-size unknown measurement: ${unknown.join(', ')}${unmeasurableNote(unmeasurable)}`;
+  }
+  if (over.length > 0) return `diff-size exceeded: ${over.join('; ')}`;
+  return withinLimitsSummary(used);
+}
+
+function recordBinaryUsage(
+  files: readonly ValidationDiffBinaryFile[],
+  wanted: { binaryFiles: boolean; binaryBytes: boolean },
+  used: DiffSizeUsed,
+  unknown: ValidationDiffSizeUnknownDimension[],
+): void {
+  if (wanted.binaryFiles) used.changedBinaryFiles = files.length;
+  if (!wanted.binaryBytes) return;
+  // 没有大小的只可能是被删除的文件，不占字节；其余缺大小说明没量到，不能当 0。
+  if (files.some((file) => file.bytes === undefined && file.deleted !== true)) {
+    unknown.push('changedBinaryBytes');
+    return;
+  }
+  used.changedBinaryBytes = files.reduce((sum, file) => sum + (file.bytes ?? 0), 0);
+}
+
+function overLimitMessages(limits: DiffSizeLimits, used: DiffSizeUsed): string[] {
+  const over: string[] = [];
+  const pairs = [
+    ['changedFiles', 'maxChangedFiles'],
+    ['changedLines', 'maxChangedLines'],
+    ['changedBinaryFiles', 'maxChangedBinaryFiles'],
+    ['changedBinaryBytes', 'maxChangedBinaryBytes'],
+  ] as const;
+  for (const [usedKey, limitKey] of pairs) {
+    const actual = used[usedKey];
+    const max = limits[limitKey];
+    if (max !== undefined && actual !== undefined && actual > max) {
+      over.push(`${usedKey} ${actual} > ${limitKey} ${max}`);
+    }
+  }
+  return over;
+}
+
+function withinLimitsSummary(used: DiffSizeUsed): string {
+  const bits: string[] = [];
+  if (used.changedFiles !== undefined) bits.push(`files=${used.changedFiles}`);
+  if (used.changedLines !== undefined) bits.push(`lines=${used.changedLines}`);
+  if (used.changedBinaryFiles !== undefined) bits.push(`binaryFiles=${used.changedBinaryFiles}`);
+  if (used.changedBinaryBytes !== undefined) bits.push(`binaryBytes=${used.changedBinaryBytes}`);
+  return bits.length > 0 ? `diff-size within limits (${bits.join(', ')})` : 'diff-size ok';
+}
+
+/** 无法计量时点名具体文件与原因，不让人对着一个笼统的 unknown 猜。 */
+function unmeasurableNote(items: readonly ValidationDiffUnmeasurable[] | undefined): string {
+  if (!items || items.length === 0) return '';
+  const shown = items.slice(0, 5).map((item) => `${item.path}（${item.reason}）`);
+  const more = items.length > shown.length ? `；另有 ${items.length - shown.length} 个` : '';
+  return `：无法计量 ${shown.join('；')}${more}`;
 }
 
 function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
@@ -474,6 +570,12 @@ function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
         unknown: Object.freeze([
           ...check.diffSize.unknown,
         ]) as readonly ValidationDiffSizeUnknownDimension[],
+        ...(check.diffSize.binaryFiles !== undefined
+          ? { binaryFiles: check.diffSize.binaryFiles.map((file) => ({ ...file })) }
+          : {}),
+        ...(check.diffSize.unmeasurable !== undefined
+          ? { unmeasurable: check.diffSize.unmeasurable.map((item) => ({ ...item })) }
+          : {}),
       },
     };
   }
@@ -496,27 +598,9 @@ function tail(output: string, max: number): string {
   return output.slice(output.length - max);
 }
 
-/** 规范化路径：`\\`→`/`，去重复前导 `./`，去空白外壳。 */
-export function normalizePath(raw: string): string {
-  let s = raw.trim().replace(/\\/g, '/');
-  while (s.startsWith('./')) {
-    s = s.slice(2);
-  }
-  return s;
-}
-
-function isAbsoluteOrDrive(p: string): boolean {
-  if (p.startsWith('/')) return true;
-  if (/^[A-Za-z]:(\/|$)/.test(p)) return true;
-  return false;
-}
-
-/** 绝对路径或含 `..` 段 → 逃逸。 */
-export function isEscapePath(p: string): boolean {
-  if (isAbsoluteOrDrive(p)) return true;
-  const parts = p.split('/');
-  return parts.some((part) => part === '..');
-}
+/** 路径语义收在 scope-paths.ts（建单 / 验证 / 检查点共用）；这里原名再导出，调用方不用改。 */
+export { isEscapePath, scopeMatches };
+export const normalizePath = normalizeScopePath;
 
 function hasGlobMeta(p: string): boolean {
   return /[*?\[]/.test(p);
@@ -531,21 +615,6 @@ function dedupeStable(paths: readonly string[]): string[] {
     out.push(p);
   }
   return out;
-}
-
-/**
- * 单个 allowed 是否覆盖 actual。
- * - 普通 scope：精确匹配
- * - 以 `/` 结尾：目录前缀（目录自身 + descendants）
- */
-export function scopeMatches(allowed: string, actual: string): boolean {
-  if (allowed.endsWith('/')) {
-    const dir = allowed.slice(0, -1);
-    if (actual === dir) return true;
-    if (dir === '') return !isAbsoluteOrDrive(actual) && !isEscapePath(actual);
-    return actual.startsWith(`${dir}/`);
-  }
-  return allowed === actual;
 }
 
 function evaluateChangedPaths(

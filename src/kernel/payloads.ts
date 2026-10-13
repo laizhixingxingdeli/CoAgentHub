@@ -234,7 +234,12 @@ export interface WorkOrderValidationCommand {
  */
 export interface WorkOrderValidationDiffSize {
   readonly maxChangedFiles?: number;
+  /** 只数文本行；二进制文件不进行数，单独按下面两项计量。 */
   readonly maxChangedLines?: number;
+  /** 二进制文件个数上限（含被删除的）。授权的 SDK / 工具包 jar、aar 属于这一类。 */
+  readonly maxChangedBinaryFiles?: number;
+  /** 二进制文件总字节数上限（已删除的文件不计）。 */
+  readonly maxChangedBinaryBytes?: number;
 }
 
 /**
@@ -391,7 +396,28 @@ export type ValidationCheckKind =
 export type ValidationCheckFailureCode = 'invalid_argv' | 'unsupported_scope';
 
 /** diff-size 检查中无法计量的维度（in-force 时 fail-closed）。 */
-export type ValidationDiffSizeUnknownDimension = 'changedFiles' | 'changedLines';
+export type ValidationDiffSizeUnknownDimension =
+  | 'changedFiles'
+  | 'changedLines'
+  | 'changedBinaryFiles'
+  | 'changedBinaryBytes';
+
+/** diff-size 检查看到的一个二进制文件。哈希让「验证前后是不是同一个文件」可以事后核对。 */
+export interface ValidationDiffBinaryFile {
+  readonly path: string;
+  /** 被删除的文件没有大小。 */
+  readonly bytes?: number;
+  readonly sha256?: string;
+  readonly deleted?: true;
+  /** 路径是否被工单 allowedScope 覆盖。未授权的二进制仍由 changed-paths 判失败。 */
+  readonly authorized: boolean;
+}
+
+/** 无法计量的具体文件与原因：不用笼统的 unknown 掩盖问题。 */
+export interface ValidationDiffUnmeasurable {
+  readonly path: string;
+  readonly reason: string;
+}
 
 export interface ValidationCheckResult {
   readonly kind: ValidationCheckKind;
@@ -425,12 +451,20 @@ export interface ValidationCheckResult {
     readonly limits: {
       readonly maxChangedFiles?: number;
       readonly maxChangedLines?: number;
+      readonly maxChangedBinaryFiles?: number;
+      readonly maxChangedBinaryBytes?: number;
     };
     readonly used: {
       readonly changedFiles?: number;
+      /** 文本行数；二进制不计。 */
       readonly changedLines?: number;
+      readonly changedBinaryFiles?: number;
+      readonly changedBinaryBytes?: number;
     };
     readonly unknown: readonly ValidationDiffSizeUnknownDimension[];
+    /** 旧报告没有这两项。 */
+    readonly binaryFiles?: readonly ValidationDiffBinaryFile[];
+    readonly unmeasurable?: readonly ValidationDiffUnmeasurable[];
   };
 }
 
@@ -671,7 +705,28 @@ export type WaitReason =
   /** 票级费用上限（独立门禁）已触及；与 ExecutionBudget 硬维度分开。 */
   | 'mission_cost_cap_reached'
   /** 工作项已到达待人工/平台确认的检查点。 */
-  | 'work_item_checkpoint';
+  | 'work_item_checkpoint'
+  /**
+   * 执行者已交卷，但冻结范围的检查点拒绝了（越界改动、模糊授权）。成果与改动都留在工作区、没有回滚。
+   *
+   * 和 `no_available_agent` 分开：那个等候选冷却过了重跑就好，这个不会自己好——
+   * 要有人看越界的是什么、是谁留下的，再决定吸收进恢复工单还是清掉。
+   */
+  | 'checkpoint_failed'
+  /**
+   * 某一跳失败后在退避，到点平台会自动接着跑（Mission.waitResumeAt 就是那一刻）。
+   *
+   * 以前写成 `project_busy`，而那个词的意思是「同项目别的 Mission 占着改动名额」——
+   * 一个在等 1 秒后重试的 Mission 和一个要等别人落地的 Mission 在界面上长一个样，
+   * 人只能去翻事件才分得清（MiRing-V0-probe 的 W-619 / W-622）。
+   */
+  | 'retry_backoff'
+  /**
+   * Mission 对某个角色指定了候选（不可替代），而匹配的候选现在都不可用——冷却、熔断、额度，
+   * 或者资源池里根本没有这样的候选。按约束不派发别的候选。
+   * 有明确的冷却到期时刻（Mission.waitResumeAt）时平台到点自动重试，否则要人处理。
+   */
+  | 'model_unavailable';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。

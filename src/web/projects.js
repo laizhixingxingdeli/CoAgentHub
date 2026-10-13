@@ -263,7 +263,10 @@ export function missionFilterKey(row) {
   const r = row || {};
   if (r.status === 'completed') return 'completed';
   if (r.status === 'blocked') return 'blocked';
-  if (r.status === 'awaiting_review' || r.paused || r.waitReason === 'waiting_l3' || r.waitReason === 'escalated') {
+  // waitInfo.owner 是后端算好的「谁来处理」：落在检视者 / 用户头上的就是需处理（越界停下、尝试到顶、
+  // 预算……），落在平台头上的（退避、冷却、排队）是在自己恢复，归进行中。老接口没有这一格就照旧。
+  const needsHuman = r.waitInfo && (r.waitInfo.owner === 'l3' || r.waitInfo.owner === 'user');
+  if (r.status === 'awaiting_review' || r.paused || r.waitReason === 'waiting_l3' || r.waitReason === 'escalated' || needsHuman) {
     return 'needs';
   }
   return 'active';

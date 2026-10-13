@@ -29,6 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { canonicalPath } from './canonical-path.ts';
+import { describeScopeIssues, exactFileScopeIssues, normalizeScopePath } from './scope-paths.ts';
 
 const run = promisify(execFile);
 
@@ -111,6 +112,57 @@ export interface PreparedWorkspace {
   readonly targetBranch?: string;
 }
 
+export interface WorkspaceSettleInput {
+  readonly missionId: string;
+  readonly workItemId: string;
+  readonly allowedPaths: readonly string[];
+  /** 进提交信息，让人从 git log 就看得出这不是执行者的交付。 */
+  readonly label: string;
+}
+
+export interface WorkspaceSettleOutcome {
+  /** 已提交的路径（授权范围内的脏改动）。 */
+  readonly committed: readonly string[];
+  readonly commit?: string;
+  /** 范围外、原样保留的脏路径。 */
+  readonly left: readonly string[];
+}
+
+export type CheckpointRejectionCode =
+  | 'unauthorized_paths'
+  | 'ambiguous_scope'
+  | 'index_outside_scope'
+  | 'unparseable_status';
+
+/**
+ * 检查点拒绝。除了人读的 message，还带结构化的原因码与路径：
+ * 编排器据此写事件、标等待原因、查脏路径是谁留下的，不用对着一句话做字符串匹配。
+ */
+export class CheckpointRejectedError extends Error {
+  readonly code: CheckpointRejectionCode;
+  readonly paths: readonly string[];
+
+  // 参数类型不写 `readonly string[]`：源码约束测试按正则找构造参数属性，会把它误认成 readonly 参数。
+  constructor(code: CheckpointRejectionCode, message: string, paths: ReadonlyArray<string> = []) {
+    super(message);
+    this.name = 'CheckpointRejectedError';
+    this.code = code;
+    this.paths = paths;
+  }
+}
+
+/** `git status --porcelain=v1 -z --no-renames` 的输出 → 路径集合。 */
+function parseStatusPaths(status: string): string[] {
+  const dirty = new Set<string>();
+  for (const record of status.split('\0').filter(Boolean)) {
+    if (record.length < 4) {
+      throw new CheckpointRejectedError('unparseable_status', '无法解析 Git status，拒绝创建检查点');
+    }
+    dirty.add(record.slice(3).replace(/\\\\/g, '/'));
+  }
+  return [...dirty];
+}
+
 export interface MergeOutcome {
   readonly ok: boolean;
   /** 落到了哪个版本；失败时为 undefined。 */
@@ -150,6 +202,17 @@ export interface WorkspaceManager {
   head(cwd: string): Promise<string>;
   /** Commit only the explicitly authorized work-item paths; unsupported by in-place mode. */
   checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
+  /**
+   * 工作区里还没提交的路径（已修改、已暂存、未跟踪），相对路径、`/` 分隔。读不出来就抛错。
+   * 验证命令的副作用、开跑前的工作区检查都靠它；原地模式没有隔离工作区，不提供。
+   */
+  dirtyPaths?(cwd: string): Promise<readonly string[]>;
+  /**
+   * 验证跑完后收口：只提交落在 allowedPaths 里的脏路径，范围外的原样留着、不删不提交，
+   * 作为 `left` 报告出来。和 checkpoint 的区别是不因范围外的脏路径而失败——
+   * 那是验证命令已经留下的事实，要由后面的门禁点名，而不是在这里再抛一次错。
+   */
+  settle?(cwd: string, input: WorkspaceSettleInput): Promise<WorkspaceSettleOutcome>;
   /** Read-only assertion that an isolated Mission worktree has no tracked, staged, or untracked changes. */
   assertMissionWorktreeClean?(missionId: string, projectRoot: string): Promise<void>;
   /** 目标分支现在的 HEAD。用来判断分叉基线是不是已经过期。 */
@@ -425,6 +488,48 @@ export class GitWorktreeManager implements WorkspaceManager {
     if (status.length > 0) throw new Error('Mission worktree 不干净');
   }
 
+  async dirtyPaths(cwd: string): Promise<readonly string[]> {
+    const status = (
+      await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })
+    ).stdout;
+    return parseStatusPaths(status);
+  }
+
+  async settle(cwd: string, input: WorkspaceSettleInput): Promise<WorkspaceSettleOutcome> {
+    const issues = exactFileScopeIssues(input.allowedPaths);
+    if (issues.length > 0) {
+      throw new CheckpointRejectedError(
+        'ambiguous_scope',
+        `验证后收口的授权路径不确定：${describeScopeIssues(issues)}`,
+        issues.map((issue) => issue.entry),
+      );
+    }
+    const allowed = new Set(input.allowedPaths.map((path) => normalizeScopePath(path)));
+    const dirty = await this.dirtyPaths(cwd);
+    const committable = dirty.filter((path) => allowed.has(path));
+    const left = dirty.filter((path) => !allowed.has(path));
+    if (committable.length === 0) return { committed: [], left };
+    // pathspec 一律按字面量理解，并且 commit 也限定在这些路径上：index 里即便有别的暂存内容也不会被带进来。
+    await run('git', ['--literal-pathspecs', 'add', '-A', '--', ...committable], { cwd });
+    await run(
+      'git',
+      [
+        '--literal-pathspecs',
+        '-c',
+        'user.name=coagenthub',
+        '-c',
+        'user.email=noreply@local',
+        'commit',
+        '-m',
+        `chore(mission): ${input.workItemId} ${input.label} ${input.missionId}`,
+        '--',
+        ...committable,
+      ],
+      { cwd },
+    );
+    return { committed: committable, commit: await this.head(cwd), left };
+  }
+
   async checkpoint(
     cwd: string,
     missionId: string,
@@ -434,25 +539,25 @@ export class GitWorktreeManager implements WorkspaceManager {
     if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
       throw new Error('检查点授权路径不能为空');
     }
-    const allowed = new Set<string>();
-    for (const path of allowedPaths) {
-      if (typeof path !== 'string' || path.length === 0 || path.includes('\\0') ||
-          path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:/.test(path) ||
-          path.split(/[\\/]/).some((part) => part === '..' || part === '.' || part === '') ||
-          /[*?{}]/.test(path) || path.includes('[') || path.includes(']') || path.endsWith('/')) {
-        throw new Error(`检查点授权路径不确定：${String(path)}`);
-      }
-      allowed.add(path.replace(/\\/g, '/'));
+    // 判据与建单时的前置校验是同一份（scope-paths.ts）：能收进来的范围，检查点一定认。
+    const issues = exactFileScopeIssues(allowedPaths);
+    if (issues.length > 0) {
+      throw new CheckpointRejectedError(
+        'ambiguous_scope',
+        `检查点授权路径不确定：${describeScopeIssues(issues)}`,
+        issues.map((issue) => issue.entry),
+      );
     }
-    const status = (await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })).stdout;
-    const records = status.split('\0').filter(Boolean);
-    const dirty = new Set<string>();
-    for (const record of records) {
-      if (record.length < 4) throw new Error('无法解析 Git status，拒绝创建检查点');
-      dirty.add(record.slice(3).replace(/\\\\/g, '/'));
-    }
+    const allowed = new Set<string>(allowedPaths.map((path) => normalizeScopePath(path)));
+    const dirty = new Set(await this.dirtyPaths(cwd));
     const outside = [...dirty].filter((path) => !allowed.has(path));
-    if (outside.length) throw new Error(`检查点包含未授权改动：${outside.join(', ')}`);
+    if (outside.length) {
+      throw new CheckpointRejectedError(
+        'unauthorized_paths',
+        `检查点包含未授权改动：${outside.join(', ')}`,
+        outside,
+      );
+    }
     if (dirty.size === 0) return;
     const tracked = new Set((await run('git', ['ls-files', '-z'], { cwd })).stdout.split('\0').filter(Boolean));
     const trackedAllowed = [...allowed].filter((path) => tracked.has(path));
@@ -462,7 +567,13 @@ export class GitWorktreeManager implements WorkspaceManager {
     const staged = (await run('git', ['diff', '--cached', '--name-only', '-z'], { cwd })).stdout
       .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
     const stagedOutside = staged.filter((path) => !allowed.has(path));
-    if (stagedOutside.length) throw new Error(`Git index 包含未授权路径：${stagedOutside.join(', ')}`);
+    if (stagedOutside.length) {
+      throw new CheckpointRejectedError(
+        'index_outside_scope',
+        `Git index 包含未授权路径：${stagedOutside.join(', ')}`,
+        stagedOutside,
+      );
+    }
     if (staged.length === 0) return;
     await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `chore(mission): ${workItemId} 检查点 ${missionId}`], { cwd });
   }

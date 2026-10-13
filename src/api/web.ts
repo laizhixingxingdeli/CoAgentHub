@@ -296,6 +296,10 @@ const WAIT_REASON = {
   execution_budget_exceeded: '执行预算硬上限已耗尽',
   mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
   work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
+  // 检查点拒绝了执行者的成果：越界改动原样保留，要人看是什么、谁留下的。
+  checkpoint_failed: '成果被冻结范围的检查点拒绝，越界改动已保留，等人处理',
+  retry_backoff: '上一跳失败后在退避，到点平台会自动重试',
+  model_unavailable: '指定的模型现在用不了，按约束不改派别的模型',
 };
 
 const STATUS_CN = {

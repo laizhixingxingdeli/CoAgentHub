@@ -2,7 +2,7 @@ import type { Mission, Project } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { runDecisionShadow } from '../decision-shadow-runner.ts';
 import { enforceMissionTicketGates } from './ticket-budget.ts';
-import { notDispatchableHint } from './work-order-helpers.ts';
+import { checkWorkOrderScope, notDispatchableHint } from './work-order-helpers.ts';
 import { PLATFORM_BLOCKED_EVENT_KIND } from './stalled-work-item.ts';
 
 export async function dispatchWorkItems(
@@ -38,6 +38,11 @@ export async function dispatchWorkItems(
           `工作项 ${item.id} 当前是 ${item.status}，不能派发；${notDispatchableHint(item.status)}`,
         );
       }
+    }
+    // 范围前置校验：建单与修订已经查过；这里兜的是校验上线前就冻结下来的存量工单——
+    // 它们的目录 / 通配符范围本来要到执行者交卷后才被检查点拒掉，现在派发前就说清楚。
+    for (const item of items) {
+      if (item.order) checkWorkOrderScope(item.order, ctx.workspace?.checkpoint !== undefined);
     }
     // 门禁（W-292）：执行者曾报 blocked 或交 partial/blocked 结果的工作项，
     // 未修订不得原样重派。查「最近一次」相关事件（不是只看当前状态），

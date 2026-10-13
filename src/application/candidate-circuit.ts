@@ -159,7 +159,14 @@ export function resolveCandidateProbe(record: CandidateCircuit | undefined, inpu
 }
 
 export type CandidateFailureClassification = {
-  failureClass: 'quota' | 'auth' | 'upstream_5xx' | 'killed_idle' | 'local_adapter_error' | 'unknown';
+  failureClass:
+    | 'quota'
+    | 'auth'
+    | 'upstream_5xx'
+    | 'killed_idle'
+    | 'local_adapter_error'
+    | 'model_unavailable'
+    | 'unknown';
   failover: boolean;
 };
 
@@ -182,6 +189,12 @@ export function classifyCandidateFailure(
   }
   if (/\b401\b|unauthori[sz]ed|authentication|鉴权|认证/i.test(message)) {
     return { failureClass: 'auth', failover: true };
+  }
+  // 模型根本不存在 / 没注册（"模型不可用：tenrouter/cbai/deepseek-v4.1-flash。可用的有：…"）。
+  // 这是候选配置问题，重试同一个候选不会好：以前落进 unknown（不换候选、退避三次后死信）。
+  // 归成独立一类并允许换候选；候选熔断按冷却时长隔离它，运维修好配置后探针自然恢复。
+  if (/模型不可用|model[_ ](?:not[_ ]found|unavailable|does not exist)|unknown model|no such model|不存在的模型/i.test(message)) {
+    return { failureClass: 'model_unavailable', failover: true };
   }
   // xai 会给 "Error Code null: Internal error during token generation"：没有 5xx 数字，
   // 旧正则判 unknown / failover=false，同次运行不退避、不换候选，Mission 停在 project_busy。

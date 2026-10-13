@@ -26,6 +26,8 @@ import { ClassifiedMissionInputError } from '../application/classified-mission-i
 import { ChangeImpactConflictError } from '../application/change-impact.ts';
 import { ChangeReceiptConflictError } from '../application/change-receipt.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
+import { describeRolePolicy, policyMatches } from '../application/model-policy.ts';
+import { withAutoResumeSwitch } from '../application/platform/wait-info.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -97,6 +99,15 @@ export const RUNTIME_MODELS_CACHE_MS = 10 * 60 * 1000;
 /** hosted run 的一行进度。channel 必须可区分，客户端不能靠猜 stdout/stderr。 */
 export type HostedRunEmit = (channel: 'stdout' | 'stderr', line: string) => void;
 
+export interface RunnerStateProbe {
+  /** 这条 Mission 现在有没有托管运行在服务进程里跑。 */
+  isRunning(missionId: string): boolean;
+  /** 服务进程里所有托管运行着的 Mission。 */
+  running(): readonly string[];
+  /** 自动恢复调度：启用与否、正在自动续跑的 Mission。未装配（如 PG）就没有这一项。 */
+  autoResume?: { enabled(): boolean; active(): readonly string[] };
+}
+
 /**
  * 没有进度可写时隔这么久发一帧 `{ heartbeat: true }`。
  * 必须短于 Node 19+ keep-alive 套接字默认 5s 空闲超时：方案等升级决定的 poll
@@ -151,6 +162,12 @@ export interface ApiDeps {
    * 少一个默认实现，比少一类调用点便宜。
    */
   agentPool?: AgentPoolRepository;
+  /**
+   * 服务进程内的运行事实：托管运行是不是真的在跑、自动恢复调度开没开、在续跑谁。
+   * 「HTTP 受理」（启动请求被接受）、「runner 在跑」、「等待」、「完成」是四件事——
+   * 前两者以前只有发起方自己的流能看出来，进程断流后就只能猜；这里给一份服务端权威答案。
+   */
+  runnerState?: RunnerStateProbe;
   /**
    * 持久队列。注入后平台状态报五态/死信/占用，资源池用有效租约判断是否在跑。
    * 不注入就标明不适用 / 无运行时原因，不编造空队列或 0 占用。
@@ -822,11 +839,41 @@ export function createApi(deps: ApiDeps): Server {
     throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
   };
 
+  /**
+   * 自动恢复调度现在是不是真在工作。没装配运行探针（嵌入式 / 单测）时不知道，当作在工作、不改写 waitInfo；
+   * 装配了探针却没有 autoResume 项（PG 部署）或开关关着，就是没有。
+   */
+  const schedulerWorking = (): boolean =>
+    deps.runnerState === undefined ? true : deps.runnerState.autoResume?.enabled() ?? false;
+
+  /** 约束里每个角色在当前资源池里能匹配到几个启用的候选；匹配不到就写一句话。 */
+  const modelPolicyWarnings = async (
+    policy: Awaited<ReturnType<typeof platform.getMissionModelPolicy>>,
+  ): Promise<string[]> => {
+    if (!policy) return [];
+    const pool = await agentPool.list();
+    const warnings: string[] = [];
+    for (const role of ['coordinator', 'executor'] as const) {
+      const rolePolicy = policy[role];
+      if (!rolePolicy) continue;
+      const matched = (pool[role] ?? []).filter(
+        (row) => row.enabled !== false && policyMatches({ endpoint: row.endpoint, profileId: row.profileId, facts: row.facts }, rolePolicy),
+      );
+      if (matched.length === 0) {
+        warnings.push(
+          `${role}：资源池里当前没有匹配的启用候选（${describeRolePolicy(rolePolicy)}）。` +
+            (rolePolicy.mode === 'required' ? '指定模式下这个角色会一直停在 model_unavailable，直到配出匹配的候选。' : '优先模式会退回池里其余候选。'),
+        );
+      }
+    }
+    return warnings;
+  };
+
   const requireControl = async (req: IncomingMessage, action: PolicyAction): Promise<void> => {
     await requireControlAuth(req, action);
     if (req.method !== 'POST') return;
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
+    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|model-policy|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|rerun)$/.exec(path);
     if (!controlled) return;
     const mission = await platform.getMissionView(controlled[1]);
     const duty = await platform.getReviewerDuty(mission.projectId);
@@ -1753,7 +1800,7 @@ export function createApi(deps: ApiDeps): Server {
     rejectImpactRunOutsideAllowlist(req);
     if (req.method !== 'POST') return handle(req, res);
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
+    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|model-policy|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|rerun)$/.exec(path);
     const planControl = /^\/api\/plan-runs\/([^/]+)\/decide$/.exec(path);
     const projectControl = /^\/api\/projects\/([^/]+)\/(?:mission-queue|execution-config)$/.exec(path);
     if (!missionControl && !planControl && !projectControl) return handle(req, res);
@@ -1831,6 +1878,19 @@ export function createApi(deps: ApiDeps): Server {
               : 'main_lock_not_assembled'),
           queue,
           occupancy,
+          runner: deps.runnerState
+            ? {
+                hostedMissions: [...deps.runnerState.running()],
+                ...(deps.runnerState.autoResume
+                  ? {
+                      autoResume: {
+                        enabled: deps.runnerState.autoResume.enabled(),
+                        resuming: [...deps.runnerState.autoResume.active()],
+                      },
+                    }
+                  : {}),
+              }
+            : inapplicable('runner_state_not_assembled'),
           agentEnv: assembledOrInapplicable(assembled?.agentEnv, 'agent_env_not_assembled'),
           defaultAdapter: assembledOrInapplicable(assembled?.defaultAdapter, 'default_adapter_not_assembled'),
         }),
@@ -2076,7 +2136,14 @@ export function createApi(deps: ApiDeps): Server {
     if (method === 'GET' && path === '/api/missions') {
       await requireControl(req, POLICY_ACTION.missionRead);
       const rows = await platform.listMissions();
-      return send(res, 200, refineMissionPlanOrigin(rows, listPlanRuns(planRunDirs())));
+      const working = schedulerWorking();
+      return send(
+        res,
+        200,
+        refineMissionPlanOrigin(rows, listPlanRuns(planRunDirs())).map((row) =>
+          row.waitInfo ? { ...row, waitInfo: withAutoResumeSwitch(row.waitInfo, working) } : row,
+        ),
+      );
     }
 
     const activityMatch = /^\/api\/missions\/([^/]+)\/activity$/.exec(path);
@@ -2200,9 +2267,24 @@ export function createApi(deps: ApiDeps): Server {
       // timeAttribution 与 mission 视图同级只读（同一 missionRead 授权）：
       // 页面一张时间线要阶段耗时，而耗时来自报告仓储与 hop 行，不在 MissionView 里。
       // 另开一个接口会让首屏多一次往返，且授权要再讲一遍。
+      const runner = deps.runnerState;
+      const view = await platform.getMissionView(id);
       return send(res, 200, {
-        ...(await platform.getMissionView(id)),
+        ...view,
+        ...(view.waitInfo ? { waitInfo: withAutoResumeSwitch(view.waitInfo, schedulerWorking()) } : {}),
         timeAttribution: await platform.getTimeAttribution(id),
+        // runner.running = 服务进程里确有托管运行在跑（权威）；它不等于「Mission 在推进」
+        // （可能在退避等待）也不等于「启动请求被受理过」。没装配探针的部署不带这一格。
+        ...(runner
+          ? {
+              runner: {
+                running: runner.isRunning(id),
+                ...(runner.autoResume
+                  ? { autoResume: { enabled: runner.autoResume.enabled(), resuming: runner.autoResume.active().includes(id) } }
+                  : {}),
+              },
+            }
+          : {}),
       });
     }
 
@@ -2373,6 +2455,51 @@ export function createApi(deps: ApiDeps): Server {
         res,
         200,
         await platform.retireWorkItem(retireMatch[1], retireMatch[2], String(body.reason ?? '')),
+      );
+    }
+
+    // Mission 级模型约束：协调者 / 执行者允许用哪些模型，由平台在派发前强制（优先可替代 / 指定不可替代）。
+    // 读：missionRead；写：与改契约同一格（missionRevise），署名与理由必填、整份替换、事件留全部历史。
+    // 规则（匹配、版本、署名）都在 Platform 与 model-policy.ts，这里只在写入后核对「资源池里有没有
+    // 候选能匹配」——没有也照写（池可以晚点再配），但在响应里点名，免得设了一个永远等不到的约束。
+    const modelPolicyMatch = /^\/api\/missions\/([^/]+)\/model-policy$/.exec(path);
+    if (method === 'GET' && modelPolicyMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      return send(res, 200, { policy: (await platform.getMissionModelPolicy(modelPolicyMatch[1])) ?? null });
+    }
+    if (method === 'POST' && modelPolicyMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      const result = await platform.setMissionModelPolicy(modelPolicyMatch[1], {
+        ...(body.coordinator !== undefined ? { coordinator: body.coordinator } : {}),
+        ...(body.executor !== undefined ? { executor: body.executor } : {}),
+        ...(body.clear === true ? { clear: true } : {}),
+        reviewer: String(body.reviewer ?? ''),
+        reason: String(body.reason ?? ''),
+        ...(typeof body.expectedRevision === 'number' ? { expectedRevision: body.expectedRevision } : {}),
+      });
+      return send(res, 200, { ...result, warnings: await modelPolicyWarnings(result.policy) });
+    }
+
+    // 状态恢复：有执行结果、却停在 dispatched 且没有活执行者的工单 → blocked，让协调者依法审查 / 修订。
+    // 控制面 operator（与 retire 同一格）。署名与理由必填；核实尝试 / 租约 / 修订号与幂等都在 Platform，
+    // 这里只验输入形状。expectedAttemptId / orderRevision 是调用方看到的快照：给了就必须与平台一致。
+    const recoverMatch = /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/recover$/.exec(path);
+    if (method === 'POST' && recoverMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      return send(
+        res,
+        200,
+        await platform.recoverStrandedWorkItem({
+          missionId: recoverMatch[1],
+          workItemId: recoverMatch[2],
+          source: 'operator_recovery',
+          reviewer: String(body.reviewer ?? ''),
+          reason: String(body.reason ?? ''),
+          ...(typeof body.expectedAttemptId === 'string' ? { expectedAttemptId: body.expectedAttemptId } : {}),
+          ...(typeof body.orderRevision === 'string' ? { orderRevision: body.orderRevision } : {}),
+        }),
       );
     }
 

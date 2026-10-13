@@ -30,6 +30,7 @@ import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
 import { MissionQueueWorker } from './application/mission-queue-worker.ts';
+import { RetryWakeScheduler } from './application/retry-wake.ts';
 import { InMemoryAgentPoolRepository, loadRoleProfiles } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
@@ -97,7 +98,7 @@ import type {
   DecisionProvider,
   PostExecutionEvaluator,
 } from './application/ports.ts';
-import { runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
+import { resumeMissionBody, runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
@@ -1053,6 +1054,9 @@ export async function startServer(
       ...('live' in built ? { live: built.live } : {}),
     };
     const hostedRuntime = options?.runtime ? { runtime: options.runtime } : {};
+    // 自动恢复调度在 createApi 之后才装配（它要用 runMission），状态探针先拿到一个可后补的引用。
+    let retryWake: RetryWakeScheduler | undefined;
+    const autoResumeEnabled = env.COAGENT_AUTO_RESUME !== '0';
     const heldState = hostedHeldState(usePg, statePath);
     // 只认本服务状态文件旁的缺省目录，加上本次成功托管登记的 runDir。
     // 不能扫任意 CLI 目录：独立进程写到别处的记录不在这把锁的观测范围。
@@ -1098,6 +1102,13 @@ export async function startServer(
       queuedHops: built.queuedHops,
       candidateCircuits: built.candidateCircuits,
       queryRuns: built.queryRuns,
+      runnerState: {
+        isRunning: (missionId) => hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
+        running: () => hostedRuns.snapshot().filter((run) => run.kind === 'mission').map((run) => run.id),
+        ...(usePg
+          ? {}
+          : { autoResume: { enabled: () => autoResumeEnabled && retryWake !== undefined, active: () => retryWake?.active ?? [] } }),
+      },
       platformStatus: {
         store: usePg ? 'pg' : 'file',
         startedAt,
@@ -1211,6 +1222,29 @@ export async function startServer(
       warn: warnPeriodicRepair,
     });
     missionQueueWorker.start();
+    // 退避 / 候选冷却到点自动接着跑：托管运行遇到这类等待就退出了，此前只能靠 L3 手动 start_mission。
+    // 持久的是 Mission.waitResumeAt 与托管启动参数，重启后第一个 tick 就从状态里找回来；
+    // 入过队列的 Mission 归队列 worker 驱动，这里不插手。PG 不支持托管运行，不装配。
+    // COAGENT_AUTO_RESUME=0 可整体关掉（运维开关）。
+    retryWake = usePg
+      ? undefined
+      : new RetryWakeScheduler({
+          listDue: (nowIso) => built.platform.listAutoResumeDue(nowIso),
+          runDriver: (missionId) => built.platform.getRunDriver(missionId),
+          isRunning: (missionId) =>
+            hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
+          record: (missionId, data) => built.platform.recordAutoResume(missionId, data),
+          start: async (missionId, request) => {
+            const view = await built.platform.getMissionView(missionId);
+            if (!view.contract) return;
+            await runMission(
+              resumeMissionBody({ projectId: view.projectId, missionId, contract: view.contract, request, state: statePath }),
+              () => {},
+            );
+          },
+          warn: warnPeriodicRepair,
+        });
+    if (autoResumeEnabled) retryWake?.start();
     // 文件版周期在 server 主锁下用已持锁 store，不再短借自己的锁。PG 独立 store。只补投递。
     // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
     const periodic = startPeriodicDeliveryRepair({
@@ -1227,8 +1261,10 @@ export async function startServer(
       server,
       async () => {
         const queueStopped = missionQueueWorker.stop();
+        const wakeStopped = retryWake?.stop() ?? Promise.resolve();
         await drainApi(server);
         await queueStopped;
+        await wakeStopped;
         if (safeShutdown) await safeShutdown;
         await (periodic?.stop() ?? Promise.resolve());
         await built.persist();

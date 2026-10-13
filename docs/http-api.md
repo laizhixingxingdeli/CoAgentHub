@@ -61,7 +61,7 @@ curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/plan-runs/R/decide
 curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/master-brief'
 ```
 
-可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十一个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十三个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason；coagenthub_work_item_recover 经 POST /api/missions/:id/work-items/:id/recover 做工单状态恢复（署名与理由必填，见该路由）；coagenthub_model_policy_set 经 POST /api/missions/:id/model-policy 设置或清除 Mission 级模型约束（见该路由）。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
 
 ### GET /api/projects/:projectId/documents
 
@@ -132,7 +132,7 @@ curl.exe -sS --noproxy '*' -X GET 'http://127.0.0.1:3101/api/version'
 
 ### GET /api/platform/status
 
-鉴权：控制面（可选resolver）。参数：无。含pid、statePath、监听地址、队列与有效租约占用；未装配项带不可用原因。
+鉴权：控制面（可选resolver）。参数：无。含pid、statePath、监听地址、队列与有效租约占用；未装配项带不可用原因。`runner`：`hostedMissions` 是服务进程里正在跑托管运行的 Mission；`autoResume` 是自动恢复调度是否启用及正在续跑哪些 Mission（PG 部署不装配，写不可用原因）。
 
 请求示例及本机curl：
 
@@ -395,6 +395,18 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 ### GET /api/missions/:missionId
 
 鉴权：控制面（可选resolver）。参数：路径missionId。完整视图包含契约、结果、升级和签字，另附只读的 `timeAttribution` 时间归因投影。
+
+**等待与运行状态**（可靠性加固新增；都是追加字段，老客户端忽略即可，没有对应状态时不出现该字段）：
+
+- `waitReason`：为什么停着。新增三种具体原因，不再借用旧词：`retry_backoff`（某一跳失败后在退避，到点平台自动重试；以前写成 `project_busy`）、`checkpoint_failed`（执行者的成果被冻结范围检查点拒绝，越界改动已保留；以前写成 `no_available_agent`）、`model_unavailable`（Mission 指定了模型而它现在用不了，按约束不改派别的模型）。`project_busy` 现在只表示「同项目别的 Mission 占着名额 / 队列容量」。
+- `waitResumeAt`：平台打算自动接着跑的时刻（ISO）。退避写队列行的 `availableAt`；候选全冷却时写最早的明确到期时刻。没有 = 平台不会自动恢复，要人处理。
+- `waitInfo`：等待状态的统一投影。`owner`（`platform` 平台自己会好 / `coordinator` / `l3` / `user`）、`autoResume`（平台会不会自动继续：有恢复时刻、没暂停 / 挂起 / 未决升级、不在门禁原因上；服务级开关 `COAGENT_AUTO_RESUME=0` 关着、或此部署没装配调度器（PG）时一律是 `false`，`owner` 改为 `l3`，不给 `nextRetryAt`）、`nextRetryAt`、`retry`（失败退避的 `attempt`/`max`）、`activeAgent`（现在有没有 in_progress 的 Attempt）、`action`（下一步一句话）。列表接口 `GET /api/missions` 的每一行同样带 `waitInfo`（不含重试计数）。
+- `modelPolicy`：Mission 级模型约束，见 `/model-policy`。
+- `runner`（服务装配了运行探针时才有）：`running` 是服务进程里确有托管运行在跑——权威、不依赖发起方的流；`autoResume.enabled` / `resuming` 是自动恢复调度是否启用、是否正在替这条 Mission 续跑。
+
+四件事要分开看：**HTTP 受理**（`POST /api/control/run-mission` 的流打开，只说明启动请求被接收，断线不取消）、**runner 在跑**（`runner.running`）、**等待**（`waitReason` / `waitInfo`：runner 退出后仍可能「会自动恢复」）、**完成**（`status` / `result` 与终审）。一个在退避的 Mission：`runner.running=false`、`waitInfo.autoResume=true`——不需要人动手，服务到点自己续跑。
+
+**服务重启与自动恢复**：恢复时刻和托管启动参数（事件 `mission.run_requested`）都持久化，重启后第一个调度周期就从状态里找回到点的等待，不重复启动已在跑的 Mission。入过 Mission 队列的由队列 worker 驱动。`COAGENT_AUTO_RESUME=0` 关闭自动恢复（运维开关）；暂停、挂起、待 L3、预算、检查点、尝试上限、不可重试失败一律不会被自动恢复绕过。
 
 `timeAttribution` 为**只读派生**字段，取值规则：
 
@@ -767,6 +779,73 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 ```json
 {
   "status": "retired"
+}
+```
+
+### GET /api/missions/:missionId/model-policy
+
+鉴权：控制面 missionRead。返回当前生效的 Mission 级模型约束：`{ "policy": {...} | null }`。没设过、或最近一次是「清除」就是 `null`。`GET /api/missions/:id` 的响应里同样带 `modelPolicy`（没设就没有这一格）。
+
+```bash
+curl.exe -sS --noproxy '*' -H 'Authorization: Bearer <token>' 'http://127.0.0.1:3101/api/missions/M-example/model-policy'
+```
+
+```json
+{
+  "policy": {
+    "revision": 2,
+    "coordinator": { "mode": "required", "selectors": [{ "provider": "xai", "model": "grok-4.7", "reasoning": "medium" }] },
+    "setBy": "检视者",
+    "reason": "用户 10-12 要求协调者只用 Grok 4.7",
+    "at": "2026-10-12T15:30:00.000Z"
+  }
+}
+```
+
+### POST /api/missions/:missionId/model-policy
+
+鉴权：控制面（与改契约同一格，有值守租约时同样要求 reviewer 与 generation）。设置或清除 Mission 级模型约束：协调者 / 执行者允许用哪些模型，由**平台在派发前强制**，不靠模型自己发现身份不符。
+
+参数：`coordinator`、`executor`（各自可省略 = 不约束该角色）形如 `{ "mode": "preferred" | "required", "selectors": [...] }`；选择器字段 `profileId` / `provider` / `model` / `reasoning`（后三项对应候选 facts，精确匹配、不区分大小写；同一选择器里给出的条件都要满足，多个选择器任一满足即可，至少给一项条件）。`clear: true` 清除全部约束（与上面两项互斥）。`reviewer`、`reason` 必填；`expectedRevision` 可选（没有约束时为 0），给了就必须与当前版本一致，防止覆盖别人刚改的。整份替换，不做局部合并；每次设置版本号 +1，事件 `mission.model_policy_set` 留全部历史——旧的限制留在历史里，不会被当成当前要求。
+
+两种策略：`preferred`（优先，可替代）匹配的候选排在前面，都不可用时才退到池里其余候选；`required`（指定，不可替代）只准派匹配的候选，它们都不可用时 Mission 停在 `model_unavailable`——有明确的冷却到期时刻（`waitResumeAt`）平台到点自动重试，否则要人处理——**绝不派发别的模型**。只作用于这条 Mission 的后续派发；在途的 Attempt 不受影响，资源池配置与其他 Mission 不动。每次派发留事件 `attempt.profile_selected`（候选、约束版本、是否匹配、是否替代）。响应里 `warnings` 点名「资源池里当前没有匹配的启用候选」这类设了也等不到的约束。
+
+不从契约正文解析：正文是叙述，可能已经过期，只有显式设置的约束有强制力。
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' --data '{"coordinator":{"mode":"required","selectors":[{"provider":"xai","model":"grok-4.7"}]},"reviewer":"检视者","reason":"用户要求协调者只用 Grok 4.7","expectedRevision":0}' 'http://127.0.0.1:3101/api/missions/M-example/model-policy'
+```
+
+```json
+{
+  "revision": 1,
+  "policy": { "revision": 1, "coordinator": { "mode": "required", "selectors": [{ "provider": "xai", "model": "grok-4.7" }] }, "setBy": "检视者", "reason": "用户要求协调者只用 Grok 4.7", "at": "2026-10-12T15:30:00.000Z" },
+  "warnings": []
+}
+```
+
+### POST /api/missions/:missionId/work-items/:workItemId/recover
+
+鉴权：控制面（可选resolver，与 retire 同一格；有值守租约时同样要求 reviewer 与 generation）。参数：`reviewer`、`reason` 必填（署名与理由进审计）；`expectedAttemptId`、`orderRevision` 可选，是调用方看到的最后一次执行者尝试号与工单修订号，给了就必须与平台一致。
+
+状态恢复，不是重启：把「已有执行结果、却停在 dispatched、没有活执行者」的工单收成 `blocked`，成果、验证报告与工作区改动原样保留，协调者随后可以依法修订同一张工单再派发（`dispatched` 不能 reject 也不能修订）。
+
+恢复前平台核实：Standard 模式；工单仍是 dispatched；所有执行者尝试已结束（有 `in_progress` 一律拒绝）；没有该工单执行者 hop 的有效租约；`expectedAttemptId` / `orderRevision` 与当前一致。任一不成立回 `converted:false` 与原因，不写任何事件。重复调用幂等：已经恢复过的返回 `alreadyRecovered:true`，不重复写事件。事件 `work_item.platform_blocked`（`source: "operator_recovery"`）带 reviewer 与 operatorReason，且不带 `orderRevision`——卡住的是状态不是工单正文，恢复后不用先改工单也可以再派发。
+
+编排器在叫协调者之前会对「Mission 不在 executing、工单带着结果被机器续派回 dispatched」的残留自动做同样的恢复（`source: "stranded_dispatch"`），不需要人工调用本接口；本接口留给自动判定不了的情形。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' --data '{"reviewer":"检视者","reason":"核对过 W-1.exec-1 已结束、无租约、VR-339 失败","expectedAttemptId":"W-1.exec-1"}' 'http://127.0.0.1:3101/api/missions/M-example/work-items/W-1/recover'
+```
+
+响应结构摘录：
+
+```json
+{
+  "converted": true,
+  "reason": "状态恢复（检视者）：核对过 W-1.exec-1 已结束、无租约、VR-339 失败。工单已有执行结果和验证报告 VR-339却停在 dispatched，没有活执行者，平台收成 blocked 交回协调者。"
 }
 ```
 

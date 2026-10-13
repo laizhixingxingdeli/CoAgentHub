@@ -2642,7 +2642,7 @@ describe('run-plan 方案驱动：真实 MissionRunner 失败停靠队列',
           const early = await runner.run(missionId, { projectRoot: repo });
           assert.equal(early.outcome.kind, 'waiting');
           if (early.outcome.kind === 'waiting') {
-            assert.equal(early.outcome.reason, 'project_busy');
+            assert.equal(early.outcome.reason, 'retry_backoff');
             assert.match(early.outcome.detail, /退避/);
           }
           const duringBackoff = await executorQueueRow(built.queuedHops);

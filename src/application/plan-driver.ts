@@ -709,7 +709,7 @@ async function land(
 /** 只有这两类 waiting 值得探一次资格：名额被占、没有可用候选。其余（等 L3 答复、
  * 基线过期、墙钟）要么等不到头，要么探针也证明不了，照旧走原升级处置。 */
 function isRetryEligibleWaitReason(reason: WaitReason): boolean {
-  return reason === 'project_busy' || reason === 'no_available_agent';
+  return reason === 'project_busy' || reason === 'retry_backoff' || reason === 'no_available_agent';
 }
 
 /**

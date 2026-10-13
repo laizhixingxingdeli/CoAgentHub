@@ -552,6 +552,9 @@ function buildQueuePhases(events: readonly NormalizedEvent[], hops: readonly Tim
   return out;
 }
 
+/** 算作「退避等待」的停机原因：旧事件写 project_busy，新事件写 retry_backoff，两者都要认。 */
+const BACKOFF_WAIT_REASONS: ReadonlySet<string> = new Set(['project_busy', 'retry_backoff']);
+
 /**
  * 有 hop.backoff 事件就用它的 failedAt/availableAt；否则仅当 mission.waiting
  * reason=project_busy 到下一条 mission.resumed 时，把这段墙钟标为退避等待。
@@ -574,10 +577,10 @@ function buildBackoffPhases(events: readonly NormalizedEvent[]): PhaseDraft[] {
   if (fromEvents.length > 0) return fromEvents;
   return pairPhases(
     events,
-    (e) => e.kind === 'mission.waiting' && str(e.data.reason) === 'project_busy',
+    (e) => e.kind === 'mission.waiting' && BACKOFF_WAIT_REASONS.has(str(e.data.reason)),
     ['mission.resumed'],
     'hop_backoff',
-    'detail 里的 availableAt 会被后一次失败覆盖，不采用；按 project_busy waiting → resumed 配对',
+    'detail 里的 availableAt 会被后一次失败覆盖，不采用；按 project_busy / retry_backoff waiting → resumed 配对',
   );
 }
 
@@ -703,7 +706,7 @@ function buildWaitingDecisionPhases(events: readonly NormalizedEvent[]): PhaseDr
   return [
     ...pairPhases(
       events,
-      (e) => e.kind === 'mission.waiting' && str(e.data.reason) !== 'project_busy',
+      (e) => e.kind === 'mission.waiting' && !BACKOFF_WAIT_REASONS.has(str(e.data.reason)),
       ['mission.resumed'],
       'waiting_decision',
       '按 mission.waiting → mission.resumed 配对',

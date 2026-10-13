@@ -25,6 +25,7 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator, inRunBackoffWaitMs } from '../src/application/orchestrator.ts';
 import { MissionRunner } from '../src/application/mission-runner.ts';
+import { RetryWakeScheduler } from '../src/application/retry-wake.ts';
 import { Platform, PlatformRuleError } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
@@ -414,7 +415,8 @@ describe('调度器：整条 Mission 自己走完', () => {
       const result = await orchestrator.runMission('M-checkpoint-denied', { projectRoot });
 
       assert.equal(result.kind, 'waiting');
-      assert.equal((result as { reason: string }).reason, 'no_available_agent');
+      // 检查点拒绝不是候选不可用：单独的停机原因，才不会被当成「等一会儿重跑」。
+      assert.equal((result as { reason: string }).reason, 'checkpoint_failed');
       assert.match((result as { detail: string }).detail, /checkpoint-denied/);
       assert.deepEqual(
         orchestrator.hops.map((hop) => hop.role),
@@ -428,9 +430,8 @@ describe('调度器：整条 Mission 自己走完', () => {
   });
 
   // 方案驱动的等待探针要能直接从结果里读出「这次缺的是哪个角色的人」。
-  // 为什么不能拿 reason 顶替：`no_available_agent` 这个字符串同时盖着
-  // 「候选在冷却」和「检查点失败」两件处置相反的事——后者要人来看，
-  // 探针若一律当成候选冷却，就会去等一个永远不会自己好的东西。
+  // 检查点失败曾和「候选在冷却」共用 `no_available_agent`，处置却相反——后者等一等就好，
+  // 前者要人来看。现在检查点失败有自己的停机原因 checkpoint_failed，仍然不许贴角色。
   test('缺候选的 waiting 带出角色；非候选故障不带', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-candidate-role-'));
     const circuits = candidateCircuitRepository();
@@ -462,7 +463,7 @@ describe('调度器：整条 Mission 自己走完', () => {
       const orchestrator = current.makeOrchestrator();
       const checkpointFault = await orchestrator.runMission('M-checkpoint-no-role', { projectRoot });
       assert.equal(checkpointFault.kind, 'waiting');
-      assert.equal((checkpointFault as { reason: string }).reason, 'no_available_agent');
+      assert.equal((checkpointFault as { reason: string }).reason, 'checkpoint_failed');
       assert.match((checkpointFault as { detail: string }).detail, /checkpoint-denied/);
       assert.equal(
         Object.hasOwn(checkpointFault, 'candidateRole'),
@@ -471,15 +472,18 @@ describe('调度器：整条 Mission 自己走完', () => {
       );
 
       // 再让协调者唯一的候选进冷却。执行者的候选没动，不许混算成 executor。
+      const coolUntil = new Date(Date.now() + 5 * 60_000).toISOString();
       await circuits.open({
         profileId: 'coordinator-a',
         failureClass: 'rate_limit',
-        openUntil: new Date(Date.now() + 5 * 60_000).toISOString(),
+        openUntil: coolUntil,
       });
       const cold = await orchestrator.runMission('M-coord-cold', { projectRoot });
       assert.equal(cold.kind, 'waiting');
       assert.equal((cold as { reason: string }).reason, 'no_available_agent');
       assert.equal((cold as { candidateRole?: string }).candidateRole, 'coordinator');
+      // 所有候选都有明确的冷却到期时刻：最早那一刻就是平台自动重试的时刻。
+      assert.equal((cold as { resumeAt?: string }).resumeAt, coolUntil);
       assert.equal(coordinator.specs.length, 1, '候选不可用不得启动协调者');
       assert.equal(orchestrator.hops.length, 2, '这一跳连 Attempt 都不该开');
     } finally {
@@ -872,6 +876,37 @@ describe('调度器：整条 Mission 自己走完', () => {
     // 只是这一张工单上的局部排除，两个候选的健康记录都不该被写。
     assert.deepEqual(await circuits.get('exec-a'), { profileId: 'exec-a', state: 'closed' });
     assert.deepEqual(await circuits.get('exec-b'), { profileId: 'exec-b', state: 'closed' });
+  });
+
+  // 模型约束（required）与局部排除碰在一起：匹配的候选在这张工单上连续无结果、被排除了，
+  // 不是「模型不可用」——不能停给人，更不能改派 exec-b；要和无约束时一样交回协调者看工单本身。
+  test('指定执行者模型而匹配的候选被工作项局部排除：交回协调者，不报 model_unavailable，也不改派别的模型', async () => {
+    const executor = new ScriptedRuntime({ 'executor:W-1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] } });
+    current = await harness({ coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor }, candidateCircuitRepository());
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-policy-excluded', contract: CONTRACT });
+    await current.platform.setMissionModelPolicy('M-policy-excluded', {
+      executor: { mode: 'required', selectors: [{ profileId: 'exec-a' }] },
+      reviewer: 'L3',
+      reason: '测试：执行者只准 exec-a',
+    });
+    const orchestrator = current.makeOrchestrator();
+    await orchestrator.runMission('M-policy-excluded', { projectRoot: process.cwd() });
+    const executorHops = orchestrator.hops.filter((hop) => hop.role === 'executor');
+    assert.deepEqual(
+      executorHops.map((hop) => hop.profile.profileId),
+      ['exec-a', 'exec-a'],
+      '只准 exec-a：连续两次无结果后它被这张工单排除，不能换成 exec-b',
+    );
+    const waits = (await current.platform.getActivity('M-policy-excluded')).filter((event) => event.kind === 'mission.waiting');
+    assert.equal(
+      waits.some((event) => (event.data as { reason?: string }).reason === 'model_unavailable'),
+      false,
+      '排除耗尽不是模型不可用，不该写这个停机原因',
+    );
+    assert.ok(
+      waits.some((event) => (event.data as { reason?: string }).reason === 'attempt_limit_reached'),
+      '和无约束时一样按「排除耗尽」交回协调者',
+    );
   });
 
   test('持久候选熔断记录五种真实 Hop 失败分类及未来截止', async () => {
@@ -1887,7 +1922,7 @@ describe('调度器：持久五维容量租约守住 Agent 启动',
         const result = await env.makeOrchestrator().runMission('M-fail', { projectRoot: process.cwd() });
         assert.equal(result.kind, 'waiting');
         if (result.kind === 'waiting') {
-          assert.equal(result.reason, 'project_busy');
+          assert.equal(result.reason, 'retry_backoff');
           assert.match(result.detail, /退避/);
         }
         const execStarts = starts.filter((row) => row.role === 'executor');
@@ -2583,7 +2618,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       const first = await env.makeOrchestrator().runMission('M-retry', { projectRoot: process.cwd() });
       assert.equal(first.kind, 'waiting');
       if (first.kind === 'waiting') {
-        assert.equal(first.reason, 'project_busy');
+        assert.equal(first.reason, 'retry_backoff');
         assert.match(first.detail, /退避/);
       }
       const afterFirst = (await queuedHops.list()).filter((row) => row.role === 'executor');
@@ -2594,6 +2629,9 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       assert.ok(Date.parse(hop.availableAt) > Date.parse(hop.lastFailure!.at));
       assert.equal(hop.lastFailure?.classification, 'upstream_5xx');
       const view1 = await env.platform.getMissionView('M-retry');
+      // 退避的下次重试时刻存在 Mission 上：服务重启后恢复调度、界面写「下次重试」读的都是它。
+      assert.equal(view1.waitReason, 'retry_backoff');
+      assert.equal(view1.waitResumeAt, hop.availableAt);
       assert.notEqual(view1.status, 'completed');
       assert.equal(view1.workItems[0]?.attempts, 1);
       const execStarts1 = starts.filter((row) => row.role === 'executor').length;
@@ -2601,7 +2639,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       const early = await env.makeOrchestrator().runMission('M-retry', { projectRoot: process.cwd() });
       assert.equal(early.kind, 'waiting');
       if (early.kind === 'waiting') {
-        assert.equal(early.reason, 'project_busy');
+        assert.equal(early.reason, 'retry_backoff');
         assert.match(early.detail, /退避/);
       }
       assert.equal((await queuedHops.list()).filter((row) => row.role === 'executor').length, 1);
@@ -2635,6 +2673,70 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       assert.equal(starts.filter((row) => row.role === 'executor').length, execStarts1 + 1);
     });
 
+  // 案例（MiRing-V0-probe 的 W-619）：Provider 失败 → hop.backoff → 托管运行退出 → 退避早已过期，
+  // 仍要人手动 start_mission。现在由服务的自动恢复调度接着跑，而且不重复派发。
+  test('退避到期由自动恢复调度接着跑：到点之前不动，到点只续跑一次，失败的那跳不被重复派发', async () => {
+    const rows: QueuedHop[] = [];
+    const queuedHops = memoryCapacityRepo(rows);
+    const hopClock = new FixedClock(CAP_NOW);
+    const starts: { role: string; profileId: string }[] = [];
+    const executor = new ScriptedRuntime({
+      'executor:W-1:0': { steps: [], upstreamFailure: 'HTTP 503 Service Unavailable' },
+      'executor:W-1:1': EXECUTOR_HAPPY['executor:W-1'],
+    });
+    const env = await capacityHarness({
+      coordinator: trackingStarts(new ScriptedRuntime(COORDINATOR_HAPPY), starts),
+      executor: trackingStarts(executor, starts),
+      queuedHops,
+      hopClock,
+      hopCapacityLimits: capLimits(),
+    });
+    await env.platform.createMission({ projectId: 'P', missionId: 'M-wake', contract: CONTRACT });
+    await env.platform.recordHostedRunRequest('M-wake', {
+      cwd: process.cwd(),
+      adapter: 'agent-entry.ts',
+      acceptStaleBase: false,
+    });
+
+    const first = await env.makeOrchestrator().runMission('M-wake', { projectRoot: process.cwd() });
+    assert.equal(first.kind, 'waiting');
+    assert.equal((first as { reason: string }).reason, 'retry_backoff');
+    const hop = (await queuedHops.list()).find((row) => row.role === 'executor')!;
+    const executorStarts = () => starts.filter((row) => row.role === 'executor').length;
+    assert.equal(executorStarts(), 1);
+
+    const scheduler = new RetryWakeScheduler({
+      listDue: (nowIso) => env.platform.listAutoResumeDue(nowIso),
+      runDriver: (id) => env.platform.getRunDriver(id),
+      isRunning: () => false,
+      record: (id, data) => env.platform.recordAutoResume(id, data),
+      start: async (id) => {
+        await env.makeOrchestrator().runMission(id, { projectRoot: process.cwd() });
+      },
+      warn: (error) => {
+        throw error;
+      },
+      now: () => hopClock.now().getTime(),
+    });
+
+    await scheduler.tick();
+    assert.equal(executorStarts(), 1, '还没到退避时刻：不动');
+
+    hopClock.advance(Date.parse(hop.availableAt) - Date.parse(CAP_NOW));
+    await Promise.all([scheduler.tick(), scheduler.tick()]);
+    await scheduler.stop();
+
+    assert.equal(executorStarts(), 2, '失败的那一跳 + 到点自动续跑的一跳；并发 tick 没有重复派发');
+    const view = await env.platform.getMissionView('M-wake');
+    assert.equal(view.status, 'awaiting_review', '自动续跑一路走到交卷');
+    assert.equal(view.waitReason, undefined);
+    assert.equal(
+      (await env.platform.getActivity('M-wake')).filter((event) => event.kind === 'mission.auto_resumed').length,
+      1,
+      '服务替 Mission 自动续跑留了一条审计',
+    );
+  });
+
   test('候选冷却不能掩盖退避等待；同一失败重入不多计数', async () => {
     const rows: QueuedHop[] = [];
     const queuedHops = memoryCapacityRepo(rows);
@@ -2658,7 +2760,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     const reentry = await orch.runMission('M-cool', { projectRoot: process.cwd() });
     assert.equal(reentry.kind, 'waiting');
     if (reentry.kind === 'waiting') {
-      assert.equal(reentry.reason, 'project_busy');
+      assert.equal(reentry.reason, 'retry_backoff');
       assert.notEqual(reentry.reason, 'no_available_agent');
       assert.match(reentry.detail, /退避/);
     }
@@ -2797,7 +2899,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       const outcome = await env.makeOrchestrator().runMission('M-unknown-wait', { projectRoot: process.cwd() });
       assert.equal(outcome.kind, 'waiting');
       if (outcome.kind === 'waiting') {
-        assert.equal(outcome.reason, 'project_busy');
+        assert.equal(outcome.reason, 'retry_backoff');
         assert.match(outcome.detail, /退避/);
       }
       const execStarts = starts.filter((row) => row.role === 'executor');
@@ -2830,7 +2932,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       const outcome = await env.makeOrchestrator().runMission('M-cap', { projectRoot: process.cwd() });
       assert.equal(outcome.kind, 'waiting');
       if (outcome.kind === 'waiting') {
-        assert.equal(outcome.reason, 'project_busy');
+        assert.equal(outcome.reason, 'retry_backoff');
         assert.match(outcome.detail, /退避/);
       }
       assert.deepEqual(
@@ -2864,7 +2966,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       const outcome = await env.makeOrchestrator().runMission('M-wall', { projectRoot: process.cwd() });
       assert.equal(outcome.kind, 'waiting');
       if (outcome.kind === 'waiting') {
-        assert.equal(outcome.reason, 'project_busy');
+        assert.equal(outcome.reason, 'retry_backoff');
         assert.match(outcome.detail, /退避/);
       }
       assert.deepEqual(

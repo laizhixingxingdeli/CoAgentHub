@@ -343,7 +343,44 @@ export const WAIT_REASON = {
   mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
   // 工作项开到检查点（默认第 15 个），等检视者判断是否拆票。
   work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
+  // 检查点拒绝了执行者的成果：越界改动原样保留，要人看是什么、谁留下的。
+  checkpoint_failed: '成果被冻结范围的检查点拒绝，越界改动已保留，等人处理',
+  // 失败后的退避：到点平台自动接着跑，不是名额被占，也不要人动手。
+  retry_backoff: '上一跳失败后在退避，到点平台会自动重试',
+  // 指定了模型（不可替代）而它现在用不了：平台不会改派别的模型，等冷却到期或调整约束。
+  model_unavailable: '指定的模型现在用不了，按约束不改派别的模型',
 };
+
+/** 谁来处理一个停机状态（后端 waitInfo.owner）。 */
+export const WAIT_OWNER = {
+  platform: '平台自动处理',
+  coordinator: '协调者处理',
+  l3: '需要检视者（L3）处理',
+  user: '需要用户处理',
+};
+
+/**
+ * 等待信息的一行话：处理方、会不会自动恢复及下次重试、重试计数、有没有活动 Agent、
+ * 托管运行在不在跑，最后是下一步。
+ *
+ * 为什么要把这几样摆在一起：「HTTP 受理了」「runner 在跑」「在等」「完成了」是四件事。
+ * 一个在退避的 Mission，runner 早就退出了，但平台会自动重试；一个越界停下的 Mission，
+ * 不会自动恢复，要有人处理——只看一个状态词分不出来。
+ * formatTime 由调用方传入（页面按本地时区格式化），这里不碰时区。
+ */
+export function waitInfoText(info, runner, formatTime = (iso) => iso) {
+  if (!info) return '';
+  const parts = [WAIT_OWNER[info.owner] || text(info.owner) || '（未知）'];
+  parts.push(
+    info.autoResume
+      ? `会自动恢复${info.nextRetryAt ? `（下次 ${formatTime(info.nextRetryAt)}）` : ''}`
+      : '不会自动恢复',
+  );
+  if (info.retry) parts.push(`第 ${num(info.retry.attempt)}/${num(info.retry.max)} 次重试`);
+  parts.push(info.activeAgent ? '有活动 Agent' : '没有活动 Agent');
+  if (runner) parts.push(runner.running ? '托管运行：在跑' : '托管运行：没有在跑');
+  return `${parts.join(' · ')}${info.action ? `。下一步：${info.action}` : ''}`;
+}
 
 /**
  * waitDetail 优先：那是平台写下的具体情形（"卡在 exec-a"），比 enum 翻出来的
@@ -387,7 +424,13 @@ export function evidenceKindLabel(kind) {
 const OUTCOME_CN = { completed: '完成', partial: '部分完成', delivered: '已交付', blocked: '没做出来' };
 
 /** 平台收尾（work_item.platform_blocked）的来源。认不出来的原样带出，不编原因。 */
-const STALL_SOURCE_CN = { runaway: '一跳跑太久被掐断', no_result_limit: '连续无结构化结果到顶' };
+const STALL_SOURCE_CN = {
+  runaway: '一跳跑太久被掐断',
+  no_result_limit: '连续无结构化结果到顶',
+  workspace_dirty: '开跑前发现工作区有不属于本工单的改动',
+  stranded_dispatch: '有结果的工单被机器续派后无人执行，状态恢复',
+  operator_recovery: 'L3 / 操作员触发的状态恢复',
+};
 
 /** outcome 是人话在前、机器值在括号里：两边的人都要能对上号。 */
 const outcomeText = (outcome) => {
@@ -562,6 +605,94 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '平台把卡住的工作项转为卡住',
       detail: `来源 ${source ? STALL_SOURCE_CN[source] || source : '（没有写来源）'} · ${or(data.reason, '（没有写原因）')}`,
+    };
+  },
+
+  // 验证命令在 Mission 工作区里跑，会留下改动。授权范围内的由平台收口提交；范围外的原样保留，
+  // 并记下来源，供下一张工单开跑前核对（不自动提交未授权文件，不扩大范围）。
+  'workspace.validation_settled': (event) => {
+    const data = (event && event.data) || {};
+    const committed = list(data.committed);
+    const left = list(data.left);
+    const parts = [];
+    if (committed.length) parts.push(`验证留下的授权范围内改动已提交：${committed.join('、')}`);
+    if (left.length) parts.push(`范围外的改动原样保留、没有提交：${left.join('、')}`);
+    if (data.error) parts.push(`收口失败：${text(data.error)}`);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '验证后收口工作区',
+      detail: parts.join('；') || '工作区干净',
+    };
+  },
+
+  'workspace.residue_adopted': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '开跑前并入工作区残留',
+      detail: `工单 ${or(event && event.workItemId, '（没有工作项 ID）')} 的授权范围内已有未提交改动：${list(data.paths).join('、') || '（无）'}`,
+    };
+  },
+
+  // Mission 级模型约束：协调者 / 执行者允许用哪些模型，平台在派发前强制。最新一条生效，旧的留在历史里。
+  'mission.model_policy_set': (event) => {
+    const data = (event && event.data) || {};
+    const describe = (label, policy) => {
+      if (!policy) return '';
+      const selectors = list(policy.selectors)
+        .map((selector) => ['profileId', 'provider', 'model', 'reasoning']
+          .filter((key) => selector && selector[key])
+          .map((key) => `${key}=${selector[key]}`)
+          .join(' '))
+        .join(' 或 ');
+      return `${label}${policy.mode === 'required' ? '指定（不可替代）' : '优先（可替代）'}：${selectors}`;
+    };
+    const parts = data.cleared ? ['已清除全部模型约束'] : [describe('协调者', data.coordinator), describe('执行者', data.executor)].filter(Boolean);
+    return {
+      badge: 'L3',
+      action: `改模型约束（r${num(data.revision)}）`,
+      detail: `${parts.join('；') || '（空）'} · ${or(data.setBy, '未署名')}：${or(data.reason, '（没有写理由）')}`,
+    };
+  },
+
+  // 每次派发在有约束时留一条：实际用了谁、按的是哪一版、是不是替代（优先模式才会替代）。
+  'attempt.profile_selected': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: data.substituted ? '按约束改派了替代候选' : '按约束选定候选',
+      detail: `${or(data.profileId, '（未知候选）')} · ${data.mode === 'required' ? '指定' : '优先'} r${num(data.policyRevision)} · ${data.matched ? '符合约束' : '不符合约束（优先模式的替代）'}`,
+    };
+  },
+
+  // 托管启动参数：Mission 进入退避后，服务到点靠它自动接着跑，重启后也读得回来。
+  'mission.run_requested': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '记下托管启动参数',
+      detail: `目录 ${or(data.cwd, '（未记）')}${data.maxRounds ? ` · 最多 ${num(data.maxRounds)} 轮` : ''}`,
+    };
+  },
+
+  // 服务到点自动接着跑，不是谁手动 start。连续无进展时 streak 递增，间隔随之拉长。
+  'mission.auto_resumed': (event) => {
+    const data = (event && event.data) || {};
+    const reason = text(data.reason);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '到点自动接着跑',
+      detail: `原因 ${reason ? WAIT_REASON[reason] || reason : '（没有写原因）'} · 第 ${num(data.streak)} 次连续唤醒`,
+    };
+  },
+
+  'workspace.checkpoint_failed': (event) => {
+    const data = (event && event.data) || {};
+    const paths = list(data.paths);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '检查点拒绝了成果',
+      detail: `${or(data.message, '（没有写原因）')}${paths.length ? `；涉及：${paths.join('、')}` : ''}`,
     };
   },
 

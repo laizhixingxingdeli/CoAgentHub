@@ -517,7 +517,7 @@ test('文件平台注入真实 MissionRunner：上游失败进持久退避，到
     const first = await runner.run('M-fail-queue', { projectRoot });
     assert.equal(first.outcome.kind, 'waiting');
     if (first.outcome.kind === 'waiting') {
-      assert.equal(first.outcome.reason, 'project_busy');
+      assert.equal(first.outcome.reason, 'retry_backoff');
       assert.match(first.outcome.detail, /退避/);
     }
     const hop = await executorQueueRow(built.queuedHops);
@@ -544,7 +544,7 @@ test('文件平台注入真实 MissionRunner：上游失败进持久退避，到
     const early = await runner.run('M-fail-queue', { projectRoot });
     assert.equal(early.outcome.kind, 'waiting');
     if (early.outcome.kind === 'waiting') {
-      assert.equal(early.outcome.reason, 'project_busy');
+      assert.equal(early.outcome.reason, 'retry_backoff');
       assert.match(early.outcome.detail, /退避/);
     }
     const duringBackoff = await executorQueueRow(built.queuedHops);

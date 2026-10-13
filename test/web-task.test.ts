@@ -1813,6 +1813,9 @@ describe('项目页方案运行标签与按票分组', () => {
     assert.equal(missionFilterKey({ status: 'awaiting_review' }), 'needs');
     assert.equal(missionFilterKey({ status: 'executing', waitReason: 'escalated' }), 'needs');
     assert.equal(missionFilterKey({ status: 'executing', waitReason: 'project_busy' }), 'active');
+    // 后端算好的处理方优先：退避在平台手里（进行中），越界停下在检视者手里（需处理）。
+    assert.equal(missionFilterKey({ status: 'executing', waitReason: 'retry_backoff', waitInfo: { owner: 'platform' } }), 'active');
+    assert.equal(missionFilterKey({ status: 'executing', waitReason: 'checkpoint_failed', waitInfo: { owner: 'l3' } }), 'needs');
     assert.equal(missionFilterKey({ status: 'completed' }), 'completed');
     assert.equal(missionFilterKey({ status: 'blocked' }), 'blocked');
 

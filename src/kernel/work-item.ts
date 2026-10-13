@@ -489,26 +489,26 @@ function normalizeDiffSize(
   fail: (detail: string) => undefined,
 ): WorkOrderValidationDiffSize | undefined {
   if (!isPlainObject(value)) return fail('diffSize must be a plain object');
-  if (!onlyKeys(value, ['maxChangedFiles', 'maxChangedLines'])) {
-    return fail('diffSize only keys maxChangedFiles,maxChangedLines are allowed');
+  const DIFF_SIZE_KEYS = [
+    'maxChangedFiles',
+    'maxChangedLines',
+    'maxChangedBinaryFiles',
+    'maxChangedBinaryBytes',
+  ] as const;
+  if (!onlyKeys(value, DIFF_SIZE_KEYS)) {
+    return fail(`diffSize only keys ${DIFF_SIZE_KEYS.join(',')} are allowed`);
   }
-  const out: { maxChangedFiles?: number; maxChangedLines?: number } = {};
-  if (Object.prototype.hasOwnProperty.call(value, 'maxChangedFiles')) {
-    const n = asNonNegativeInt(value.maxChangedFiles);
+  const out: { -readonly [K in (typeof DIFF_SIZE_KEYS)[number]]?: number } = {};
+  for (const key of DIFF_SIZE_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const n = asNonNegativeInt(value[key]);
     if (n === undefined) {
-      return fail('diffSize.maxChangedFiles must be a finite nonnegative integer');
+      return fail(`diffSize.${key} must be a finite nonnegative integer`);
     }
-    out.maxChangedFiles = n;
+    out[key] = n;
   }
-  if (Object.prototype.hasOwnProperty.call(value, 'maxChangedLines')) {
-    const n = asNonNegativeInt(value.maxChangedLines);
-    if (n === undefined) {
-      return fail('diffSize.maxChangedLines must be a finite nonnegative integer');
-    }
-    out.maxChangedLines = n;
-  }
-  if (out.maxChangedFiles === undefined && out.maxChangedLines === undefined) {
-    return fail('diffSize requires at least one of maxChangedFiles,maxChangedLines');
+  if (Object.keys(out).length === 0) {
+    return fail(`diffSize requires at least one of ${DIFF_SIZE_KEYS.join(',')}`);
   }
   return out;
 }

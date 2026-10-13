@@ -37,6 +37,22 @@ import * as workItemDispatch from './platform/work-item-dispatch.ts';
 import { blockStalledWorkItem } from './platform/stalled-work-item.ts';
 export type { StalledSource, StalledWorkItemInput, StalledWorkItemResult } from './platform/stalled-work-item.ts';
 export { PLATFORM_BLOCKED_EVENT_KIND } from './platform/stalled-work-item.ts';
+import { recoverStrandedWorkItem, type StrandedRecoveryInput, type StrandedRecoveryResult } from './platform/stranded-work-item.ts';
+export type { StrandedRecoveryInput, StrandedRecoveryResult, StrandedSource } from './platform/stranded-work-item.ts';
+import * as modelPolicyStore from './platform/model-policy.ts';
+export type { SetModelPolicyInput } from './platform/model-policy.ts';
+export { MODEL_POLICY_EVENT_KIND, PROFILE_SELECTED_EVENT_KIND } from './platform/model-policy.ts';
+import * as autoResume from './platform/auto-resume.ts';
+export type { AutoResumeDue, HostedRunRequest, RunDriverInfo } from './platform/auto-resume.ts';
+export { AUTO_RESUMED_EVENT_KIND, RUN_REQUESTED_EVENT_KIND, isAutoResumable } from './platform/auto-resume.ts';
+import * as workspaceHygiene from './platform/workspace-hygiene.ts';
+export type { ResidueOrigin, ValidationSettlementInput, WorkspaceBlockInput } from './platform/workspace-hygiene.ts';
+export {
+  CHECKPOINT_FAILED_EVENT_KIND,
+  RESIDUE_ADOPTED_EVENT_KIND,
+  VALIDATION_SETTLED_EVENT_KIND,
+  describeResidue,
+} from './platform/workspace-hygiene.ts';
 import * as workItemReview from './platform/work-item-review.ts';
 import * as workOrders from './platform/work-orders.ts';
 import * as startupBrief from './platform/startup-brief.ts';
@@ -979,17 +995,19 @@ export class Platform {
     missionId: string,
     reason: WaitReason | undefined,
     detail?: string,
+    resumeAt?: string,
   ): Promise<void> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#setWaitReason(missionId, reason, detail));
+    return this.#tx(() => this.#setWaitReason(missionId, reason, detail, resumeAt));
   }
 
   async #setWaitReason(
     missionId: string,
     reason: WaitReason | undefined,
     detail?: string,
+    resumeAt?: string,
   ): Promise<void> {
-    return missionLifecycle.setWaitReason(this.#context, (id, answer) => this.#answerEscalation(id, answer), missionId, reason, detail);
+    return missionLifecycle.setWaitReason(this.#context, (id, answer) => this.#answerEscalation(id, answer), missionId, reason, detail, resumeAt);
   }
   /* =========================== 取消 / 暂停 =========================== */
 
@@ -1446,6 +1464,110 @@ export class Platform {
     claim?: QueueClaimIdentity,
   ): Promise<{ converted: boolean; reason: string }> {
     return blockStalledWorkItem(this.#context, input, claim);
+  }
+
+  /**
+   * 状态恢复：把「有执行结果、却停在 dispatched、没有活执行者」的工单收成 blocked，让协调者能
+   * 依法审查、修订、再派发。编排器在叫协调者之前自动调（stranded_dispatch，只认可证明的机器续派
+   * 残留）；L3 / 操作员经 HTTP 显式调（operator_recovery，必须署名写理由）。
+   *
+   * 恢复前核实 Attempt、租约与冻结的修订号；任一不成立无副作用拒绝；重复调用幂等。
+   */
+  async recoverStrandedWorkItem(input: StrandedRecoveryInput): Promise<StrandedRecoveryResult> {
+    return recoverStrandedWorkItem(this.#context, input);
+  }
+
+  /** 当前生效的 Mission 级模型约束；没设过或已清除返回 undefined。派发前每一跳都现读。 */
+  async getMissionModelPolicy(missionId: string) {
+    return modelPolicyStore.readMissionModelPolicy(this.#context, missionId);
+  }
+
+  /**
+   * 设置 / 清除 Mission 级模型约束（整份替换，署名与理由必填，事件留全部历史）。
+   * 对后续派发生效；在途的 Attempt 不受影响；其它 Mission 与资源池配置不动。
+   */
+  async setMissionModelPolicy(missionId: string, input: modelPolicyStore.SetModelPolicyInput) {
+    return this.#tx(() => modelPolicyStore.setMissionModelPolicy(this.#context, missionId, input));
+  }
+
+  /** 派发时记下这一跳实际用了谁、按哪一版约束、是不是替代。 */
+  async recordProfileSelection(
+    missionId: string,
+    attemptId: string,
+    data: Parameters<typeof modelPolicyStore.recordProfileSelection>[3],
+  ): Promise<void> {
+    return this.#tx(() => modelPolicyStore.recordProfileSelection(this.#context, missionId, attemptId, data));
+  }
+
+  /** 托管启动时记下续跑要复用的参数（目录、适配器、轮次上限……）；与最近一条相同不重复写。 */
+  async recordHostedRunRequest(
+    missionId: string,
+    request: autoResume.HostedRunRequest,
+  ): Promise<{ recorded: boolean }> {
+    return this.#tx(() => autoResume.recordHostedRunRequest(this.#context, missionId, request));
+  }
+
+  /** 这条 Mission 由谁驱动：入过队列的归队列 worker；否则看有没有记下的托管启动参数。 */
+  async getRunDriver(missionId: string): Promise<autoResume.RunDriverInfo> {
+    return autoResume.readRunDriver(this.#context, missionId);
+  }
+
+  /** 自动恢复时刻已到、且满足全部前置条件（没暂停 / 挂起 / 待 L3 / 不在门禁原因上）的 Mission。 */
+  async listAutoResumeDue(nowIso: string): Promise<autoResume.AutoResumeDue[]> {
+    return autoResume.listAutoResumeDue(this.#context, nowIso);
+  }
+
+  /** 服务自动接着跑之前留的审计记录。 */
+  async recordAutoResume(
+    missionId: string,
+    data: { readonly reason: string; readonly resumeAt: string; readonly streak: number },
+  ): Promise<void> {
+    return this.#tx(() => autoResume.recordAutoResume(this.#context, missionId, data));
+  }
+
+  /** 验证跑完、授权范围内的副作用已收口提交后，记下提交了什么、范围外留下了什么。 */
+  async recordValidationSettlement(
+    input: workspaceHygiene.ValidationSettlementInput,
+  ): Promise<{ recorded: boolean }> {
+    return this.#tx(() => workspaceHygiene.recordValidationSettlement(this.#context, input));
+  }
+
+  /** 脏路径是谁留下的（只认平台记过的验证后收口事件；查不到的不在结果里）。 */
+  async attributeWorkspacePaths(
+    missionId: string,
+    paths: readonly string[],
+  ): Promise<Record<string, workspaceHygiene.ResidueOrigin>> {
+    return workspaceHygiene.workspaceResidueOrigins(this.#context, missionId, paths);
+  }
+
+  /** 开跑前把范围内的残留并入这张工单，并留下它们原来的来源。 */
+  async recordResidueAdopted(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly paths: readonly string[];
+    readonly origins: Readonly<Record<string, workspaceHygiene.ResidueOrigin>>;
+  }): Promise<void> {
+    return this.#tx(() => workspaceHygiene.recordResidueAdopted(this.#context, input));
+  }
+
+  /** 检查点失败的结构化记录（原因码、路径、来源）。 */
+  async recordCheckpointFailure(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly attemptId?: string;
+    readonly code?: string;
+    readonly message: string;
+    readonly paths: readonly string[];
+    readonly origins: Readonly<Record<string, workspaceHygiene.ResidueOrigin>>;
+  }): Promise<void> {
+    return this.#tx(() => workspaceHygiene.recordCheckpointFailure(this.#context, input));
+  }
+
+  /** 开跑前发现工作区不干净：不启动执行者，把工单收成 blocked 交回协调者。 */
+  async blockWorkItemForWorkspace(
+    input: workspaceHygiene.WorkspaceBlockInput,
+  ): Promise<{ converted: boolean; reason: string }> {
+    return this.#tx(() => workspaceHygiene.blockWorkItemForWorkspace(this.#context, input));
   }
 
   async reviewExecutionResult(

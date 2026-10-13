@@ -834,7 +834,7 @@ test('single-id queue: retryable failure waits, due reclaim dead-letters, missin
     const first = await env.makeOrchestrator().runMission('M-sid', { projectRoot: process.cwd() });
     assert.equal(first.kind, 'waiting');
     if (first.kind === 'waiting') {
-      assert.equal(first.reason, 'project_busy');
+      assert.equal(first.reason, 'retry_backoff');
       assert.match(first.detail, /退避/);
     }
     const exec1 = (await queuedHops.list()).filter((row) => row.role === 'executor');

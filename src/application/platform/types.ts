@@ -40,6 +40,7 @@ import type {
   WorkItem,
   WorkItemStatus,
   WorkOrder,
+  WorkOrderValidationDiffSize,
   WorkspaceRef,
 } from '../../kernel/index.ts';
 import type {
@@ -62,6 +63,8 @@ import type {
   ProjectRepository,
 } from '../ports.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
+import type { MissionModelPolicy } from '../model-policy.ts';
+import type { MissionWaitInfo } from './wait-info.ts';
 import type { DeliveryRepository } from '../delivery.ts';
 import type { WorkspaceManager } from '../workspace.ts';
 import type { ArtifactStore } from '../artifact-store.ts';
@@ -98,10 +101,7 @@ export interface PlatformValidationDeps {
       }[];
       /** 仅从 frozen WorkOrder.validation 拷贝；缺省 = 检查不在 force。 */
       readonly forbiddenPaths?: readonly string[];
-      readonly diffSize?: {
-        readonly maxChangedFiles?: number;
-        readonly maxChangedLines?: number;
-      };
+      readonly diffSize?: WorkOrderValidationDiffSize;
     }) => Promise<{
       readonly report: ValidationReport;
       readonly authority?: Extract<ReviewAuthority, { kind: 'validator' }>;
@@ -304,6 +304,12 @@ export interface MissionView {
   /** 为什么停着。undefined = 没停。 */
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
+  /** 平台打算自动接着跑的时刻（ISO）。没有 = 不会自动恢复，要人处理。 */
+  waitResumeAt?: string;
+  /** Mission 级模型约束（平台在派发前强制）；没设就没有这一格。 */
+  modelPolicy?: MissionModelPolicy;
+  /** 等待状态的统一投影：谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步。没有停机原因就没有这一格。 */
+  waitInfo?: MissionWaitInfo;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
@@ -396,6 +402,8 @@ export interface MissionSummary {
   status: string;
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
+  waitResumeAt?: string;
+  waitInfo?: MissionWaitInfo;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;

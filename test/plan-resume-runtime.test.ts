@@ -71,6 +71,11 @@ test('生产队列探针只认本 Mission 的 retry_wait / 占位：同 missionI
     await ask(createQueuedHopWaitEligibility({ list: async () => ownBackoff, now }), 'R-probe-F1', 'project_busy'),
     { kind: 'own_backoff', availableAt: plusMs(T0, 2_000) },
   );
+  // 失败后的退避现在有自己的停机原因 retry_backoff：探针对它的判断与 project_busy 一致。
+  assert.deepEqual(
+    await ask(createQueuedHopWaitEligibility({ list: async () => ownBackoff, now }), 'R-probe-F1', 'retry_backoff'),
+    { kind: 'own_backoff', availableAt: plusMs(T0, 2_000) },
+  );
 
   // 别的 Mission 的退避不是本 Mission 的证明——detail 文案写得再像也不认。
   const foreign = [row({ missionId: 'R-other-F1', status: 'retry_wait', availableAt: plusMs(T0, 2_000) })];

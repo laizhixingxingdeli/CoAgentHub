@@ -31,6 +31,13 @@ import { PlatformRuleError } from './platform.ts';
 import { CHANGE_IMPACT_UNSUPPORTED } from './platform/change-impact.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
+import { HopGuards } from './hop-guards.ts';
+import {
+  applyRolePolicy,
+  describeModelUnavailable,
+  policyMatches,
+  type RoleModelPolicy,
+} from './model-policy.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
@@ -277,8 +284,26 @@ export type MissionRunOutcome =
    * 候选可能只是 unknown（探针在跑、仓储读不懂）。到底等不等，得再拿
    * roleCooldownSnapshot 按这个角色算一遍。
    */
-  | { kind: 'waiting'; reason: WaitReason; detail: string; candidateRole?: RolePoolName }
+  | {
+      kind: 'waiting';
+      reason: WaitReason;
+      detail: string;
+      candidateRole?: RolePoolName;
+      /** 平台打算自动接着跑的时刻（ISO）；没有就是不会自动恢复。 */
+      resumeAt?: string;
+    }
   | { kind: 'stalled'; reason: string };
+
+/**
+ * 队列等待种类 → 停机原因。
+ * 失败后的退避（available_at）是「到点自动重试」，单独成因；死信要人看；
+ * 租约被占 / 容量不够仍是排队，沿用 project_busy。
+ */
+function queuedWaitReason(wait: QueuedHopWait): WaitReason {
+  if (wait === 'dead_letter') return 'attempt_limit_reached';
+  if (wait === 'available_at') return 'retry_backoff';
+  return 'project_busy';
+}
 
 /**
  * 每一跳协调者开头都要说的那句。
@@ -311,6 +336,7 @@ function coordinatorInstruction(view: {
   promotions?: readonly { triggerRule: string }[];
   conflictFiles?: readonly string[];
   waitDetail?: string;
+  modelPolicy?: { revision: number; coordinator?: unknown };
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -325,6 +351,12 @@ function coordinatorInstruction(view: {
     // 以及一句泛泛的「按简报决定下一步」——它会以为是普通的空闲轮回，而不是
     // 这次执行被拦住。
     view.waitDetail ? `**执行者已经被挡住：** ${view.waitDetail}` : '',
+    // 模型身份由平台在派发前强制：协调者不必、也不应该靠自己核对「我是不是契约正文里写的那个模型」，
+    // 更不要为此升级——契约正文可能是过期的叙述（用户后来明确授权改用别的模型）。
+    view.modelPolicy?.coordinator
+      ? `**模型身份由平台强制**（候选约束 r${view.modelPolicy.revision}）：你被派到这一跳，就说明身份已经符合当前约束。` +
+        '不要核对自己是哪个模型，也不要因契约正文里对模型的描述与你不一致而升级。'
+      : '',
     coordinatorBody(view),
   ]
     .filter(Boolean)
@@ -575,6 +607,8 @@ export class Orchestrator {
    * 加上 --accept-stale-base 再跑。不是隐式状态，也不会自己失忆。
    */
   #staleAcknowledged: boolean;
+  /** 每一跳前后的工作区守卫与状态恢复（拆出去的，见 hop-guards.ts）。 */
+  readonly #guards: HopGuards;
   /** 本次运行实际用的工作区，跑完打给调用方看。 */
   workspace: { cwd: string; branch: string; baseRevision: string } | undefined;
 
@@ -588,6 +622,7 @@ export class Orchestrator {
     this.#executor = deps.executor;
     this.#independentReviewer = deps.independentReviewer;
     this.#workspace = deps.workspace;
+    this.#guards = new HopGuards(deps.platform, deps.workspace);
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
     this.#candidateCircuits = deps.candidateCircuits;
     this.#usageReader = deps.usageReader ?? getRuntimeUsage;
@@ -816,6 +851,9 @@ export class Orchestrator {
             missionId,
             item.id,
           );
+          // 开跑前核对工作区：别的工单的验证留在工作区里的改动，不能让这张工单背着去跑一整跳、
+          // 到交卷时才被检查点以「越界」拒掉。拦下时工单收成 blocked 交回协调者，不启动执行者。
+          if ((await this.#guards.preflightWorkspace(missionId, item, cwd)) === 'blocked') continue;
           const hop = await this.#runHop({
             role: 'executor',
             missionId,
@@ -869,8 +907,8 @@ export class Orchestrator {
             }
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
-            await this.#platform.setWaitReason(missionId, reason, detail);
-            return this.#waitingOutcome(reason, detail, hop?.candidateRole);
+            await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
+            return this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt);
           }
           if ('persistentUnknown' in hop && hop.persistentUnknown) {
             const detail = '持久候选熔断记录为 unknown；停止本次 runMission，避免后续轮次绕过保守轮换';
@@ -882,7 +920,9 @@ export class Orchestrator {
           // **partial 不跑**：冻结命令是给「做完了」的交付当验收材料的，拿半成品去跑等于
           // 把「还没做完」判成「做法不对」，退回一次本来就要接着做的交付。
           if (needsStandardValidation && !(await this.#standardSubmitIsPartial(missionId, item.id))) {
-            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+            if (await this.#validateStandardIfSubmitted(missionId, item.id, cwd)) {
+              await this.#guards.settleValidationResidue(missionId, item, cwd);
+            }
           }
           // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
           // 没交卷（这一跳没 structured submit）时平台自己会跳过。
@@ -917,7 +957,9 @@ export class Orchestrator {
         if ((item.order?.validation?.commands?.length ?? 0) > 0) {
           // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
           if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
-            await this.#validateStandardIfSubmitted(missionId, item.id, cwd);
+            if (await this.#validateStandardIfSubmitted(missionId, item.id, cwd)) {
+              await this.#guards.settleValidationResidue(missionId, item, cwd);
+            }
           }
         }
         // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为「重启
@@ -927,6 +969,12 @@ export class Orchestrator {
       }
       // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
       if (redispatchedOnRecovery) continue;
+
+      // 状态恢复：Mission 不在 executing，却有「带着结果被机器续派回 dispatched」的工单——调度器不会
+      // 再为它启动执行者，协调者也无法对 dispatched 工单 reject 或修订（W-621：dispatched -> rejected
+      // is not allowed）。先由平台收成 blocked，协调者拿到的才是一张它能依法处理的工单。
+      const recovered = await this.#guards.recoverStrandedDispatches(missionId, view);
+      const coordinatorView = recovered ? await this.#platform.getMissionView(missionId) : view;
 
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
       //
@@ -951,7 +999,7 @@ export class Orchestrator {
         cwd,
         pool: this.#coordinator,
         instruction: coordinatorInstruction({
-          ...view,
+          ...coordinatorView,
           conflictFiles: activeConflicts,
           // 这一轮刚写下的交回原因。view 是循环开头拍的，看不见它；而 runMission
           // 开头已经把上一次的旧原因清掉了，所以在这里现读只会读到陈货。
@@ -977,8 +1025,8 @@ export class Orchestrator {
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason);
-        await this.#platform.setWaitReason(missionId, reason, detail);
-        return this.#waitingOutcome(reason, detail, hop?.candidateRole);
+        await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
+        return this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt);
       }
 
       // GATE-POST after coordinator hop.
@@ -1326,10 +1374,10 @@ export class Orchestrator {
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
-        await this.#platform.setWaitReason(missionId, reason, detail);
+        await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
         return {
           kind: 'outcome',
-          outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole),
+          outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt),
         };
       }
       // reportBlocked 把非空提问记成 Mission 升级。不在这里读一次视图的话，
@@ -1517,10 +1565,10 @@ export class Orchestrator {
     if (!hop || 'exhausted' in hop) {
       const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
       const detail = hop?.detail ?? this.#stallDetail(reason);
-      await this.#platform.setWaitReason(missionId, reason, detail);
+      await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
       return {
         kind: 'outcome',
-        outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole),
+        outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt),
       };
     }
     // Standard 那一跳在 coordinator 之后就过一次预算闸（#enforceAuthoritativeBudget）。快车道
@@ -1880,10 +1928,15 @@ export class Orchestrator {
     reason: WaitReason,
     detail: string,
     candidateRole?: RolePoolName,
+    resumeAt?: string,
   ): MissionRunOutcome {
-    return candidateRole
-      ? { kind: 'waiting', reason, detail, candidateRole }
-      : { kind: 'waiting', reason, detail };
+    return {
+      kind: 'waiting',
+      reason,
+      detail,
+      ...(candidateRole ? { candidateRole } : {}),
+      ...(resumeAt !== undefined ? { resumeAt } : {}),
+    };
   }
 
   /**
@@ -2089,16 +2142,93 @@ export class Orchestrator {
     missionId: string,
     workItemId: string,
     cwd: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    // 返回值是「验证命令有没有机会在工作区里跑过」：跑过就可能留下改动，调用方要接着收口。
+    // 命令中途抛错也算（命令可能已经改了文件），所以先置位再调用。
+    let attempted = false;
     try {
       // 重新读一次：这一跳跑完执行者之后，工作项状态已经变了，入参里的 view 是旧的。
       const live = await this.#platform.getMissionView(missionId);
       const item = live.workItems.find((row) => row.id === workItemId);
-      if (item?.status !== 'submitted') return;
-      await this.#platform.validateStandardWorkItem({ missionId, workItemId, cwd });
+      if (item?.status !== 'submitted') return false;
+      attempted = true;
+      const validated = await this.#platform.validateStandardWorkItem({ missionId, workItemId, cwd });
+      return validated !== undefined;
     } catch {
       // 见上：没有报告也要让协调者接手，不替它评审。
+      return attempted;
     }
+  }
+
+  /** 这条 Mission 对该角色的模型约束（含版本号）；没设就是 undefined。读不出来就抛——读不到约束不能当没约束去派发。 */
+  async #rolePolicy(
+    missionId: string,
+    role: 'coordinator' | 'executor',
+  ): Promise<{ role: RoleModelPolicy; revision: number } | undefined> {
+    const policy = await this.#platform.getMissionModelPolicy(missionId);
+    const rolePolicy = policy?.[role];
+    return policy && rolePolicy ? { role: rolePolicy, revision: policy.revision } : undefined;
+  }
+
+  /**
+   * 指定了模型而匹配的候选现在都不可用：不派发别的模型，等或升级。
+   * 匹配的候选都有明确的冷却到期时刻时，最早那一刻就是自动重试的时刻；资源池里根本没有匹配的候选、
+   * 或有一个说不准，就没有恢复时刻——要人去修候选、调资源池或改约束。
+   */
+  async #modelUnavailable(
+    pool: RolePool,
+    role: 'coordinator' | 'executor',
+    policy: { role: RoleModelPolicy; revision: number },
+    now: number,
+    excludedProfileIds: readonly string[] | undefined,
+  ): Promise<{ exhausted: WaitReason; detail?: string; candidateRole: RolePoolName; resumeAt?: string }> {
+    const matching = (profile: ExecutionProfile) => policyMatches(profile, policy.role);
+    const matched = (await this.#poolCandidates(pool)).filter(matching);
+    const configured = matched.length;
+    // 匹配的候选全被「同一工作项连续无结构化结果」局部排除了：这不是模型不可用，而是这张工单在
+    // 这些候选上跑不出结果。和没有约束时一样按「排除耗尽」处置（调用方认 no_available_agent + 排除名单，
+    // 交回协调者去看工单本身）；伪装成 model_unavailable 停给人，既说错了原因，也绕过了交回。
+    if (
+      excludedProfileIds?.length &&
+      configured > 0 &&
+      matched.every((profile) => excludedProfileIds.includes(profile.profileId))
+    ) {
+      return { exhausted: 'no_available_agent', candidateRole: role };
+    }
+    const resumeAt = await this.#earliestCooldownEnd(pool, now, excludedProfileIds, matching);
+    return {
+      exhausted: 'model_unavailable',
+      detail: describeModelUnavailable({ role, revision: policy.revision, policy: policy.role, configured, resumeAt }),
+      candidateRole: role,
+      ...(resumeAt !== undefined ? { resumeAt } : {}),
+    };
+  }
+
+  /**
+   * 候选全在冷却时，平台最早什么时候能再试（ISO）。
+   *
+   * 每个候选都必须有明确的未来到期时刻才给：有一个 unknown（探针在跑、到期值非法、读不出来）、
+   * 或者已经可用，就说不准——返回 undefined，等于「平台不会自动恢复」，宁可让人来看，
+   * 也不编一个时刻让 Mission 在那一刻空转。被局部排除的候选不算（它们本来就不会被选）。
+   */
+  async #earliestCooldownEnd(
+    pool: RolePool,
+    now: number,
+    excludedProfileIds?: readonly string[],
+    only?: (profile: ExecutionProfile) => boolean,
+  ): Promise<string | undefined> {
+    const skip = excludedProfileIds?.length ? new Set(excludedProfileIds) : undefined;
+    let earliest: number | undefined;
+    for (const profile of await this.#poolCandidates(pool)) {
+      if (skip?.has(profile.profileId)) continue;
+      if (only && !only(profile)) continue;
+      const state = await this.#candidateCooldown(profile.profileId, now);
+      if (state.availability !== 'cooldown' || state.until === undefined) return undefined;
+      const until = Date.parse(state.until);
+      if (!Number.isFinite(until)) return undefined;
+      earliest = earliest === undefined ? until : Math.min(earliest, until);
+    }
+    return earliest === undefined ? undefined : new Date(earliest).toISOString();
   }
 
   /**
@@ -2177,7 +2307,7 @@ export class Orchestrator {
      * 缺的不是候选，后面所有的失败出口都不是候选不可用（检查点失败最典型，
      * 它也返回 no_available_agent）。
      */
-    | { exhausted: WaitReason; detail?: string; candidateRole?: RolePoolName }
+    | { exhausted: WaitReason; detail?: string; candidateRole?: RolePoolName; resumeAt?: string }
     | { alreadyCompleted: true }
     /** 已等到退避；由 runMission 下一轮重新领取，以便 maxRounds 能拦住 Q。 */
     | { retrySameSlot: true }
@@ -2197,13 +2327,27 @@ export class Orchestrator {
     if (input.purpose === 'impact') this.#requireImpactCapability();
 
     const now = this.#now().getTime();
-    const usable = await this.#availableCandidates(input.pool, now, input.excludedProfileIds);
+    const available = await this.#availableCandidates(input.pool, now, input.excludedProfileIds);
+    // Mission 级模型约束：在平台里、派发之前强制。指定（required）而匹配的候选都不可用时，
+    // 宁可停下来等或升级，也不改派别的模型——不能靠被换上来的模型自己发现身份不符。
+    const policy = await this.#rolePolicy(input.missionId, input.role);
+    const selection = applyRolePolicy(available, policy?.role);
+    const usable = selection.candidates;
+    if (selection.blocked && policy) {
+      return this.#modelUnavailable(input.pool, input.role, policy, now, input.excludedProfileIds);
+    }
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
       // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
       //
       // 带上角色：这一跳没跑起来的原因**只有**候选不可用一个，调用方不用再猜。
-      return { exhausted: 'no_available_agent', candidateRole: input.role };
+      // 每个候选都有明确的冷却到期时刻时，最早那一刻就是平台自动重试的时刻。
+      const resumeAt = await this.#earliestCooldownEnd(input.pool, now, input.excludedProfileIds);
+      return {
+        exhausted: 'no_available_agent',
+        candidateRole: input.role,
+        ...(resumeAt !== undefined ? { resumeAt } : {}),
+      };
     }
 
     // 租约必须钉在即将启动的候选上。先领再选会让 failover 把 B 跑在 A 的 runtime/profile 名额下。
@@ -2267,7 +2411,11 @@ export class Orchestrator {
             }
             continue;
           }
-          return { exhausted: queued.reason, detail: queued.detail };
+          return {
+            exhausted: queued.reason,
+            detail: queued.detail,
+            ...(queued.resumeAt !== undefined ? { resumeAt: queued.resumeAt } : {}),
+          };
         }
         if (queued.kind === 'completed') return { alreadyCompleted: true };
         claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
@@ -2295,6 +2443,20 @@ export class Orchestrator {
               )
             : await this.#tokens.startCoordinator(input.missionId, profile, claim)
           : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile, claim);
+
+      if (policy) {
+        // 实际派发身份可追溯：这一跳用了谁、按的是哪一版约束、是不是替代。尽力而为，
+        // attempt.started 里已经有候选身份，这条补的是「为什么是它」。
+        await this.#platform
+          .recordProfileSelection(input.missionId, attemptId, {
+            role: input.role === 'coordinator' ? 'coordinator' : 'executor',
+            profileId: profile.profileId,
+            mode: policy.role.mode,
+            policyRevision: policy.revision,
+            matched: policyMatches(profile, policy.role),
+          })
+          .catch(() => undefined);
+      }
 
       let outcome: Awaited<ReturnType<Awaited<ReturnType<AgentRuntime['start']>>['wait']>> | undefined;
       let unsubscribe: (() => void) | undefined;
@@ -2602,10 +2764,11 @@ export class Orchestrator {
             throw new Error('WorkspaceManager 未实现 checkpoint，无法验证已交回成果');
           }
         } catch (error) {
-          const detail = `执行者已交回成果，但冻结范围检查点失败：${error instanceof Error ? error.message : String(error)}。改动保留在工作区，已停止后续执行。`;
-          await this.#platform.setWaitReason(input.missionId, 'no_available_agent', detail).catch(() => undefined);
+          // 不是候选不可用，也不会等一等就好：要人看越界的是什么、谁留下的（checkpoint_failed）。
+          const detail = await this.#guards.checkpointFailureDetail(input.missionId, input.workItemId, attemptId, error);
+          await this.#platform.setWaitReason(input.missionId, 'checkpoint_failed', detail).catch(() => undefined);
           this.hops.push({ role: input.role, workItemId: input.workItemId, attemptId, profile, endedBy: outcome.endedBy, failureMessage: detail });
-          return { exhausted: 'no_available_agent', detail };
+          return { exhausted: 'checkpoint_failed', detail };
         }
       }
 
@@ -2759,8 +2922,10 @@ export class Orchestrator {
           return { retrySameSlot: true };
         }
         return {
-          exhausted: 'project_busy',
+          // 失败后的退避：到 availableAt 平台自己接着跑，不是名额被占（旧版写 project_busy）。
+          exhausted: 'retry_backoff',
           detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'available_at' }),
+          resumeAt: reported.availableAt,
         };
       }
       if (shouldFailover) {
@@ -2934,6 +3099,7 @@ export class Orchestrator {
     // **保留 pending，不抢、不无 claim 启动。**
     if (
       hop.exhausted === 'project_busy' ||
+      hop.exhausted === 'retry_backoff' ||
       hop.exhausted === 'cancelled_by_user' ||
       hop.exhausted === 'no_available_agent' ||
       hop.exhausted === 'attempt_limit_reached'
@@ -3001,7 +3167,7 @@ export class Orchestrator {
     | { kind: 'bypass' }
     | { kind: 'claimed'; hop: QueuedHop }
     | { kind: 'completed'; hop: QueuedHop }
-    | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait }
+    | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait; resumeAt?: string }
   > {
     if (!this.#hopScheduler || !this.#queuedHops) return { kind: 'bypass' };
     const view = await this.#platform.getMissionView(input.missionId);
@@ -3067,9 +3233,10 @@ export class Orchestrator {
     if (acquired.kind === 'waiting') {
       return {
         kind: 'waiting',
-        reason: acquired.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+        reason: queuedWaitReason(acquired.wait),
         detail: queuedHopWaitDetail(acquired),
         wait: acquired.wait,
+        ...(acquired.wait === 'available_at' ? { resumeAt: acquired.hop.availableAt } : {}),
       };
     }
     if (acquired.kind === 'completed') return acquired;
@@ -3305,8 +3472,9 @@ export class Orchestrator {
     const parked = parkedQueuedHopWait(existing, this.#hopClock.now().toISOString());
     if (!parked) return undefined;
     return {
-      exhausted: parked.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+      exhausted: queuedWaitReason(parked.wait),
       detail: queuedHopWaitDetail(parked),
+      ...(parked.wait === 'available_at' ? { resumeAt: parked.hop.availableAt } : {}),
     };
   }
 
