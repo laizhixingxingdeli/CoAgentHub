@@ -18,6 +18,7 @@ import type {
 import type { Clock, IdGenerator } from '../ports.ts';
 import type { ChangedPathReader, CommandRunner, DiffFactReader } from './ports.ts';
 import { redactSecrets } from '../redact.ts';
+import { isEscapePath, normalizeScopePath, scopeMatches } from '../scope-paths.ts';
 
 export const VALIDATION_POLICY_REVISION = 1;
 export const OUTPUT_TAIL_MAX_CHARS = 4096;
@@ -496,27 +497,9 @@ function tail(output: string, max: number): string {
   return output.slice(output.length - max);
 }
 
-/** 规范化路径：`\\`→`/`，去重复前导 `./`，去空白外壳。 */
-export function normalizePath(raw: string): string {
-  let s = raw.trim().replace(/\\/g, '/');
-  while (s.startsWith('./')) {
-    s = s.slice(2);
-  }
-  return s;
-}
-
-function isAbsoluteOrDrive(p: string): boolean {
-  if (p.startsWith('/')) return true;
-  if (/^[A-Za-z]:(\/|$)/.test(p)) return true;
-  return false;
-}
-
-/** 绝对路径或含 `..` 段 → 逃逸。 */
-export function isEscapePath(p: string): boolean {
-  if (isAbsoluteOrDrive(p)) return true;
-  const parts = p.split('/');
-  return parts.some((part) => part === '..');
-}
+/** 路径语义收在 scope-paths.ts（建单 / 验证 / 检查点共用）；这里原名再导出，调用方不用改。 */
+export { isEscapePath, scopeMatches };
+export const normalizePath = normalizeScopePath;
 
 function hasGlobMeta(p: string): boolean {
   return /[*?\[]/.test(p);
@@ -531,21 +514,6 @@ function dedupeStable(paths: readonly string[]): string[] {
     out.push(p);
   }
   return out;
-}
-
-/**
- * 单个 allowed 是否覆盖 actual。
- * - 普通 scope：精确匹配
- * - 以 `/` 结尾：目录前缀（目录自身 + descendants）
- */
-export function scopeMatches(allowed: string, actual: string): boolean {
-  if (allowed.endsWith('/')) {
-    const dir = allowed.slice(0, -1);
-    if (actual === dir) return true;
-    if (dir === '') return !isAbsoluteOrDrive(actual) && !isEscapePath(actual);
-    return actual.startsWith(`${dir}/`);
-  }
-  return allowed === actual;
 }
 
 function evaluateChangedPaths(

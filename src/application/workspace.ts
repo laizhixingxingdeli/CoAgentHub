@@ -29,6 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { canonicalPath } from './canonical-path.ts';
+import { describeScopeIssues, exactFileScopeIssues, normalizeScopePath } from './scope-paths.ts';
 
 const run = promisify(execFile);
 
@@ -434,16 +435,12 @@ export class GitWorktreeManager implements WorkspaceManager {
     if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
       throw new Error('检查点授权路径不能为空');
     }
-    const allowed = new Set<string>();
-    for (const path of allowedPaths) {
-      if (typeof path !== 'string' || path.length === 0 || path.includes('\\0') ||
-          path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:/.test(path) ||
-          path.split(/[\\/]/).some((part) => part === '..' || part === '.' || part === '') ||
-          /[*?{}]/.test(path) || path.includes('[') || path.includes(']') || path.endsWith('/')) {
-        throw new Error(`检查点授权路径不确定：${String(path)}`);
-      }
-      allowed.add(path.replace(/\\/g, '/'));
+    // 判据与建单时的前置校验是同一份（scope-paths.ts）：能收进来的范围，检查点一定认。
+    const issues = exactFileScopeIssues(allowedPaths);
+    if (issues.length > 0) {
+      throw new Error(`检查点授权路径不确定：${describeScopeIssues(issues)}`);
     }
+    const allowed = new Set<string>(allowedPaths.map((path) => normalizeScopePath(path)));
     const status = (await run('git', ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'], { cwd })).stdout;
     const records = status.split('\0').filter(Boolean);
     const dirty = new Set<string>();

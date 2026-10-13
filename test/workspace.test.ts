@@ -82,6 +82,8 @@ test('checkpoint rejects outside changes and ambiguous authorization without del
   await assert.rejects(new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['base']), /未授权/);
   assert.equal(readFileSync(join(cwd, 'outside'), 'utf8'), 'keep');
   await assert.rejects(new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['src/*']), /不确定/);
+  // 目录形式同样拒绝，并且说得出改法（与建单时的前置校验同一份判据）。
+  await assert.rejects(new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['app/']), /不确定.*目录形式.*app\/<文件名>/s);
   assert.equal(git(cwd, 'status', '--porcelain').includes('outside'), true);
 });
 
