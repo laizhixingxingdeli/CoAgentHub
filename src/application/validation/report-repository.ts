@@ -113,6 +113,12 @@ function cloneCheck(check: ValidationCheckResult): ValidationCheckResult {
         limits: { ...check.diffSize.limits },
         used: { ...check.diffSize.used },
         unknown: [...check.diffSize.unknown],
+        ...(check.diffSize.binaryFiles !== undefined
+          ? { binaryFiles: check.diffSize.binaryFiles.map((file) => ({ ...file })) }
+          : {}),
+        ...(check.diffSize.unmeasurable !== undefined
+          ? { unmeasurable: check.diffSize.unmeasurable.map((item) => ({ ...item })) }
+          : {}),
       },
     };
   }
@@ -165,9 +171,15 @@ function checksEqual(a: ValidationCheckResult, b: ValidationCheckResult): boolea
   if (ad && bd) {
     if (ad.limits.maxChangedFiles !== bd.limits.maxChangedFiles) return false;
     if (ad.limits.maxChangedLines !== bd.limits.maxChangedLines) return false;
+    if (ad.limits.maxChangedBinaryFiles !== bd.limits.maxChangedBinaryFiles) return false;
+    if (ad.limits.maxChangedBinaryBytes !== bd.limits.maxChangedBinaryBytes) return false;
     if (ad.used.changedFiles !== bd.used.changedFiles) return false;
     if (ad.used.changedLines !== bd.used.changedLines) return false;
+    if (ad.used.changedBinaryFiles !== bd.used.changedBinaryFiles) return false;
+    if (ad.used.changedBinaryBytes !== bd.used.changedBinaryBytes) return false;
     if (!stringArraysEqual(ad.unknown, bd.unknown)) return false;
+    if (JSON.stringify(ad.binaryFiles ?? null) !== JSON.stringify(bd.binaryFiles ?? null)) return false;
+    if (JSON.stringify(ad.unmeasurable ?? null) !== JSON.stringify(bd.unmeasurable ?? null)) return false;
   }
   return true;
 }

@@ -1,4 +1,5 @@
 import type { ValidationReport, WorkOrder } from '../../kernel/index.ts';
+import { copyDiffSizeLimits } from '../validation/engine.ts';
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 
 /**
@@ -191,18 +192,7 @@ export async function validateStandardWorkItem(ctx: PlatformContext, input: {
         cwd: trustedCwd,
       })),
       ...(forbiddenPaths !== undefined ? { forbiddenPaths: [...forbiddenPaths] } : {}),
-      ...(diffSize !== undefined
-        ? {
-            diffSize: {
-              ...(diffSize.maxChangedFiles !== undefined
-                ? { maxChangedFiles: diffSize.maxChangedFiles }
-                : {}),
-              ...(diffSize.maxChangedLines !== undefined
-                ? { maxChangedLines: diffSize.maxChangedLines }
-                : {}),
-            },
-          }
-        : {}),
+      ...(diffSize !== undefined ? { diffSize: copyDiffSizeLimits(diffSize) } : {}),
     });
 
     // 跑命令可能要几分钟，不能占着事务（与 Lightweight 同理）：跑完再开事务存报告 + 记事件。

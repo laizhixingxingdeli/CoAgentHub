@@ -234,7 +234,12 @@ export interface WorkOrderValidationCommand {
  */
 export interface WorkOrderValidationDiffSize {
   readonly maxChangedFiles?: number;
+  /** 只数文本行；二进制文件不进行数，单独按下面两项计量。 */
   readonly maxChangedLines?: number;
+  /** 二进制文件个数上限（含被删除的）。授权的 SDK / 工具包 jar、aar 属于这一类。 */
+  readonly maxChangedBinaryFiles?: number;
+  /** 二进制文件总字节数上限（已删除的文件不计）。 */
+  readonly maxChangedBinaryBytes?: number;
 }
 
 /**
@@ -391,7 +396,28 @@ export type ValidationCheckKind =
 export type ValidationCheckFailureCode = 'invalid_argv' | 'unsupported_scope';
 
 /** diff-size 检查中无法计量的维度（in-force 时 fail-closed）。 */
-export type ValidationDiffSizeUnknownDimension = 'changedFiles' | 'changedLines';
+export type ValidationDiffSizeUnknownDimension =
+  | 'changedFiles'
+  | 'changedLines'
+  | 'changedBinaryFiles'
+  | 'changedBinaryBytes';
+
+/** diff-size 检查看到的一个二进制文件。哈希让「验证前后是不是同一个文件」可以事后核对。 */
+export interface ValidationDiffBinaryFile {
+  readonly path: string;
+  /** 被删除的文件没有大小。 */
+  readonly bytes?: number;
+  readonly sha256?: string;
+  readonly deleted?: true;
+  /** 路径是否被工单 allowedScope 覆盖。未授权的二进制仍由 changed-paths 判失败。 */
+  readonly authorized: boolean;
+}
+
+/** 无法计量的具体文件与原因：不用笼统的 unknown 掩盖问题。 */
+export interface ValidationDiffUnmeasurable {
+  readonly path: string;
+  readonly reason: string;
+}
 
 export interface ValidationCheckResult {
   readonly kind: ValidationCheckKind;
@@ -425,12 +451,20 @@ export interface ValidationCheckResult {
     readonly limits: {
       readonly maxChangedFiles?: number;
       readonly maxChangedLines?: number;
+      readonly maxChangedBinaryFiles?: number;
+      readonly maxChangedBinaryBytes?: number;
     };
     readonly used: {
       readonly changedFiles?: number;
+      /** 文本行数；二进制不计。 */
       readonly changedLines?: number;
+      readonly changedBinaryFiles?: number;
+      readonly changedBinaryBytes?: number;
     };
     readonly unknown: readonly ValidationDiffSizeUnknownDimension[];
+    /** 旧报告没有这两项。 */
+    readonly binaryFiles?: readonly ValidationDiffBinaryFile[];
+    readonly unmeasurable?: readonly ValidationDiffUnmeasurable[];
   };
 }
 

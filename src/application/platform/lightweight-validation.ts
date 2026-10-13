@@ -1,6 +1,7 @@
 import type { Mission, PromotionTriggerCode } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { lightweightGateTrigger } from '../promotion/lightweight-gate.ts';
+import { copyDiffSizeLimits } from '../validation/engine.ts';
 
 export async function validateAndAcceptLightweightWorkItem(
   ctx: PlatformContext,
@@ -79,18 +80,7 @@ export async function validateAndAcceptLightweightWorkItem(
         cwd: trustedCwd,
       })),
       ...(forbiddenPaths !== undefined ? { forbiddenPaths: [...forbiddenPaths] } : {}),
-      ...(diffSize !== undefined
-        ? {
-            diffSize: {
-              ...(diffSize.maxChangedFiles !== undefined
-                ? { maxChangedFiles: diffSize.maxChangedFiles }
-                : {}),
-              ...(diffSize.maxChangedLines !== undefined
-                ? { maxChangedLines: diffSize.maxChangedLines }
-                : {}),
-            },
-          }
-        : {}),
+      ...(diffSize !== undefined ? { diffSize: copyDiffSizeLimits(diffSize) } : {}),
     });
 
     // 跑完验收命令之后才开事务（C4）：跑命令可能要几分钟，不能占着事务。

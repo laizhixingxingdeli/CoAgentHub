@@ -1,4 +1,4 @@
-import type { Mission, WaitReason } from '../../kernel/index.ts';
+import type { Mission, WaitReason, WorkOrderValidationDiffSize } from '../../kernel/index.ts';
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 import * as independentReview from './independent-review.ts';
 
@@ -104,22 +104,16 @@ export async function runHaDeterministicValidation(ctx: PlatformContext, setWait
     const forbiddenPaths = hasForbidden
       ? [...new Set(active.flatMap((item) => [...(item.order?.validation?.forbiddenPaths ?? [])]))]
       : undefined;
-    let diffSize: { maxChangedFiles?: number; maxChangedLines?: number } | undefined;
+    // 多张工单的上限逐维取最小：谁的限制都不能被另一张放宽。
+    let diffSize: { -readonly [K in keyof WorkOrderValidationDiffSize]?: number } | undefined;
     for (const item of active) {
       const size = item.order?.validation?.diffSize;
       if (!size) continue;
       diffSize ??= {};
-      if (size.maxChangedFiles !== undefined) {
-        diffSize.maxChangedFiles =
-          diffSize.maxChangedFiles === undefined
-            ? size.maxChangedFiles
-            : Math.min(diffSize.maxChangedFiles, size.maxChangedFiles);
-      }
-      if (size.maxChangedLines !== undefined) {
-        diffSize.maxChangedLines =
-          diffSize.maxChangedLines === undefined
-            ? size.maxChangedLines
-            : Math.min(diffSize.maxChangedLines, size.maxChangedLines);
+      for (const key of Object.keys(size) as (keyof WorkOrderValidationDiffSize)[]) {
+        const value = size[key];
+        if (value === undefined) continue;
+        diffSize[key] = diffSize[key] === undefined ? value : Math.min(diffSize[key]!, value);
       }
     }
     const result = await validation.engine.validate({

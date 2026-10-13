@@ -40,6 +40,7 @@ import type {
   WorkItem,
   WorkItemStatus,
   WorkOrder,
+  WorkOrderValidationDiffSize,
   WorkspaceRef,
 } from '../../kernel/index.ts';
 import type {
@@ -98,10 +99,7 @@ export interface PlatformValidationDeps {
       }[];
       /** 仅从 frozen WorkOrder.validation 拷贝；缺省 = 检查不在 force。 */
       readonly forbiddenPaths?: readonly string[];
-      readonly diffSize?: {
-        readonly maxChangedFiles?: number;
-        readonly maxChangedLines?: number;
-      };
+      readonly diffSize?: WorkOrderValidationDiffSize;
     }) => Promise<{
       readonly report: ValidationReport;
       readonly authority?: Extract<ReviewAuthority, { kind: 'validator' }>;

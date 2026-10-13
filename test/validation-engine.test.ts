@@ -505,6 +505,14 @@ describe('ValidationEngine — report shape, authority, immutability', () => {
     assert.equal(result.output, 'ok');
     assert.ok(result.durationMs >= 0);
 
+    // 验证命令不许在工作区里留字节码缓存：这个开关在源头关掉，比事后清理稳。
+    const env = await runner.run({
+      argv: [process.execPath, '-e', 'process.stdout.write(process.env.PYTHONDONTWRITEBYTECODE ?? "")'],
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+    });
+    assert.equal(env.output, '1');
+
     const { report, authority } = await engine({
       runner,
       paths: fakePaths([]),
@@ -862,6 +870,71 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
     assert.deepEqual(ds2.diffSize?.unknown, ['changedLines']);
   });
 
+  test('文本与二进制独立计量：授权二进制不破坏行数，二进制上限单独生效，量不出的文件被点名', async () => {
+    const facts: DiffLineFacts = {
+      changedLines: 12,
+      unknown: [],
+      binaryFiles: [
+        { path: 'libs/sdk.aar', bytes: 2048, sha256: 'a'.repeat(64) },
+        { path: 'tests/__pycache__/x.pyc', bytes: 10, sha256: 'b'.repeat(64) },
+      ],
+    };
+    const ok = await engine({
+      paths: fakePaths(['src/a.kt', 'libs/sdk.aar']),
+      diffFacts: fakeDiffFacts(facts),
+    }).validate(
+      baseInput({
+        allowedScope: ['src/a.kt', 'libs/sdk.aar'],
+        diffSize: { maxChangedLines: 20, maxChangedBinaryFiles: 2, maxChangedBinaryBytes: 4096 },
+      }),
+    );
+    const ds = ok.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(ds.passed, true, '12 行文本 + 2 个二进制都在上限内');
+    assert.equal(ds.diffSize?.used.changedLines, 12);
+    assert.equal(ds.diffSize?.used.changedBinaryFiles, 2);
+    assert.equal(ds.diffSize?.used.changedBinaryBytes, 2058);
+    const byPath = new Map(ds.diffSize?.binaryFiles?.map((file) => [file.path, file]));
+    assert.equal(byPath.get('libs/sdk.aar')?.authorized, true);
+    assert.equal(byPath.get('tests/__pycache__/x.pyc')?.authorized, false, '未授权的生成物要标出来');
+    const paths = ok.report.checks.find((c) => c.kind === 'changed-paths')!;
+    assert.equal(paths.passed, true, '这一例里只有授权文件');
+
+    // 未授权二进制：changed-paths 仍然失败，不因为分开计量就放过。
+    const stray = await engine({
+      paths: fakePaths(['src/a.kt', 'tests/__pycache__/x.pyc']),
+      diffFacts: fakeDiffFacts(facts),
+    }).validate(baseInput({ allowedScope: ['src/a.kt'], diffSize: { maxChangedLines: 20 } }));
+    assert.equal(stray.report.passed, false);
+    assert.deepEqual(
+      stray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
+      ['tests/__pycache__/x.pyc'],
+    );
+
+    // 二进制上限被超过：点名是二进制维度，而不是文本行数。
+    const heavy = await engine({
+      paths: fakePaths(['libs/sdk.aar']),
+      diffFacts: fakeDiffFacts(facts),
+    }).validate(
+      baseInput({ allowedScope: ['libs/sdk.aar'], diffSize: { maxChangedBinaryBytes: 1000 } }),
+    );
+    assert.equal(
+      heavy.report.checks.find((c) => c.kind === 'diff-size')!.summary,
+      'diff-size exceeded: changedBinaryBytes 2058 > maxChangedBinaryBytes 1000',
+    );
+
+    // 文本文件量不出来：unknown 带上具体文件与原因。
+    const broken = await engine({
+      paths: fakePaths(['src/a.kt']),
+      diffFacts: fakeDiffFacts({
+        unknown: ['changedLines'],
+        unmeasurable: [{ path: 'src/big.kt', reason: '读取失败：EACCES' }],
+      }),
+    }).validate(baseInput({ allowedScope: ['src/a.kt'], diffSize: { maxChangedLines: 20 } }));
+    const unmeasurable = broken.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.match(unmeasurable.summary, /changedLines.*src\/big\.kt.*EACCES/);
+    assert.equal(unmeasurable.diffSize?.unmeasurable?.[0]?.path, 'src/big.kt');
+  });
+
   test('untracked included in file count; check order ends with diff-size', async () => {
     const { report } = await engine({
       paths: fakePaths(['tracked.ts', 'new-untracked.ts']),
@@ -935,7 +1008,7 @@ describe('WorkspaceDiffFactReader — trusted line facts', () => {
     return { root, base, wt, missionId };
   }
 
-  test('tracked numstat + untracked text lines; binary numstat → unknown', async () => {
+  test('tracked numstat + untracked text lines；二进制单独计量，不拖累文本行数', async () => {
     const { root, base, wt, missionId } = tempGit();
     writeFileSync(join(wt, 'keep.txt'), 'line1\nline2\nline3\n');
     writeFileSync(join(wt, 'new.txt'), 'a\nb\n');
@@ -967,22 +1040,29 @@ describe('WorkspaceDiffFactReader — trusted line facts', () => {
     // keep.txt: +2 lines (was 1 line "line1\n", now 3 lines); new.txt untracked 2 lines
     assert.equal(textFacts.changedLines, 2 + 2);
 
-    // Binary untracked → unknown
+    // 未跟踪二进制 + 已跟踪二进制（numstat 里是 `-`）：文本行数不变，二进制各自记路径 / 大小 / 哈希。
     writeFileSync(join(wt, 'blob.bin'), Buffer.from([0, 1, 2, 0]));
+    writeFileSync(join(wt, 'tracked.bin'), Buffer.from([0, 9, 9]));
+    execFileSync('git', ['add', 'tracked.bin'], { cwd: wt, stdio: 'ignore' });
     const binFacts = await reader.measureLines({
       missionId,
       baseRevision: base,
       projectRoot: root,
     });
-    assert.deepEqual(binFacts.unknown, ['changedLines']);
-    assert.equal(binFacts.changedLines, undefined);
+    assert.deepEqual(binFacts.unknown, []);
+    assert.equal(binFacts.changedLines, 2 + 2, '二进制不能让文本行数变 unknown');
+    const byPath = new Map((binFacts.binaryFiles ?? []).map((file) => [file.path, file]));
+    assert.deepEqual([...byPath.keys()].sort(), ['blob.bin', 'tracked.bin']);
+    assert.equal(byPath.get('blob.bin')?.bytes, 4);
+    assert.match(byPath.get('blob.bin')?.sha256 ?? '', /^[0-9a-f]{64}$/);
+    assert.equal(byPath.get('tracked.bin')?.bytes, 3);
 
     assert.equal(countTextLines(''), 0);
     assert.equal(countTextLines('a'), 1);
     assert.equal(countTextLines('a\nb\n'), 2);
   });
 
-  test('missing worktree → unknown', async () => {
+  test('missing worktree → unknown，并说明是哪里量不出来', async () => {
     const reader = new WorkspaceDiffFactReader({
       worktreePath: () => join(tmpdir(), 'no-such-wt-val002'),
     } as unknown as WorkspaceManager);
@@ -992,6 +1072,7 @@ describe('WorkspaceDiffFactReader — trusted line facts', () => {
       projectRoot: '/p',
     });
     assert.deepEqual(facts.unknown, ['changedLines']);
+    assert.match(facts.unmeasurable?.[0]?.reason ?? '', /工作区不存在/);
   });
 });
 

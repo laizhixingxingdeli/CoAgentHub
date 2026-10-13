@@ -7,6 +7,16 @@
 import { execFile } from 'node:child_process';
 import type { CommandRunner } from './ports.ts';
 
+/**
+ * 验证命令在 Mission 工作区里跑，它们留下的文件就是下一张工单的脏改动。
+ * Python 的字节码缓存是最常见的一种：`tests/__pycache__/*.pyc` 三次让验证因「越界二进制」失败，
+ * 又在检查点之后留在工作区里污染后续工单（MiRing-V0-probe 的 W-610 / W-616 / W-620）。
+ * 在源头关掉比事后识别、清理更稳；只加这一个无害的开关，不改验证命令的其它环境。
+ */
+const VALIDATION_ENV_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  PYTHONDONTWRITEBYTECODE: '1',
+});
+
 export class ExecFileCommandRunner implements CommandRunner {
   run(input: {
     readonly argv: readonly string[];
@@ -37,6 +47,7 @@ export class ExecFileCommandRunner implements CommandRunner {
         args,
         {
           cwd: input.cwd,
+          env: { ...process.env, ...VALIDATION_ENV_OVERRIDES },
           timeout: input.timeoutMs,
           encoding: 'utf8',
           maxBuffer: 8 * 1024 * 1024,
