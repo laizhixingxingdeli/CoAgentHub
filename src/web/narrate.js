@@ -347,6 +347,8 @@ export const WAIT_REASON = {
   checkpoint_failed: '成果被冻结范围的检查点拒绝，越界改动已保留，等人处理',
   // 失败后的退避：到点平台自动接着跑，不是名额被占，也不要人动手。
   retry_backoff: '上一跳失败后在退避，到点平台会自动重试',
+  // 指定了模型（不可替代）而它现在用不了：平台不会改派别的模型，等冷却到期或调整约束。
+  model_unavailable: '指定的模型现在用不了，按约束不改派别的模型',
 };
 
 /**
@@ -598,6 +600,37 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '开跑前并入工作区残留',
       detail: `工单 ${or(event && event.workItemId, '（没有工作项 ID）')} 的授权范围内已有未提交改动：${list(data.paths).join('、') || '（无）'}`,
+    };
+  },
+
+  // Mission 级模型约束：协调者 / 执行者允许用哪些模型，平台在派发前强制。最新一条生效，旧的留在历史里。
+  'mission.model_policy_set': (event) => {
+    const data = (event && event.data) || {};
+    const describe = (label, policy) => {
+      if (!policy) return '';
+      const selectors = list(policy.selectors)
+        .map((selector) => ['profileId', 'provider', 'model', 'reasoning']
+          .filter((key) => selector && selector[key])
+          .map((key) => `${key}=${selector[key]}`)
+          .join(' '))
+        .join(' 或 ');
+      return `${label}${policy.mode === 'required' ? '指定（不可替代）' : '优先（可替代）'}：${selectors}`;
+    };
+    const parts = data.cleared ? ['已清除全部模型约束'] : [describe('协调者', data.coordinator), describe('执行者', data.executor)].filter(Boolean);
+    return {
+      badge: 'L3',
+      action: `改模型约束（r${num(data.revision)}）`,
+      detail: `${parts.join('；') || '（空）'} · ${or(data.setBy, '未署名')}：${or(data.reason, '（没有写理由）')}`,
+    };
+  },
+
+  // 每次派发在有约束时留一条：实际用了谁、按的是哪一版、是不是替代（优先模式才会替代）。
+  'attempt.profile_selected': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: data.substituted ? '按约束改派了替代候选' : '按约束选定候选',
+      detail: `${or(data.profileId, '（未知候选）')} · ${data.mode === 'required' ? '指定' : '优先'} r${num(data.policyRevision)} · ${data.matched ? '符合约束' : '不符合约束（优先模式的替代）'}`,
     };
   },
 

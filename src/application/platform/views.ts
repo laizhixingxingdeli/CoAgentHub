@@ -2,6 +2,7 @@ import type { Mission, MissionContract } from '../../kernel/index.ts';
 import type { ActivityEvent } from '../ports.ts';
 import type { RunSummary, MissionSummary, MissionView, AgentMissionView, WorkOrderView, AgentWorkItemView, AgentWorkItemSubmissionSummary, ValidationReportView } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
+import { readMissionModelPolicy } from './model-policy.ts';
 import { elapsedMs, sumUsage, combine } from './usage-helpers.ts';
 import { priorGuidanceForWorkItem, agentWorkItemIndex, agentEscalationAnswers, buildAgentWorkItemView } from './agent-view-helpers.ts';
 import { plannedMemoryFiles, readProjectMemory } from '../project-memory.ts';
@@ -238,9 +239,11 @@ export async function getMissionView(ctx: PlatformContext, deps: ViewDeps, missi
     const { mission, project } = await ctx.locate(missionId);
     // 谁挡着我。要 Project 才算得出来，所以在这一层补，不放进 viewOf。
     const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
+    const modelPolicy = await readMissionModelPolicy(ctx, mission.id);
     const view = {
       ...viewOf(mission, await deps.workItemValidationReportViews(mission)),
       blockedByMission: holder?.id,
+      ...(modelPolicy ? { modelPolicy } : {}),
     };
     if (mission.executionMode === 'high_assurance' && mission.status === 'awaiting_review') {
       return { ...view, haReviewHold: await deps.haReviewHold(mission) };

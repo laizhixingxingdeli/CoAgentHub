@@ -32,6 +32,12 @@ import { CHANGE_IMPACT_UNSUPPORTED } from './platform/change-impact.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
 import { CheckpointRejectedError, InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
 import { normalizeScopePath } from './scope-paths.ts';
+import {
+  applyRolePolicy,
+  describeRolePolicy,
+  policyMatches,
+  type RoleModelPolicy,
+} from './model-policy.ts';
 import { NoLiveOutput } from './live.ts';
 import type { LiveOutput } from './live.ts';
 import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.ts';
@@ -330,6 +336,7 @@ function coordinatorInstruction(view: {
   promotions?: readonly { triggerRule: string }[];
   conflictFiles?: readonly string[];
   waitDetail?: string;
+  modelPolicy?: { revision: number; coordinator?: unknown };
 }): string {
   // 开局那一跳不用说这句：它本来就没有"上一跳"，讲一遍只会让人（和模型）
   // 以为前面发生过什么。
@@ -344,6 +351,12 @@ function coordinatorInstruction(view: {
     // 以及一句泛泛的「按简报决定下一步」——它会以为是普通的空闲轮回，而不是
     // 这次执行被拦住。
     view.waitDetail ? `**执行者已经被挡住：** ${view.waitDetail}` : '',
+    // 模型身份由平台在派发前强制：协调者不必、也不应该靠自己核对「我是不是契约正文里写的那个模型」，
+    // 更不要为此升级——契约正文可能是过期的叙述（用户后来明确授权改用别的模型）。
+    view.modelPolicy?.coordinator
+      ? `**模型身份由平台强制**（候选约束 r${view.modelPolicy.revision}）：你被派到这一跳，就说明身份已经符合当前约束。` +
+        '不要核对自己是哪个模型，也不要因契约正文里对模型的描述与你不一致而升级。'
+      : '',
     coordinatorBody(view),
   ]
     .filter(Boolean)
@@ -2144,6 +2157,48 @@ export class Orchestrator {
     }
   }
 
+  /** 这条 Mission 对该角色的模型约束（含版本号）；没设就是 undefined。读不出来就抛——读不到约束不能当没约束去派发。 */
+  async #rolePolicy(
+    missionId: string,
+    role: 'coordinator' | 'executor',
+  ): Promise<{ role: RoleModelPolicy; revision: number } | undefined> {
+    const policy = await this.#platform.getMissionModelPolicy(missionId);
+    const rolePolicy = policy?.[role];
+    return policy && rolePolicy ? { role: rolePolicy, revision: policy.revision } : undefined;
+  }
+
+  /**
+   * 指定了模型而匹配的候选现在都不可用：不派发别的模型，等或升级。
+   * 匹配的候选都有明确的冷却到期时刻时，最早那一刻就是自动重试的时刻；资源池里根本没有匹配的候选、
+   * 或有一个说不准，就没有恢复时刻——要人去修候选、调资源池或改约束。
+   */
+  async #modelUnavailable(
+    pool: RolePool,
+    role: 'coordinator' | 'executor',
+    policy: { role: RoleModelPolicy; revision: number },
+    now: number,
+    excludedProfileIds: readonly string[] | undefined,
+  ): Promise<{ exhausted: WaitReason; detail: string; candidateRole: RolePoolName; resumeAt?: string }> {
+    const matching = (profile: ExecutionProfile) => policyMatches(profile, policy.role);
+    const configured = (await this.#poolCandidates(pool)).filter(matching).length;
+    const resumeAt = await this.#earliestCooldownEnd(pool, now, excludedProfileIds, matching);
+    const why =
+      configured === 0
+        ? '资源池里当前没有匹配的候选（没配置，或已停用）'
+        : '匹配的候选现在都不可用（冷却、熔断或额度）';
+    const next = resumeAt
+      ? `最早 ${resumeAt} 自动重试`
+      : '没有可预期的恢复时刻，需要人处理：修好该候选、调整资源池，或改这条 Mission 的模型约束';
+    return {
+      exhausted: 'model_unavailable',
+      detail:
+        `Mission 对${role === 'coordinator' ? '协调者' : '执行者'}的模型约束 r${policy.revision}：` +
+        `${describeRolePolicy(policy.role)}。${why}；按约束不派发其他模型。${next}。`,
+      candidateRole: role,
+      ...(resumeAt !== undefined ? { resumeAt } : {}),
+    };
+  }
+
   /**
    * 候选全在冷却时，平台最早什么时候能再试（ISO）。
    *
@@ -2155,11 +2210,13 @@ export class Orchestrator {
     pool: RolePool,
     now: number,
     excludedProfileIds?: readonly string[],
+    only?: (profile: ExecutionProfile) => boolean,
   ): Promise<string | undefined> {
     const skip = excludedProfileIds?.length ? new Set(excludedProfileIds) : undefined;
     let earliest: number | undefined;
     for (const profile of await this.#poolCandidates(pool)) {
       if (skip?.has(profile.profileId)) continue;
+      if (only && !only(profile)) continue;
       const state = await this.#candidateCooldown(profile.profileId, now);
       if (state.availability !== 'cooldown' || state.until === undefined) return undefined;
       const until = Date.parse(state.until);
@@ -2429,7 +2486,15 @@ export class Orchestrator {
     if (input.purpose === 'impact') this.#requireImpactCapability();
 
     const now = this.#now().getTime();
-    const usable = await this.#availableCandidates(input.pool, now, input.excludedProfileIds);
+    const available = await this.#availableCandidates(input.pool, now, input.excludedProfileIds);
+    // Mission 级模型约束：在平台里、派发之前强制。指定（required）而匹配的候选都不可用时，
+    // 宁可停下来等或升级，也不改派别的模型——不能靠被换上来的模型自己发现身份不符。
+    const policy = await this.#rolePolicy(input.missionId, input.role);
+    const selection = applyRolePolicy(available, policy?.role);
+    const usable = selection.candidates;
+    if (selection.blocked && policy) {
+      return this.#modelUnavailable(input.pool, input.role, policy, now, input.excludedProfileIds);
+    }
     if (usable.length === 0) {
       // 全在冷却：这不是"实现错了"，是暂时没人干活。分开报，因为处置不同——
       // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
@@ -2537,6 +2602,20 @@ export class Orchestrator {
               )
             : await this.#tokens.startCoordinator(input.missionId, profile, claim)
           : await this.#tokens.startExecutor(input.missionId, input.workItemId as string, profile, claim);
+
+      if (policy) {
+        // 实际派发身份可追溯：这一跳用了谁、按的是哪一版约束、是不是替代。尽力而为，
+        // attempt.started 里已经有候选身份，这条补的是「为什么是它」。
+        await this.#platform
+          .recordProfileSelection(input.missionId, attemptId, {
+            role: input.role === 'coordinator' ? 'coordinator' : 'executor',
+            profileId: profile.profileId,
+            mode: policy.role.mode,
+            policyRevision: policy.revision,
+            matched: policyMatches(profile, policy.role),
+          })
+          .catch(() => undefined);
+      }
 
       let outcome: Awaited<ReturnType<Awaited<ReturnType<AgentRuntime['start']>>['wait']>> | undefined;
       let unsubscribe: (() => void) | undefined;

@@ -4,6 +4,8 @@ import type { Readable, Writable } from 'node:stream';
 
 const text = { type: 'string', minLength: 1 };
 const generation = { type: 'integer', minimum: 1 };
+const object = { type: 'object' };
+const bool = { type: 'boolean' };
 const changes = { type: 'array', items: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } }, required: ['before', 'after'], additionalProperties: false } };
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const tools = [
@@ -33,6 +35,9 @@ const tools = [
   { name: 'coagenthub_work_item_recover', description: '状态恢复：把有执行结果、却停在 dispatched 且没有活执行者的工单收成 blocked，成果与验证报告保留，协调者可修订再派发；署名与理由必填，重复调用幂等，有活执行者或租约时拒绝',
     inputSchema: schema({ missionId: text, workItemId: text, reviewer: text, reason: text, expectedAttemptId: text, orderRevision: text, generation },
       ['missionId', 'workItemId', 'reviewer', 'reason']) },
+  { name: 'coagenthub_model_policy_set', description: '设置或清除 Mission 级模型约束：优先（preferred，可替代）或指定（required，不可替代，用不了就等或升级，绝不改派别的模型）；整份替换、署名与理由必填，对后续派发生效，不改资源池，不影响其他 Mission',
+    inputSchema: schema({ missionId: text, coordinator: object, executor: object, clear: bool, reviewer: text, reason: text,
+      expectedRevision: { type: 'integer', minimum: 0 }, generation }, ['missionId', 'reviewer', 'reason']) },
 ];
 
 function validate(name: string, args: Record<string, unknown>) {
@@ -72,6 +77,8 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
     else {
       method = 'POST';
       path = name === 'coagenthub_candidate_reset' ? `/api/pools/${encodeURIComponent(String(args.profileId))}/circuit/reset`
+        : name === 'coagenthub_model_policy_set'
+          ? `/api/missions/${encodeURIComponent(String(args.missionId))}/model-policy`
         : name === 'coagenthub_work_item_recover'
           ? `/api/missions/${encodeURIComponent(String(args.missionId))}/work-items/${encodeURIComponent(String(args.workItemId))}/recover`
         : name === 'coagenthub_reviewer_duty' ? `/api/projects/${encodeURIComponent(String(projectId))}/reviewer-duty`
@@ -87,6 +94,8 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
         'x-coagent-reviewer-generation': String(args.generation) } : {}) },
       ...(method === 'POST' ? { body: JSON.stringify(name === 'coagenthub_candidate_reset'
         ? { reason: `[${String(args.reviewer)}] ${String(args.reason)}` }
+        : name === 'coagenthub_model_policy_set'
+          ? { coordinator: args.coordinator, executor: args.executor, clear: args.clear, reviewer: args.reviewer, reason: args.reason, expectedRevision: args.expectedRevision }
         : name === 'coagenthub_work_item_recover'
           // 路径里的 mission / 工作项不重复进 body；署名与理由由平台写进审计事件。
           ? { reviewer: args.reviewer, reason: args.reason, expectedAttemptId: args.expectedAttemptId, orderRevision: args.orderRevision }

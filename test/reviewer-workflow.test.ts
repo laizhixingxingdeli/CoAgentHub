@@ -117,7 +117,7 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
   assert.ok((await invoke('tools/list', undefined, 1))?.error);
   await invoke('initialize', { protocolVersion: '2025-11-25' }, 2);
   assert.equal(await invoke('notifications/initialized'), undefined);
-  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 12);
+  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 13);
   await invoke('tools/call', { name: 'coagenthub_reviewer_todos', arguments: { projectId: 'P' } }, 4);
   assert.equal(calls[0].url, 'http://127.0.0.1:3101/api/reviewer/todos?projectId=P');
   assert.equal(calls[0].init?.method, 'GET');
@@ -143,6 +143,13 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
   assert.equal(calls[3].init?.headers?.['x-coagent-reviewer-generation'], '3');
   const unsigned = await invoke('tools/call', { name: 'coagenthub_work_item_recover', arguments: { missionId: 'M-1', workItemId: 'W-2', reviewer: 'L3' } }, 10);
   assert.equal(unsigned?.result.isError, true); assert.equal(calls.length, 4);
+  // 模型约束：路径带 mission，body 带角色约束与署名；缺署名在 MCP 层就拒。
+  await invoke('tools/call', { name: 'coagenthub_model_policy_set', arguments: { missionId: 'M-1', coordinator: { mode: 'required', selectors: [{ provider: 'xai', model: 'grok-4.7' }] }, reviewer: 'L3', reason: '用户要求协调者只用 Grok', expectedRevision: 0 } }, 11);
+  assert.equal(calls[4].url, 'http://127.0.0.1:3101/api/missions/M-1/model-policy');
+  assert.equal(calls[4].init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(calls[4].init?.body)), { coordinator: { mode: 'required', selectors: [{ provider: 'xai', model: 'grok-4.7' }] }, reviewer: 'L3', reason: '用户要求协调者只用 Grok', expectedRevision: 0 });
+  const unsignedPolicy = await invoke('tools/call', { name: 'coagenthub_model_policy_set', arguments: { missionId: 'M-1', clear: true, reviewer: 'L3' } }, 12);
+  assert.equal(unsignedPolicy?.result.isError, true); assert.equal(calls.length, 5);
   assert.throws(() => createReviewerMcpHandler('http://example.invalid'), /LOOPBACK/);
 });
 

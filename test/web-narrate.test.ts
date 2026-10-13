@@ -927,6 +927,7 @@ describe('阶段与状态是两根轴', () => {
       'escalated',
       'execution_budget_exceeded',
       'mission_cost_cap_reached',
+      'model_unavailable',
       'no_available_agent',
       'platform_unreachable',
       'project_busy',

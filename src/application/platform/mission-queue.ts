@@ -76,7 +76,9 @@ export async function readMissionQueue(ctx: PlatformContext, projectId: string):
     const status = mission.status;
     const active = [...mission.coordinatorAttempts, ...mission.independentReviewerAttempts, ...mission.workItems.flatMap((item) => item.attempts)]
       .some((attempt) => attempt.status === 'in_progress');
-    const waitingGate = mission.waitReason !== undefined && mission.waitReason !== 'no_available_agent' && mission.waitReason !== 'project_busy' && mission.waitReason !== 'retry_backoff';
+    const waitingGate = mission.waitReason !== undefined && mission.waitReason !== 'no_available_agent' && mission.waitReason !== 'project_busy' && mission.waitReason !== 'retry_backoff'
+      // 指定模型用不了：有明确的恢复时刻才是「等一等就好」；没有就是要人调整约束或资源池，队列别每 15 秒空转。
+      && !(mission.waitReason === 'model_unavailable' && mission.waitResumeAt !== undefined);
     const holder = project?.missions.find((row) => row.id !== mission.id && row.isMutating);
     entries.push({ missionId: mission.id, position: data.position, dependsOn: data.dependsOn,
       status, blockedBy, contract: mission.contract,

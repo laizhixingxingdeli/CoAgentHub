@@ -63,6 +63,7 @@ import type {
   ProjectRepository,
 } from '../ports.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
+import type { MissionModelPolicy } from '../model-policy.ts';
 import type { DeliveryRepository } from '../delivery.ts';
 import type { WorkspaceManager } from '../workspace.ts';
 import type { ArtifactStore } from '../artifact-store.ts';
@@ -304,6 +305,8 @@ export interface MissionView {
   waitDetail: string | undefined;
   /** 平台打算自动接着跑的时刻（ISO）。没有 = 不会自动恢复，要人处理。 */
   waitResumeAt?: string;
+  /** Mission 级模型约束（平台在派发前强制）；没设就没有这一格。 */
+  modelPolicy?: MissionModelPolicy;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;

@@ -720,7 +720,13 @@ export type WaitReason =
    * 一个在等 1 秒后重试的 Mission 和一个要等别人落地的 Mission 在界面上长一个样，
    * 人只能去翻事件才分得清（MiRing-V0-probe 的 W-619 / W-622）。
    */
-  | 'retry_backoff';
+  | 'retry_backoff'
+  /**
+   * Mission 对某个角色指定了候选（不可替代），而匹配的候选现在都不可用——冷却、熔断、额度，
+   * 或者资源池里根本没有这样的候选。按约束不派发别的候选。
+   * 有明确的冷却到期时刻（Mission.waitResumeAt）时平台到点自动重试，否则要人处理。
+   */
+  | 'model_unavailable';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。

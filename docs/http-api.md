@@ -61,7 +61,7 @@ curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/plan-runs/R/decide
 curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/master-brief'
 ```
 
-可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十二个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason；coagenthub_work_item_recover 经 POST /api/missions/:id/work-items/:id/recover 做工单状态恢复（署名与理由必填，见该路由）。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十三个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason；coagenthub_work_item_recover 经 POST /api/missions/:id/work-items/:id/recover 做工单状态恢复（署名与理由必填，见该路由）；coagenthub_model_policy_set 经 POST /api/missions/:id/model-policy 设置或清除 Mission 级模型约束（见该路由）。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
 
 ### GET /api/projects/:projectId/documents
 
@@ -767,6 +767,48 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 ```json
 {
   "status": "retired"
+}
+```
+
+### GET /api/missions/:missionId/model-policy
+
+鉴权：控制面 missionRead。返回当前生效的 Mission 级模型约束：`{ "policy": {...} | null }`。没设过、或最近一次是「清除」就是 `null`。`GET /api/missions/:id` 的响应里同样带 `modelPolicy`（没设就没有这一格）。
+
+```bash
+curl.exe -sS --noproxy '*' -H 'Authorization: Bearer <token>' 'http://127.0.0.1:3101/api/missions/M-example/model-policy'
+```
+
+```json
+{
+  "policy": {
+    "revision": 2,
+    "coordinator": { "mode": "required", "selectors": [{ "provider": "xai", "model": "grok-4.7", "reasoning": "medium" }] },
+    "setBy": "检视者",
+    "reason": "用户 10-12 要求协调者只用 Grok 4.7",
+    "at": "2026-10-12T15:30:00.000Z"
+  }
+}
+```
+
+### POST /api/missions/:missionId/model-policy
+
+鉴权：控制面（与改契约同一格，有值守租约时同样要求 reviewer 与 generation）。设置或清除 Mission 级模型约束：协调者 / 执行者允许用哪些模型，由**平台在派发前强制**，不靠模型自己发现身份不符。
+
+参数：`coordinator`、`executor`（各自可省略 = 不约束该角色）形如 `{ "mode": "preferred" | "required", "selectors": [...] }`；选择器字段 `profileId` / `provider` / `model` / `reasoning`（后三项对应候选 facts，精确匹配、不区分大小写；同一选择器里给出的条件都要满足，多个选择器任一满足即可，至少给一项条件）。`clear: true` 清除全部约束（与上面两项互斥）。`reviewer`、`reason` 必填；`expectedRevision` 可选（没有约束时为 0），给了就必须与当前版本一致，防止覆盖别人刚改的。整份替换，不做局部合并；每次设置版本号 +1，事件 `mission.model_policy_set` 留全部历史——旧的限制留在历史里，不会被当成当前要求。
+
+两种策略：`preferred`（优先，可替代）匹配的候选排在前面，都不可用时才退到池里其余候选；`required`（指定，不可替代）只准派匹配的候选，它们都不可用时 Mission 停在 `model_unavailable`——有明确的冷却到期时刻（`waitResumeAt`）平台到点自动重试，否则要人处理——**绝不派发别的模型**。只作用于这条 Mission 的后续派发；在途的 Attempt 不受影响，资源池配置与其他 Mission 不动。每次派发留事件 `attempt.profile_selected`（候选、约束版本、是否匹配、是否替代）。响应里 `warnings` 点名「资源池里当前没有匹配的启用候选」这类设了也等不到的约束。
+
+不从契约正文解析：正文是叙述，可能已经过期，只有显式设置的约束有强制力。
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' --data '{"coordinator":{"mode":"required","selectors":[{"provider":"xai","model":"grok-4.7"}]},"reviewer":"检视者","reason":"用户要求协调者只用 Grok 4.7","expectedRevision":0}' 'http://127.0.0.1:3101/api/missions/M-example/model-policy'
+```
+
+```json
+{
+  "revision": 1,
+  "policy": { "revision": 1, "coordinator": { "mode": "required", "selectors": [{ "provider": "xai", "model": "grok-4.7" }] }, "setBy": "检视者", "reason": "用户要求协调者只用 Grok 4.7", "at": "2026-10-12T15:30:00.000Z" },
+  "warnings": []
 }
 ```
 

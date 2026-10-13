@@ -39,6 +39,9 @@ export type { StalledSource, StalledWorkItemInput, StalledWorkItemResult } from 
 export { PLATFORM_BLOCKED_EVENT_KIND } from './platform/stalled-work-item.ts';
 import { recoverStrandedWorkItem, type StrandedRecoveryInput, type StrandedRecoveryResult } from './platform/stranded-work-item.ts';
 export type { StrandedRecoveryInput, StrandedRecoveryResult, StrandedSource } from './platform/stranded-work-item.ts';
+import * as modelPolicyStore from './platform/model-policy.ts';
+export type { SetModelPolicyInput } from './platform/model-policy.ts';
+export { MODEL_POLICY_EVENT_KIND, PROFILE_SELECTED_EVENT_KIND } from './platform/model-policy.ts';
 import * as autoResume from './platform/auto-resume.ts';
 export type { AutoResumeDue, HostedRunRequest, RunDriverInfo } from './platform/auto-resume.ts';
 export { AUTO_RESUMED_EVENT_KIND, RUN_REQUESTED_EVENT_KIND, isAutoResumable } from './platform/auto-resume.ts';
@@ -1472,6 +1475,28 @@ export class Platform {
    */
   async recoverStrandedWorkItem(input: StrandedRecoveryInput): Promise<StrandedRecoveryResult> {
     return recoverStrandedWorkItem(this.#context, input);
+  }
+
+  /** 当前生效的 Mission 级模型约束；没设过或已清除返回 undefined。派发前每一跳都现读。 */
+  async getMissionModelPolicy(missionId: string) {
+    return modelPolicyStore.readMissionModelPolicy(this.#context, missionId);
+  }
+
+  /**
+   * 设置 / 清除 Mission 级模型约束（整份替换，署名与理由必填，事件留全部历史）。
+   * 对后续派发生效；在途的 Attempt 不受影响；其它 Mission 与资源池配置不动。
+   */
+  async setMissionModelPolicy(missionId: string, input: modelPolicyStore.SetModelPolicyInput) {
+    return this.#tx(() => modelPolicyStore.setMissionModelPolicy(this.#context, missionId, input));
+  }
+
+  /** 派发时记下这一跳实际用了谁、按哪一版约束、是不是替代。 */
+  async recordProfileSelection(
+    missionId: string,
+    attemptId: string,
+    data: Parameters<typeof modelPolicyStore.recordProfileSelection>[3],
+  ): Promise<void> {
+    return this.#tx(() => modelPolicyStore.recordProfileSelection(this.#context, missionId, attemptId, data));
   }
 
   /** 托管启动时记下续跑要复用的参数（目录、适配器、轮次上限……）；与最近一条相同不重复写。 */

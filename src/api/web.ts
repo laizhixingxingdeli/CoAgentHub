@@ -299,6 +299,7 @@ const WAIT_REASON = {
   // 检查点拒绝了执行者的成果：越界改动原样保留，要人看是什么、谁留下的。
   checkpoint_failed: '成果被冻结范围的检查点拒绝，越界改动已保留，等人处理',
   retry_backoff: '上一跳失败后在退避，到点平台会自动重试',
+  model_unavailable: '指定的模型现在用不了，按约束不改派别的模型',
 };
 
 const STATUS_CN = {
