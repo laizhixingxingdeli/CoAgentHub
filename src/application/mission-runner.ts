@@ -459,6 +459,17 @@ export async function runHostedMission(
     });
   }
   ctx.onStarted?.(parsed.spec.missionId);
+  // 记下续跑要复用的启动参数：Mission 进入退避后托管运行会退出，到点由服务自动接着跑
+  // （retry-wake），服务重启后也要读得回来——这些只有托管入口知道。记不上不挡启动。
+  await platform
+    .recordHostedRunRequest(parsed.spec.missionId, {
+      cwd: parsed.cwd,
+      adapter: parsed.adapter,
+      ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }),
+      acceptStaleBase: parsed.acceptStaleBase,
+      ...(parsed.origin ? { origin: parsed.origin } : {}),
+    })
+    .catch(() => undefined);
   emit('stdout', `Mission ${parsed.spec.missionId}；平台监听 ${ctx.baseUrl}`);
   emit('stdout', `worktree: ${parsed.cwd}`);
   emit('stdout', `适配器  : ${parsed.adapter}`);

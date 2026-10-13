@@ -278,8 +278,26 @@ export type MissionRunOutcome =
    * 候选可能只是 unknown（探针在跑、仓储读不懂）。到底等不等，得再拿
    * roleCooldownSnapshot 按这个角色算一遍。
    */
-  | { kind: 'waiting'; reason: WaitReason; detail: string; candidateRole?: RolePoolName }
+  | {
+      kind: 'waiting';
+      reason: WaitReason;
+      detail: string;
+      candidateRole?: RolePoolName;
+      /** 平台打算自动接着跑的时刻（ISO）；没有就是不会自动恢复。 */
+      resumeAt?: string;
+    }
   | { kind: 'stalled'; reason: string };
+
+/**
+ * 队列等待种类 → 停机原因。
+ * 失败后的退避（available_at）是「到点自动重试」，单独成因；死信要人看；
+ * 租约被占 / 容量不够仍是排队，沿用 project_busy。
+ */
+function queuedWaitReason(wait: QueuedHopWait): WaitReason {
+  if (wait === 'dead_letter') return 'attempt_limit_reached';
+  if (wait === 'available_at') return 'retry_backoff';
+  return 'project_busy';
+}
 
 /**
  * 每一跳协调者开头都要说的那句。
@@ -873,8 +891,8 @@ export class Orchestrator {
             }
             const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
             const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
-            await this.#platform.setWaitReason(missionId, reason, detail);
-            return this.#waitingOutcome(reason, detail, hop?.candidateRole);
+            await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
+            return this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt);
           }
           if ('persistentUnknown' in hop && hop.persistentUnknown) {
             const detail = '持久候选熔断记录为 unknown；停止本次 runMission，避免后续轮次绕过保守轮换';
@@ -991,8 +1009,8 @@ export class Orchestrator {
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason);
-        await this.#platform.setWaitReason(missionId, reason, detail);
-        return this.#waitingOutcome(reason, detail, hop?.candidateRole);
+        await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
+        return this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt);
       }
 
       // GATE-POST after coordinator hop.
@@ -1340,10 +1358,10 @@ export class Orchestrator {
       if (!hop || 'exhausted' in hop) {
         const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
         const detail = hop?.detail ?? this.#stallDetail(reason, item.id);
-        await this.#platform.setWaitReason(missionId, reason, detail);
+        await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
         return {
           kind: 'outcome',
-          outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole),
+          outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt),
         };
       }
       // reportBlocked 把非空提问记成 Mission 升级。不在这里读一次视图的话，
@@ -1531,10 +1549,10 @@ export class Orchestrator {
     if (!hop || 'exhausted' in hop) {
       const reason: WaitReason = hop?.exhausted ?? 'no_available_agent';
       const detail = hop?.detail ?? this.#stallDetail(reason);
-      await this.#platform.setWaitReason(missionId, reason, detail);
+      await this.#platform.setWaitReason(missionId, reason, detail, hop?.resumeAt);
       return {
         kind: 'outcome',
-        outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole),
+        outcome: this.#waitingOutcome(reason, detail, hop?.candidateRole, hop?.resumeAt),
       };
     }
     // Standard 那一跳在 coordinator 之后就过一次预算闸（#enforceAuthoritativeBudget）。快车道
@@ -1894,10 +1912,15 @@ export class Orchestrator {
     reason: WaitReason,
     detail: string,
     candidateRole?: RolePoolName,
+    resumeAt?: string,
   ): MissionRunOutcome {
-    return candidateRole
-      ? { kind: 'waiting', reason, detail, candidateRole }
-      : { kind: 'waiting', reason, detail };
+    return {
+      kind: 'waiting',
+      reason,
+      detail,
+      ...(candidateRole ? { candidateRole } : {}),
+      ...(resumeAt !== undefined ? { resumeAt } : {}),
+    };
   }
 
   /**
@@ -2119,6 +2142,31 @@ export class Orchestrator {
       // 见上：没有报告也要让协调者接手，不替它评审。
       return attempted;
     }
+  }
+
+  /**
+   * 候选全在冷却时，平台最早什么时候能再试（ISO）。
+   *
+   * 每个候选都必须有明确的未来到期时刻才给：有一个 unknown（探针在跑、到期值非法、读不出来）、
+   * 或者已经可用，就说不准——返回 undefined，等于「平台不会自动恢复」，宁可让人来看，
+   * 也不编一个时刻让 Mission 在那一刻空转。被局部排除的候选不算（它们本来就不会被选）。
+   */
+  async #earliestCooldownEnd(
+    pool: RolePool,
+    now: number,
+    excludedProfileIds?: readonly string[],
+  ): Promise<string | undefined> {
+    const skip = excludedProfileIds?.length ? new Set(excludedProfileIds) : undefined;
+    let earliest: number | undefined;
+    for (const profile of await this.#poolCandidates(pool)) {
+      if (skip?.has(profile.profileId)) continue;
+      const state = await this.#candidateCooldown(profile.profileId, now);
+      if (state.availability !== 'cooldown' || state.until === undefined) return undefined;
+      const until = Date.parse(state.until);
+      if (!Number.isFinite(until)) return undefined;
+      earliest = earliest === undefined ? until : Math.min(earliest, until);
+    }
+    return earliest === undefined ? undefined : new Date(earliest).toISOString();
   }
 
   /**
@@ -2361,7 +2409,7 @@ export class Orchestrator {
      * 缺的不是候选，后面所有的失败出口都不是候选不可用（检查点失败最典型，
      * 它也返回 no_available_agent）。
      */
-    | { exhausted: WaitReason; detail?: string; candidateRole?: RolePoolName }
+    | { exhausted: WaitReason; detail?: string; candidateRole?: RolePoolName; resumeAt?: string }
     | { alreadyCompleted: true }
     /** 已等到退避；由 runMission 下一轮重新领取，以便 maxRounds 能拦住 Q。 */
     | { retrySameSlot: true }
@@ -2387,7 +2435,13 @@ export class Orchestrator {
       // 前者要人看，后者等一会儿就好。死信/退避已经在上面认过，不会被这条盖掉。
       //
       // 带上角色：这一跳没跑起来的原因**只有**候选不可用一个，调用方不用再猜。
-      return { exhausted: 'no_available_agent', candidateRole: input.role };
+      // 每个候选都有明确的冷却到期时刻时，最早那一刻就是平台自动重试的时刻。
+      const resumeAt = await this.#earliestCooldownEnd(input.pool, now, input.excludedProfileIds);
+      return {
+        exhausted: 'no_available_agent',
+        candidateRole: input.role,
+        ...(resumeAt !== undefined ? { resumeAt } : {}),
+      };
     }
 
     // 租约必须钉在即将启动的候选上。先领再选会让 failover 把 B 跑在 A 的 runtime/profile 名额下。
@@ -2451,7 +2505,11 @@ export class Orchestrator {
             }
             continue;
           }
-          return { exhausted: queued.reason, detail: queued.detail };
+          return {
+            exhausted: queued.reason,
+            detail: queued.detail,
+            ...(queued.resumeAt !== undefined ? { resumeAt: queued.resumeAt } : {}),
+          };
         }
         if (queued.kind === 'completed') return { alreadyCompleted: true };
         claimedHop = queued.kind === 'claimed' ? queued.hop : undefined;
@@ -2944,8 +3002,10 @@ export class Orchestrator {
           return { retrySameSlot: true };
         }
         return {
-          exhausted: 'project_busy',
+          // 失败后的退避：到 availableAt 平台自己接着跑，不是名额被占（旧版写 project_busy）。
+          exhausted: 'retry_backoff',
           detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'available_at' }),
+          resumeAt: reported.availableAt,
         };
       }
       if (shouldFailover) {
@@ -3119,6 +3179,7 @@ export class Orchestrator {
     // **保留 pending，不抢、不无 claim 启动。**
     if (
       hop.exhausted === 'project_busy' ||
+      hop.exhausted === 'retry_backoff' ||
       hop.exhausted === 'cancelled_by_user' ||
       hop.exhausted === 'no_available_agent' ||
       hop.exhausted === 'attempt_limit_reached'
@@ -3186,7 +3247,7 @@ export class Orchestrator {
     | { kind: 'bypass' }
     | { kind: 'claimed'; hop: QueuedHop }
     | { kind: 'completed'; hop: QueuedHop }
-    | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait }
+    | { kind: 'waiting'; reason: WaitReason; detail: string; wait?: QueuedHopWait; resumeAt?: string }
   > {
     if (!this.#hopScheduler || !this.#queuedHops) return { kind: 'bypass' };
     const view = await this.#platform.getMissionView(input.missionId);
@@ -3252,9 +3313,10 @@ export class Orchestrator {
     if (acquired.kind === 'waiting') {
       return {
         kind: 'waiting',
-        reason: acquired.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+        reason: queuedWaitReason(acquired.wait),
         detail: queuedHopWaitDetail(acquired),
         wait: acquired.wait,
+        ...(acquired.wait === 'available_at' ? { resumeAt: acquired.hop.availableAt } : {}),
       };
     }
     if (acquired.kind === 'completed') return acquired;
@@ -3490,8 +3552,9 @@ export class Orchestrator {
     const parked = parkedQueuedHopWait(existing, this.#hopClock.now().toISOString());
     if (!parked) return undefined;
     return {
-      exhausted: parked.wait === 'dead_letter' ? 'attempt_limit_reached' : 'project_busy',
+      exhausted: queuedWaitReason(parked.wait),
       detail: queuedHopWaitDetail(parked),
+      ...(parked.wait === 'available_at' ? { resumeAt: parked.hop.availableAt } : {}),
     };
   }
 

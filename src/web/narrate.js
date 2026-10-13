@@ -345,6 +345,8 @@ export const WAIT_REASON = {
   work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
   // 检查点拒绝了执行者的成果：越界改动原样保留，要人看是什么、谁留下的。
   checkpoint_failed: '成果被冻结范围的检查点拒绝，越界改动已保留，等人处理',
+  // 失败后的退避：到点平台自动接着跑，不是名额被占，也不要人动手。
+  retry_backoff: '上一跳失败后在退避，到点平台会自动重试',
 };
 
 /**
@@ -596,6 +598,27 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '开跑前并入工作区残留',
       detail: `工单 ${or(event && event.workItemId, '（没有工作项 ID）')} 的授权范围内已有未提交改动：${list(data.paths).join('、') || '（无）'}`,
+    };
+  },
+
+  // 托管启动参数：Mission 进入退避后，服务到点靠它自动接着跑，重启后也读得回来。
+  'mission.run_requested': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '记下托管启动参数',
+      detail: `目录 ${or(data.cwd, '（未记）')}${data.maxRounds ? ` · 最多 ${num(data.maxRounds)} 轮` : ''}`,
+    };
+  },
+
+  // 服务到点自动接着跑，不是谁手动 start。连续无进展时 streak 递增，间隔随之拉长。
+  'mission.auto_resumed': (event) => {
+    const data = (event && event.data) || {};
+    const reason = text(data.reason);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '到点自动接着跑',
+      detail: `原因 ${reason ? WAIT_REASON[reason] || reason : '（没有写原因）'} · 第 ${num(data.streak)} 次连续唤醒`,
     };
   },
 

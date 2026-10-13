@@ -132,6 +132,7 @@ export class Mission {
   #finalReview: Readonly<FinalReview> | undefined;
   #waitReason: WaitReason | undefined;
   #waitDetail: string | undefined;
+  #waitResumeAt: string | undefined;
   #updatedAt: string | undefined;
   #paused = false;
   #parked = false;
@@ -323,6 +324,7 @@ export class Mission {
     this.#goto('blocked');
     this.#waitReason = 'cancelled_by_user';
     this.#waitDetail = undefined;
+    this.#waitResumeAt = undefined;
   }
 
   /**
@@ -407,11 +409,23 @@ export class Mission {
     return this.#waitDetail;
   }
 
+  /**
+   * 平台打算在这一刻自动接着跑（ISO 时间）。只有「等一会儿就会好」的停机才有：失败后的退避、
+   * 候选冷却到期。没有这个值就说明平台不会自己恢复，要有人处理。
+   *
+   * 存在 Mission 上而不是只存在队列行里：服务重启后恢复调度、界面上写「下次重试时间」，
+   * 读的都是这一格；队列行只管某一跳的租约与计数。
+   */
+  get waitResumeAt(): string | undefined {
+    return this.#waitResumeAt;
+  }
+
   /** 记下停机原因。传 undefined 表示又动起来了。 */
-  setWaitReason(reason: WaitReason | undefined, detail?: string): void {
+  setWaitReason(reason: WaitReason | undefined, detail?: string, resumeAt?: string): void {
     this.#waitReason = reason;
-    // 原因清掉时详情必须一起清，不然界面上会挂着一句过期的解释。
+    // 原因清掉时详情必须一起清，不然界面上会挂着一句过期的解释；自动恢复时刻同理。
     this.#waitDetail = reason ? detail : undefined;
+    this.#waitResumeAt = reason ? resumeAt : undefined;
   }
 
   /**
@@ -815,6 +829,7 @@ export class Mission {
       finalReview: this.#finalReview,
       waitReason: this.#waitReason,
       waitDetail: this.#waitDetail,
+      ...(this.#waitResumeAt !== undefined ? { waitResumeAt: this.#waitResumeAt } : {}),
       updatedAt: this.#updatedAt,
       paused: this.#paused,
       parked: this.#parked,
@@ -875,6 +890,11 @@ export class Mission {
     mission.#workspaceRef = snapshot.workspaceRef as Readonly<WorkspaceRef> | undefined;
     mission.#waitReason = snapshot.waitReason as WaitReason | undefined;
     mission.#waitDetail = snapshot.waitDetail;
+    // 老快照没有这一格；形状不对一律当没有，不猜一个自动恢复时刻出来。
+    mission.#waitResumeAt =
+      typeof snapshot.waitResumeAt === 'string' && Number.isFinite(Date.parse(snapshot.waitResumeAt))
+        ? snapshot.waitResumeAt
+        : undefined;
     mission.#updatedAt = snapshot.updatedAt;
     mission.#paused = snapshot.paused ?? false;
     mission.#parked = snapshot.parked ?? false;

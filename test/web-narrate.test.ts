@@ -930,6 +930,7 @@ describe('阶段与状态是两根轴', () => {
       'no_available_agent',
       'platform_unreachable',
       'project_busy',
+      'retry_backoff',
       'runaway_suspected',
       'target_changed',
       'waiting_l3',

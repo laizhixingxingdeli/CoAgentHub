@@ -30,6 +30,7 @@ import { rememberAdapterDir } from './application/runtime-catalog.ts';
 import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
 import { MissionQueueWorker } from './application/mission-queue-worker.ts';
+import { RetryWakeScheduler } from './application/retry-wake.ts';
 import { InMemoryAgentPoolRepository, loadRoleProfiles } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
@@ -1211,6 +1212,39 @@ export async function startServer(
       warn: warnPeriodicRepair,
     });
     missionQueueWorker.start();
+    // 退避 / 候选冷却到点自动接着跑：托管运行遇到这类等待就退出了，此前只能靠 L3 手动 start_mission。
+    // 持久的是 Mission.waitResumeAt 与托管启动参数，重启后第一个 tick 就从状态里找回来；
+    // 入过队列的 Mission 归队列 worker 驱动，这里不插手。PG 不支持托管运行，不装配。
+    // COAGENT_AUTO_RESUME=0 可整体关掉（运维开关）。
+    const retryWake = usePg
+      ? undefined
+      : new RetryWakeScheduler({
+          listDue: (nowIso) => built.platform.listAutoResumeDue(nowIso),
+          runDriver: (missionId) => built.platform.getRunDriver(missionId),
+          isRunning: (missionId) =>
+            hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
+          record: (missionId, data) => built.platform.recordAutoResume(missionId, data),
+          start: async (missionId, request) => {
+            const view = await built.platform.getMissionView(missionId);
+            if (!view.contract) return;
+            await runMission(
+              {
+                spec: { projectId: view.projectId, missionId, contract: view.contract },
+                cwd: request.cwd,
+                adapter: request.adapter,
+                state: statePath,
+                store: 'file',
+                env: { [SPAWN_ENV_PASSTHROUGH_VAR]: '-' },
+                ...(request.maxRounds !== undefined ? { maxRounds: request.maxRounds } : {}),
+                ...(request.acceptStaleBase ? { acceptStaleBase: true } : {}),
+                ...(request.origin ? { origin: request.origin } : {}),
+              },
+              () => {},
+            );
+          },
+          warn: warnPeriodicRepair,
+        });
+    if (env.COAGENT_AUTO_RESUME !== '0') retryWake?.start();
     // 文件版周期在 server 主锁下用已持锁 store，不再短借自己的锁。PG 独立 store。只补投递。
     // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
     const periodic = startPeriodicDeliveryRepair({
@@ -1227,8 +1261,10 @@ export async function startServer(
       server,
       async () => {
         const queueStopped = missionQueueWorker.stop();
+        const wakeStopped = retryWake?.stop() ?? Promise.resolve();
         await drainApi(server);
         await queueStopped;
+        await wakeStopped;
         if (safeShutdown) await safeShutdown;
         await (periodic?.stop() ?? Promise.resolve());
         await built.persist();

@@ -34,15 +34,28 @@ export async function setWaitReason(ctx: PlatformContext, answerEscalation: Answ
     missionId: string,
     reason: WaitReason | undefined,
     detail?: string,
+    resumeAt?: string,
   ): Promise<void> {
+    if (resumeAt !== undefined && !Number.isFinite(Date.parse(resumeAt))) {
+      throw new PlatformRuleError('INVALID_RESUME_AT', `自动恢复时刻必须是有效的时间戳：${resumeAt}`);
+    }
     const { mission } = await ctx.locate(missionId);
     // detail 变了也要写：同一个 no_available_agent，"卡在 exec-a" 和
-    // "卡在 exec-d" 对排障的人是两条不同的信息。
-    if (mission.waitReason === reason && mission.waitDetail === detail) return;
-    mission.setWaitReason(reason, detail);
+    // "卡在 exec-d" 对排障的人是两条不同的信息。恢复时刻变了同理：下一次重试是几点，
+    // 界面和调度器读的都是它。
+    const nextResumeAt = reason ? resumeAt : undefined;
+    if (
+      mission.waitReason === reason &&
+      mission.waitDetail === detail &&
+      mission.waitResumeAt === nextResumeAt
+    ) {
+      return;
+    }
+    mission.setWaitReason(reason, detail, resumeAt);
     await ctx.event(mission, reason ? 'mission.waiting' : 'mission.resumed', {
       reason,
       detail,
+      ...(nextResumeAt !== undefined ? { resumeAt: nextResumeAt } : {}),
     });
   }
 

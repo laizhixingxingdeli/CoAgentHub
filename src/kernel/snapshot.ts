@@ -76,6 +76,8 @@ export interface MissionSnapshot {
   finalReview?: unknown;
   waitReason?: string;
   waitDetail?: string;
+  /** 平台打算自动接着跑的时刻（ISO）；老快照没有，缺省 = 不会自动恢复。 */
+  waitResumeAt?: string;
   /** 最后一次状态变化的时间。 */
   updatedAt?: string;
   paused?: boolean;

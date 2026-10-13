@@ -39,6 +39,9 @@ export type { StalledSource, StalledWorkItemInput, StalledWorkItemResult } from 
 export { PLATFORM_BLOCKED_EVENT_KIND } from './platform/stalled-work-item.ts';
 import { recoverStrandedWorkItem, type StrandedRecoveryInput, type StrandedRecoveryResult } from './platform/stranded-work-item.ts';
 export type { StrandedRecoveryInput, StrandedRecoveryResult, StrandedSource } from './platform/stranded-work-item.ts';
+import * as autoResume from './platform/auto-resume.ts';
+export type { AutoResumeDue, HostedRunRequest, RunDriverInfo } from './platform/auto-resume.ts';
+export { AUTO_RESUMED_EVENT_KIND, RUN_REQUESTED_EVENT_KIND, isAutoResumable } from './platform/auto-resume.ts';
 import * as workspaceHygiene from './platform/workspace-hygiene.ts';
 export type { ResidueOrigin, ValidationSettlementInput, WorkspaceBlockInput } from './platform/workspace-hygiene.ts';
 export {
@@ -989,17 +992,19 @@ export class Platform {
     missionId: string,
     reason: WaitReason | undefined,
     detail?: string,
+    resumeAt?: string,
   ): Promise<void> {
     // 单事务命令（C4）：状态改动与事件一起提交，或者一个都不落。
-    return this.#tx(() => this.#setWaitReason(missionId, reason, detail));
+    return this.#tx(() => this.#setWaitReason(missionId, reason, detail, resumeAt));
   }
 
   async #setWaitReason(
     missionId: string,
     reason: WaitReason | undefined,
     detail?: string,
+    resumeAt?: string,
   ): Promise<void> {
-    return missionLifecycle.setWaitReason(this.#context, (id, answer) => this.#answerEscalation(id, answer), missionId, reason, detail);
+    return missionLifecycle.setWaitReason(this.#context, (id, answer) => this.#answerEscalation(id, answer), missionId, reason, detail, resumeAt);
   }
   /* =========================== 取消 / 暂停 =========================== */
 
@@ -1467,6 +1472,32 @@ export class Platform {
    */
   async recoverStrandedWorkItem(input: StrandedRecoveryInput): Promise<StrandedRecoveryResult> {
     return recoverStrandedWorkItem(this.#context, input);
+  }
+
+  /** 托管启动时记下续跑要复用的参数（目录、适配器、轮次上限……）；与最近一条相同不重复写。 */
+  async recordHostedRunRequest(
+    missionId: string,
+    request: autoResume.HostedRunRequest,
+  ): Promise<{ recorded: boolean }> {
+    return this.#tx(() => autoResume.recordHostedRunRequest(this.#context, missionId, request));
+  }
+
+  /** 这条 Mission 由谁驱动：入过队列的归队列 worker；否则看有没有记下的托管启动参数。 */
+  async getRunDriver(missionId: string): Promise<autoResume.RunDriverInfo> {
+    return autoResume.readRunDriver(this.#context, missionId);
+  }
+
+  /** 自动恢复时刻已到、且满足全部前置条件（没暂停 / 挂起 / 待 L3 / 不在门禁原因上）的 Mission。 */
+  async listAutoResumeDue(nowIso: string): Promise<autoResume.AutoResumeDue[]> {
+    return autoResume.listAutoResumeDue(this.#context, nowIso);
+  }
+
+  /** 服务自动接着跑之前留的审计记录。 */
+  async recordAutoResume(
+    missionId: string,
+    data: { readonly reason: string; readonly resumeAt: string; readonly streak: number },
+  ): Promise<void> {
+    return this.#tx(() => autoResume.recordAutoResume(this.#context, missionId, data));
   }
 
   /** 验证跑完、授权范围内的副作用已收口提交后，记下提交了什么、范围外留下了什么。 */

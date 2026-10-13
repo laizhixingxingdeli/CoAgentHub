@@ -76,7 +76,7 @@ export async function readMissionQueue(ctx: PlatformContext, projectId: string):
     const status = mission.status;
     const active = [...mission.coordinatorAttempts, ...mission.independentReviewerAttempts, ...mission.workItems.flatMap((item) => item.attempts)]
       .some((attempt) => attempt.status === 'in_progress');
-    const waitingGate = mission.waitReason !== undefined && mission.waitReason !== 'no_available_agent' && mission.waitReason !== 'project_busy';
+    const waitingGate = mission.waitReason !== undefined && mission.waitReason !== 'no_available_agent' && mission.waitReason !== 'project_busy' && mission.waitReason !== 'retry_backoff';
     const holder = project?.missions.find((row) => row.id !== mission.id && row.isMutating);
     entries.push({ missionId: mission.id, position: data.position, dependsOn: data.dependsOn,
       status, blockedBy, contract: mission.contract,

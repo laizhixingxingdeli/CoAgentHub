@@ -712,7 +712,15 @@ export type WaitReason =
    * 和 `no_available_agent` 分开：那个等候选冷却过了重跑就好，这个不会自己好——
    * 要有人看越界的是什么、是谁留下的，再决定吸收进恢复工单还是清掉。
    */
-  | 'checkpoint_failed';
+  | 'checkpoint_failed'
+  /**
+   * 某一跳失败后在退避，到点平台会自动接着跑（Mission.waitResumeAt 就是那一刻）。
+   *
+   * 以前写成 `project_busy`，而那个词的意思是「同项目别的 Mission 占着改动名额」——
+   * 一个在等 1 秒后重试的 Mission 和一个要等别人落地的 Mission 在界面上长一个样，
+   * 人只能去翻事件才分得清（MiRing-V0-probe 的 W-619 / W-622）。
+   */
+  | 'retry_backoff';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。

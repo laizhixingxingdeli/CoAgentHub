@@ -128,7 +128,7 @@ export function createQueuedHopWaitEligibility(
 ): NonNullable<PlanDriverDeps['waitEligibility']> {
   return async ({ missionId, reason }) => {
     // 只有「名额被占」值得探一次；其余 reason 探队列也证明不了本 Mission 等得到头。
-    if (reason !== 'project_busy') return undefined;
+    if (reason !== 'project_busy' && reason !== 'retry_backoff') return undefined;
     let rows: readonly QueuedHop[];
     try {
       rows = await deps.list();
@@ -204,7 +204,7 @@ export function createPlanWaitEligibility(
     : undefined;
   return async ({ missionId, reason, detail, candidateRole }) => {
     // project_busy 交给队列探针：只认本 Mission 自己的退避/占位。
-    if (reason === 'project_busy') {
+    if (reason === 'project_busy' || reason === 'retry_backoff') {
       return queued ? queued({ missionId, reason, detail }) : undefined;
     }
     // 只有「指定角色候选全冷却」才值得探：缺角色或别的 reason 查快照也证明不了。

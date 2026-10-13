@@ -302,6 +302,8 @@ export interface MissionView {
   /** 为什么停着。undefined = 没停。 */
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
+  /** 平台打算自动接着跑的时刻（ISO）。没有 = 不会自动恢复，要人处理。 */
+  waitResumeAt?: string;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
@@ -394,6 +396,7 @@ export interface MissionSummary {
   status: string;
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
+  waitResumeAt?: string;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
