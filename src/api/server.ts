@@ -27,6 +27,7 @@ import { ChangeImpactConflictError } from '../application/change-impact.ts';
 import { ChangeReceiptConflictError } from '../application/change-receipt.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import { describeRolePolicy, policyMatches } from '../application/model-policy.ts';
+import { withAutoResumeSwitch } from '../application/platform/wait-info.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -837,6 +838,13 @@ export function createApi(deps: ApiDeps): Server {
     }
     throw new HttpError(403, 'CONTROL_FORBIDDEN', '当前身份无权执行此操作');
   };
+
+  /**
+   * 自动恢复调度现在是不是真在工作。没装配运行探针（嵌入式 / 单测）时不知道，当作在工作、不改写 waitInfo；
+   * 装配了探针却没有 autoResume 项（PG 部署）或开关关着，就是没有。
+   */
+  const schedulerWorking = (): boolean =>
+    deps.runnerState === undefined ? true : deps.runnerState.autoResume?.enabled() ?? false;
 
   /** 约束里每个角色在当前资源池里能匹配到几个启用的候选；匹配不到就写一句话。 */
   const modelPolicyWarnings = async (
@@ -2128,7 +2136,14 @@ export function createApi(deps: ApiDeps): Server {
     if (method === 'GET' && path === '/api/missions') {
       await requireControl(req, POLICY_ACTION.missionRead);
       const rows = await platform.listMissions();
-      return send(res, 200, refineMissionPlanOrigin(rows, listPlanRuns(planRunDirs())));
+      const working = schedulerWorking();
+      return send(
+        res,
+        200,
+        refineMissionPlanOrigin(rows, listPlanRuns(planRunDirs())).map((row) =>
+          row.waitInfo ? { ...row, waitInfo: withAutoResumeSwitch(row.waitInfo, working) } : row,
+        ),
+      );
     }
 
     const activityMatch = /^\/api\/missions\/([^/]+)\/activity$/.exec(path);
@@ -2253,8 +2268,10 @@ export function createApi(deps: ApiDeps): Server {
       // 页面一张时间线要阶段耗时，而耗时来自报告仓储与 hop 行，不在 MissionView 里。
       // 另开一个接口会让首屏多一次往返，且授权要再讲一遍。
       const runner = deps.runnerState;
+      const view = await platform.getMissionView(id);
       return send(res, 200, {
-        ...(await platform.getMissionView(id)),
+        ...view,
+        ...(view.waitInfo ? { waitInfo: withAutoResumeSwitch(view.waitInfo, schedulerWorking()) } : {}),
         timeAttribution: await platform.getTimeAttribution(id),
         // runner.running = 服务进程里确有托管运行在跑（权威）；它不等于「Mission 在推进」
         // （可能在退避等待）也不等于「启动请求被受理过」。没装配探针的部署不带这一格。

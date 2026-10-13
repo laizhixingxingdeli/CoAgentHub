@@ -400,7 +400,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 - `waitReason`：为什么停着。新增三种具体原因，不再借用旧词：`retry_backoff`（某一跳失败后在退避，到点平台自动重试；以前写成 `project_busy`）、`checkpoint_failed`（执行者的成果被冻结范围检查点拒绝，越界改动已保留；以前写成 `no_available_agent`）、`model_unavailable`（Mission 指定了模型而它现在用不了，按约束不改派别的模型）。`project_busy` 现在只表示「同项目别的 Mission 占着名额 / 队列容量」。
 - `waitResumeAt`：平台打算自动接着跑的时刻（ISO）。退避写队列行的 `availableAt`；候选全冷却时写最早的明确到期时刻。没有 = 平台不会自动恢复，要人处理。
-- `waitInfo`：等待状态的统一投影。`owner`（`platform` 平台自己会好 / `coordinator` / `l3` / `user`）、`autoResume`（平台会不会自动继续：有恢复时刻、没暂停 / 挂起 / 未决升级、不在门禁原因上）、`nextRetryAt`、`retry`（失败退避的 `attempt`/`max`）、`activeAgent`（现在有没有 in_progress 的 Attempt）、`action`（下一步一句话）。列表接口 `GET /api/missions` 的每一行同样带 `waitInfo`（不含重试计数）。
+- `waitInfo`：等待状态的统一投影。`owner`（`platform` 平台自己会好 / `coordinator` / `l3` / `user`）、`autoResume`（平台会不会自动继续：有恢复时刻、没暂停 / 挂起 / 未决升级、不在门禁原因上；服务级开关 `COAGENT_AUTO_RESUME=0` 关着、或此部署没装配调度器（PG）时一律是 `false`，`owner` 改为 `l3`，不给 `nextRetryAt`）、`nextRetryAt`、`retry`（失败退避的 `attempt`/`max`）、`activeAgent`（现在有没有 in_progress 的 Attempt）、`action`（下一步一句话）。列表接口 `GET /api/missions` 的每一行同样带 `waitInfo`（不含重试计数）。
 - `modelPolicy`：Mission 级模型约束，见 `/model-policy`。
 - `runner`（服务装配了运行探针时才有）：`running` 是服务进程里确有托管运行在跑——权威、不依赖发起方的流；`autoResume.enabled` / `resuming` 是自动恢复调度是否启用、是否正在替这条 Mission 续跑。
 

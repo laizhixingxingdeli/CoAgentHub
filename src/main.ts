@@ -98,7 +98,7 @@ import type {
   DecisionProvider,
   PostExecutionEvaluator,
 } from './application/ports.ts';
-import { runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
+import { resumeMissionBody, runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
@@ -1238,17 +1238,7 @@ export async function startServer(
             const view = await built.platform.getMissionView(missionId);
             if (!view.contract) return;
             await runMission(
-              {
-                spec: { projectId: view.projectId, missionId, contract: view.contract },
-                cwd: request.cwd,
-                adapter: request.adapter,
-                state: statePath,
-                store: 'file',
-                env: { [SPAWN_ENV_PASSTHROUGH_VAR]: '-' },
-                ...(request.maxRounds !== undefined ? { maxRounds: request.maxRounds } : {}),
-                ...(request.acceptStaleBase ? { acceptStaleBase: true } : {}),
-                ...(request.origin ? { origin: request.origin } : {}),
-              },
+              resumeMissionBody({ projectId: view.projectId, missionId, contract: view.contract, request, state: statePath }),
               () => {},
             );
           },

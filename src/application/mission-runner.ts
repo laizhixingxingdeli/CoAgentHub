@@ -39,6 +39,7 @@ import type {
   QueuedHopRepository,
 } from './ports.ts';
 import type { Platform } from './platform.ts';
+import type { HostedRunRequest } from './platform/auto-resume.ts';
 import {
   parseAgentEnvPassthrough,
   SPAWN_ENV_PASSTHROUGH_VAR,
@@ -292,6 +293,34 @@ function pickHostedCandidates(
     }
     return found;
   });
+}
+
+/**
+ * 自动续跑（retry-wake）发给托管运行的请求体：和 `POST /api/control/run-mission` 同一形状，
+ * 由下面的 {@link parseHostedMissionBody} 校验。启动参数来自 Mission 上记下的 `mission.run_requested`。
+ *
+ * 环境透传只能是 `-`：托管运行拒绝任何额外变量（HOSTED_AGENT_ENV_UNPROVEN_MESSAGE），
+ * 变量值也从不进事件，所以续跑和首次启动的环境口径一致。
+ */
+export function resumeMissionBody(input: {
+  readonly projectId: string;
+  readonly missionId: string;
+  readonly contract: MissionContract;
+  readonly request: HostedRunRequest;
+  readonly state: string;
+}): Record<string, unknown> {
+  const { request } = input;
+  return {
+    spec: { projectId: input.projectId, missionId: input.missionId, contract: input.contract },
+    cwd: request.cwd,
+    adapter: request.adapter,
+    state: input.state,
+    store: 'file',
+    env: { [SPAWN_ENV_PASSTHROUGH_VAR]: '-' },
+    ...(request.maxRounds !== undefined ? { maxRounds: request.maxRounds } : {}),
+    ...(request.acceptStaleBase ? { acceptStaleBase: true } : {}),
+    ...(request.origin ? { origin: request.origin } : {}),
+  };
 }
 
 /**

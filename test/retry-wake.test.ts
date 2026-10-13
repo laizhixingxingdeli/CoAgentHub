@@ -23,6 +23,8 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, AUTO_RESUMED_EVENT_KIND } from '../src/application/platform.ts';
 import { RetryWakeScheduler, type RetryWakeDeps } from '../src/application/retry-wake.ts';
+import { parseHostedMissionBody, resumeMissionBody } from '../src/application/mission-runner.ts';
+import { resolve } from 'node:path';
 import { buildPersistentPlatform } from '../src/main.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import type { AutoResumeDue, HostedRunRequest } from '../src/application/platform/auto-resume.ts';
@@ -257,5 +259,46 @@ describe('服务重启后仍能恢复', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('自动续跑的请求体：由托管入口自己的解析校验，不靠 main.ts 里手写', () => {
+  const held = { kind: 'file', statePath: '/state.json', identityEquals: (submitted: string) => submitted === '/state.json' } as const;
+
+  test('带全部启动参数时被原样解析出来；环境透传恒为空，不放大首次启动的权限', () => {
+    const request: HostedRunRequest = {
+      cwd: resolve('repo'),
+      adapter: resolve('adapter', 'agent-entry.ts'),
+      maxRounds: 7,
+      acceptStaleBase: true,
+      origin: 'l3-claude',
+    };
+    const parsed = parseHostedMissionBody(
+      resumeMissionBody({ projectId: 'P', missionId: 'M-1', contract: CONTRACT, request, state: '/state.json' }),
+      held,
+    );
+    assert.equal(parsed.spec.projectId, 'P');
+    assert.equal(parsed.spec.missionId, 'M-1');
+    assert.equal(parsed.cwd, request.cwd);
+    assert.equal(parsed.adapter, request.adapter);
+    assert.equal(parsed.maxRounds, 7);
+    assert.equal(parsed.acceptStaleBase, true);
+    assert.equal(parsed.origin, 'l3-claude');
+    assert.deepEqual(parsed.envPassthrough, []);
+    assert.equal(parsed.store, 'file');
+    assert.equal(parsed.inPlace, false);
+  });
+
+  test('没有可选参数也合法；持锁文件对不上就在开跑前被拒', () => {
+    const request: HostedRunRequest = { cwd: resolve('repo'), adapter: resolve('adapter', 'agent-entry.ts'), acceptStaleBase: false };
+    const body = resumeMissionBody({ projectId: 'P', missionId: 'M-2', contract: CONTRACT, request, state: '/state.json' });
+    const parsed = parseHostedMissionBody(body, held);
+    assert.equal(parsed.maxRounds, undefined);
+    assert.equal(parsed.acceptStaleBase, false);
+    assert.equal(parsed.origin, undefined);
+    assert.throws(
+      () => parseHostedMissionBody({ ...body, state: '/other-state.json' }, held),
+      /不是同一文件/,
+    );
   });
 });

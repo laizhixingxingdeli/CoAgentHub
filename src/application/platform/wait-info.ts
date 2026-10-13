@@ -88,6 +88,25 @@ export const WAIT_RULES: Readonly<Record<WaitReason, ReasonRule>> = {
   work_item_checkpoint: { owner: 'l3', fallback: 'l3', action: () => '工作项到检查点：检视者判断是否拆票并显式批准' },
 };
 
+/**
+ * 服务级的自动恢复调度没在工作（`COAGENT_AUTO_RESUME=0`，或 PG 部署根本没装配）时，Mission 自己的状态
+ * 再「可恢复」，平台也不会去恢复：把投影改成如实的样子。HTTP 层知道调度器在不在，Mission 内核不知道，
+ * 所以这一步放在出口，不放进 {@link deriveWaitInfo}。
+ */
+export function withAutoResumeSwitch(
+  info: MissionWaitInfo | undefined,
+  schedulerWorking: boolean,
+): MissionWaitInfo | undefined {
+  if (!info || schedulerWorking || !info.autoResume) return info;
+  const { nextRetryAt: _dropped, ...rest } = info;
+  return {
+    ...rest,
+    autoResume: false,
+    owner: info.owner === 'platform' ? 'l3' : info.owner,
+    action: '服务的自动恢复没有在工作（COAGENT_AUTO_RESUME=0，或此部署未装配），平台不会自动重试：处理后 start_mission 接着跑',
+  };
+}
+
 function hasActiveAgent(mission: Mission): boolean {
   return [
     ...mission.coordinatorAttempts,
