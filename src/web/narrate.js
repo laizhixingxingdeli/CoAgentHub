@@ -343,6 +343,8 @@ export const WAIT_REASON = {
   mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
   // 工作项开到检查点（默认第 15 个），等检视者判断是否拆票。
   work_item_checkpoint: '工作项已到检查点，等检视者判断是否拆票',
+  // 检查点拒绝了执行者的成果：越界改动原样保留，要人看是什么、谁留下的。
+  checkpoint_failed: '成果被冻结范围的检查点拒绝，越界改动已保留，等人处理',
 };
 
 /**
@@ -387,7 +389,11 @@ export function evidenceKindLabel(kind) {
 const OUTCOME_CN = { completed: '完成', partial: '部分完成', delivered: '已交付', blocked: '没做出来' };
 
 /** 平台收尾（work_item.platform_blocked）的来源。认不出来的原样带出，不编原因。 */
-const STALL_SOURCE_CN = { runaway: '一跳跑太久被掐断', no_result_limit: '连续无结构化结果到顶' };
+const STALL_SOURCE_CN = {
+  runaway: '一跳跑太久被掐断',
+  no_result_limit: '连续无结构化结果到顶',
+  workspace_dirty: '开跑前发现工作区有不属于本工单的改动',
+};
 
 /** outcome 是人话在前、机器值在括号里：两边的人都要能对上号。 */
 const outcomeText = (outcome) => {
@@ -562,6 +568,42 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '平台把卡住的工作项转为卡住',
       detail: `来源 ${source ? STALL_SOURCE_CN[source] || source : '（没有写来源）'} · ${or(data.reason, '（没有写原因）')}`,
+    };
+  },
+
+  // 验证命令在 Mission 工作区里跑，会留下改动。授权范围内的由平台收口提交；范围外的原样保留，
+  // 并记下来源，供下一张工单开跑前核对（不自动提交未授权文件，不扩大范围）。
+  'workspace.validation_settled': (event) => {
+    const data = (event && event.data) || {};
+    const committed = list(data.committed);
+    const left = list(data.left);
+    const parts = [];
+    if (committed.length) parts.push(`验证留下的授权范围内改动已提交：${committed.join('、')}`);
+    if (left.length) parts.push(`范围外的改动原样保留、没有提交：${left.join('、')}`);
+    if (data.error) parts.push(`收口失败：${text(data.error)}`);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '验证后收口工作区',
+      detail: parts.join('；') || '工作区干净',
+    };
+  },
+
+  'workspace.residue_adopted': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '开跑前并入工作区残留',
+      detail: `工单 ${or(event && event.workItemId, '（没有工作项 ID）')} 的授权范围内已有未提交改动：${list(data.paths).join('、') || '（无）'}`,
+    };
+  },
+
+  'workspace.checkpoint_failed': (event) => {
+    const data = (event && event.data) || {};
+    const paths = list(data.paths);
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '检查点拒绝了成果',
+      detail: `${or(data.message, '（没有写原因）')}${paths.length ? `；涉及：${paths.join('、')}` : ''}`,
     };
   },
 

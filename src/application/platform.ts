@@ -37,6 +37,14 @@ import * as workItemDispatch from './platform/work-item-dispatch.ts';
 import { blockStalledWorkItem } from './platform/stalled-work-item.ts';
 export type { StalledSource, StalledWorkItemInput, StalledWorkItemResult } from './platform/stalled-work-item.ts';
 export { PLATFORM_BLOCKED_EVENT_KIND } from './platform/stalled-work-item.ts';
+import * as workspaceHygiene from './platform/workspace-hygiene.ts';
+export type { ResidueOrigin, ValidationSettlementInput, WorkspaceBlockInput } from './platform/workspace-hygiene.ts';
+export {
+  CHECKPOINT_FAILED_EVENT_KIND,
+  RESIDUE_ADOPTED_EVENT_KIND,
+  VALIDATION_SETTLED_EVENT_KIND,
+  describeResidue,
+} from './platform/workspace-hygiene.ts';
 import * as workItemReview from './platform/work-item-review.ts';
 import * as workOrders from './platform/work-orders.ts';
 import * as startupBrief from './platform/startup-brief.ts';
@@ -1446,6 +1454,51 @@ export class Platform {
     claim?: QueueClaimIdentity,
   ): Promise<{ converted: boolean; reason: string }> {
     return blockStalledWorkItem(this.#context, input, claim);
+  }
+
+  /** 验证跑完、授权范围内的副作用已收口提交后，记下提交了什么、范围外留下了什么。 */
+  async recordValidationSettlement(
+    input: workspaceHygiene.ValidationSettlementInput,
+  ): Promise<{ recorded: boolean }> {
+    return this.#tx(() => workspaceHygiene.recordValidationSettlement(this.#context, input));
+  }
+
+  /** 脏路径是谁留下的（只认平台记过的验证后收口事件；查不到的不在结果里）。 */
+  async attributeWorkspacePaths(
+    missionId: string,
+    paths: readonly string[],
+  ): Promise<Record<string, workspaceHygiene.ResidueOrigin>> {
+    return workspaceHygiene.workspaceResidueOrigins(this.#context, missionId, paths);
+  }
+
+  /** 开跑前把范围内的残留并入这张工单，并留下它们原来的来源。 */
+  async recordResidueAdopted(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly paths: readonly string[];
+    readonly origins: Readonly<Record<string, workspaceHygiene.ResidueOrigin>>;
+  }): Promise<void> {
+    return this.#tx(() => workspaceHygiene.recordResidueAdopted(this.#context, input));
+  }
+
+  /** 检查点失败的结构化记录（原因码、路径、来源）。 */
+  async recordCheckpointFailure(input: {
+    readonly missionId: string;
+    readonly workItemId: string;
+    readonly attemptId?: string;
+    readonly code?: string;
+    readonly message: string;
+    readonly paths: readonly string[];
+    readonly origins: Readonly<Record<string, workspaceHygiene.ResidueOrigin>>;
+  }): Promise<void> {
+    return this.#tx(() => workspaceHygiene.recordCheckpointFailure(this.#context, input));
+  }
+
+  /** 开跑前发现工作区不干净：不启动执行者，把工单收成 blocked 交回协调者。 */
+  async blockWorkItemForWorkspace(
+    input: workspaceHygiene.WorkspaceBlockInput,
+  ): Promise<{ converted: boolean; reason: string }> {
+    return this.#tx(() => workspaceHygiene.blockWorkItemForWorkspace(this.#context, input));
   }
 
   async reviewExecutionResult(

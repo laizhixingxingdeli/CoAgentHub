@@ -414,7 +414,8 @@ describe('调度器：整条 Mission 自己走完', () => {
       const result = await orchestrator.runMission('M-checkpoint-denied', { projectRoot });
 
       assert.equal(result.kind, 'waiting');
-      assert.equal((result as { reason: string }).reason, 'no_available_agent');
+      // 检查点拒绝不是候选不可用：单独的停机原因，才不会被当成「等一会儿重跑」。
+      assert.equal((result as { reason: string }).reason, 'checkpoint_failed');
       assert.match((result as { detail: string }).detail, /checkpoint-denied/);
       assert.deepEqual(
         orchestrator.hops.map((hop) => hop.role),
@@ -428,9 +429,8 @@ describe('调度器：整条 Mission 自己走完', () => {
   });
 
   // 方案驱动的等待探针要能直接从结果里读出「这次缺的是哪个角色的人」。
-  // 为什么不能拿 reason 顶替：`no_available_agent` 这个字符串同时盖着
-  // 「候选在冷却」和「检查点失败」两件处置相反的事——后者要人来看，
-  // 探针若一律当成候选冷却，就会去等一个永远不会自己好的东西。
+  // 检查点失败曾和「候选在冷却」共用 `no_available_agent`，处置却相反——后者等一等就好，
+  // 前者要人来看。现在检查点失败有自己的停机原因 checkpoint_failed，仍然不许贴角色。
   test('缺候选的 waiting 带出角色；非候选故障不带', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'orchestrator-candidate-role-'));
     const circuits = candidateCircuitRepository();
@@ -462,7 +462,7 @@ describe('调度器：整条 Mission 自己走完', () => {
       const orchestrator = current.makeOrchestrator();
       const checkpointFault = await orchestrator.runMission('M-checkpoint-no-role', { projectRoot });
       assert.equal(checkpointFault.kind, 'waiting');
-      assert.equal((checkpointFault as { reason: string }).reason, 'no_available_agent');
+      assert.equal((checkpointFault as { reason: string }).reason, 'checkpoint_failed');
       assert.match((checkpointFault as { detail: string }).detail, /checkpoint-denied/);
       assert.equal(
         Object.hasOwn(checkpointFault, 'candidateRole'),

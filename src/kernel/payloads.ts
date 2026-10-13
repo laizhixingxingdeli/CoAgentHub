@@ -705,7 +705,14 @@ export type WaitReason =
   /** 票级费用上限（独立门禁）已触及；与 ExecutionBudget 硬维度分开。 */
   | 'mission_cost_cap_reached'
   /** 工作项已到达待人工/平台确认的检查点。 */
-  | 'work_item_checkpoint';
+  | 'work_item_checkpoint'
+  /**
+   * 执行者已交卷，但冻结范围的检查点拒绝了（越界改动、模糊授权）。成果与改动都留在工作区、没有回滚。
+   *
+   * 和 `no_available_agent` 分开：那个等候选冷却过了重跑就好，这个不会自己好——
+   * 要有人看越界的是什么、是谁留下的，再决定吸收进恢复工单还是清掉。
+   */
+  | 'checkpoint_failed';
 
 /**
  * Mission 在版本控制里的落脚点：它自己的分支，和分叉时的基线版本。

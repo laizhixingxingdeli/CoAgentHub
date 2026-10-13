@@ -923,6 +923,7 @@ describe('阶段与状态是两根轴', () => {
       'attempt_limit_reached',
       'base_revision_stale',
       'cancelled_by_user',
+      'checkpoint_failed',
       'escalated',
       'execution_budget_exceeded',
       'mission_cost_cap_reached',
