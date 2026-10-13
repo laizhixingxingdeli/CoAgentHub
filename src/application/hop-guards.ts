@@ -69,19 +69,28 @@ export class HopGuards {
    * - 本工单自己上一次验证留下的、或重派时来源没记录的：沿用，续派交接里已经点名；
    * - 其余（别的工单的验证留下的，或首次派发时凭空出现的）：不启动执行者，把工单收成 blocked。
    *
-   * 读不出工作区状态时放行：后面的检查点是最终防线，这里不为一次读取抖动拦人。
+   * 读不出工作区状态、或核对本身出错（读来源事件、写收尾失败）时放行：后面的检查点是最终防线，
+   * 这一道只是把「必然被检查点拒掉」的一跳提前拦在花钱之前——它自己出错不能反过来让整次运行崩掉。
    * 返回 blocked 表示工单已转交协调者，调用方不要再启动执行者。
    */
   async preflightWorkspace(missionId: string, item: WorkItemView, cwd: string): Promise<'ok' | 'blocked'> {
     const scope = item.order?.allowedScope;
     if (!this.#workspace.dirtyPaths || !Array.isArray(scope)) return 'ok';
-    let dirty: readonly string[];
     try {
-      dirty = await this.#workspace.dirtyPaths(cwd);
+      const dirty = await this.#workspace.dirtyPaths(cwd);
+      if (dirty.length === 0) return 'ok';
+      return await this.#screenDirtyPaths(missionId, item, scope, dirty);
     } catch {
       return 'ok';
     }
-    if (dirty.length === 0) return 'ok';
+  }
+
+  async #screenDirtyPaths(
+    missionId: string,
+    item: WorkItemView,
+    scope: readonly string[],
+    dirty: readonly string[],
+  ): Promise<'ok' | 'blocked'> {
     const allowed = new Set(scope.map((entry) => normalizeScopePath(entry)));
     const origins = await this.#platform.attributeWorkspacePaths(missionId, dirty);
     const firstDispatch = item.attemptIds.length === 0;

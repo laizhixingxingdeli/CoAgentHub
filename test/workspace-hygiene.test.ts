@@ -26,6 +26,7 @@ import {
 } from '../src/application/in-memory.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Orchestrator } from '../src/application/orchestrator.ts';
+import { HopGuards } from '../src/application/hop-guards.ts';
 import { PLATFORM_BLOCKED_EVENT_KIND, Platform } from '../src/application/platform.ts';
 import { makeIssuer } from '../src/main.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
@@ -364,5 +365,29 @@ describe('开跑前核对工作区：别的工单留下的改动不让新工单�
     // 检查点把它连同这张工单的交付一起提交：工作区干净，残留有了归属。
     assert.equal(git(cwd, 'status', '--porcelain'), '');
     assert.match(git(cwd, 'log', '-1', '--format=%s'), /检查点/);
+  });
+});
+
+describe('开跑前核对自己出错：放行，不让整次运行崩掉', () => {
+  const item = { id: 'W-2', attemptIds: [], order: { allowedScope: ['src/bar.ts'] } } as unknown as Parameters<
+    HopGuards['preflightWorkspace']
+  >[1];
+  const workspace = { dirtyPaths: async () => ['docs/log.md'] } as unknown as ConstructorParameters<typeof HopGuards>[1];
+
+  test('读来源事件失败、收尾失败都按放行处理——最终防线是检查点，这一道不许反过来让运行崩掉', async () => {
+    const readFails = {
+      attributeWorkspacePaths: async () => {
+        throw new Error('活动日志读不出来');
+      },
+    } as unknown as ConstructorParameters<typeof HopGuards>[0];
+    assert.equal(await new HopGuards(readFails, workspace).preflightWorkspace('M', item, 'cwd'), 'ok');
+
+    const blockFails = {
+      attributeWorkspacePaths: async () => ({}),
+      blockWorkItemForWorkspace: async () => {
+        throw new Error('写不进去');
+      },
+    } as unknown as ConstructorParameters<typeof HopGuards>[0];
+    assert.equal(await new HopGuards(blockFails, workspace).preflightWorkspace('M', item, 'cwd'), 'ok');
   });
 });

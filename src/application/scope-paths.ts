@@ -93,8 +93,10 @@ export function exactFileScopeIssue(entry: unknown): ScopeIssue | undefined {
   if (normalized === '' || normalized.includes('\0')) {
     return issue('empty', '范围条目为空或含非法字符', '"src/foo.ts"');
   }
-  if (isAbsoluteOrDrive(normalized) || normalized.startsWith('//')) {
-    return issue('absolute', '绝对路径不能作为授权范围', '相对仓库根的路径，例如 "src/foo.ts"');
+  // 盘符开头一律拒（含 `C:foo` 这种「某盘当前目录」的相对写法）：Windows 上它指向仓库之外或备用数据流，
+  // 检查点原来就是这么严，验证器的 isAbsoluteOrDrive 只认 `C:/` 与 `C:`，这里不能放宽。
+  if (isAbsoluteOrDrive(normalized) || normalized.startsWith('//') || /^[A-Za-z]:/.test(normalized)) {
+    return issue('absolute', '绝对路径或盘符开头的路径不能作为授权范围', '相对仓库根的路径，例如 "src/foo.ts"');
   }
   const segments = normalized.split('/');
   if (segments.some((part) => part === '..')) {

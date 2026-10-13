@@ -878,6 +878,37 @@ describe('调度器：整条 Mission 自己走完', () => {
     assert.deepEqual(await circuits.get('exec-b'), { profileId: 'exec-b', state: 'closed' });
   });
 
+  // 模型约束（required）与局部排除碰在一起：匹配的候选在这张工单上连续无结果、被排除了，
+  // 不是「模型不可用」——不能停给人，更不能改派 exec-b；要和无约束时一样交回协调者看工单本身。
+  test('指定执行者模型而匹配的候选被工作项局部排除：交回协调者，不报 model_unavailable，也不改派别的模型', async () => {
+    const executor = new ScriptedRuntime({ 'executor:W-1': { steps: [{ tool: 'coagent_get_work_order', body: {} }] } });
+    current = await harness({ coordinator: new ScriptedRuntime(COORDINATOR_HAPPY), executor }, candidateCircuitRepository());
+    await current.platform.createMission({ projectId: 'P', missionId: 'M-policy-excluded', contract: CONTRACT });
+    await current.platform.setMissionModelPolicy('M-policy-excluded', {
+      executor: { mode: 'required', selectors: [{ profileId: 'exec-a' }] },
+      reviewer: 'L3',
+      reason: '测试：执行者只准 exec-a',
+    });
+    const orchestrator = current.makeOrchestrator();
+    await orchestrator.runMission('M-policy-excluded', { projectRoot: process.cwd() });
+    const executorHops = orchestrator.hops.filter((hop) => hop.role === 'executor');
+    assert.deepEqual(
+      executorHops.map((hop) => hop.profile.profileId),
+      ['exec-a', 'exec-a'],
+      '只准 exec-a：连续两次无结果后它被这张工单排除，不能换成 exec-b',
+    );
+    const waits = (await current.platform.getActivity('M-policy-excluded')).filter((event) => event.kind === 'mission.waiting');
+    assert.equal(
+      waits.some((event) => (event.data as { reason?: string }).reason === 'model_unavailable'),
+      false,
+      '排除耗尽不是模型不可用，不该写这个停机原因',
+    );
+    assert.ok(
+      waits.some((event) => (event.data as { reason?: string }).reason === 'attempt_limit_reached'),
+      '和无约束时一样按「排除耗尽」交回协调者',
+    );
+  });
+
   test('持久候选熔断记录五种真实 Hop 失败分类及未来截止', async () => {
     const scenarios = [
       ['quota', 'HTTP 429 quota exceeded', 'quota'],

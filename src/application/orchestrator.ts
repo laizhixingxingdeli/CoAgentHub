@@ -2181,9 +2181,20 @@ export class Orchestrator {
     policy: { role: RoleModelPolicy; revision: number },
     now: number,
     excludedProfileIds: readonly string[] | undefined,
-  ): Promise<{ exhausted: WaitReason; detail: string; candidateRole: RolePoolName; resumeAt?: string }> {
+  ): Promise<{ exhausted: WaitReason; detail?: string; candidateRole: RolePoolName; resumeAt?: string }> {
     const matching = (profile: ExecutionProfile) => policyMatches(profile, policy.role);
-    const configured = (await this.#poolCandidates(pool)).filter(matching).length;
+    const matched = (await this.#poolCandidates(pool)).filter(matching);
+    const configured = matched.length;
+    // 匹配的候选全被「同一工作项连续无结构化结果」局部排除了：这不是模型不可用，而是这张工单在
+    // 这些候选上跑不出结果。和没有约束时一样按「排除耗尽」处置（调用方认 no_available_agent + 排除名单，
+    // 交回协调者去看工单本身）；伪装成 model_unavailable 停给人，既说错了原因，也绕过了交回。
+    if (
+      excludedProfileIds?.length &&
+      configured > 0 &&
+      matched.every((profile) => excludedProfileIds.includes(profile.profileId))
+    ) {
+      return { exhausted: 'no_available_agent', candidateRole: role };
+    }
     const resumeAt = await this.#earliestCooldownEnd(pool, now, excludedProfileIds, matching);
     return {
       exhausted: 'model_unavailable',

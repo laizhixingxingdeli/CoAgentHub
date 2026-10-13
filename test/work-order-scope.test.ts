@@ -63,6 +63,7 @@ describe('工单范围：执行前拒绝模糊授权', () => {
       ['src/*.ts', 'glob'],
       ['/etc/passwd', 'absolute'],
       ['C:\\x\\y.ts', 'absolute'],
+      ['C:foo.ts', 'absolute'],
       ['../x.ts', 'traversal'],
       ['', 'empty'],
     ] as const) {
