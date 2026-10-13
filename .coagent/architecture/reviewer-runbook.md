@@ -48,6 +48,7 @@
 3. 升级单：
    - 协调者问「已验收的项要补做 / 作废的项怎么办」：不再属于升级范围（ADR-0007 补充，2026-10-07），答复引用那一条并让它直接新建引用原 id 的补修单；执行者被杀（墙钟强杀）或平台放弃重跑（无结果到顶、候选排除耗尽）后工作项卡在 dispatched 的：COM12 上线后平台自己把它收成 blocked（事件 `work_item.platform_blocked`，只 Standard、只执行者跳），协调者修订同一张单再派发，不用作废重建；上线前只能由我作废并另建（作废只当「不用做了」用，不是重启办法）。
    - 协调者问契约问题——先核实；票有缺口就 `l3 revise` 发新契约，再 `l3 plan decide <E-n> --action answer`；答复写清做法，不只说「同意」。
+   - （停机原因 `retry_backoff` / `checkpoint_failed` / `model_unavailable` 见文末「2026-10-13 补充」，不要再按 project_busy 处理。）
    - 平台停在 project_busy / no_available_agent / runaway_suspected 且只给「隔离重跑 / 跳过 / 重划 / 停」——选「停」（reviewer_stop），必要时 `l3 pause` 该 Mission、`l3 retire` 卡死的工作项并写明原因，再开跑，平台续跑同一 Mission（PLAT2 / PLAT5）。
    - 不在方案运行里的 Mission：`l3 answer`，答完重跑 `run-mission`。
 4. 到线（15 个工作项、单项 4 次）时看原因：在推进就放开那一条线继续，在空转就作废、改票或停。
@@ -105,7 +106,7 @@
 
 值守通过 `/api/projects/:id/reviewer-duty` claim 领取五分钟租约，每分钟 renew。handoff 递增代次，旧会话不能续约或守候；L3 写操作须携带真实 owner 与 generation。值守不是鉴权，D1d 仍暂缓。显式守候脚本 `node scripts/reviewer-watch.ts <projectId> <会话ID>` 只打印变化；不创建定时任务，本会话按用户要求不启动守候。
 
-可选 `node scripts/reviewer-mcp.ts` 提供十一个工作流工具（含 L3MCP1 的候选熔断复位 `coagenthub_candidate_reset`），仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
+可选 `node scripts/reviewer-mcp.ts` 提供十三个工作流工具（含 L3MCP1 的候选熔断复位 `coagenthub_candidate_reset`，以及 10-13 可靠性加固的工单状态恢复 `coagenthub_work_item_recover`、Mission 模型约束 `coagenthub_model_policy_set`），仍通过本机 HTTP 调用，不直接读写状态。现有 L3 插件保持不变，Delivery 仍由原桥接投递；MCP 握手不代表实际 Delivery 已送达。PlanRun decide 必须确认当前服务确实承载该 run；历史 origin 或仅有记录不能作为依据。
 
 `/api/projects/:id/master-brief` 只提供简报，不执行 master 合并。没有当前 HEAD 的可信平台全量报告时 ready=false，直接实施批的终端测试日志不会被伪造为平台报告。用户签名仍是合 master 的前置。
 
@@ -141,3 +142,15 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 - 执行者自己跑全量会和平台 VR 抢同一批全机共用的 PG 测试库，制造 DUPLICATE_ID 之类的假红；看到红就交 partial 时平台又不跑 VR，会原地打转（B3 的 W-487）。验证单的 requiredBehaviour 要写死「只跑一次定向、交证据、立即交 completed」。
 - pi 协调者还没有读取完整 VR 的工具，每张单验收前都会升级来要全文。L3 按「报告原文 + 来源事件 + Git 关联 + HAOFF1 静态 skip 核对」答复，然后续跑；要等 pi A2 注册、集成代码部署到服务以后，这一来一回才会消失。
 - 2026-10-07 夜：PI-COM1（pi 协调者注册 `coagent_get_validation_report`、契约核对 issues 后不再手动升级、usage 命令报 10Router 各上游额度、`appendXaiQuotaReset` 只认 xAI 行）已在 pi 集成分支的 Mission 里验收完毕，等 master 合入 PERF1 并重启之后再合；合入后协调者可以自读完整 VR，上一条说的那一来一回才真正消失。
+
+## 2026-10-13 补充（可靠性加固，案例 MiRing-V0-probe 暴露）
+
+- **这批是直接实施的一次性例外**：用户 10-13 明确同意「这次例外，把剩下的做完然后合并」，由检视者在隔离 worktree 里实现，没有走 Mission、没有平台出的验证报告，只有本机全量 `node --test` 与自检审查。第 0 节的划线不因此改变：以后同类改动照样开 Mission。
+- **新的停机原因，处置各不相同**（`GET /api/missions/:id` 的 `waitInfo` 给出谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步；`runner.running` 是服务进程里托管运行是否真在跑——「HTTP 受理」「runner 在跑」「在等」「完成」是四件事）：
+  - `retry_backoff`：某一跳失败后在退避，**不是故障也不是名额被占**。`waitResumeAt` 到点由服务自动接着跑（`RetryWakeScheduler`，重启后也会）；`runner.running=false` 是正常的，不要因此手动 start。想关掉整个自动恢复：服务环境变量 `COAGENT_AUTO_RESUME=0`。旧代码留下的退避 Mission 没有 `waitResumeAt` 与托管启动参数，需要手动 start 一次，之后才进入自动恢复。
+  - `checkpoint_failed`：执行者的成果被冻结范围检查点拒绝，越界改动**原样保留**。看事件 `workspace.checkpoint_failed` 的路径与来源（哪张工单的验证留下的）：要保留就让协调者建一张 `allowedScope` 精确包含它们的恢复单，不要就由 L3 清理工作区；处理后再 start。平台不会自动恢复，也不会自动提交未授权文件。
+  - `model_unavailable`：Mission 用 `model-policy` 指定了模型（`required`），而匹配的候选现在都不可用。平台**绝不改派别的模型**；有明确冷却到期时刻就自动重试，没有就要人修候选、调资源池，或改约束。契约正文里写的模型名只是叙述，不是约束（用户后来改授权时，旧限制留在历史里不再生效）。
+- **状态恢复**：工单「已有执行结果、停在 dispatched、没有活执行者」（案例的 W-621）——编排器在叫协调者前自动收成 blocked（只认可证明的机器续派残留）；自动判不了的由 `coagenthub_work_item_recover`（署名与理由必填，幂等，有活执行者或租约时拒绝）。Mission 不在 executing 时机器不再续派。
+- **验证与工作区**：验证命令跑完后，授权范围内的副作用由平台用「验证副作用检查点」提交；范围外的原样保留并记下来源，下一张工单开跑前对着来源核对，不属于它的改动会让工单在**花钱之前**收成 blocked（事件 `work_item.platform_blocked`，`source: workspace_dirty`）。验证子进程带 `PYTHONDONTWRITEBYTECODE=1`。
+- **工单范围**：Standard 工单的 `allowedScope` 必须是相对仓库根的精确文件；目录、通配符、绝对 / 盘符路径、`..` 在建单、修订、派发时就被 `WORK_ORDER_SCOPE_INVALID` 拒绝并给出改法（只在装了检查点的工作区上；存量的目录范围工单到派发时被拒）。
+- **部署**：合 master 之后服务仍是旧代码，要重启才加载（静态网页文件按磁盘现读，新网页对老接口向后兼容）。重启前提不变——没有在跑的 agent（第 7 节）；合并本身不重启、不推送。
