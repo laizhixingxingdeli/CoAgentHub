@@ -826,7 +826,7 @@ export function createApi(deps: ApiDeps): Server {
     await requireControlAuth(req, action);
     if (req.method !== 'POST') return;
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
+    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|rerun)$/.exec(path);
     if (!controlled) return;
     const mission = await platform.getMissionView(controlled[1]);
     const duty = await platform.getReviewerDuty(mission.projectId);
@@ -1753,7 +1753,7 @@ export function createApi(deps: ApiDeps): Server {
     rejectImpactRunOutsideAllowlist(req);
     if (req.method !== 'POST') return handle(req, res);
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/retire|rerun)$/.exec(path);
+    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|rerun)$/.exec(path);
     const planControl = /^\/api\/plan-runs\/([^/]+)\/decide$/.exec(path);
     const projectControl = /^\/api\/projects\/([^/]+)\/(?:mission-queue|execution-config)$/.exec(path);
     if (!missionControl && !planControl && !projectControl) return handle(req, res);
@@ -2373,6 +2373,28 @@ export function createApi(deps: ApiDeps): Server {
         res,
         200,
         await platform.retireWorkItem(retireMatch[1], retireMatch[2], String(body.reason ?? '')),
+      );
+    }
+
+    // 状态恢复：有执行结果、却停在 dispatched 且没有活执行者的工单 → blocked，让协调者依法审查 / 修订。
+    // 控制面 operator（与 retire 同一格）。署名与理由必填；核实尝试 / 租约 / 修订号与幂等都在 Platform，
+    // 这里只验输入形状。expectedAttemptId / orderRevision 是调用方看到的快照：给了就必须与平台一致。
+    const recoverMatch = /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/recover$/.exec(path);
+    if (method === 'POST' && recoverMatch) {
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      return send(
+        res,
+        200,
+        await platform.recoverStrandedWorkItem({
+          missionId: recoverMatch[1],
+          workItemId: recoverMatch[2],
+          source: 'operator_recovery',
+          reviewer: String(body.reviewer ?? ''),
+          reason: String(body.reason ?? ''),
+          ...(typeof body.expectedAttemptId === 'string' ? { expectedAttemptId: body.expectedAttemptId } : {}),
+          ...(typeof body.orderRevision === 'string' ? { orderRevision: body.orderRevision } : {}),
+        }),
       );
     }
 

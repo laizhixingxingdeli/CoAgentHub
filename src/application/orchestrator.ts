@@ -936,6 +936,12 @@ export class Orchestrator {
       // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
       if (redispatchedOnRecovery) continue;
 
+      // 状态恢复：Mission 不在 executing，却有「带着结果被机器续派回 dispatched」的工单——调度器不会
+      // 再为它启动执行者，协调者也无法对 dispatched 工单 reject 或修订（W-621：dispatched -> rejected
+      // is not allowed）。先由平台收成 blocked，协调者拿到的才是一张它能依法处理的工单。
+      const recovered = await this.#recoverStrandedDispatches(missionId, view);
+      const coordinatorView = recovered ? await this.#platform.getMissionView(missionId) : view;
+
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
       //
       // **不续跑上一跳的会话。** 这里曾经传 view.coordinatorResumeRef，
@@ -959,7 +965,7 @@ export class Orchestrator {
         cwd,
         pool: this.#coordinator,
         instruction: coordinatorInstruction({
-          ...view,
+          ...coordinatorView,
           conflictFiles: activeConflicts,
           // 这一轮刚写下的交回原因。view 是循环开头拍的，看不见它；而 runMission
           // 开头已经把上一次的旧原因清掉了，所以在这里现读只会读到陈货。
@@ -2113,6 +2119,37 @@ export class Orchestrator {
       // 见上：没有报告也要让协调者接手，不替它评审。
       return attempted;
     }
+  }
+
+  /**
+   * 叫协调者之前的状态恢复（P0：状态一致性）。只处理一类可证明的残留：Mission 不在 executing，
+   * 工单带着上一次的结果停在 dispatched，且是被机器续派留下的。其余情形平台判不了，不动。
+   * 平台一侧会再核实尝试、租约与修订号；拒绝或失败都不改变「交给协调者」的语义，所以尽力而为。
+   * 返回是否真的转换了至少一张，调用方据此重取视图。
+   */
+  async #recoverStrandedDispatches(
+    missionId: string,
+    view: Pick<MissionView, 'status' | 'workItems'>,
+  ): Promise<boolean> {
+    if (view.status === 'executing') return false;
+    let converted = false;
+    for (const item of view.workItems) {
+      const latestAttemptId = item.attemptIds.at(-1);
+      if (item.status !== 'dispatched' || !item.hasResult || latestAttemptId === undefined) continue;
+      try {
+        const result = await this.#platform.recoverStrandedWorkItem({
+          missionId,
+          workItemId: item.id,
+          source: 'stranded_dispatch',
+          expectedAttemptId: latestAttemptId,
+          orderRevision: item.order?.orderRevision ?? 'r1',
+        });
+        converted = converted || result.converted;
+      } catch {
+        // 见上：恢复失败时工单维持原样，协调者照旧收到它的真实状态。
+      }
+    }
+    return converted;
   }
 
   /**

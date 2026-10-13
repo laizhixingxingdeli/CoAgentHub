@@ -15,6 +15,14 @@ export async function autoRedispatchStandardWorkItem(ctx: PlatformContext, input
     if (item.status !== 'submitted') {
       return { redispatched: false, reason: 'not_submitted' };
     }
+    // 续派 = reject + dispatch，之后只有执行者那一跳能动这张工单；而调度器只在 executing 阶段才跑
+    // 执行者（orchestrator 的 pending）。契约修订会把 Mission 退回 planning：这时续派出去的工单
+    // 没有人会去跑，协调者又 reject 不了 dispatched——MiRing-V0-probe 的 W-621 就这样卡成
+    // 「有 completed 结果、有失败的验证报告、状态却是 dispatched」，只能由 L3 作废重建。
+    // 不在 executing 就原样留在 submitted：协调者拿着失败报告可以依法 reject、修订、再派。
+    if (mission.status !== 'executing') {
+      return { redispatched: false, reason: 'mission_not_executing' };
+    }
     // 停派期间不自动续派，且返回「没续派」而非抛错：编排器内部路径崩掉会把一次本该
     // 交给 L2 的交付变成一跳失败。
     const events0 = await ctx.activity.list(mission.id);

@@ -37,6 +37,8 @@ import * as workItemDispatch from './platform/work-item-dispatch.ts';
 import { blockStalledWorkItem } from './platform/stalled-work-item.ts';
 export type { StalledSource, StalledWorkItemInput, StalledWorkItemResult } from './platform/stalled-work-item.ts';
 export { PLATFORM_BLOCKED_EVENT_KIND } from './platform/stalled-work-item.ts';
+import { recoverStrandedWorkItem, type StrandedRecoveryInput, type StrandedRecoveryResult } from './platform/stranded-work-item.ts';
+export type { StrandedRecoveryInput, StrandedRecoveryResult, StrandedSource } from './platform/stranded-work-item.ts';
 import * as workspaceHygiene from './platform/workspace-hygiene.ts';
 export type { ResidueOrigin, ValidationSettlementInput, WorkspaceBlockInput } from './platform/workspace-hygiene.ts';
 export {
@@ -1454,6 +1456,17 @@ export class Platform {
     claim?: QueueClaimIdentity,
   ): Promise<{ converted: boolean; reason: string }> {
     return blockStalledWorkItem(this.#context, input, claim);
+  }
+
+  /**
+   * 状态恢复：把「有执行结果、却停在 dispatched、没有活执行者」的工单收成 blocked，让协调者能
+   * 依法审查、修订、再派发。编排器在叫协调者之前自动调（stranded_dispatch，只认可证明的机器续派
+   * 残留）；L3 / 操作员经 HTTP 显式调（operator_recovery，必须署名写理由）。
+   *
+   * 恢复前核实 Attempt、租约与冻结的修订号；任一不成立无副作用拒绝；重复调用幂等。
+   */
+  async recoverStrandedWorkItem(input: StrandedRecoveryInput): Promise<StrandedRecoveryResult> {
+    return recoverStrandedWorkItem(this.#context, input);
   }
 
   /** 验证跑完、授权范围内的副作用已收口提交后，记下提交了什么、范围外留下了什么。 */

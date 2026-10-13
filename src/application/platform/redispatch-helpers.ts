@@ -35,6 +35,11 @@ export type StandardAutoRedispatchReason = 'partial' | 'validation_failed';
 export type StandardAutoRedispatchSkipReason =
   /** 当前不是 submitted：已续派过、已被评审、从未交卷。 */
   | 'not_submitted'
+  /**
+   * Mission 不在 executing：调度器只在 executing 阶段跑执行者，续派出去的工单没人会去跑它。
+   * 留在 submitted 交给协调者按验证报告 reject / 修订，而不是卡成「有结果、有失败报告、却是 dispatched」。
+   */
+  | 'mission_not_executing'
   /** 没有可自动续派的依据：非 partial、缺报告、报告不属于这次提交、报告跑绿。 */
   | 'no_auto_reason'
   /** 这一次提交已经自动续派过（编排器重启后重复调用必须无害）。 */

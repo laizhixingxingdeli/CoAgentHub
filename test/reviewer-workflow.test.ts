@@ -117,7 +117,7 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
   assert.ok((await invoke('tools/list', undefined, 1))?.error);
   await invoke('initialize', { protocolVersion: '2025-11-25' }, 2);
   assert.equal(await invoke('notifications/initialized'), undefined);
-  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 11);
+  assert.equal((await invoke('tools/list', undefined, 3))?.result.tools.length, 12);
   await invoke('tools/call', { name: 'coagenthub_reviewer_todos', arguments: { projectId: 'P' } }, 4);
   assert.equal(calls[0].url, 'http://127.0.0.1:3101/api/reviewer/todos?projectId=P');
   assert.equal(calls[0].init?.method, 'GET');
@@ -135,6 +135,14 @@ test('MCP 握手、工具调用与错误通过 HTTP，不消费通知或允许�
   assert.ok(!Object.keys(calls[2].init?.headers ?? {}).some((key) => key.startsWith('x-coagent-reviewer')));
   const noReason = await invoke('tools/call', { name: 'coagenthub_candidate_reset', arguments: { profileId, reviewer: 'L3' } }, 8);
   assert.equal(noReason?.result.isError, true); assert.equal(calls.length, 3);
+  // 状态恢复：路径带 mission / 工作项，body 只带署名、理由和快照围栏；有值守代次时带 reviewer 头。
+  await invoke('tools/call', { name: 'coagenthub_work_item_recover', arguments: { missionId: 'M-1', workItemId: 'W-2', reviewer: 'L3', reason: '核对过无租约', expectedAttemptId: 'W-2.exec-1', generation: 3 } }, 9);
+  assert.equal(calls[3].url, 'http://127.0.0.1:3101/api/missions/M-1/work-items/W-2/recover');
+  assert.equal(calls[3].init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(calls[3].init?.body)), { reviewer: 'L3', reason: '核对过无租约', expectedAttemptId: 'W-2.exec-1' });
+  assert.equal(calls[3].init?.headers?.['x-coagent-reviewer-generation'], '3');
+  const unsigned = await invoke('tools/call', { name: 'coagenthub_work_item_recover', arguments: { missionId: 'M-1', workItemId: 'W-2', reviewer: 'L3' } }, 10);
+  assert.equal(unsigned?.result.isError, true); assert.equal(calls.length, 4);
   assert.throws(() => createReviewerMcpHandler('http://example.invalid'), /LOOPBACK/);
 });
 

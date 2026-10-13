@@ -30,6 +30,9 @@ const tools = [
     inputSchema: schema({ projectId: text, reviewer: text, generation }, ['projectId']) },
   { name: 'coagenthub_candidate_reset', description: '人工复位一个候选的熔断，留审计记录；一次只复位一个已核实的候选',
     inputSchema: schema({ profileId: text, reviewer: text, reason: text }, ['profileId', 'reviewer', 'reason']) },
+  { name: 'coagenthub_work_item_recover', description: '状态恢复：把有执行结果、却停在 dispatched 且没有活执行者的工单收成 blocked，成果与验证报告保留，协调者可修订再派发；署名与理由必填，重复调用幂等，有活执行者或租约时拒绝',
+    inputSchema: schema({ missionId: text, workItemId: text, reviewer: text, reason: text, expectedAttemptId: text, orderRevision: text, generation },
+      ['missionId', 'workItemId', 'reviewer', 'reason']) },
 ];
 
 function validate(name: string, args: Record<string, unknown>) {
@@ -69,6 +72,8 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
     else {
       method = 'POST';
       path = name === 'coagenthub_candidate_reset' ? `/api/pools/${encodeURIComponent(String(args.profileId))}/circuit/reset`
+        : name === 'coagenthub_work_item_recover'
+          ? `/api/missions/${encodeURIComponent(String(args.missionId))}/work-items/${encodeURIComponent(String(args.workItemId))}/recover`
         : name === 'coagenthub_reviewer_duty' ? `/api/projects/${encodeURIComponent(String(projectId))}/reviewer-duty`
         : name === 'coagenthub_reviewer_todo_decide' ? `/api/reviewer/todos/${encodeURIComponent(String(todoId))}`
         : name === 'coagenthub_propose_document' ? `/api/projects/${encodeURIComponent(String(projectId))}/documents`
@@ -81,7 +86,11 @@ export function createReviewerMcpHandler(base = 'http://127.0.0.1:3101', request
         'x-coagent-reviewer': String(args.owner ?? args.reviewer ?? args.decidedBy),
         'x-coagent-reviewer-generation': String(args.generation) } : {}) },
       ...(method === 'POST' ? { body: JSON.stringify(name === 'coagenthub_candidate_reset'
-        ? { reason: `[${String(args.reviewer)}] ${String(args.reason)}` } : body) } : {}) });
+        ? { reason: `[${String(args.reviewer)}] ${String(args.reason)}` }
+        : name === 'coagenthub_work_item_recover'
+          // 路径里的 mission / 工作项不重复进 body；署名与理由由平台写进审计事件。
+          ? { reviewer: args.reviewer, reason: args.reason, expectedAttemptId: args.expectedAttemptId, orderRevision: args.orderRevision }
+          : body) } : {}) });
     const value = await response.json();
     if (!response.ok) throw new Error(value.error ?? `HTTP_${response.status}`);
     return { content: [{ type: 'text', text: JSON.stringify(value) }] };

@@ -61,7 +61,7 @@ curl.exe -sS --noproxy '*' -X POST 'http://127.0.0.1:3101/api/plan-runs/R/decide
 curl.exe -sS --noproxy '*' 'http://127.0.0.1:3101/api/projects/P/master-brief'
 ```
 
-可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十一个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
+可选零依赖 stdio MCP：`node scripts/reviewer-mcp.ts`，`COAGENT_BASE` 只能指定本机 HTTP origin，默认 `http://127.0.0.1:3101`。公开十二个工作流工具（包括读取、提出、处理和提交文档），所有状态仍经 HTTP；coagenthub_candidate_reset 经 POST /api/pools/:id/circuit/reset 复位一个候选的熔断，reviewer 署名写进 reason；coagenthub_work_item_recover 经 POST /api/missions/:id/work-items/:id/recover 做工单状态恢复（署名与理由必填，见该路由）。stdio 仅写 JSON-RPC，不打印业务日志。此入口补充现有 L3 插件，不修改已安装插件、凭据或 Codex 配置，不自动绑定 Delivery。协议依据 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 和 [初始化规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)。
 
 ### GET /api/projects/:projectId/documents
 
@@ -767,6 +767,31 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 ```json
 {
   "status": "retired"
+}
+```
+
+### POST /api/missions/:missionId/work-items/:workItemId/recover
+
+鉴权：控制面（可选resolver，与 retire 同一格；有值守租约时同样要求 reviewer 与 generation）。参数：`reviewer`、`reason` 必填（署名与理由进审计）；`expectedAttemptId`、`orderRevision` 可选，是调用方看到的最后一次执行者尝试号与工单修订号，给了就必须与平台一致。
+
+状态恢复，不是重启：把「已有执行结果、却停在 dispatched、没有活执行者」的工单收成 `blocked`，成果、验证报告与工作区改动原样保留，协调者随后可以依法修订同一张工单再派发（`dispatched` 不能 reject 也不能修订）。
+
+恢复前平台核实：Standard 模式；工单仍是 dispatched；所有执行者尝试已结束（有 `in_progress` 一律拒绝）；没有该工单执行者 hop 的有效租约；`expectedAttemptId` / `orderRevision` 与当前一致。任一不成立回 `converted:false` 与原因，不写任何事件。重复调用幂等：已经恢复过的返回 `alreadyRecovered:true`，不重复写事件。事件 `work_item.platform_blocked`（`source: "operator_recovery"`）带 reviewer 与 operatorReason，且不带 `orderRevision`——卡住的是状态不是工单正文，恢复后不用先改工单也可以再派发。
+
+编排器在叫协调者之前会对「Mission 不在 executing、工单带着结果被机器续派回 dispatched」的残留自动做同样的恢复（`source: "stranded_dispatch"`），不需要人工调用本接口；本接口留给自动判定不了的情形。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' --data '{"reviewer":"检视者","reason":"核对过 W-1.exec-1 已结束、无租约、VR-339 失败","expectedAttemptId":"W-1.exec-1"}' 'http://127.0.0.1:3101/api/missions/M-example/work-items/W-1/recover'
+```
+
+响应结构摘录：
+
+```json
+{
+  "converted": true,
+  "reason": "状态恢复（检视者）：核对过 W-1.exec-1 已结束、无租约、VR-339 失败。工单已有执行结果和验证报告 VR-339却停在 dispatched，没有活执行者，平台收成 blocked 交回协调者。"
 }
 ```
 

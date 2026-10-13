@@ -393,6 +393,8 @@ const STALL_SOURCE_CN = {
   runaway: '一跳跑太久被掐断',
   no_result_limit: '连续无结构化结果到顶',
   workspace_dirty: '开跑前发现工作区有不属于本工单的改动',
+  stranded_dispatch: '有结果的工单被机器续派后无人执行，状态恢复',
+  operator_recovery: 'L3 / 操作员触发的状态恢复',
 };
 
 /** outcome 是人话在前、机器值在括号里：两边的人都要能对上号。 */
