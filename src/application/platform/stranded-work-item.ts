@@ -1,3 +1,5 @@
+import type { Mission, WorkItem } from '../../kernel/index.ts';
+import type { ActivityEvent } from '../ports.ts';
 import { PlatformRuleError, type PlatformContext } from './context.ts';
 import { isActiveHopLease } from '../durable-scheduler.ts';
 import { autoRedispatchEventsFor } from './redispatch-helpers.ts';
@@ -47,103 +49,132 @@ export interface StrandedRecoveryResult {
 
 const RECOVERY_SOURCES: readonly string[] = ['stranded_dispatch', 'operator_recovery'];
 
+type ActivityEvents = readonly ActivityEvent[];
+
 export async function recoverStrandedWorkItem(
   ctx: PlatformContext,
   input: StrandedRecoveryInput,
 ): Promise<StrandedRecoveryResult> {
-  if (input.source === 'operator_recovery') {
-    if (!input.reviewer?.trim() || !input.reason?.trim()) {
-      throw new PlatformRuleError(
-        'RECOVERY_SIGNATURE_REQUIRED',
-        '状态恢复需要署名与理由：reviewer 说明是谁恢复的，reason 说明凭什么（核对过哪些尝试、租约与验证报告）。',
-      );
-    }
-  }
+  requireOperatorSignature(input);
   // 校验、读事件、写状态在同一个事务里：事务外预检会在核对和提交之间被别人接手。
   return ctx.tx(async () => {
     const { mission, item } = await ctx.locateItem(input.missionId, input.workItemId);
-    const skip = (reason: string): StrandedRecoveryResult => ({ converted: false, reason });
     const events = await ctx.activity.list(mission.id);
+    const earlier = earlierRecovery(item, events);
+    if (earlier) return earlier;
+    const refusal =
+      refusalOnState(input, mission, item, events) ?? (await refusalOnLiveness(ctx, mission, item));
+    if (refusal) return { converted: false, reason: refusal };
+    return convertToBlocked(ctx, input, mission, item, events);
+  });
+}
 
-    if (mission.executionMode !== 'standard') {
-      return skip(`Mission ${mission.id} 的 executionMode 是 ${mission.executionMode}，只有 Standard 才有协调者能接手恢复后的工单。`);
-    }
-    if (item.status === 'blocked') {
-      const last = lastStateEvent(events, item.id);
-      if (last?.kind === PLATFORM_BLOCKED_EVENT_KIND && RECOVERY_SOURCES.includes(String(last.data?.source))) {
-        return { converted: false, alreadyRecovered: true, reason: String(last.data?.reason ?? '') };
-      }
-    }
-    if (item.status !== 'dispatched') {
-      return skip(`工作项 ${item.id} 当前是 ${item.status}，不是 dispatched：已经恢复或被别人处理过，本次不动。`);
-    }
-    const attempts = item.attempts;
-    const latest = attempts[attempts.length - 1];
-    if (!latest) {
-      return skip(`工作项 ${item.id} 还没有执行者尝试，谈不上状态不一致。`);
-    }
-    if (input.expectedAttemptId !== undefined && input.expectedAttemptId !== latest.id) {
-      return skip(`快照已过期：调用方以为最后一次尝试是 ${input.expectedAttemptId}，平台这里是 ${latest.id}。`);
-    }
-    const currentRevision = item.order?.orderRevision ?? 'r1';
-    if (input.orderRevision !== undefined && input.orderRevision !== currentRevision) {
-      return skip(`工单已修订：调用方拿的是 ${input.orderRevision}，当前是 ${currentRevision}。`);
-    }
-    const live = attempts.find((attempt) => attempt.status === 'in_progress');
-    if (live) {
-      return skip(`尝试 ${live.id} 还是 in_progress：真正在执行的工单不能强行转换。`);
-    }
-    const lease = await activeExecutorLease(ctx, mission.id, item.id);
-    if (lease) {
-      return skip(`队列 Hop ${lease.id} 仍有有效租约（持有者 ${lease.owner ?? '(unknown)'}，到期 ${lease.leaseUntil ?? '(none)'}）：执行者可能还在启动，先等它收尾。`);
-    }
+function requireOperatorSignature(input: StrandedRecoveryInput): void {
+  if (input.source !== 'operator_recovery') return;
+  if (!input.reviewer?.trim() || !input.reason?.trim()) {
+    throw new PlatformRuleError(
+      'RECOVERY_SIGNATURE_REQUIRED',
+      '状态恢复需要署名与理由：reviewer 说明是谁恢复的，reason 说明凭什么（核对过哪些尝试、租约与验证报告）。',
+    );
+  }
+}
 
-    const submittedAttemptId = item.submittedAttemptId;
-    const redispatch = submittedAttemptId
-      ? autoRedispatchEventsFor(events, item.id).find((row) => row.attemptId === submittedAttemptId)
-      : undefined;
-    if (input.source === 'stranded_dispatch') {
-      // 自动路径只认可证明的残留：Mission 不会再跑它（不在 executing），并且确实是
-      // 「这次提交已被机器续派」留下的。其余情形不是平台能替人判断的。
-      if (mission.status === 'executing') {
-        return skip(`Mission ${mission.id} 仍在 executing：执行者会接着跑这张工单，不收尾。`);
-      }
-      if (!item.hasResult || !redispatch) {
-        return skip(`工作项 ${item.id} 没有「已有结果又被机器续派」的记录，不是平台能自动判定的残留。`);
-      }
-    }
+/** 已经恢复过：什么都不写，把当时的说明原样返回（幂等）。 */
+function earlierRecovery(item: WorkItem, events: ActivityEvents): StrandedRecoveryResult | undefined {
+  if (item.status !== 'blocked') return undefined;
+  const last = lastStateEvent(events, item.id);
+  if (last?.kind !== PLATFORM_BLOCKED_EVENT_KIND || !RECOVERY_SOURCES.includes(String(last.data?.source))) {
+    return undefined;
+  }
+  return { converted: false, alreadyRecovered: true, reason: String(last.data?.reason ?? '') };
+}
 
-    const reportId = submittedAttemptId
-      ? await submittedAttemptReportId(ctx, mission.id, item.id, submittedAttemptId)
-      : undefined;
-    const reason = describeStranded(input, mission.status, redispatch?.summary, reportId);
-    item.recordBlocked({
+/** 只看状态与调用方带来的快照：Standard、仍是 dispatched、有尝试、尝试号与修订号一致、自动路径的可证明条件。 */
+function refusalOnState(
+  input: StrandedRecoveryInput,
+  mission: Mission,
+  item: WorkItem,
+  events: ActivityEvents,
+): string | undefined {
+  if (mission.executionMode !== 'standard') {
+    return `Mission ${mission.id} 的 executionMode 是 ${mission.executionMode}，只有 Standard 才有协调者能接手恢复后的工单。`;
+  }
+  if (item.status !== 'dispatched') {
+    return `工作项 ${item.id} 当前是 ${item.status}，不是 dispatched：已经恢复或被别人处理过，本次不动。`;
+  }
+  const latest = item.attempts[item.attempts.length - 1];
+  if (!latest) return `工作项 ${item.id} 还没有执行者尝试，谈不上状态不一致。`;
+  if (input.expectedAttemptId !== undefined && input.expectedAttemptId !== latest.id) {
+    return `快照已过期：调用方以为最后一次尝试是 ${input.expectedAttemptId}，平台这里是 ${latest.id}。`;
+  }
+  const currentRevision = item.order?.orderRevision ?? 'r1';
+  if (input.orderRevision !== undefined && input.orderRevision !== currentRevision) {
+    return `工单已修订：调用方拿的是 ${input.orderRevision}，当前是 ${currentRevision}。`;
+  }
+  if (input.source !== 'stranded_dispatch') return undefined;
+  // 自动路径只认可证明的残留：Mission 不会再跑它（不在 executing），并且确实是
+  // 「这次提交已被机器续派」留下的。其余情形不是平台能替人判断的。
+  if (mission.status === 'executing') {
+    return `Mission ${mission.id} 仍在 executing：执行者会接着跑这张工单，不收尾。`;
+  }
+  if (!item.hasResult || findRedispatch(item, events) === undefined) {
+    return `工作项 ${item.id} 没有「已有结果又被机器续派」的记录，不是平台能自动判定的残留。`;
+  }
+  return undefined;
+}
+
+/** 真正在执行的工单不能强行转换：有 in_progress 的尝试，或执行者 hop 还握着有效租约。 */
+async function refusalOnLiveness(ctx: PlatformContext, mission: Mission, item: WorkItem): Promise<string | undefined> {
+  const live = item.attempts.find((attempt) => attempt.status === 'in_progress');
+  if (live) return `尝试 ${live.id} 还是 in_progress：真正在执行的工单不能强行转换。`;
+  const lease = await activeExecutorLease(ctx, mission.id, item.id);
+  if (!lease) return undefined;
+  return `队列 Hop ${lease.id} 仍有有效租约（持有者 ${lease.owner ?? '(unknown)'}，到期 ${lease.leaseUntil ?? '(none)'}）：执行者可能还在启动，先等它收尾。`;
+}
+
+/** 这次提交被机器续派过的那条记录；没有就说明工单不是被续派留在 dispatched 的。 */
+function findRedispatch(item: WorkItem, events: ActivityEvents) {
+  const submitted = item.submittedAttemptId;
+  return submitted ? autoRedispatchEventsFor(events, item.id).find((row) => row.attemptId === submitted) : undefined;
+}
+
+async function convertToBlocked(
+  ctx: PlatformContext,
+  input: StrandedRecoveryInput,
+  mission: Mission,
+  item: WorkItem,
+  events: ActivityEvents,
+): Promise<StrandedRecoveryResult> {
+  const latest = item.attempts[item.attempts.length - 1]!;
+  const submitted = item.submittedAttemptId;
+  const reportId = submitted ? await submittedAttemptReportId(ctx, mission.id, item.id, submitted) : undefined;
+  const reason = describeStranded(input, mission.status, findRedispatch(item, events)?.summary, reportId);
+  item.recordBlocked({
+    attemptId: latest.id,
+    reason,
+    whatWasTried: item.attempts.map((attempt) => `${attempt.id}（${attempt.endedBy ?? 'unknown'}）`),
+    needsFromUpstream:
+      '先看已有的执行结果与验证报告：问题在工单就 coagent_revise_work_order 修订同一张单再派发；' +
+      '问题在工作区（越界改动、验证副作用）就新建一张范围精确的恢复单。成果与改动原样保留，没有回滚。',
+  });
+  // 不带 orderRevision：卡住的是状态不是工单正文，派发门禁不要求先改工单（见 work-item-dispatch 的 W-292 门禁）。
+  await ctx.event(
+    mission,
+    PLATFORM_BLOCKED_EVENT_KIND,
+    {
+      source: input.source,
       attemptId: latest.id,
       reason,
-      whatWasTried: attempts.map((attempt) => `${attempt.id}（${attempt.endedBy ?? 'unknown'}）`),
-      needsFromUpstream:
-        '先看已有的执行结果与验证报告：问题在工单就 coagent_revise_work_order 修订同一张单再派发；' +
-        '问题在工作区（越界改动、验证副作用）就新建一张范围精确的恢复单。成果与改动原样保留，没有回滚。',
-    });
-    // 不带 orderRevision：卡住的是状态不是工单正文，派发门禁不要求先改工单（见 work-item-dispatch 的 W-292 门禁）。
-    await ctx.event(
-      mission,
-      PLATFORM_BLOCKED_EVENT_KIND,
-      {
-        source: input.source,
-        attemptId: latest.id,
-        reason,
-        staleResult: item.hasResult,
-        ...(reportId !== undefined ? { reportId } : {}),
-        ...(input.source === 'operator_recovery'
-          ? { reviewer: input.reviewer!.trim(), operatorReason: input.reason!.trim() }
-          : {}),
-      },
-      item.id,
-      latest.id,
-    );
-    return { converted: true, reason };
-  });
+      staleResult: item.hasResult,
+      ...(reportId !== undefined ? { reportId } : {}),
+      ...(input.source === 'operator_recovery'
+        ? { reviewer: input.reviewer!.trim(), operatorReason: input.reason!.trim() }
+        : {}),
+    },
+    item.id,
+    latest.id,
+  );
+  return { converted: true, reason };
 }
 
 /** 这张工单最近一条决定它状态的事件：被平台 / 执行者收成卡住，或被（重新）派发。 */

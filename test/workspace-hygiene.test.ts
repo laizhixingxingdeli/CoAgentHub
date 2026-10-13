@@ -253,6 +253,54 @@ describe('验证后收口：授权范围内的副作用提交，下一张工单�
   });
 });
 
+describe('验证留下范围外的改动：保留、记来源、不提交，验证报告判失败（不静默放行）', () => {
+  test('验证命令在授权范围外生成文件：文件原样留着，没有被提交或删除；报告点名它；事件记下是谁的验证留下的', async () => {
+    const repo = gitRepo();
+    const runner: CommandRunner = {
+      run: async ({ cwd }) => {
+        mkdirSync(join(cwd, 'scratch'), { recursive: true });
+        writeFileSync(join(cwd, 'scratch', 'cache.tmp'), 'build leftovers\n');
+        return { exitCode: 0, timedOut: false, durationMs: 1, output: 'ok' };
+      },
+    };
+    const h = await harness({
+      runner,
+      coordinatorScripts: {
+        'coordinator:-:0': {
+          steps: [
+            { tool: 'coagent_get_mission', body: {} },
+            { tool: 'coagent_update_plan', body: PLAN },
+            { tool: 'coagent_create_work_item', body: { title: '改 foo', ...order(['src/foo.ts'], true) } },
+            { tool: 'coagent_submit_contract_check', body: { verdict: 'ok', summary: '已核对' } },
+            { tool: 'coagent_dispatch_work_item', body: (previous) => ({ workItemIds: [previous.workItemId] }) },
+          ],
+        },
+      },
+      executorScripts: { 'executor:W-1': executorScript(['src/foo.ts']) },
+      effects: (spec) => writeFileSync(join(spec.cwd, 'src', 'foo.ts'), 'export const foo = 1;\n'),
+    });
+    await h.platform.createMission({ projectId: 'P', missionId: 'M-stray', contract: CONTRACT });
+    await h.orchestrator.runMission('M-stray', { projectRoot: repo, maxRounds: 2 });
+
+    const worktree = h.workspace.worktreePath('M-stray', repo);
+    assert.equal(readFileSync(join(worktree, 'scratch', 'cache.tmp'), 'utf8'), 'build leftovers\n', '范围外的改动原样保留');
+    assert.match(git(worktree, 'status', '--porcelain'), /scratch\//, '没有被提交，也没有被删');
+    assert.doesNotMatch(git(worktree, 'log', '--format=%s'), /验证副作用/, '范围外的不自动提交');
+
+    const [settled] = await eventsOf(h, 'M-stray', 'workspace.validation_settled');
+    const data = settled!.data as { committed: string[]; left: string[]; reportId?: string };
+    assert.deepEqual(data.committed, []);
+    assert.deepEqual(data.left, ['scratch/cache.tmp']);
+    assert.equal(settled!.workItemId, 'W-1', '记在这张工单名下：之后能查到残留是谁的验证留下的');
+
+    const view = await h.platform.getMissionView('M-stray');
+    const report = view.workItems.find((item) => item.id === 'W-1')?.validationReport;
+    assert.equal(report?.passed, false, '越界不会被放行');
+    assert.deepEqual(report?.changedPaths?.violations, ['scratch/cache.tmp']);
+    assert.equal(data.reportId, report?.reportId);
+  });
+});
+
 describe('开跑前核对工作区：别的工单留下的改动不让新工单背着跑', () => {
   async function dirtyMission(missionId: string, w1Scope: string[]) {
     const repo = gitRepo();

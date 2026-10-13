@@ -27,14 +27,14 @@ import type {
   QueueClaimIdentity,
   StandardAutoRedispatchHandoff,
 } from './platform.ts';
-import { PlatformRuleError, describeResidue } from './platform.ts';
+import { PlatformRuleError } from './platform.ts';
 import { CHANGE_IMPACT_UNSUPPORTED } from './platform/change-impact.ts';
 import type { RunTokenIssuer } from './token-issuer.ts';
-import { CheckpointRejectedError, InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
-import { normalizeScopePath } from './scope-paths.ts';
+import { InPlaceWorkspaceManager, type WorkspaceManager } from './workspace.ts';
+import { HopGuards } from './hop-guards.ts';
 import {
   applyRolePolicy,
-  describeRolePolicy,
+  describeModelUnavailable,
   policyMatches,
   type RoleModelPolicy,
 } from './model-policy.ts';
@@ -607,6 +607,8 @@ export class Orchestrator {
    * 加上 --accept-stale-base 再跑。不是隐式状态，也不会自己失忆。
    */
   #staleAcknowledged: boolean;
+  /** 每一跳前后的工作区守卫与状态恢复（拆出去的，见 hop-guards.ts）。 */
+  readonly #guards: HopGuards;
   /** 本次运行实际用的工作区，跑完打给调用方看。 */
   workspace: { cwd: string; branch: string; baseRevision: string } | undefined;
 
@@ -620,6 +622,7 @@ export class Orchestrator {
     this.#executor = deps.executor;
     this.#independentReviewer = deps.independentReviewer;
     this.#workspace = deps.workspace;
+    this.#guards = new HopGuards(deps.platform, deps.workspace);
     this.#wallClockMs = deps.attemptWallClockMs ?? ATTEMPT_WALL_CLOCK_MS;
     this.#candidateCircuits = deps.candidateCircuits;
     this.#usageReader = deps.usageReader ?? getRuntimeUsage;
@@ -850,7 +853,7 @@ export class Orchestrator {
           );
           // 开跑前核对工作区：别的工单的验证留在工作区里的改动，不能让这张工单背着去跑一整跳、
           // 到交卷时才被检查点以「越界」拒掉。拦下时工单收成 blocked 交回协调者，不启动执行者。
-          if ((await this.#preflightWorkspace(missionId, item, cwd)) === 'blocked') continue;
+          if ((await this.#guards.preflightWorkspace(missionId, item, cwd)) === 'blocked') continue;
           const hop = await this.#runHop({
             role: 'executor',
             missionId,
@@ -918,7 +921,7 @@ export class Orchestrator {
           // 把「还没做完」判成「做法不对」，退回一次本来就要接着做的交付。
           if (needsStandardValidation && !(await this.#standardSubmitIsPartial(missionId, item.id))) {
             if (await this.#validateStandardIfSubmitted(missionId, item.id, cwd)) {
-              await this.#settleValidationResidue(missionId, item, cwd);
+              await this.#guards.settleValidationResidue(missionId, item, cwd);
             }
           }
           // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
@@ -955,7 +958,7 @@ export class Orchestrator {
           // partial 依旧不跑冻结命令：理由同 pending 那边，重启不改变它是半成品。
           if (!(await this.#standardSubmitIsPartial(missionId, item.id))) {
             if (await this.#validateStandardIfSubmitted(missionId, item.id, cwd)) {
-              await this.#settleValidationResidue(missionId, item, cwd);
+              await this.#guards.settleValidationResidue(missionId, item, cwd);
             }
           }
         }
@@ -970,7 +973,7 @@ export class Orchestrator {
       // 状态恢复：Mission 不在 executing，却有「带着结果被机器续派回 dispatched」的工单——调度器不会
       // 再为它启动执行者，协调者也无法对 dispatched 工单 reject 或修订（W-621：dispatched -> rejected
       // is not allowed）。先由平台收成 blocked，协调者拿到的才是一张它能依法处理的工单。
-      const recovered = await this.#recoverStrandedDispatches(missionId, view);
+      const recovered = await this.#guards.recoverStrandedDispatches(missionId, view);
       const coordinatorView = recovered ? await this.#platform.getMissionView(missionId) : view;
 
       // 没有在途工作项 —— 该协调者出场：规划、派发，或验收。
@@ -2182,18 +2185,9 @@ export class Orchestrator {
     const matching = (profile: ExecutionProfile) => policyMatches(profile, policy.role);
     const configured = (await this.#poolCandidates(pool)).filter(matching).length;
     const resumeAt = await this.#earliestCooldownEnd(pool, now, excludedProfileIds, matching);
-    const why =
-      configured === 0
-        ? '资源池里当前没有匹配的候选（没配置，或已停用）'
-        : '匹配的候选现在都不可用（冷却、熔断或额度）';
-    const next = resumeAt
-      ? `最早 ${resumeAt} 自动重试`
-      : '没有可预期的恢复时刻，需要人处理：修好该候选、调整资源池，或改这条 Mission 的模型约束';
     return {
       exhausted: 'model_unavailable',
-      detail:
-        `Mission 对${role === 'coordinator' ? '协调者' : '执行者'}的模型约束 r${policy.revision}：` +
-        `${describeRolePolicy(policy.role)}。${why}；按约束不派发其他模型。${next}。`,
+      detail: describeModelUnavailable({ role, revision: policy.revision, policy: policy.role, configured, resumeAt }),
       candidateRole: role,
       ...(resumeAt !== undefined ? { resumeAt } : {}),
     };
@@ -2224,170 +2218,6 @@ export class Orchestrator {
       earliest = earliest === undefined ? until : Math.min(earliest, until);
     }
     return earliest === undefined ? undefined : new Date(earliest).toISOString();
-  }
-
-  /**
-   * 叫协调者之前的状态恢复（P0：状态一致性）。只处理一类可证明的残留：Mission 不在 executing，
-   * 工单带着上一次的结果停在 dispatched，且是被机器续派留下的。其余情形平台判不了，不动。
-   * 平台一侧会再核实尝试、租约与修订号；拒绝或失败都不改变「交给协调者」的语义，所以尽力而为。
-   * 返回是否真的转换了至少一张，调用方据此重取视图。
-   */
-  async #recoverStrandedDispatches(
-    missionId: string,
-    view: Pick<MissionView, 'status' | 'workItems'>,
-  ): Promise<boolean> {
-    if (view.status === 'executing') return false;
-    let converted = false;
-    for (const item of view.workItems) {
-      const latestAttemptId = item.attemptIds.at(-1);
-      if (item.status !== 'dispatched' || !item.hasResult || latestAttemptId === undefined) continue;
-      try {
-        const result = await this.#platform.recoverStrandedWorkItem({
-          missionId,
-          workItemId: item.id,
-          source: 'stranded_dispatch',
-          expectedAttemptId: latestAttemptId,
-          orderRevision: item.order?.orderRevision ?? 'r1',
-        });
-        converted = converted || result.converted;
-      } catch {
-        // 见上：恢复失败时工单维持原样，协调者照旧收到它的真实状态。
-      }
-    }
-    return converted;
-  }
-
-  /**
-   * 验证命令跑完后收口工作区（P0：验证与检查点闭环）。
-   *
-   * 验证命令在 Mission 的 worktree 里跑，发生在执行者的检查点**之后**，改动没有人收口：
-   * 授权范围内的（比如安装脚本追加的记录）会被下一张工单的检查点当成越界拒掉。
-   * 这里把授权范围内的脏改动用「验证副作用检查点」提交；范围外的原样保留、不删不提交，
-   * 记下来源，让下一张工单开跑前能对着核对。收口本身失败也要留记录——工作区里的改动还在，
-   * 只是不能无声无息。
-   */
-  async #settleValidationResidue(
-    missionId: string,
-    item: MissionView['workItems'][number],
-    cwd: string,
-  ): Promise<void> {
-    const scope = item.order?.allowedScope;
-    if (!this.#workspace.settle || !Array.isArray(scope) || scope.length === 0) return;
-    try {
-      const outcome = await this.#workspace.settle(cwd, {
-        missionId,
-        workItemId: item.id,
-        allowedPaths: scope,
-        label: '验证副作用检查点',
-      });
-      await this.#platform.recordValidationSettlement({
-        missionId,
-        workItemId: item.id,
-        committed: outcome.committed,
-        left: outcome.left,
-        ...(outcome.commit !== undefined ? { commit: outcome.commit } : {}),
-      });
-    } catch (error) {
-      await this.#platform
-        .recordValidationSettlement({
-          missionId,
-          workItemId: item.id,
-          committed: [],
-          left: [],
-          error: error instanceof Error ? error.message : String(error),
-        })
-        .catch(() => undefined);
-    }
-  }
-
-  /**
-   * 工单开跑前核对工作区：脏路径要么属于这张工单，要么是它自己上一次尝试留下的。
-   *
-   * - 落在本工单授权范围内的：并入（恢复单正是这样收口残留的），记下原来的来源；
-   * - 本工单自己上一次验证留下的、或重派时来源没记录的：沿用，续派交接里已经点名；
-   * - 其余（别的工单的验证留下的，或首次派发时凭空出现的）：不启动执行者，把工单收成 blocked。
-   *
-   * 读不出工作区状态时放行：后面的检查点是最终防线，这里不为一次读取抖动拦人。
-   * 返回 blocked 表示工单已转交协调者，调用方不要再启动执行者。
-   */
-  async #preflightWorkspace(
-    missionId: string,
-    item: MissionView['workItems'][number],
-    cwd: string,
-  ): Promise<'ok' | 'blocked'> {
-    const scope = item.order?.allowedScope;
-    if (!this.#workspace.dirtyPaths || !Array.isArray(scope)) return 'ok';
-    let dirty: readonly string[];
-    try {
-      dirty = await this.#workspace.dirtyPaths(cwd);
-    } catch {
-      return 'ok';
-    }
-    if (dirty.length === 0) return 'ok';
-    const allowed = new Set(scope.map((entry) => normalizeScopePath(entry)));
-    const origins = await this.#platform.attributeWorkspacePaths(missionId, dirty);
-    const firstDispatch = item.attemptIds.length === 0;
-    const adopted: string[] = [];
-    const foreign: string[] = [];
-    for (const path of dirty) {
-      if (allowed.has(path)) {
-        adopted.push(path);
-        continue;
-      }
-      const origin = origins[path];
-      const ownResidue = origin !== undefined ? origin.workItemId === item.id : !firstDispatch;
-      if (!ownResidue) foreign.push(path);
-    }
-    if (foreign.length > 0) {
-      const blocked = await this.#platform.blockWorkItemForWorkspace({
-        missionId,
-        workItemId: item.id,
-        paths: foreign,
-        origins,
-      });
-      if (blocked.converted) return 'blocked';
-    }
-    if (adopted.length > 0) {
-      await this.#platform
-        .recordResidueAdopted({ missionId, workItemId: item.id, paths: adopted, origins })
-        .catch(() => undefined);
-    }
-    return 'ok';
-  }
-
-  /**
-   * 检查点拒绝了执行者的成果：写结构化事件（原因码、路径、来源），返回给等待原因用的那句话。
-   * 记录失败不能盖住真正的原因，所以事件尽力而为。
-   */
-  async #checkpointFailureDetail(
-    missionId: string,
-    workItemId: string | undefined,
-    attemptId: string,
-    error: unknown,
-  ): Promise<string> {
-    const message = error instanceof Error ? error.message : String(error);
-    const paths = error instanceof CheckpointRejectedError ? [...error.paths] : [];
-    let origins: Awaited<ReturnType<Platform['attributeWorkspacePaths']>> = {};
-    try {
-      origins = paths.length > 0 ? await this.#platform.attributeWorkspacePaths(missionId, paths) : {};
-      if (workItemId !== undefined) {
-        await this.#platform.recordCheckpointFailure({
-          missionId,
-          workItemId,
-          attemptId,
-          ...(error instanceof CheckpointRejectedError ? { code: error.code } : {}),
-          message,
-          paths,
-          origins,
-        });
-      }
-    } catch {
-      // 见上：只丢记录，不丢原因。
-    }
-    const provenance = paths.length > 0 && Object.keys(origins).length > 0
-      ? `（来源：${describeResidue(paths, origins)}）`
-      : '';
-    return `执行者已交回成果，但冻结范围检查点失败：${message}${provenance}。改动保留在工作区，已停止后续执行。`;
   }
 
   /**
@@ -2924,7 +2754,7 @@ export class Orchestrator {
           }
         } catch (error) {
           // 不是候选不可用，也不会等一等就好：要人看越界的是什么、谁留下的（checkpoint_failed）。
-          const detail = await this.#checkpointFailureDetail(input.missionId, input.workItemId, attemptId, error);
+          const detail = await this.#guards.checkpointFailureDetail(input.missionId, input.workItemId, attemptId, error);
           await this.#platform.setWaitReason(input.missionId, 'checkpoint_failed', detail).catch(() => undefined);
           this.hops.push({ role: input.role, workItemId: input.workItemId, attemptId, profile, endedBy: outcome.endedBy, failureMessage: detail });
           return { exhausted: 'checkpoint_failed', detail };

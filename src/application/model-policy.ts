@@ -71,28 +71,29 @@ export function parseRoleModelPolicy(raw: unknown, role: string): RoleModelPolic
       `${role}.selectors 至少一条，例如 [{"provider":"xai","model":"grok-4.7"}] 或 [{"profileId":"<资源池里的候选 id>"}]`,
     );
   }
-  const selectors = row.selectors.map((entry, index) => {
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new ModelPolicyError(`${role}.selectors[${index}] 必须是对象`);
-    }
-    const source = entry as Record<string, unknown>;
-    const unknownKey = Object.keys(source).find((key) => !(SELECTOR_KEYS as readonly string[]).includes(key));
-    if (unknownKey) {
-      throw new ModelPolicyError(`${role}.selectors[${index}] 不认识字段 ${unknownKey}，只有 ${SELECTOR_KEYS.join(' / ')}`);
-    }
-    const selector: Record<string, string> = {};
-    for (const key of SELECTOR_KEYS) {
-      const value = source[key];
-      if (value === undefined) continue;
-      if (!nonEmpty(value)) throw new ModelPolicyError(`${role}.selectors[${index}].${key} 必须是非空字符串`);
-      selector[key] = value.trim();
-    }
-    if (Object.keys(selector).length === 0) {
-      throw new ModelPolicyError(`${role}.selectors[${index}] 至少给一项条件（${SELECTOR_KEYS.join(' / ')}），空选择器会匹配一切`);
-    }
-    return selector as ModelSelector;
-  });
-  return { mode: row.mode, selectors };
+  return { mode: row.mode, selectors: row.selectors.map((entry, index) => parseSelector(entry, `${role}.selectors[${index}]`)) };
+}
+
+function parseSelector(entry: unknown, where: string): ModelSelector {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+    throw new ModelPolicyError(`${where} 必须是对象`);
+  }
+  const source = entry as Record<string, unknown>;
+  const unknownKey = Object.keys(source).find((key) => !(SELECTOR_KEYS as readonly string[]).includes(key));
+  if (unknownKey) {
+    throw new ModelPolicyError(`${where} 不认识字段 ${unknownKey}，只有 ${SELECTOR_KEYS.join(' / ')}`);
+  }
+  const selector: Record<string, string> = {};
+  for (const key of SELECTOR_KEYS) {
+    const value = source[key];
+    if (value === undefined) continue;
+    if (!nonEmpty(value)) throw new ModelPolicyError(`${where}.${key} 必须是非空字符串`);
+    selector[key] = value.trim();
+  }
+  if (Object.keys(selector).length === 0) {
+    throw new ModelPolicyError(`${where} 至少给一项条件（${SELECTOR_KEYS.join(' / ')}），空选择器会匹配一切`);
+  }
+  return selector as ModelSelector;
 }
 
 function factOf(profile: ExecutionProfile, key: string): string | undefined {
@@ -153,4 +154,24 @@ export function describeSelectors(selectors: readonly ModelSelector[]): string {
 
 export function describeRolePolicy(policy: RoleModelPolicy): string {
   return `${policy.mode === 'required' ? '指定（不可替代）' : '优先（可替代）'}：${describeSelectors(policy.selectors)}`;
+}
+
+/** 指定模型而匹配的候选都不可用时的等待说明：为什么、按约束不改派、什么时候重试或谁来处理。 */
+export function describeModelUnavailable(input: {
+  readonly role: PolicyRole;
+  readonly revision: number;
+  readonly policy: RoleModelPolicy;
+  /** 资源池里（含冷却中的）匹配这个约束的候选数；0 = 根本没有。 */
+  readonly configured: number;
+  readonly resumeAt: string | undefined;
+}): string {
+  const why =
+    input.configured === 0
+      ? '资源池里当前没有匹配的候选（没配置，或已停用）'
+      : '匹配的候选现在都不可用（冷却、熔断或额度）';
+  const next = input.resumeAt
+    ? `最早 ${input.resumeAt} 自动重试`
+    : '没有可预期的恢复时刻，需要人处理：修好该候选、调整资源池，或改这条 Mission 的模型约束';
+  const role = input.role === 'coordinator' ? '协调者' : '执行者';
+  return `Mission 对${role}的模型约束 r${input.revision}：${describeRolePolicy(input.policy)}。${why}；按约束不派发其他模型。${next}。`;
 }
