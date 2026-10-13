@@ -64,6 +64,7 @@ import type {
 } from '../ports.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
 import type { MissionModelPolicy } from '../model-policy.ts';
+import type { MissionWaitInfo } from './wait-info.ts';
 import type { DeliveryRepository } from '../delivery.ts';
 import type { WorkspaceManager } from '../workspace.ts';
 import type { ArtifactStore } from '../artifact-store.ts';
@@ -307,6 +308,8 @@ export interface MissionView {
   waitResumeAt?: string;
   /** Mission 级模型约束（平台在派发前强制）；没设就没有这一格。 */
   modelPolicy?: MissionModelPolicy;
+  /** 等待状态的统一投影：谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步。没有停机原因就没有这一格。 */
+  waitInfo?: MissionWaitInfo;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;
@@ -400,6 +403,7 @@ export interface MissionSummary {
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
   waitResumeAt?: string;
+  waitInfo?: MissionWaitInfo;
   updatedAt: string | undefined;
   paused: boolean;
   isMutating: boolean;

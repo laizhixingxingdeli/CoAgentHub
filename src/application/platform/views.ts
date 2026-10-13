@@ -1,8 +1,10 @@
 import type { Mission, MissionContract } from '../../kernel/index.ts';
 import type { ActivityEvent } from '../ports.ts';
+import type { MissionWaitInfo } from './wait-info.ts';
 import type { RunSummary, MissionSummary, MissionView, AgentMissionView, WorkOrderView, AgentWorkItemView, AgentWorkItemSubmissionSummary, ValidationReportView } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { readMissionModelPolicy } from './model-policy.ts';
+import { deriveWaitInfo } from './wait-info.ts';
 import { elapsedMs, sumUsage, combine } from './usage-helpers.ts';
 import { priorGuidanceForWorkItem, agentWorkItemIndex, agentEscalationAnswers, buildAgentWorkItemView } from './agent-view-helpers.ts';
 import { plannedMemoryFiles, readProjectMemory } from '../project-memory.ts';
@@ -181,6 +183,7 @@ export async function listMissions(ctx: PlatformContext, ): Promise<MissionSumma
           waitReason: mission.waitReason,
           waitDetail: mission.waitDetail,
           ...(mission.waitResumeAt !== undefined ? { waitResumeAt: mission.waitResumeAt } : {}),
+          ...withWaitInfo(mission),
           updatedAt: mission.updatedAt,
           paused: mission.isPaused,
           isMutating: mission.isMutating,
@@ -240,10 +243,13 @@ export async function getMissionView(ctx: PlatformContext, deps: ViewDeps, missi
     // 谁挡着我。要 Project 才算得出来，所以在这一层补，不放进 viewOf。
     const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
     const modelPolicy = await readMissionModelPolicy(ctx, mission.id);
+    // 单条视图多读一次队列：失败后退避的「第几次 / 最多几次」在队列行里，Mission 上没有。
+    const hops = mission.waitReason === 'retry_backoff' ? await ctx.queuedHops?.list() : undefined;
     const view = {
       ...viewOf(mission, await deps.workItemValidationReportViews(mission)),
       blockedByMission: holder?.id,
       ...(modelPolicy ? { modelPolicy } : {}),
+      ...withWaitInfo(mission, hops),
     };
     if (mission.executionMode === 'high_assurance' && mission.status === 'awaiting_review') {
       return { ...view, haReviewHold: await deps.haReviewHold(mission) };
@@ -451,6 +457,12 @@ function planRunListFields(mission: Mission): { planRunId: string; featureId: st
   return { planRunId, featureId };
 }
 
+/** 有停机原因才有等待信息；用展开的形式拼，没有时不留 undefined 字段。 */
+function withWaitInfo(mission: Mission, hops?: Parameters<typeof deriveWaitInfo>[1]): { waitInfo?: MissionWaitInfo } {
+  const waitInfo = deriveWaitInfo(mission, hops);
+  return waitInfo ? { waitInfo } : {};
+}
+
 function viewOf(
   mission: Mission,
   validationReports?: ReadonlyMap<string, ValidationReportView>,
@@ -465,6 +477,7 @@ function viewOf(
     waitReason: mission.waitReason,
     waitDetail: mission.waitDetail,
     ...(mission.waitResumeAt !== undefined ? { waitResumeAt: mission.waitResumeAt } : {}),
+    ...withWaitInfo(mission),
     updatedAt: mission.updatedAt,
     paused: mission.isPaused,
     isMutating: mission.isMutating,

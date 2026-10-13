@@ -98,6 +98,15 @@ export const RUNTIME_MODELS_CACHE_MS = 10 * 60 * 1000;
 /** hosted run 的一行进度。channel 必须可区分，客户端不能靠猜 stdout/stderr。 */
 export type HostedRunEmit = (channel: 'stdout' | 'stderr', line: string) => void;
 
+export interface RunnerStateProbe {
+  /** 这条 Mission 现在有没有托管运行在服务进程里跑。 */
+  isRunning(missionId: string): boolean;
+  /** 服务进程里所有托管运行着的 Mission。 */
+  running(): readonly string[];
+  /** 自动恢复调度：启用与否、正在自动续跑的 Mission。未装配（如 PG）就没有这一项。 */
+  autoResume?: { enabled(): boolean; active(): readonly string[] };
+}
+
 /**
  * 没有进度可写时隔这么久发一帧 `{ heartbeat: true }`。
  * 必须短于 Node 19+ keep-alive 套接字默认 5s 空闲超时：方案等升级决定的 poll
@@ -152,6 +161,12 @@ export interface ApiDeps {
    * 少一个默认实现，比少一类调用点便宜。
    */
   agentPool?: AgentPoolRepository;
+  /**
+   * 服务进程内的运行事实：托管运行是不是真的在跑、自动恢复调度开没开、在续跑谁。
+   * 「HTTP 受理」（启动请求被接受）、「runner 在跑」、「等待」、「完成」是四件事——
+   * 前两者以前只有发起方自己的流能看出来，进程断流后就只能猜；这里给一份服务端权威答案。
+   */
+  runnerState?: RunnerStateProbe;
   /**
    * 持久队列。注入后平台状态报五态/死信/占用，资源池用有效租约判断是否在跑。
    * 不注入就标明不适用 / 无运行时原因，不编造空队列或 0 占用。
@@ -1855,6 +1870,19 @@ export function createApi(deps: ApiDeps): Server {
               : 'main_lock_not_assembled'),
           queue,
           occupancy,
+          runner: deps.runnerState
+            ? {
+                hostedMissions: [...deps.runnerState.running()],
+                ...(deps.runnerState.autoResume
+                  ? {
+                      autoResume: {
+                        enabled: deps.runnerState.autoResume.enabled(),
+                        resuming: [...deps.runnerState.autoResume.active()],
+                      },
+                    }
+                  : {}),
+              }
+            : inapplicable('runner_state_not_assembled'),
           agentEnv: assembledOrInapplicable(assembled?.agentEnv, 'agent_env_not_assembled'),
           defaultAdapter: assembledOrInapplicable(assembled?.defaultAdapter, 'default_adapter_not_assembled'),
         }),
@@ -2224,9 +2252,22 @@ export function createApi(deps: ApiDeps): Server {
       // timeAttribution 与 mission 视图同级只读（同一 missionRead 授权）：
       // 页面一张时间线要阶段耗时，而耗时来自报告仓储与 hop 行，不在 MissionView 里。
       // 另开一个接口会让首屏多一次往返，且授权要再讲一遍。
+      const runner = deps.runnerState;
       return send(res, 200, {
         ...(await platform.getMissionView(id)),
         timeAttribution: await platform.getTimeAttribution(id),
+        // runner.running = 服务进程里确有托管运行在跑（权威）；它不等于「Mission 在推进」
+        // （可能在退避等待）也不等于「启动请求被受理过」。没装配探针的部署不带这一格。
+        ...(runner
+          ? {
+              runner: {
+                running: runner.isRunning(id),
+                ...(runner.autoResume
+                  ? { autoResume: { enabled: runner.autoResume.enabled(), resuming: runner.autoResume.active().includes(id) } }
+                  : {}),
+              },
+            }
+          : {}),
       });
     }
 

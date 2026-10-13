@@ -351,6 +351,37 @@ export const WAIT_REASON = {
   model_unavailable: '指定的模型现在用不了，按约束不改派别的模型',
 };
 
+/** 谁来处理一个停机状态（后端 waitInfo.owner）。 */
+export const WAIT_OWNER = {
+  platform: '平台自动处理',
+  coordinator: '协调者处理',
+  l3: '需要检视者（L3）处理',
+  user: '需要用户处理',
+};
+
+/**
+ * 等待信息的一行话：处理方、会不会自动恢复及下次重试、重试计数、有没有活动 Agent、
+ * 托管运行在不在跑，最后是下一步。
+ *
+ * 为什么要把这几样摆在一起：「HTTP 受理了」「runner 在跑」「在等」「完成了」是四件事。
+ * 一个在退避的 Mission，runner 早就退出了，但平台会自动重试；一个越界停下的 Mission，
+ * 不会自动恢复，要有人处理——只看一个状态词分不出来。
+ * formatTime 由调用方传入（页面按本地时区格式化），这里不碰时区。
+ */
+export function waitInfoText(info, runner, formatTime = (iso) => iso) {
+  if (!info) return '';
+  const parts = [WAIT_OWNER[info.owner] || text(info.owner) || '（未知）'];
+  parts.push(
+    info.autoResume
+      ? `会自动恢复${info.nextRetryAt ? `（下次 ${formatTime(info.nextRetryAt)}）` : ''}`
+      : '不会自动恢复',
+  );
+  if (info.retry) parts.push(`第 ${num(info.retry.attempt)}/${num(info.retry.max)} 次重试`);
+  parts.push(info.activeAgent ? '有活动 Agent' : '没有活动 Agent');
+  if (runner) parts.push(runner.running ? '托管运行：在跑' : '托管运行：没有在跑');
+  return `${parts.join(' · ')}${info.action ? `。下一步：${info.action}` : ''}`;
+}
+
 /**
  * waitDetail 优先：那是平台写下的具体情形（"卡在 exec-a"），比 enum 翻出来的
  * 套话有用。没有原因时回空串而不是「—」：空态该由页面说清楚为什么空，

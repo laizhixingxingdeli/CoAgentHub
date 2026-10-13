@@ -42,6 +42,7 @@ import {
   stageName,
   stateLabel,
   usageLine,
+  waitInfoText,
 } from '../src/web/narrate.js';
 
 /** 契约翻译表里出现过的全部机器事件名：界面上一个都不许露头。 */
@@ -941,6 +942,22 @@ describe('阶段与状态是两根轴', () => {
     assert.equal(reasonText({ waitReason: 'project_busy' }), WAIT_REASON.project_busy);
     assert.equal(reasonText({ waitReason: 'something_new' }), 'something_new');
     assert.equal(reasonText({}), '');
+  });
+
+  test('waitInfoText：处理方、会不会自动恢复、下次重试、活动 Agent、runner 一句话说清', () => {
+    const backoff = {
+      reason: 'retry_backoff', owner: 'platform', autoResume: true, nextRetryAt: '10-13 04:15',
+      retry: { attempt: 1, max: 3 }, activeAgent: false, action: '到点平台自动重试',
+    };
+    assert.equal(
+      waitInfoText(backoff, { running: false }),
+      '平台自动处理 · 会自动恢复（下次 10-13 04:15） · 第 1/3 次重试 · 没有活动 Agent · 托管运行：没有在跑。下一步：到点平台自动重试',
+    );
+    assert.equal(
+      waitInfoText({ reason: 'checkpoint_failed', owner: 'l3', autoResume: false, activeAgent: false, action: '看越界文件' }),
+      '需要检视者（L3）处理 · 不会自动恢复 · 没有活动 Agent。下一步：看越界文件',
+    );
+    assert.equal(waitInfoText(undefined), '');
   });
 
   test('runaway_suspected 翻成人话，不露英文键', () => {

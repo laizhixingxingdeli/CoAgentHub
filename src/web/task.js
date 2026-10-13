@@ -43,6 +43,7 @@ import {
   pendingMemoryNote,
   PLATFORM_ROLE_LABEL,
   reasonText,
+  waitInfoText,
   revisionLabel,
   roleBadge,
   roleOfAttempt,
@@ -173,6 +174,10 @@ export function headerHtml(view, activity, nowIso) {
     + '<div class="now-doing">现在在干什么：' + esc(doing) + '</div>'
     + (waiting
       ? '<div class="wait-reason">停机原因：' + esc(reasonText(v) || '（没有写原因）') + '</div>'
+      : '')
+    // 谁处理 / 会不会自动恢复 / 下次重试 / 有没有活动 Agent / runner 在不在跑：和停机原因一起看才分得清。
+    + (v.waitInfo
+      ? '<div class="wait-info" data-wait-info>' + esc(waitInfoText(v.waitInfo, v.runner, formatTime)) + '</div>'
       : '')
     + '<dl class="task-stats">'
     +   '<div class="stat"><dt>运行时长</dt><dd class="mono">'
