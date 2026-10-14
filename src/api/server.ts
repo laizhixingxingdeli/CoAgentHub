@@ -1484,8 +1484,15 @@ export function createApi(deps: ApiDeps): Server {
       );
     },
 
-    async coagent_get_contract(run) {
-      return platform.getContract(run.missionId, run.attemptId);
+    async coagent_get_contract(run, body) {
+      // 与 coagent_get_work_item 同一套写法：full 缺省是「按指向规则来」，显式
+      // full:true 才是「别管指向，给全文」。非布尔一律 400，别让 'true' / 1 这种
+      // 手写值静默变成 false 再给出指向。
+      const { full } = body as unknown as { full?: unknown };
+      if (full !== undefined && typeof full !== 'boolean') {
+        throw new HttpError(400, 'BAD_REQUEST', 'full 必须是布尔值。');
+      }
+      return platform.getContract(run.missionId, run.attemptId, full === true);
     },
 
     async coagent_submit_contract_check(run, body) {
@@ -1586,8 +1593,15 @@ export function createApi(deps: ApiDeps): Server {
       return platform.getProjectContext(run.missionId, slug);
     },
 
-    async coagent_get_work_order(run) {
-      return platform.getWorkOrder(run.missionId, requireWorkItem(run), run.attemptId);
+    async coagent_get_work_order(run, body) {
+      // requireWorkItem 必须在最前：没有绑定工作项是 409 ATTEMPT_NOT_BOUND，
+      // 跟 body 里的 full 写得对不对无关。先查 full 会把这条身份错误盖成 400。
+      const workItemId = requireWorkItem(run);
+      const { full } = body as unknown as { full?: unknown };
+      if (full !== undefined && typeof full !== 'boolean') {
+        throw new HttpError(400, 'BAD_REQUEST', 'full 必须是布尔值。');
+      }
+      return platform.getWorkOrder(run.missionId, workItemId, run.attemptId, full === true);
     },
 
     async coagent_get_context(run, body) {

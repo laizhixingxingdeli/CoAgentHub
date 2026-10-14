@@ -293,6 +293,7 @@ export async function getContract(
     ctx: PlatformContext,
     missionId: string,
     attemptId?: string,
+    full?: boolean,
   ): Promise<
     | { contract: Readonly<MissionContract> | undefined; contractRevision: number }
     | ContractPointer
@@ -300,11 +301,16 @@ export async function getContract(
     const { mission } = await ctx.locate(missionId);
     // 这一跳简报里已是同一修订的全文时，只回一句指向——别再传一遍。
     // 修订号对不上（或没取过简报）一律给全文。
-    if (attemptId !== undefined) {
+    // full === true 是**退路**：指向句只在简报真的进了上下文时才成立，而简报
+    // 可能被压缩掉。不给退路，agent 就只能拿着指向句去猜契约正文。
+    if (full !== true && attemptId !== undefined) {
       const inclusion = readBriefInclusion(ctx, missionId, attemptId);
       if (inclusion?.contractRevision === mission.contractRevision) {
         const n = mission.contractRevision;
-        return { pointer: `契约 r${n} 全文已在本跳简报里。`, contractRevision: n };
+        return {
+          pointer: `契约 r${n} 全文已在本跳简报里。若你的上下文里确实没有它，用 full:true 再调一次。`,
+          contractRevision: n,
+        };
       }
     }
     return { contract: mission.contract, contractRevision: mission.contractRevision };
@@ -336,6 +342,7 @@ export async function getWorkOrder(
     missionId: string,
     workItemId: string,
     attemptId?: string,
+    full?: boolean,
   ): Promise<WorkOrderView | WorkOrderPointer> {
     const { mission, item } = await ctx.locateItem(missionId, workItemId);
     if (!item.order) {
@@ -343,10 +350,16 @@ export async function getWorkOrder(
     }
     const rev = item.order.orderRevision ?? 'r1';
     // 执行者这一跳简报已含同一修订的工单全文时，只回一句指向。
-    if (attemptId !== undefined) {
+    // 顺序不能反：没有工单正文是 NO_WORK_ORDER，跟要不要指向无关，full 也不该
+    // 把它变成别的东西。full === true 是退路，理由同 getContract（简报可能被压缩）。
+    if (full !== true && attemptId !== undefined) {
       const inclusion = readBriefInclusion(ctx, missionId, attemptId);
       if (inclusion?.orderRevision === rev) {
-        return { pointer: `工单 ${workItemId} ${rev} 全文已在本跳简报里。`, orderRevision: rev, workItemId };
+        return {
+          pointer: `工单 ${workItemId} ${rev} 全文已在本跳简报里。若你的上下文里确实没有它，用 full:true 再调一次。`,
+          orderRevision: rev,
+          workItemId,
+        };
       }
     }
     const contract = mission.contract;

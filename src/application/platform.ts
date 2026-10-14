@@ -1211,11 +1211,12 @@ export class Platform {
   async getContract(
     missionId: string,
     attemptId?: string,
+    full?: boolean,
   ): Promise<
     | { contract: Readonly<MissionContract> | undefined; contractRevision: number }
     | ContractPointer
   > {
-    return views.getContract(this.#context, missionId, attemptId);
+    return views.getContract(this.#context, missionId, attemptId, full);
   }
 
   /**
@@ -2178,8 +2179,8 @@ export class Platform {
 
   /* ============================ L1 执行者面 ============================ */
 
-  async getWorkOrder(missionId: string, workItemId: string, attemptId?: string): Promise<WorkOrderView | WorkOrderPointer> {
-    return views.getWorkOrder(this.#context, missionId, workItemId, attemptId);
+  async getWorkOrder(missionId: string, workItemId: string, attemptId?: string, full?: boolean): Promise<WorkOrderView | WorkOrderPointer> {
+    return views.getWorkOrder(this.#context, missionId, workItemId, attemptId, full);
   }
 
   async getAgentWorkItem(missionId: string, workItemId: string, options?: { full?: boolean }): Promise<AgentWorkItemView> {
