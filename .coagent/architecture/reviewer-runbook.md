@@ -148,9 +148,9 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 - **这批是直接实施的一次性例外**：用户 10-13 明确同意「这次例外，把剩下的做完然后合并」，由检视者在隔离 worktree 里实现，没有走 Mission、没有平台出的验证报告，只有本机全量 `node --test` 与自检审查。第 0 节的划线不因此改变：以后同类改动照样开 Mission。
 - **新的停机原因，处置各不相同**（`GET /api/missions/:id` 的 `waitInfo` 给出谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步；`runner.running` 是服务进程里托管运行是否真在跑——「HTTP 受理」「runner 在跑」「在等」「完成」是四件事）：
   - `retry_backoff`：某一跳失败后在退避，**不是故障也不是名额被占**。`waitResumeAt` 到点由服务自动接着跑（`RetryWakeScheduler`，重启后也会）；`runner.running=false` 是正常的，不要因此手动 start。想关掉整个自动恢复：服务环境变量 `COAGENT_AUTO_RESUME=0`。旧代码留下的退避 Mission 没有 `waitResumeAt` 与托管启动参数，需要手动 start 一次，之后才进入自动恢复。
-  - `checkpoint_failed`：执行者的成果被冻结范围检查点拒绝，越界改动**原样保留**。看事件 `workspace.checkpoint_failed` 的路径与来源（哪张工单的验证留下的）：要保留就让协调者建一张 `allowedScope` 精确包含它们的恢复单，不要就由 L3 清理工作区；处理后再 start。平台不会自动恢复，也不会自动提交未授权文件。
+  - `checkpoint_failed`：GATE1（2026-10-14）起只留给 git 本身出错、范围为空、范围写法无法确定这类真故障；范围外的脏文件不再让检查点失败（见下面「验证与工作区」）。遇到时看事件 `workspace.checkpoint_failed` 的原因，修好再 start。
   - `model_unavailable`：Mission 用 `model-policy` 指定了模型（`required`），而匹配的候选现在都不可用。平台**绝不改派别的模型**；有明确冷却到期时刻就自动重试，没有就要人修候选、调资源池，或改约束。契约正文里写的模型名只是叙述，不是约束（用户后来改授权时，旧限制留在历史里不再生效）。
 - **状态恢复**：工单「已有执行结果、停在 dispatched、没有活执行者」（案例的 W-621）——编排器在叫协调者前自动收成 blocked（只认可证明的机器续派残留）；自动判不了的由 `coagenthub_work_item_recover`（署名与理由必填，幂等，有活执行者或租约时拒绝）。Mission 不在 executing 时机器不再续派。
-- **验证与工作区**：验证命令跑完后，授权范围内的副作用由平台用「验证副作用检查点」提交；范围外的原样保留并记下来源，下一张工单开跑前对着来源核对，不属于它的改动会让工单在**花钱之前**收成 blocked（事件 `work_item.platform_blocked`，`source: workspace_dirty`）。验证子进程带 `PYTHONDONTWRITEBYTECODE=1`。
-- **工单范围**：Standard 工单的 `allowedScope` 必须是相对仓库根的精确文件；目录、通配符、绝对 / 盘符路径、`..` 在建单、修订、派发时就被 `WORK_ORDER_SCOPE_INVALID` 拒绝并给出改法（只在装了检查点的工作区上；存量的目录范围工单到派发时被拒）。
+- **验证与工作区**（GATE1，2026-10-14）：检查点、验证后收口、开跑前核对都只提交授权范围内的改动；范围外的脏文件、杂文件（`__pycache__`、`.pyc`、`.DS_Store` 等）移出工作树存档到 `.coagent-worktrees/.scope-archive/<missionId>/<workItemId>/`——已跟踪文件存补丁后还原，未跟踪文件原样移走——不提交、不删除、不停机，记事件 `workspace.scope_archived`（路径、来源、存档位置），协调者下一跳简报里能看到。要找回：补丁用 `git apply`，未跟踪文件从存档目录拷回。被 .gitignore 忽略的未跟踪文件（例如签名私钥）不在 git status 里，不会被移动，也不会被提交。验证子进程带 `PYTHONDONTWRITEBYTECODE=1`。
+- **工单范围**（GATE1，2026-10-14）：Standard 工单的 `allowedScope` 与 `validation.forbiddenPaths` 可写相对仓库根的精确文件，或以 `/` 结尾的目录（目录下新增、修改、删除都算授权）；通配符、绝对 / 盘符路径、`..`、空段在建单、修订、派发时被 `WORK_ORDER_SCOPE_INVALID` 拒绝并给出改法。Standard 的 diff-size 超限只提醒（报告里 `diff-size advisory:`），`maxChangedFiles: 0` 的零代码验证单仍硬卡。
 - **部署**：合 master 之后服务仍是旧代码，要重启才加载（静态网页文件按磁盘现读，新网页对老接口向后兼容）。重启前提不变——没有在跑的 agent（第 7 节）；合并本身不重启、不推送。
