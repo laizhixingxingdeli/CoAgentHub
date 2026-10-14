@@ -71,6 +71,37 @@ export function resolveProfile(
 	return reasoning ? { ...base, reasoning: reasoning as ResolvedProfile["reasoning"] } : base;
 }
 
+/**
+ * 候选事实落在哪条通道："user" 走用户消息，"system" 走系统提示。
+ *
+ * 判定放在这里而不是提示词里：通道选错不会报错，只会静默换一条注入路径，
+ * 靠模型"记得住"是拦不住的。缺省一律 system——把没识别的候选塞进 user 通道
+ * 会绕过系统提示的位置约束，错了看不出来。
+ */
+export type PromptChannel = "user" | "system";
+
+/**
+ * 与 resolveProfile 的 pick 同语义：取 facts 里第一个同 key 的 value。
+ *
+ * 显式覆盖只认 "user"/"system" 两个字面量：大小写不对或写别的词都当作
+ * 没写。宽松匹配会让界面上的一个笔误悄悄改变注入通道，而配置看起来是"写了"的。
+ */
+export function resolvePromptChannel(
+	facts?: readonly { key: string; value: string }[],
+): PromptChannel {
+	const pick = (key: string) => facts?.find((f) => f.key === key)?.value;
+
+	const explicit = pick("prompt_channel");
+	if (explicit === "user" || explicit === "system") return explicit;
+
+	const provider = pick("provider");
+	const model = pick("model");
+	// 前缀自带斜杠："qdx" 不含斜杠，因此不会被 qd/ 误中——它是另一个模型。
+	const userModel = model !== undefined
+		&& (model.startsWith("qdc/") || model.startsWith("qd/") || model.startsWith("cbai/"));
+	return provider === "tenrouter" && userModel ? "user" : "system";
+}
+
 export function knownProfileIds(): string[] {
 	return Object.keys(PROFILES);
 }
