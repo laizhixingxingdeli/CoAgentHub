@@ -12,6 +12,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { Platform, PlatformRuleError } from '../application/platform.ts';
 import { waitForReviewerTodos } from './reviewer-wait.ts';
 import type { MissionSummary, ReviewerTodo } from '../application/platform.ts';
@@ -622,68 +623,76 @@ async function collectCandidateObservations(
   }
   const windowStart = nowMs - SEVEN_DAYS_MS;
   for (const row of missions) {
-    let view: Awaited<ReturnType<Platform['getMissionView']>>;
-    let events: Awaited<ReturnType<Platform['getActivity']>>;
+    // 每个 Mission 处理完让出一次事件循环。为什么放在 finally 而不在循环末尾：
+    // 上面那两处 `continue`（Mission 读失败 / attempt 读失败）会跳过循环末尾，
+    // 恰恰是「一整排 Mission 都读失败」时最需要让出的时候 —— 只挂在成功路径上，
+    // 一次资源池读会把事件循环独占到底，同进程的轻请求全排在后面。
     try {
-      view = await platform.getMissionView(row.missionId);
-      events = await platform.getActivity(row.missionId);
-    } catch {
-      continue;
-    }
-    const atByAttempt = new Map<string, number>();
-    for (const event of events) {
-      if (typeof event.attemptId !== 'string' || event.attemptId.length === 0) continue;
-      const ts = Date.parse(event.at);
-      if (!Number.isFinite(ts)) continue;
-      if (event.kind === 'attempt.started' || event.kind === 'attempt.ended') {
-        const prev = atByAttempt.get(event.attemptId);
-        if (prev === undefined || ts > prev) atByAttempt.set(event.attemptId, ts);
-      }
-    }
-    for (const attemptId of attemptIdsFromMissionView(view)) {
-      let detail: Awaited<ReturnType<Platform['getAttemptDetail']>>;
+      let view: Awaited<ReturnType<Platform['getMissionView']>>;
+      let events: Awaited<ReturnType<Platform['getActivity']>>;
       try {
-        detail = await platform.getAttemptDetail(row.missionId, attemptId);
+        view = await platform.getMissionView(row.missionId);
+        events = await platform.getActivity(row.missionId);
       } catch {
         continue;
       }
-      const profileId = detail.profile?.profileId;
-      if (typeof profileId !== 'string' || profileId.length === 0) continue;
-      const ended = events.find((event) => event.kind === 'attempt.ended' && event.attemptId === attemptId);
-      if (ended) {
-        const data = ended.data;
-        const endedBy =
-          data !== null && typeof data === 'object' && !Array.isArray(data)
-            ? (data as { endedBy?: unknown }).endedBy
-            : undefined;
-        const failureMessage =
-          data !== null && typeof data === 'object' && !Array.isArray(data)
-            ? (data as { failureMessage?: unknown }).failureMessage
-            : undefined;
-        if (typeof endedBy === 'string') {
-          const classified = classifyCandidateFailure(
-            endedBy as AttemptEndReason,
-            typeof failureMessage === 'string' ? failureMessage : undefined,
-          );
-          if (classified) {
-            pushHint(profileId, {
-              failureClass: classified.failureClass,
-              at: ended.at,
-              source: 'attempt.ended',
-            });
-          }
+      const atByAttempt = new Map<string, number>();
+      for (const event of events) {
+        if (typeof event.attemptId !== 'string' || event.attemptId.length === 0) continue;
+        const ts = Date.parse(event.at);
+        if (!Number.isFinite(ts)) continue;
+        if (event.kind === 'attempt.started' || event.kind === 'attempt.ended') {
+          const prev = atByAttempt.get(event.attemptId);
+          if (prev === undefined || ts > prev) atByAttempt.set(event.attemptId, ts);
         }
       }
-      const at = atByAttempt.get(attemptId);
-      if (at === undefined || at < windowStart || at > nowMs) continue;
-      const acc = usage.get(profileId) ?? { attempts: 0, successes: 0, reportedCost: null };
-      acc.attempts += 1;
-      if (detail.status === 'succeeded') acc.successes += 1;
-      const cost = detail.usage?.cost;
-      if (detail.usage?.quality === 'reported' && typeof cost === 'number' && Number.isFinite(cost)) {
-        acc.reportedCost = (acc.reportedCost ?? 0) + cost;
+      for (const attemptId of attemptIdsFromMissionView(view)) {
+        let detail: Awaited<ReturnType<Platform['getAttemptDetail']>>;
+        try {
+          detail = await platform.getAttemptDetail(row.missionId, attemptId);
+        } catch {
+          continue;
+        }
+        const profileId = detail.profile?.profileId;
+        if (typeof profileId !== 'string' || profileId.length === 0) continue;
+        const ended = events.find((event) => event.kind === 'attempt.ended' && event.attemptId === attemptId);
+        if (ended) {
+          const data = ended.data;
+          const endedBy =
+            data !== null && typeof data === 'object' && !Array.isArray(data)
+              ? (data as { endedBy?: unknown }).endedBy
+              : undefined;
+          const failureMessage =
+            data !== null && typeof data === 'object' && !Array.isArray(data)
+              ? (data as { failureMessage?: unknown }).failureMessage
+              : undefined;
+          if (typeof endedBy === 'string') {
+            const classified = classifyCandidateFailure(
+              endedBy as AttemptEndReason,
+              typeof failureMessage === 'string' ? failureMessage : undefined,
+            );
+            if (classified) {
+              pushHint(profileId, {
+                failureClass: classified.failureClass,
+                at: ended.at,
+                source: 'attempt.ended',
+              });
+            }
+          }
+        }
+        const at = atByAttempt.get(attemptId);
+        if (at === undefined || at < windowStart || at > nowMs) continue;
+        const acc = usage.get(profileId) ?? { attempts: 0, successes: 0, reportedCost: null };
+        acc.attempts += 1;
+        if (detail.status === 'succeeded') acc.successes += 1;
+        const cost = detail.usage?.cost;
+        if (detail.usage?.quality === 'reported' && typeof cost === 'number' && Number.isFinite(cost)) {
+          acc.reportedCost = (acc.reportedCost ?? 0) + cost;
+        }
+        usage.set(profileId, acc);
       }
-      usage.set(profileId, acc);
+    } finally {
+      await yieldToEventLoop();
     }
   }
   return { hints, usage };
