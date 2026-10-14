@@ -137,6 +137,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 
 - **acceptance-evidence** — 验收证据处置
   平台按契约修订留下验收原文。协调者对受影响条目显式写下 reuse、revalidate 或 new_requirement。交卷门禁默认关闭，只在显式开启后约束受影响条目。不做语义推断，不做跨环境测试缓存。
+- **auto-resume** — 服务自动续跑
+  常驻服务的 RetryWakeScheduler 扫描 Mission.waitResumeAt 已到、且 isAutoResumable 为真的等待，复用 mission.run_requested 里的托管启动参数续跑。入过 Missi
 - **candidate-circuit** — 候选熔断持久状态
   候选熔断按 `profileId` 隔离。查询无记录返回 `closed`；`open` 保存失败分类 `failureClass` 和 ISO `openUntil`。显式非探测失败可从任何状态重新打开并覆写分类与截止。
 - **classified-intake-lightweight** — Classified intake 与 Lightweight Fast Lane
