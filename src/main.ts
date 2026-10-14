@@ -71,6 +71,10 @@ import {
   tryPgAdvisoryLock,
 } from './application/pg-store.ts';
 import { acquireLock, acquireRecoverableLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
+import {
+  collectHeartbeatContinuationIds,
+  readPreviousServiceHeartbeatAt,
+} from './application/platform/heartbeat-continuation.ts';
 import { attachLoopbackWriterIdentity, listenLoopback } from './application/loopback-listen.ts';
 import {
   parseReconcileIntervalMs,
@@ -1249,9 +1253,30 @@ export async function startServer(
     }
     // 只在这里请求续跑，不在单次 runMission 的收敛路径上：那条路径本身就是这条 Mission 在跑，
     // 再请求一次会把「刚开跑」记成「需要续跑」。
+    //
+    // 并上 (b) 路：本进程是接管旧锁上来的话，旧服务死前还在动、且收敛判不出残留 attempt 的
+    // 那些 Mission 也一起请求。它们和 (a) 路共用这一次调用，按 missionId 去重。
+    let continuationCandidates: { missionId: string }[] = [...built.reconciled.interrupted];
+    if (!usePg && env.COAGENT_RESUME_INTERRUPTED !== '0' && env.COAGENT_AUTO_RESUME !== '0') {
+      try {
+        const stoppedAt = readPreviousServiceHeartbeatAt(statePath, process.pid, warnPeriodicRepair);
+        if (stoppedAt !== undefined) {
+          const extra = await collectHeartbeatContinuationIds(built.platform, stoppedAt, warnPeriodicRepair);
+          continuationCandidates = [...continuationCandidates, ...extra.map((missionId) => ({ missionId }))];
+        }
+      } catch (error) {
+        // (b) 路只是加菜：审计读不动或列表读不了时仍要走完 (a) 路，否则接管场景下
+        // 「本来能自动恢复的 Mission」会因为一个新加的旁路而全都起不来。
+        warnPeriodicRepair(
+          `[启动续跑] 心跳窗口续跑收集失败，只按收敛结果请求：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     await requestInterruptedContinuations(
       built.platform,
-      built.reconciled.interrupted,
+      continuationCandidates,
       env,
       usePg,
       warnPeriodicRepair,
