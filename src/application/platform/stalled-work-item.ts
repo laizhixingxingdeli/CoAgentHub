@@ -11,7 +11,7 @@ import type { PlatformContext } from './context.ts';
  * work_item.platform_blocked，不复用 blocked.reported、不调 criteriaFailureStop。
  */
 
-export type StalledSource = 'runaway' | 'no_result_limit';
+export type StalledSource = 'runaway' | 'no_result_limit' | 'dead_letter';
 
 export interface StalledWorkItemInput {
   readonly missionId: string;
@@ -38,9 +38,13 @@ export function stallReason(
   consecutive: number | undefined,
   minutes: number | undefined,
 ): string {
-  return source === 'runaway'
-    ? `平台掐断：一跳连续跑了 ${describeValue(minutes)} 分钟没有交结果，改动留在工作区没有回滚`
-    : `平台放弃重跑：同一工作项连续 ${describeValue(consecutive)} 次没有结构化结果`;
+  if (source === 'runaway') {
+    return `平台掐断：一跳连续跑了 ${describeValue(minutes)} 分钟没有交结果，改动留在工作区没有回滚`;
+  }
+  if (source === 'dead_letter') {
+    return `平台死信收尾：同一工作项连续 ${describeValue(consecutive)} 次尝试失败到顶，已收成 blocked 交回协调者`;
+  }
+  return `平台放弃重跑：同一工作项连续 ${describeValue(consecutive)} 次没有结构化结果`;
 }
 
 function describeValue(value: number | undefined): string {
@@ -65,8 +69,8 @@ export async function blockStalledWorkItem(
     if (item.status !== 'dispatched') {
       return skip(`工作项 ${item.id} 当前是 ${item.status}，不是 dispatched：已经收过尾或被别人处理过，本次不动。`);
     }
-    if (input.source !== 'runaway' && input.source !== 'no_result_limit') {
-      return skip(`来源 ${String(input.source)} 不是平台收尾认的 runaway / no_result_limit。`);
+    if (input.source !== 'runaway' && input.source !== 'no_result_limit' && input.source !== 'dead_letter') {
+      return skip(`来源 ${String(input.source)} 不是平台收尾认的 runaway / no_result_limit / dead_letter。`);
     }
     const attemptIds = item.attempts.map((attempt) => attempt.id);
     const latest = attemptIds[attemptIds.length - 1];

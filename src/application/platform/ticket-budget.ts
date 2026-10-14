@@ -10,6 +10,7 @@
 
 import { PlatformRuleError } from './context.ts';
 import { recordEscalationAndDeliver } from './escalations.ts';
+import { requestHostedContinuation } from './auto-resume.ts';
 import { evaluateMissionCost, type MissionCostInput } from '../ticket-budget.ts';
 import type { Mission, WaitReason, EscalationBody } from '../../kernel/index.ts';
 import type { PlatformContext } from './context.ts';
@@ -200,6 +201,7 @@ async function raiseCostCap(
   const costCap = mission.raiseCostCap(by);
   await ctx.event(mission, 'mission.cost_cap.raised', { missionId: mission.id, by, costCap }, undefined, attemptIdFor(mission));
   await releaseCostWaitIfResolved(ctx, mission, costCap);
+  await requestHostedContinuation(ctx, mission.id, 'budget_raised');
   if (cleanupGates) await cleanupResolvedCostGate(ctx, mission);
   return { costCap };
 }
@@ -320,6 +322,7 @@ export async function applyTicketGateAnswer(
     // 费用继续只增额：答下一条升级是公开 CLI 的事，这里代答会把别人的问题吃掉。
     const { costCap } = await raiseCostCap(ctx, mission, decision.by, false);
     void costCap;
+    await requestHostedContinuation(ctx, mission.id, 'budget_raised');
     return { released: true };
   }
   // 检查点继续：写 mission.work_item_checkpoint.approved {threshold}，仅清匹配等待。
@@ -328,6 +331,7 @@ export async function applyTicketGateAnswer(
     mission.setWaitReason(undefined);
     await ctx.event(mission, 'mission.resumed', {}, undefined, answered.attemptId);
   }
+  await requestHostedContinuation(ctx, mission.id, 'checkpoint_approved');
   return { released: true };
 }
 
@@ -395,5 +399,6 @@ export async function approveWorkItemCheckpoint(
     mission.setWaitReason(undefined);
     await ctx.event(mission, 'mission.resumed', {}, undefined, attemptIdFor(mission));
   }
+  await requestHostedContinuation(ctx, mission.id, 'checkpoint_approved');
   return { threshold, approved: true, alreadyApproved: false };
 }

@@ -1,6 +1,7 @@
 import type { Mission, WorkItem, EscalationBody } from '../../kernel/index.ts';
 import type { CriteriaFailureDiagnostic, QueueClaimIdentity } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
+import { requestHostedContinuation } from './auto-resume.ts';
 import { escalationDeliveryKey } from '../delivery.ts';
 import { criteriaList, criteriaFailureStopFor, criteriaFailureQuestion, criteriaFailureWhy, hasOpenDiagnosticEscalation, readDiagnosticCriteria } from './agent-view-helpers.ts';
 
@@ -255,6 +256,10 @@ export async function answerEscalation(
     // 停派期间不重派：否则编排器会把 L3 刚停下的工单再送出去。
     if (diagnostic === undefined && answered.platformGate === undefined) {
       await redispatchLightweightBlockedAfterAnswer(ctx, mission, answered);
+    }
+    // 没有未答复升级了：托管运行过的 Mission 请服务续跑一次（L3 答复解闸）。
+    if (mission.openEscalations.length === 0) {
+      await requestHostedContinuation(ctx, mission.id, 'escalation_answered');
     }
     return { question: answered.question, answer };
   }

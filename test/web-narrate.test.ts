@@ -963,7 +963,7 @@ describe('阶段与状态是两根轴', () => {
   test('runaway_suspected 翻成人话，不露英文键', () => {
     // 漏这一条的形态：界面上停机原因那一栏直接写着 runaway_suspected。
     const out = reasonText({ waitReason: 'runaway_suspected' });
-    assert.equal(out, '一跳跑太久，已停下来等人看');
+    assert.equal(out, '一跳跑太久，已停下来等人看；平台会在能续跑时自动接着跑');
     assert.equal(out.includes('runaway_suspected'), false, out);
     // nowDoing 也走同一张表，不该在那里漏出机器键。
     assert.equal(nowDoing({ status: 'executing', waitReason: 'runaway_suspected' }).includes('runaway_suspected'), false);

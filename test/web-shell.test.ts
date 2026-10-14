@@ -327,7 +327,7 @@ describe('项目页的渲染函数喂真数据', () => {
     // 等待中的行，停机原因必须跟得上（title）。
     assert.match(
       stateChip({ waitReason: 'project_busy' }),
-      /title="同项目有别的 Mission 占着改动名额"/,
+      /title="同项目有别的 Mission 占着改动名额；不用升级，名额释放后平台自动接着派"/,
     );
   });
 
