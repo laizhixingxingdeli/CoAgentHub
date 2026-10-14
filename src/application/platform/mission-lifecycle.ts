@@ -1,6 +1,7 @@
 import type { MissionContract, WaitReason } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { recordContractAcceptance } from './mission-intake.ts';
+import { requestHostedContinuation } from './auto-resume.ts';
 import { SCOPE_ARCHIVED_EVENT_KIND } from './workspace-hygiene.ts';
 type AnswerEscalation = (missionId: string, answer: string) => Promise<{ question: string; answer: string }>;
 
@@ -27,6 +28,10 @@ export async function reviseContract(ctx: PlatformContext, answerEscalation: Ans
     // 换代成功才留原文：reviseContract 抛错时这一版根本没生效，记一笔会把没
     // 生效的契约写成事实；只留 unreliable 的新版，旧版原文也就再问不出来了。
     await recordContractAcceptance(ctx, missionId, contractRevision, contract.acceptance);
+    // 契约修订成功，用 start_mission 托管启动过的 Mission 该由服务按已记录的托管
+    // 启动参数接着跑：记一次续跑请求，交给 auto-resume 调度器。是否真写由
+    // requestHostedContinuation 自己按门禁判断，这里不再套一层。
+    await requestHostedContinuation(ctx, missionId, 'contract_revised');
     return { contractRevision };
   }
 

@@ -162,5 +162,26 @@ describe('自动恢复策略：平台能自己处理的停机自动接着跑', (
       const due = await platform.listAutoResumeDue(NOW);
       assert.equal(due.some((row) => row.missionId === 'M-cont-paused'), false, '暂停时不捡起');
     }
+
+    // ---- 修订契约后请求托管续跑：托管启动过的 Mission 会被捡起，没托管过的不写。 ----
+    {
+      const { platform } = world();
+      await waiting(platform, 'M-revise', undefined, undefined);
+      await platform.recordHostedRunRequest('M-revise', {
+        cwd: '/proj',
+        adapter: '/adapter/agent-entry.ts',
+        acceptStaleBase: false,
+      });
+      await platform.reviseContract('M-revise', { ...CONTRACT, intent: '改过的契约' });
+      const due = await platform.listAutoResumeDue(NOW);
+      assert.equal(due.some((row) => row.missionId === 'M-revise'), true, '修订契约后托管 Mission 会被捡起');
+    }
+    {
+      const { platform } = world();
+      await waiting(platform, 'M-revise-plain', undefined, undefined);
+      await platform.reviseContract('M-revise-plain', { ...CONTRACT, intent: '改过的契约' });
+      const due = await platform.listAutoResumeDue(NOW);
+      assert.equal(due.some((row) => row.missionId === 'M-revise-plain'), false, '没记托管启动：修订契约也不捡起');
+    }
   });
 });
