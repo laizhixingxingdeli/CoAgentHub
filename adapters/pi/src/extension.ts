@@ -56,6 +56,35 @@ export interface CoagentExtensionOptions {
 	completion: { submitted: boolean; via?: string };
 	/** 每次实际注入简报后通知 runtime；无测得简报时为 undefined。 */
 	onBriefInjected?: (brief: CoagentBriefInjected | undefined) => void;
+	/** 简报走哪条通道：system 拼进系统提示，user 作为用户消息交付一次。缺省 system。 */
+	promptChannel?: "user" | "system";
+}
+
+/**
+ * user 通道下系统提示里只留角色名。
+ *
+ * 上游丢的是 system 角色（压缩会把系统提示挤掉），message 走的是 user，所以
+ * 简报改走用户消息后系统提示里再留全文，就是把同一份内容堆在两处。
+ */
+function promptChannelRoleName(role: Role): string {
+	switch (role) {
+		case "coordinator":
+			return "协调者";
+		case "executor":
+			return "执行者";
+		case "independent_reviewer":
+			return "独立检视者";
+		case "query":
+			return "只读查询";
+		default:
+			// solo 及以后新增的角色都走这条：没有对应的流水线身份时它就是编码 agent。
+			return "编码 agent";
+	}
+}
+
+/** user 通道每轮的那句短系统提示：只报角色名，把权威指向紧随其后的用户消息。 */
+function userChannelSystemPrompt(role: Role): string {
+	return `你的角色是${promptChannelRoleName(role)}。角色规则与本跳简报在紧随其后的用户消息里，以它为准。`;
 }
 
 /**
@@ -83,7 +112,7 @@ const DANGEROUS_GIT = [
 ];
 
 export function createCoagentExtension(opts: CoagentExtensionOptions): ExtensionFactory {
-	const { client, role, cwd, completion, onBriefInjected } = opts;
+	const { client, role, cwd, completion, onBriefInjected, promptChannel = "system" } = opts;
 	const root = resolve(cwd);
 
 	const insideWorktree = (p: unknown): boolean => {
@@ -109,6 +138,12 @@ export function createCoagentExtension(opts: CoagentExtensionOptions): Extension
 		let brief: string | undefined;
 		let briefSources: CoagentBriefInjected["sources"] | undefined;
 		let briefFetched = false;
+		/**
+		 * user 通道只交付一次全文。压缩之后不再重发：上游丢的是 system 角色，
+		 * message 走 user 本来就在会话里；重发既违反「之后不再追加」，又会让同一份
+		 * 简报在会话里再堆一条用户消息。
+		 */
+		let userMessageDelivered = false;
 		pi.on("before_agent_start", async () => {
 			if (!briefFetched) {
 				const loaded = await fetchBrief(client, role);
@@ -125,7 +160,21 @@ export function createCoagentExtension(opts: CoagentExtensionOptions): Extension
 						}
 					: undefined,
 			);
-			return { systemPrompt: injected };
+			if (promptChannel !== "user") {
+				// system 通道字节级不变：返回值里绝不多一个 message 键。
+				return { systemPrompt: injected };
+			}
+			const short = userChannelSystemPrompt(role);
+			if (userMessageDelivered) return { systemPrompt: short };
+			userMessageDelivered = true;
+			return {
+				systemPrompt: short,
+				message: {
+					customType: "coagent-brief",
+					display: false,
+					content: `以最后一份简报为准。\n\n${injected}`,
+				},
+			};
 		});
 
 		pi.on("tool_call", async (event) => {

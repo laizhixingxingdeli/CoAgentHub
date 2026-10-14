@@ -636,3 +636,80 @@ test("协调者机器验证只给编号/通过与否/失败项摘要，不再内
 	console.log(`prefix before=${beforeBytes} after=${afterBytes}`);
 	assert.ok(afterBytes < beforeBytes, "精简后应更小");
 });
+
+test("promptChannel=user 首轮以 coagent-brief 用户消息交付全文，其后只回短系统提示；system 通道字节级不变", async () => {
+	const payload = executorBriefWithBundle();
+
+	// 同一 payload 走今天的 system 通道：用来取简报正文与计量基线。
+	const systemInjected: (CoagentBriefInjected | undefined)[] = [];
+	const { client: systemClient } = recordingClient({
+		get: async () => payload,
+	});
+	const { handlers: systemHandlers, api: systemApi } = stubPi();
+	await createCoagentExtension({
+		client: systemClient,
+		role: "executor",
+		cwd: process.cwd(),
+		completion: { submitted: false },
+		onBriefInjected: (brief) => systemInjected.push(brief),
+	})(systemApi);
+	const brief = briefFromPrompt("executor", await systemHandlers.before_agent_start?.());
+
+	// 显式 promptChannel:"system" 与不传走同一条路径：都没有 message，systemPrompt 字节相同。
+	const { client: explicitSystemClient } = recordingClient({ get: async () => payload });
+	const { handlers: explicitSystemHandlers, api: explicitSystemApi } = stubPi();
+	await createCoagentExtension({
+		client: explicitSystemClient,
+		role: "executor",
+		cwd: process.cwd(),
+		completion: { submitted: false },
+		promptChannel: "system",
+	})(explicitSystemApi);
+
+	const { client, gets } = recordingClient({
+		get: async (path: string) => {
+			gets.push(path);
+			return payload;
+		},
+	});
+	const injected: (CoagentBriefInjected | undefined)[] = [];
+	const { handlers, api } = stubPi();
+	await createCoagentExtension({
+		client,
+		role: "executor",
+		cwd: process.cwd(),
+		completion: { submitted: false },
+		promptChannel: "user",
+		onBriefInjected: (item) => injected.push(item),
+	})(api);
+
+	const SHORT = "你的角色是执行者。角色规则与本跳简报在紧随其后的用户消息里，以它为准。";
+	const first = (await handlers.before_agent_start?.()) as {
+		systemPrompt: string;
+		message?: { customType: string; display: boolean; content: string; details?: unknown };
+	};
+	assert.equal(first.systemPrompt, SHORT);
+	assert.ok(first.message, "首轮必须带用户消息");
+	assert.equal(first.message.customType, "coagent-brief");
+	assert.equal(first.message.display, false);
+	assert.equal("details" in first.message, false);
+	assert.equal(first.message.content, `以最后一份简报为准。\n\n${systemPrompt("executor")}\n\n${brief}`);
+
+	const second = (await handlers.before_agent_start?.()) as { systemPrompt: string };
+	assert.equal(second.systemPrompt, SHORT);
+	assert.equal("message" in second, false, "之后不再追加用户消息");
+	assert.deepEqual(gets, ["run/brief"], "简报仍只取一次");
+
+	assert.equal(injected.length, 2);
+	for (const notice of injected) {
+		assert.ok(notice);
+		assert.equal(notice.renderedUtf8Bytes, Buffer.byteLength(brief, "utf8"));
+		assert.deepEqual(notice.sources, systemInjected[0]?.sources);
+	}
+
+	const systemPlain = (await systemHandlers.before_agent_start?.()) as { systemPrompt: string };
+	const explicitSystem = (await explicitSystemHandlers.before_agent_start?.()) as { systemPrompt: string };
+	assert.equal("message" in systemPlain, false);
+	assert.equal("message" in explicitSystem, false);
+	assert.equal(explicitSystem.systemPrompt, systemPlain.systemPrompt);
+});
