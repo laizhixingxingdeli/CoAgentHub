@@ -2,13 +2,59 @@ import type { AttemptKind, Mission, MissionContract, PlanBody, FinalReview } fro
 import type { ActivityEvent } from '../ports.ts';
 import type { QueueClaimIdentity, ValidationReportView } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
-import { readProjectMemory } from '../project-memory.ts';
+import { readProjectMemory, omitSectionsWithMarker } from '../project-memory.ts';
 import { keepTrueOrUnknownLeaves } from './context-metrics.ts';
 import { coordinatorStartupSources, boundWorkItemForExecutor, withCurrentContractSendBack } from './agent-view-helpers.ts';
 import { buildContextBundle, projectStartupBriefFields, type BoundWorkItem, type ContractCheck, type ContextBundle } from '../context-builder.ts';
 
 interface StartupDeps {
   workItemValidationReportViews(mission: Mission, events?: readonly ActivityEvent[]): Promise<Map<string, ValidationReportView>>;
+}
+
+/**
+ * 这一跳简报里实际包含了哪些全文修订号。
+ *
+ * 读工具（get_contract / get_work_order）据此决定是给全文还是给指向：只有
+ * 「记过 + 修订号一致」才给指向，否则一律全文——不能让 agent 拿旧内容干活。
+ */
+export interface BriefInclusion {
+  contractRevision?: number;
+  orderRevision?: string;
+}
+
+// 键是 missionId + '\0' + attemptId。用 WeakMap 挂在 PlatformContext 上，
+// 不建模块级 Map——coord-1 会串到别的 Mission 上去。
+const briefInclusions = new WeakMap<
+  PlatformContext,
+  Map<string, BriefInclusion>
+>();
+
+function inclusionKey(missionId: string, attemptId: string): string {
+  return `${missionId}\u0000${attemptId}`;
+}
+
+/** 记录这一跳简报里实际包含的契约 / 工单修订号。 */
+export function noteBriefInclusion(
+  ctx: PlatformContext,
+  missionId: string,
+  attemptId: string,
+  inclusion: BriefInclusion,
+): void {
+  let byAttempt = briefInclusions.get(ctx);
+  if (!byAttempt) {
+    byAttempt = new Map();
+    briefInclusions.set(ctx, byAttempt);
+  }
+  byAttempt.set(inclusionKey(missionId, attemptId), inclusion);
+}
+
+/** 读这份简报里记下的包含情况；没取过简报就是 undefined。 */
+export function readBriefInclusion(
+  ctx: PlatformContext,
+  missionId: string,
+  attemptId: string,
+): BriefInclusion | undefined {
+  return briefInclusions.get(ctx)?.get(inclusionKey(missionId, attemptId));
 }
 
 export async function getStartupBrief(
@@ -63,6 +109,9 @@ export async function getStartupBrief(
         projectRules = undefined;
       }
     }
+
+    // 只给 L3 看的章节（标题含「（仅 L3）」）不进任何角色的简报。
+    projectRules = projectRules === undefined ? undefined : omitSectionsWithMarker(projectRules);
 
     if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 0)) {
       throw new PlatformRuleError('INVALID_BUDGET', 'budget 必须是非负安全整数');
@@ -174,7 +223,7 @@ export async function getStartupBrief(
       });
     }
 
-    return {
+    const brief = {
       role: attempt.kind,
       projectId: mission.projectId,
       missionId: mission.id,
@@ -182,6 +231,20 @@ export async function getStartupBrief(
       ...projectStartupBriefFields(contextBundle),
       contextBundle,
     };
+
+    // 已成功构造返回值且审计没抛，才记下这份简报实际包含的修订号。
+    // 只记返回对象里真的有的字段——被预算裁掉或投影里缺省的不记，
+    // 否则读工具会把"没给全文"误判成"给过全文"。
+    const inclusion: BriefInclusion = {};
+    if (brief.contract !== undefined && typeof brief.contractRevision === 'number') {
+      inclusion.contractRevision = brief.contractRevision;
+    }
+    if (brief.workItem?.order !== undefined) {
+      inclusion.orderRevision = brief.workItem.order.orderRevision ?? 'r1';
+    }
+    noteBriefInclusion(ctx, missionId, attemptId, inclusion);
+
+    return brief;
   }
 
   /**

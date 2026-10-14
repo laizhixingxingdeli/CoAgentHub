@@ -1359,6 +1359,40 @@ describe('HTTP 简报与按需引用权限',
           const revised = await platform.reviseContract('M-brief', BRIEF_CONTRACT_R2);
           assert.equal(revised.contractRevision, 2);
 
+          // 取简报**之前**：这一跳简报还没把工单全文送出去，get_work_order 照给全文。
+          const preBriefOrder = await postJson(base, '/api/agent/coagent_get_work_order', {}, execToken);
+          assert.equal(preBriefOrder.status, 200);
+          const preBriefOrderJson = preBriefOrder.json as {
+            workItemId?: string;
+            title?: string;
+            status?: string;
+            order?: { contextRefs?: unknown; objective?: string };
+            missionIntent?: string;
+            guardrails?: unknown;
+            l3SendBackReasons?: unknown;
+          };
+          assert.deepEqual(Object.keys(preBriefOrder.json).sort(), [
+            'guardrails',
+            'l3SendBackReasons',
+            'missionIntent',
+            'order',
+            'status',
+            'title',
+            'workItemId',
+          ]);
+          assert.equal(preBriefOrderJson.workItemId, workItemId);
+          assert.equal(preBriefOrderJson.title, 'W1');
+          assert.equal(preBriefOrderJson.order?.objective, BRIEF_ORDER.objective);
+          assert.deepEqual(preBriefOrderJson.order?.contextRefs, BRIEF_REFS);
+          assert.equal(preBriefOrderJson.missionIntent, BRIEF_CONTRACT_R2.intent);
+          assert.deepEqual(preBriefOrderJson.guardrails, BRIEF_CONTRACT_R2.guardrails);
+          // 此 fixture 是 contract r2 触发的 send_back，从未 reject：只带 L3 理由，
+          // 不带空的 previousRequiredChanges（空数组会被读成「上次要求是空」）。
+          assert.deepEqual(preBriefOrderJson.l3SendBackReasons, [
+            'Contract 已更新到 r2，需要按新契约重新核对',
+          ]);
+          assert.equal(JSON.stringify(preBriefOrderJson.order).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
+
           const coordBriefRes = await getJson(base, '/api/run/brief', coordToken);
           const execBriefRes = await getJson(base, '/api/run/brief', execToken);
           assert.equal(coordBriefRes.status, 200);
@@ -1438,38 +1472,23 @@ describe('HTTP 简报与按需引用权限',
           assert.equal(execDumped.includes('executionResult'), false);
           assert.equal(JSON.stringify(execBrief.workItem).includes('"body"'), false);
 
+          // 取简报**之后**：工单全文已在这跳简报里，只回一句指向——
+          // 带 orderRevision 与 workItemId，没有 order/title/status，
+          // 免得 agent 拿旧修订的正文干活。
           const order = await postJson(base, '/api/agent/coagent_get_work_order', {}, execToken);
           assert.equal(order.status, 200);
-          const orderJson = order.json as {
-            workItemId?: string;
-            title?: string;
-            status?: string;
-            order?: { contextRefs?: unknown; objective?: string };
-            missionIntent?: string;
-            guardrails?: unknown;
-            l3SendBackReasons?: unknown;
-          };
           assert.deepEqual(Object.keys(order.json).sort(), [
-            'guardrails',
-            'l3SendBackReasons',
-            'missionIntent',
-            'order',
-            'status',
-            'title',
+            'orderRevision',
+            'pointer',
             'workItemId',
           ]);
-          assert.equal(orderJson.workItemId, workItemId);
-          assert.equal(orderJson.title, 'W1');
-          assert.equal(orderJson.order?.objective, BRIEF_ORDER.objective);
-          assert.deepEqual(orderJson.order?.contextRefs, BRIEF_REFS);
-          assert.equal(orderJson.missionIntent, BRIEF_CONTRACT_R2.intent);
-          assert.deepEqual(orderJson.guardrails, BRIEF_CONTRACT_R2.guardrails);
-          // 此 fixture 是 contract r2 触发的 send_back，从未 reject：只带 L3 理由，
-          // 不带空的 previousRequiredChanges（空数组会被读成「上次要求是空」）。
-          assert.deepEqual(orderJson.l3SendBackReasons, [
-            'Contract 已更新到 r2，需要按新契约重新核对',
-          ]);
-          assert.equal(JSON.stringify(orderJson.order).includes('SPEC-BODY-MUST-NOT-PREFETCH'), false);
+          assert.equal((order.json as { workItemId?: string }).workItemId, workItemId);
+          assert.equal((order.json as { orderRevision?: string }).orderRevision, 'r1');
+          assert.equal(
+            (order.json as { pointer?: string }).pointer,
+            `工单 ${workItemId} r1 全文已在本跳简报里。`,
+          );
+          assert.equal('order' in (order.json as Record<string, unknown>), false);
 
           const coordOrder = await postJson(base, '/api/agent/coagent_get_work_order', {}, coordToken);
           assert.equal(coordOrder.status, 409);
@@ -1562,21 +1581,32 @@ describe('HTTP 简报与按需引用权限',
           );
           assert.equal(coordContractTool.status, 200);
           assert.equal(execContractTool.status, 200);
+          // 协调者取过简报，且简报里就是同一修订 r2：只回一句指向，不带 contract 键。
           assert.deepEqual(Object.keys(coordContractTool.json).sort(), [
-            'contract',
             'contractRevision',
+            'pointer',
           ]);
           assert.equal(
             (coordContractTool.json as { contractRevision?: number }).contractRevision,
             2,
           );
           assert.equal(
-            (coordContractTool.json as { contract?: { intent?: string } }).contract?.intent,
-            BRIEF_CONTRACT_R2.intent,
+            (coordContractTool.json as { pointer?: string }).pointer,
+            '契约 r2 全文已在本跳简报里。',
           );
+          assert.equal('contract' in (coordContractTool.json as Record<string, unknown>), false);
+          // 执行者简报不含契约，记录里自然没有 contractRevision，仍是全文。
+          assert.deepEqual(Object.keys(execContractTool.json).sort(), [
+            'contract',
+            'contractRevision',
+          ]);
           assert.equal(
             (execContractTool.json as { contractRevision?: number }).contractRevision,
             2,
+          );
+          assert.equal(
+            (execContractTool.json as { contract?: { intent?: string } }).contract?.intent,
+            BRIEF_CONTRACT_R2.intent,
           );
 
           const coordProject = await postJson(
@@ -1617,6 +1647,122 @@ describe('HTTP 简报与按需引用权限',
     );
   },
 );
+
+describe('简报包含后的指向返回与工单预览', () => {
+  test('取简报后 get_work_order/get_contract 给指向；未取或修订已变给全文；get_work_item 缺省给预览', async () => {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const platform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries,
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    const tokens = new RunTokenRegistry();
+    const server = createApi({ platform, tokens, deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const local = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const R300 = 'R'.repeat(300);
+      const order = {
+        objective: '精简测试',
+        allowedScope: ['src/a.ts', 'src/b.ts'],
+        requiredBehaviour: R300,
+        constraints: [],
+        acceptance: ['a'],
+        verification: ['node --test'],
+        doNot: [],
+        contextRefs: ['src/a.ts', 'src/b.ts'],
+      };
+
+      await postJson(local, '/api/missions', {
+        projectId: 'P-slim',
+        missionId: 'M-slim',
+        contract: CONTRACT,
+      });
+      const coord = await postJson(local, '/api/missions/M-slim/coordinator-attempts', {});
+      assert.equal(coord.status, 201);
+      const coordToken = (coord.json as { token?: string }).token as string;
+      await postJson(
+        local,
+        '/api/agent/coagent_update_plan',
+        { findings: 'f', rejectedHypotheses: [], decisions: [], direction: 'd', risks: [] },
+        coordToken,
+      );
+      const wi = await postJson(local, '/api/agent/coagent_create_work_item', { title: 'W-slim', ...order }, coordToken);
+      assert.equal(wi.status, 200);
+      const workItemId = (wi.json as { workItemId: string }).workItemId;
+      // W-334 门禁：Standard 派发前必须先提交当前契约修订的核对结论。
+      await postJson(local, '/api/agent/coagent_submit_contract_check', { verdict: 'ok', summary: '测试契约已核对' }, coordToken);
+      await postJson(local, '/api/agent/coagent_dispatch_work_item', { workItemIds: [workItemId] }, coordToken);
+      const exec = await postJson(local, `/api/missions/M-slim/work-items/${workItemId}/executor-attempts`, {});
+      assert.equal(exec.status, 201);
+      const execToken = (exec.json as { token?: string }).token as string;
+
+      // 未取简报：get_work_order 仍是全文，没有 pointer。
+      const beforeOrder = await postJson(local, '/api/agent/coagent_get_work_order', {}, execToken);
+      assert.equal(beforeOrder.status, 200);
+      assert.equal('pointer' in (beforeOrder.json as Record<string, unknown>), false);
+      assert.equal(typeof (beforeOrder.json as { order?: unknown }).order, 'object');
+
+      // 执行者取简报后：工单全文已在这跳简报里，只给指向。
+      const execBrief = await getJson(local, '/api/run/brief', execToken);
+      assert.equal(execBrief.status, 200);
+      const afterOrder = await postJson(local, '/api/agent/coagent_get_work_order', {}, execToken);
+      assert.equal(afterOrder.status, 200);
+      assert.deepEqual(Object.keys(afterOrder.json).sort(), ['orderRevision', 'pointer', 'workItemId']);
+      assert.equal((afterOrder.json as { pointer?: string }).pointer, `工单 ${workItemId} r1 全文已在本跳简报里。`);
+      assert.equal((afterOrder.json as { orderRevision?: string }).orderRevision, 'r1');
+      assert.equal((afterOrder.json as { workItemId?: string }).workItemId, workItemId);
+      assert.equal('order' in (afterOrder.json as Record<string, unknown>), false);
+
+      // 协调者取简报后：契约全文已在这跳简报里，只给指向。
+      const coordBrief = await getJson(local, '/api/run/brief', coordToken);
+      assert.equal(coordBrief.status, 200);
+      const coordContract = await postJson(local, '/api/agent/coagent_get_contract', {}, coordToken);
+      assert.equal(coordContract.status, 200);
+      assert.deepEqual(Object.keys(coordContract.json).sort(), ['contractRevision', 'pointer']);
+      assert.equal((coordContract.json as { pointer?: string }).pointer, '契约 r1 全文已在本跳简报里。');
+      assert.equal((coordContract.json as { contractRevision?: number }).contractRevision, 1);
+      assert.equal('contract' in (coordContract.json as Record<string, unknown>), false);
+
+      // 契约修订到 r2 后：记的 r1 对不上，get_contract 必须重新给全文。
+      const revised = await platform.reviseContract('M-slim', {
+        intent: '把 Y 修好',
+        acceptance: ['绿'],
+        constraints: [],
+        nonGoals: [],
+        guardrails: [],
+      });
+      assert.equal(revised.contractRevision, 2);
+      const freshContract = await postJson(local, '/api/agent/coagent_get_contract', {}, coordToken);
+      assert.equal(freshContract.status, 200);
+      assert.equal('pointer' in (freshContract.json as Record<string, unknown>), false);
+      assert.equal((freshContract.json as { contractRevision?: number }).contractRevision, 2);
+      assert.equal((freshContract.json as { contract?: { intent?: string } }).contract?.intent, '把 Y 修好');
+
+      // 工单详情：不传 full 给预览（长度 + 开头 200 字），显式 full:true 给原文，非布尔 400。
+      const preview = await postJson(local, '/api/agent/coagent_get_work_item', { workItemId }, coordToken);
+      assert.equal(preview.status, 200);
+      const previewOrder = (preview.json as { order?: { requiredBehaviour?: string; contextRefs?: unknown } }).order;
+      assert.equal(previewOrder?.requiredBehaviour, `（300 字节）${'R'.repeat(200)}`);
+      assert.deepEqual(previewOrder?.contextRefs, [`（23 字节）${JSON.stringify(['src/a.ts', 'src/b.ts'])}`]);
+
+      const fullItem = await postJson(local, '/api/agent/coagent_get_work_item', { workItemId, full: true }, coordToken);
+      assert.equal(fullItem.status, 200);
+      const fullOrder = (fullItem.json as { order?: { requiredBehaviour?: string; contextRefs?: unknown } }).order;
+      assert.equal(fullOrder?.requiredBehaviour, R300);
+      assert.deepEqual(fullOrder?.contextRefs, ['src/a.ts', 'src/b.ts']);
+
+      const badFull = await postJson(local, '/api/agent/coagent_get_work_item', { workItemId, full: 'yes' }, coordToken);
+      assert.equal(badFull.status, 400);
+    } finally {
+      await closeServer(server);
+    }
+  });
+});
 
 type BriefEntry = {
   source: string;

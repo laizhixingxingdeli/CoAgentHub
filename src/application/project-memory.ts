@@ -135,6 +135,40 @@ export function readProjectMemory(projectRoot: string, fallbackName?: string): P
 }
 
 /**
+ * 删掉标题里含 marker 的整节（该行起到下一个同级或更高级标题，子标题属于该节）。
+ *
+ * 用途是让只给 L3 看的历史章节不进协调者/执行者的简报。判准只看**标题行**：
+ * marker 只出现在正文某处时不算，必须原样返回同一个字符串（===），
+ * 否则 `api.test.ts` 里对 projectRules 原文与 hash 的断言会无谓地变红。
+ * markdown 不含 marker 时同样原样返回——不 trim、不动换行。
+ * 只有真的删过节，才用入参实际用的换行符（含 `\r\n` 则用 `\r\n`，否则 `\n`）重新 join。
+ */
+export function omitSectionsWithMarker(markdown: string, marker = '（仅 L3）'): string {
+  if (!markdown.includes(marker)) return markdown;
+  const newline = markdown.includes('\r\n') ? '\r\n' : '\n';
+  const lines = markdown.split(/\r?\n/);
+  const kept: string[] = [];
+  // 被丢掉的那一节的标题层级；遇到同级或更高级标题才结束。
+  let skipLevel = 0;
+  let dropped = false;
+  for (const line of lines) {
+    const heading = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      if (skipLevel !== 0 && level <= skipLevel) skipLevel = 0;
+      if (skipLevel === 0 && heading[2].includes(marker)) {
+        skipLevel = level;
+        dropped = true;
+        continue;
+      }
+    }
+    if (skipLevel !== 0) continue;
+    kept.push(line);
+  }
+  return dropped ? kept.join(newline) : markdown;
+}
+
+/**
  * 在一个还没有 `.coagent/` 的仓库里建出骨架。
  *
  * 只建 `project.md` 和 specs/decisions 占位。内容该由用它的人写；
