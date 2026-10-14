@@ -4,7 +4,7 @@ import type { QueueClaimIdentity, ValidationReportView } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { readProjectMemory } from '../project-memory.ts';
 import { keepTrueOrUnknownLeaves } from './context-metrics.ts';
-import { coordinatorStartupSources, boundWorkItemForExecutor } from './agent-view-helpers.ts';
+import { coordinatorStartupSources, boundWorkItemForExecutor, withCurrentContractSendBack } from './agent-view-helpers.ts';
 import { buildContextBundle, projectStartupBriefFields, type BoundWorkItem, type ContractCheck, type ContextBundle } from '../context-builder.ts';
 
 interface StartupDeps {
@@ -146,7 +146,7 @@ export async function getStartupBrief(
         plan: mission.plan,
         planRevision: mission.planRevision,
         workItem: item ? boundWorkItemForExecutor(mission, item) : undefined,
-        finalReview: mission.finalReview,
+        finalReview: withCurrentContractSendBack(mission.finalReview, mission.contractRevision),
         classification,
         ...(briefSources
           ? {

@@ -4,6 +4,7 @@ import type { StandardAutoRedispatchResult, StandardAutoRedispatchHandoff } from
 import { STANDARD_AUTO_REDISPATCH_EVENT_KIND, STANDARD_AUTO_REDISPATCH_LIMIT, autoRedispatchEventsFor, submissionPrecedesPromotion, autoRedispatchSummary, failedValidationSummary, standardAutoRedispatchHandoff, type StandardAutoRedispatchReason } from './redispatch-helpers.ts';
 import { hasOpenDiagnosticEscalation } from './agent-view-helpers.ts';
 import { submittedAttemptReportId } from './standard-validation.ts';
+import { detectValidatorFailureUnrepairable } from '../promotion/validator-failure-unrepairable-detector.ts';
 
 export async function autoRedispatchStandardWorkItem(ctx: PlatformContext, input: {
     readonly missionId: string;
@@ -109,6 +110,9 @@ export async function standardAutoRedispatchReason(ctx: PlatformContext,
     if (report.workItemId !== undefined && report.workItemId !== item.id) return undefined;
     if (report.attemptId !== submittedAttemptId) return undefined;
     if (report.passed) return undefined; // 机器跑绿：那是 L2 的验收材料，不自动回退
+    // 结构性契约缺陷（invalid_argv / unsupported_scope）：重跑执行者不可能修好，
+    // 自动续派只会把同一份失败再退一次。交给协调者按契约处理，这里明确不自动派。
+    if (detectValidatorFailureUnrepairable({ report }) !== null) return undefined;
     return {
       reason: 'validation_failed',
       reportId: report.id,
