@@ -199,6 +199,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   本能力只投影已有 PlanRun/Mission 和服务内存输出，不改变 `plan-run` 的记录格式、驱动资格、升级决定、停止或合并语义。Web 是无构建的浏览器原生 ES module，只经 `/api/*` 读，不提供启动方案或作
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
   按 `missions/PLAN-*.json` 的资格候选顺序逐项推进；`node src/run-plan.ts` 驱动，独立 JSON PlanRun 记录方案层状态、升级、决定和停止原因，与 Mission 和 Mission 内 
+- **prompt-channel** — 角色提示的通道交付
+  pi 适配层按候选把角色规则与开跑简报放进系统提示或一条用户消息。看不见客户端系统提示的上游（已核实：10Router 的 qdc / qd / cbai）否则会丢掉角色规则与简报。不改 10Router、资源池顺序或候选 facts；上线
 - **query-run** — 独立 QueryRun（只读问答）
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
 - **reviewer-workflow** — 检视者工作流
