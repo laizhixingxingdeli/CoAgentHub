@@ -77,7 +77,7 @@
 |---|---|
 | `src/roles.ts` | 各角色的系统提示词与工具白名单 |
 | `src/tools.ts` | `coagent_*` 平台工具的名字、说明、参数（协调者另有 `coagent_get_validation_report`：只读平台验证报告全文，PI-COM1） |
-| `src/extension.ts` | 每轮注入角色提示词与开跑简报；写入越界、危险 git 命令的拦截 |
+| `src/extension.ts` | 按候选通道注入角色提示词与开跑简报（system 通道拼进系统提示，user 通道首跳作为一条用户消息交付一次，见 `specs/prompt-channel.md`）；写入越界、危险 git 命令的拦截 |
 | `src/agent-entry.ts`、`src/runtime.ts` | 读 stdin 规格、跑 pi 会话、写结果行；执行者没做终结提交就结束时，在同一会话提醒一次（PI-END1）；xAI 额度失败时取重置时间只认 provider 为 xai 的用量行（`appendXaiQuotaReset`，PI-COM1） |
 | `src/failure-classify.ts` | 上游失败分类 |
 | `src/usage.ts` | 用量查询：xAI 与本机 10Router 并发（各 5 秒），xAI 行在前、形状不变；10Router `GET <root>/api/usage/quotas`（默认 `http://127.0.0.1:20128`，`COAGENT_TENROUTER_URL` 可覆盖，不带密钥）按上游聚合成 provider=tenrouter 行（upstream codebuddy-cn / antigravity / qoder-cn ↔ modelPrefix cbcn / ag / qdc）：按层级选可服务桶（汇总桶 → 非礼包总池 → 窗口桶），任一可用即可用，全部明确耗尽才 0/100，resetAt 只给会刷新的未来时刻；规格在 coagent-pi 的 `.coagent/specs/usage.md`（PI-COM1、PI-COM2） |

@@ -99,6 +99,7 @@
 2. 经适配器实测一次（query 角色读一个文件，确认工具调用正常）。
 3. 三种执行角色的配置后端：先读 `GET /api/pools/config`，保留 revision，再经 `POST /api/pools/<role>/configure` 提交完整有序列表。可编辑模型与思考 facts、停用、排序、删除；旧版本拒绝，失败不部分落库。原 `POST /api/pools` 追加入口保留兼容。网页编辑入口仍待前端设计。
 4. 不再通过启动脚本改候选。启动只读配置，不为空池播种；旧 `--coordinator` / `--executor` 参数只做兼容校验，不覆盖实际调度顺序。下一跳重新读取当前启用列表，在途 attempt 保留启动身份。分类用只读角色池尚待独立接线，不能把本阶段标作完整 UI1。
+5. 加候选或换通道前先确认它看得见系统提示：把一个假工单号只放进系统提示问一遍（工具包 `ops/system-prompt-canary.mts`）。10-14 实测 10Router 的 qdc / qd（Qoder）与 cbai（CodeBuddy 国际）通道不把客户端系统提示交给模型（cbai 是 10Router 代码写死丢弃，Qoder 是服务端不交给模型，qd 被限流未能实测），cbcn、xai、openai-codex 看得见。适配层按候选 facts 的 `prompt_channel`（缺省按 tenrouter 的 qdc/、qd/、cbai/ 前缀判 user）把角色规则与简报放进一条用户消息（`specs/prompt-channel.md`）；加了新通道或改了判定后，用工具包 `ops/prompt-channel-e2e.mts` 对真实模型再验一遍，不要只信单测。
 
 ## 9. 检视者值守与统一待办（2026-10-03 后端）
 
