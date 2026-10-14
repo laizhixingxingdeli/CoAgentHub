@@ -17,6 +17,6 @@ MCP 补充工具仅经本机 HTTP，stdio 采用逐行 JSON-RPC、初始化握�
 空档提交要求项目没有未结束且未 park 的 Mission，没有 in_progress Attempt，目标为干净集成分支。文档和生成 VIBE.md 在隔离 worktree 提交，再核对 root HEAD/分支/干净状态并 fast-forward 落地；不改 root 未提交文件或索引。禁止路径遍历、符号链接和 Windows 设备名。Git 成功/队列确认丢失可凭提交标记及目标内容恢复，不重复提交；未处理文档阻止源 Mission 归档。
 
 ## Codex L3 插件托管入口（2026-10-04）
-coagenthub-codex 0.2.2 经 POST /api/missions 创建 Standard Mission，经 POST /api/control/run-mission 启动服务托管运行。Contract 由平台保存并在启动时读取，Delivery 接收方来自真实会话绑定或显式 recipient；start 不能覆盖合同。GET /api/platform/status 仅返回持锁身份和运行观测，不让适配器访问状态文件。插件消费 NDJSON 长流并提供进程内有界观测；HTTP受理、启动确认、退出和业务交卷是不同状态，断流未知不自动重试。当前未实现跨 MCP 实例的启动去重，应先核实真实 runner；Delivery 仍由原桥接器实际投递后确认。
+coagenthub-codex 0.2.3 经 POST /api/missions 创建 Standard Mission。契约只放目标、验收、范围、红线；实机观察与恢复指令写成证据文件、经升级答复下发，不写进契约。覆盖旧条款时删掉旧的；契约超过约 5 千字或修订超过 3 次就拆票重写。实机项目一票验证一个假设，先让设备经已打通的通道自报状态；不在契约里指定模型，按资源池顺序。集成分支合入由检视者签，合主干要用户签。要点见 docs/l3-guide.md「契约与难以自动验证的项目」，经 POST /api/control/run-mission 启动服务托管运行。Contract 由平台保存并在启动时读取，Delivery 接收方来自真实会话绑定或显式 recipient；start 不能覆盖合同。GET /api/platform/status 仅返回持锁身份和运行观测，不让适配器访问状态文件。插件消费 NDJSON 长流并提供进程内有界观测；HTTP受理、启动确认、退出和业务交卷是不同状态，断流未知不自动重试。当前未实现跨 MCP 实例的启动去重，应先核实真实 runner；Delivery 仍由原桥接器实际投递后确认。
 
 插件值守补充 coagenthub_get_pools/get_pool_config/configure_role_pool，经既有候选健康和整角色配置接口处理，携带实际 revision，保留未相关配置；不读取凭据。文档经 coagenthub_get_document_proposals/decide_document 独立读取与裁决，approve/edit/withdraw 保留平台 revision/baseHash 和空档提交门禁。
