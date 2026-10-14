@@ -1,6 +1,6 @@
 import type { MissionView } from './platform/types.ts';
 import { describeResidue, type Platform } from './platform.ts';
-import { normalizeScopePath } from './scope-paths.ts';
+import { isJunkPath, normalizeScopePath, scopeMatches } from './scope-paths.ts';
 import { CheckpointRejectedError, type WorkspaceManager } from './workspace.ts';
 
 /**
@@ -48,6 +48,9 @@ export class HopGuards {
         committed: outcome.committed,
         left: outcome.left,
         ...(outcome.commit !== undefined ? { commit: outcome.commit } : {}),
+        ...((outcome.archived?.length ?? 0) > 0
+          ? { archived: outcome.archived, archiveWhen: 'settle' as const }
+          : {}),
       });
     } catch (error) {
       await this.#platform
@@ -63,15 +66,15 @@ export class HopGuards {
   }
 
   /**
-   * 工单开跑前核对工作区：脏路径要么属于这张工单，要么是它自己上一次尝试留下的。
+   * 工单开跑前核对工作区。
    *
-   * - 落在本工单授权范围内的：并入（恢复单正是这样收口残留的），记下原来的来源；
-   * - 本工单自己上一次验证留下的、或重派时来源没记录的：沿用，续派交接里已经点名；
-   * - 其余（别的工单的验证留下的，或首次派发时凭空出现的）：不启动执行者，把工单收成 blocked。
+   * - 范围内的残留：并入（恢复单正是这样收口残留的），记下原来的来源；
+   * - 范围内的杂文件：不算越界，移出工作树存档（与检查点同一套分类）；
+   * - 其余不属于本工单的脏改动：交给 workspace.archiveDisallowed 移出工作树存档，
+   *   不再把工单收成 blocked。改动不提交也不删除，存档在工作树之外，有事件记下来源。
    *
-   * 读不出工作区状态、或核对本身出错（读来源事件、写收尾失败）时放行：后面的检查点是最终防线，
-   * 这一道只是把「必然被检查点拒掉」的一跳提前拦在花钱之前——它自己出错不能反过来让整次运行崩掉。
-   * 返回 blocked 表示工单已转交协调者，调用方不要再启动执行者。
+   * 读不出工作区状态、或核对本身出错（读来源事件、存档、写事件失败）时放行：
+   * 后面的检查点是最终防线，这一道不许反过来让整次运行崩掉。
    */
   async preflightWorkspace(missionId: string, item: WorkItemView, cwd: string): Promise<'ok' | 'blocked'> {
     const scope = item.order?.allowedScope;
@@ -79,7 +82,7 @@ export class HopGuards {
     try {
       const dirty = await this.#workspace.dirtyPaths(cwd);
       if (dirty.length === 0) return 'ok';
-      return await this.#screenDirtyPaths(missionId, item, scope, dirty);
+      return await this.#screenDirtyPaths(missionId, item, scope, dirty, cwd);
     } catch {
       return 'ok';
     }
@@ -90,31 +93,34 @@ export class HopGuards {
     item: WorkItemView,
     scope: readonly string[],
     dirty: readonly string[],
+    cwd: string,
   ): Promise<'ok' | 'blocked'> {
-    const allowed = new Set(scope.map((entry) => normalizeScopePath(entry)));
-    const origins = await this.#platform.attributeWorkspacePaths(missionId, dirty);
-    const firstDispatch = item.attemptIds.length === 0;
-    const adopted: string[] = [];
-    const foreign: string[] = [];
-    for (const path of dirty) {
-      if (allowed.has(path)) {
-        adopted.push(path);
-        continue;
-      }
-      const origin = origins[path];
-      const ownResidue = origin !== undefined ? origin.workItemId === item.id : !firstDispatch;
-      if (!ownResidue) foreign.push(path);
+    const allowed = scope.map((entry) => normalizeScopePath(entry));
+    const inScope = (path: string): boolean =>
+      !isJunkPath(path) && allowed.some((entry) => scopeMatches(entry, path));
+    const foreign = dirty.filter((path) => !inScope(path));
+    // 范围外（含杂文件、被忽略的）一律移出工作树存档，不再拦下执行者。
+    let archived: readonly { path: string; archivePath: string; tracked: boolean }[] = [];
+    if (foreign.length > 0 && this.#workspace.archiveDisallowed) {
+      archived = await this.#workspace.archiveDisallowed(cwd, missionId, item.id, scope);
     }
-    if (foreign.length > 0) {
-      const blocked = await this.#platform.blockWorkItemForWorkspace({
-        missionId,
-        workItemId: item.id,
-        paths: foreign,
-        origins,
-      });
-      if (blocked.converted) return 'blocked';
+    if (archived.length > 0) {
+      // 记事件失败不能让开跑崩掉；存档已经完成，工作树已经干净了。
+      await this.#platform
+        .recordValidationSettlement({
+          missionId,
+          workItemId: item.id,
+          committed: [],
+          left: [],
+          archived,
+          archiveWhen: 'preflight',
+        })
+        .catch(() => undefined);
     }
+    const moved = new Set(archived.map((record) => record.path));
+    const adopted = dirty.filter((path) => inScope(path) && !moved.has(path));
     if (adopted.length > 0) {
+      const origins = await this.#platform.attributeWorkspacePaths(missionId, adopted);
       await this.#platform
         .recordResidueAdopted({ missionId, workItemId: item.id, paths: adopted, origins })
         .catch(() => undefined);

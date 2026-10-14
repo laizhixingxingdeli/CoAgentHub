@@ -24,12 +24,18 @@
  */
 
 import { execFile } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { canonicalPath } from './canonical-path.ts';
-import { describeScopeIssues, exactFileScopeIssues, normalizeScopePath } from './scope-paths.ts';
+import {
+  describeScopeIssues,
+  exactFileScopeIssues,
+  isJunkPath,
+  normalizeScopePath,
+  scopeMatches,
+} from './scope-paths.ts';
 
 const run = promisify(execFile);
 
@@ -126,6 +132,18 @@ export interface WorkspaceSettleOutcome {
   readonly commit?: string;
   /** 范围外、原样保留的脏路径。 */
   readonly left: readonly string[];
+  /** 本次移出工作树存档的范围外 / 杂 / 被忽略路径（范围内可提交的不在此列）。 */
+  readonly archived?: readonly ScopeArchiveRecord[];
+}
+
+/**
+ * 一条被移出工作树存档的脏路径。`archivePath` 指向工作树之外的存档，
+ * 已跟踪文件存的是补丁（可 `git apply` 找回），未跟踪文件是原样移走的那份。
+ */
+export interface ScopeArchiveRecord {
+  readonly path: string;
+  readonly archivePath: string;
+  readonly tracked: boolean;
 }
 
 export type CheckpointRejectionCode =
@@ -133,6 +151,48 @@ export type CheckpointRejectionCode =
   | 'ambiguous_scope'
   | 'index_outside_scope'
   | 'unparseable_status';
+
+/** 对 dirtyPaths 的每条按同一份判据分类：杂文件 / 被忽略 / 范围内可提交 / 范围外存档。 */
+type DirtyClass = 'committable' | 'junk' | 'ignored' | 'outside';
+
+async function classifyDirty(
+  cwd: string,
+  path: string,
+  allowed: readonly string[],
+): Promise<DirtyClass> {
+  if (isJunkPath(path)) return 'junk';
+  // 杂文件之外的被 .gitignore 忽略路径：即使写进了 allowedScope 也不 add -f、不报错。
+  // git check-ignore 退出码 0 = 被忽略、1 = 未忽略，其余（仓库坏了等）是 git 真故障，向上抛。
+  try {
+    await run('git', ['check-ignore', '-q', '--', path], { cwd });
+    return 'ignored';
+  } catch (error) {
+    const code = (error as { code?: number | string }).code;
+    if (code !== 1 && code !== '1') throw error;
+  }
+  return allowed.some((entry) => scopeMatches(entry, path)) ? 'committable' : 'outside';
+}
+
+/** 未跟踪文件靠 rename 移出工作树，目标父目录先建好。 */
+function archiveUntracked(cwd: string, path: string, archiveRoot: string): ScopeArchiveRecord {
+  const dst = join(archiveRoot, path);
+  mkdirSync(dirname(dst), { recursive: true });
+  renameSync(join(resolve(cwd), path), dst);
+  return { path, archivePath: dst.replace(/\\/g, '/'), tracked: false };
+}
+
+/**
+ * 已跟踪文件先存补丁再还原（`git restore` 回到 HEAD，工作区与 index 一起干净）。
+ * 不 rm、不 git clean：还原成 HEAD 内容，存档里的补丁能原样找回改动。
+ */
+async function archiveTracked(cwd: string, path: string, archiveRoot: string): Promise<ScopeArchiveRecord> {
+  const patch = (await run('git', ['diff', 'HEAD', '--', path], { cwd })).stdout;
+  const dst = join(archiveRoot, `${path}.patch`);
+  mkdirSync(dirname(dst), { recursive: true });
+  writeFileSync(dst, patch);
+  await run('git', ['restore', '--source=HEAD', '--staged', '--worktree', '--', path], { cwd });
+  return { path, archivePath: dst.replace(/\\/g, '/'), tracked: true };
+}
 
 /**
  * 检查点拒绝。除了人读的 message，还带结构化的原因码与路径：
@@ -200,17 +260,35 @@ export interface WorkspaceManager {
     pinnedBase?: string,
   ): Promise<PreparedWorkspace>;
   head(cwd: string): Promise<string>;
-  /** Commit only the explicitly authorized work-item paths; unsupported by in-place mode. */
-  checkpoint?(cwd: string, missionId: string, workItemId: string, allowedPaths: readonly string[]): Promise<void>;
+  /**
+   * 提交授权范围内的脏改动；范围外的（含杂文件、被 .gitignore 忽略的）移出工作树存档，
+   * 不提交也不删除。返回本次存档清单，没有存档时为 `[]`。仅原地模式不提供。
+   */
+  checkpoint?(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    allowedPaths: readonly string[],
+  ): Promise<void | readonly ScopeArchiveRecord[]>;
+  /**
+   * 只把范围外 / 杂 / 被忽略的脏路径移出工作树存档，不提交任何东西。
+   * 检查点与收口共用同一套分类与存档；仅原地模式不提供。
+   */
+  archiveDisallowed?(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    allowedPaths: readonly string[],
+  ): Promise<readonly ScopeArchiveRecord[]>;
   /**
    * 工作区里还没提交的路径（已修改、已暂存、未跟踪），相对路径、`/` 分隔。读不出来就抛错。
    * 验证命令的副作用、开跑前的工作区检查都靠它；原地模式没有隔离工作区，不提供。
    */
   dirtyPaths?(cwd: string): Promise<readonly string[]>;
   /**
-   * 验证跑完后收口：只提交落在 allowedPaths 里的脏路径，范围外的原样留着、不删不提交，
-   * 作为 `left` 报告出来。和 checkpoint 的区别是不因范围外的脏路径而失败——
-   * 那是验证命令已经留下的事实，要由后面的门禁点名，而不是在这里再抛一次错。
+   * 验证跑完后收口：提交落在 allowedPaths 里的脏路径，范围外的（含杂 / 被忽略）移出工作树
+   * 存档，不提交也不删除，作为 `archived` 报告出来。和 checkpoint 的区别是它不因范围外的
+   * 脏路径而失败——那是验证命令已经留下的事实，要由后面的门禁点名，而不是在这里再抛一次错。
    */
   settle?(cwd: string, input: WorkspaceSettleInput): Promise<WorkspaceSettleOutcome>;
   /** Read-only assertion that an isolated Mission worktree has no tracked, staged, or untracked changes. */
@@ -504,30 +582,113 @@ export class GitWorktreeManager implements WorkspaceManager {
         issues.map((issue) => issue.entry),
       );
     }
-    const allowed = new Set(input.allowedPaths.map((path) => normalizeScopePath(path)));
+    const allowed = input.allowedPaths.map((path) => normalizeScopePath(path));
     const dirty = await this.dirtyPaths(cwd);
-    const committable = dirty.filter((path) => allowed.has(path));
-    const left = dirty.filter((path) => !allowed.has(path));
-    if (committable.length === 0) return { committed: [], left };
-    // pathspec 一律按字面量理解，并且 commit 也限定在这些路径上：index 里即便有别的暂存内容也不会被带进来。
-    await run('git', ['--literal-pathspecs', 'add', '-A', '--', ...committable], { cwd });
+    if (dirty.length === 0) return { committed: [], left: [], archived: [] };
+    // 与 checkpoint 复用同一套分类 / 存档：杂文件、被忽略的、范围外的都不提交，
+    // 移出工作树存档；范围内可提交的照常提交。
+    const { committable, archived } = await this.#archiveDisallowed(cwd, input.missionId, input.workItemId, dirty, allowed);
+    // left 只剩“未能移走”的路径；存档成功后为 []（存档不删不丢，已移出工作树）。
+    const moved = new Set(archived.map((record) => record.path));
+    const left = dirty.filter((path) => !moved.has(path) && !committable.includes(path));
+    let commit: string | undefined;
+    if (committable.length > 0) {
+      commit = await this.#commitPaths(cwd, committable, `chore(mission): ${input.workItemId} ${input.label} ${input.missionId}`);
+    }
+    return { committed: committable, ...(commit !== undefined ? { commit } : {}), left, archived };
+  }
+
+  /** 把 dirty 分成可提交 / 需存档，并把需存档的移出工作树。返回分类结果与存档清单。 */
+  async #archiveDisallowed(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    dirty: readonly string[],
+    allowed: readonly string[],
+  ): Promise<{ committable: string[]; archived: ScopeArchiveRecord[] }> {
+    const committable: string[] = [];
+    const toArchive: string[] = [];
+    for (const path of dirty) {
+      const kind = await classifyDirty(cwd, path, allowed);
+      if (kind === 'committable') committable.push(path);
+      else toArchive.push(path);
+    }
+    return { committable, archived: await this.#archivePaths(cwd, missionId, workItemId, toArchive) };
+  }
+
+  /**
+   * 把路径移出工作树存档。存档目录在工作树之外、仓库不跟踪：
+   * `<cwd 的父目录>/.scope-archive/<missionId>/<workItemId>/<stamp>/`。
+   * 已跟踪存补丁后还原，未跟踪原样 rename；不提交、不删除。
+   */
+  async #archivePaths(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    paths: readonly string[],
+  ): Promise<ScopeArchiveRecord[]> {
+    if (paths.length === 0) return [];
+    const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const archiveRoot = join(dirname(resolve(cwd)), '.scope-archive', missionId, workItemId, stamp);
+    const trackedList = (await run('git', ['ls-files', '-z', '--', ...paths], { cwd })).stdout
+      .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
+    const isTracked = new Set(trackedList);
+    const records: ScopeArchiveRecord[] = [];
+    for (const path of paths) {
+      records.push(
+        isTracked.has(path)
+          ? await archiveTracked(cwd, path, archiveRoot)
+          : archiveUntracked(cwd, path, archiveRoot),
+      );
+    }
+    return records;
+  }
+
+  /** 只存档、不提交。开跑前核对用它把范围外的脏改动从工作树里移走。 */
+  async archiveDisallowed(
+    cwd: string,
+    missionId: string,
+    workItemId: string,
+    allowedPaths: readonly string[],
+  ): Promise<readonly ScopeArchiveRecord[]> {
+    const allowed = allowedPaths.map((path) => normalizeScopePath(path));
+    const dirty = await this.dirtyPaths(cwd);
+    if (dirty.length === 0) return [];
+    const { archived } = await this.#archiveDisallowed(cwd, missionId, workItemId, dirty, allowed);
+    return archived;
+  }
+
+  /**
+   * pathspec 一律按字面量理解。已跟踪文件被 `git rm` 之后工作区里没有这个路径，
+   * `--literal-pathspecs add -A` 会 exit 128（pathspec 不匹配任何文件），所以存在的
+   * 路径走 literal `add -A`，已不存在的路径走 `git update-index --remove`（把删除记进 index；
+   * `git add -u -- <缺失路径>` 同样会因 pathspec 不匹配而 exit 128，用不得）。
+   * 只 add 分类为可提交的具体路径，不 add 目录条目本身。
+   */
+  async #commitPaths(cwd: string, paths: readonly string[], message: string): Promise<string> {
+    const missing: string[] = [];
+    const present: string[] = [];
+    for (const path of paths) {
+      (existsSync(join(resolve(cwd), path)) ? present : missing).push(path);
+    }
+    if (missing.length > 0) await run('git', ['update-index', '--remove', '--', ...missing], { cwd });
+    if (present.length > 0) await run('git', ['--literal-pathspecs', 'add', '-A', '--', ...present], { cwd });
+    // commit 不传 pathspec：对已删除路径 `--literal-pathspecs commit -- <path>` 同样 exit 128。
+    // 先确认暂存区里的路径都在本次 paths 里，再无 pathspec 提交：index 里即便有别的暂存
+    // 内容也不会被带进来，越界由调用方（checkpoint）显式判成故障。
+    const wanted = new Set(paths);
+    const staged = (await run('git', ['diff', '--cached', '--name-only', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
+    const extra = staged.filter((path) => !wanted.has(path));
+    if (extra.length > 0) {
+      throw new Error(`暂存区包含本次提交之外的路径：${extra.join(', ')}`);
+    }
     await run(
       'git',
-      [
-        '--literal-pathspecs',
-        '-c',
-        'user.name=coagenthub',
-        '-c',
-        'user.email=noreply@local',
-        'commit',
-        '-m',
-        `chore(mission): ${input.workItemId} ${input.label} ${input.missionId}`,
-        '--',
-        ...committable,
-      ],
+      ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', message],
       { cwd },
     );
-    return { committed: committable, commit: await this.head(cwd), left };
+    return this.head(cwd);
   }
 
   async checkpoint(
@@ -535,7 +696,7 @@ export class GitWorktreeManager implements WorkspaceManager {
     missionId: string,
     workItemId: string,
     allowedPaths: readonly string[],
-  ): Promise<void> {
+  ): Promise<readonly ScopeArchiveRecord[]> {
     if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
       throw new Error('检查点授权路径不能为空');
     }
@@ -548,25 +709,18 @@ export class GitWorktreeManager implements WorkspaceManager {
         issues.map((issue) => issue.entry),
       );
     }
-    const allowed = new Set<string>(allowedPaths.map((path) => normalizeScopePath(path)));
-    const dirty = new Set(await this.dirtyPaths(cwd));
-    const outside = [...dirty].filter((path) => !allowed.has(path));
-    if (outside.length) {
-      throw new CheckpointRejectedError(
-        'unauthorized_paths',
-        `检查点包含未授权改动：${outside.join(', ')}`,
-        outside,
-      );
+    const allowed = allowedPaths.map((path) => normalizeScopePath(path));
+    const dirty = await this.dirtyPaths(cwd);
+    if (dirty.length === 0) return [];
+    // 范围外的脏文件不再抛 unauthorized_paths：存档后移出工作树，范围内的照常提交。
+    const { committable, archived } = await this.#archiveDisallowed(cwd, missionId, workItemId, dirty, allowed);
+    if (committable.length > 0) {
+      await this.#commitPaths(cwd, committable, `chore(mission): ${workItemId} 检查点 ${missionId}`);
     }
-    if (dirty.size === 0) return;
-    const tracked = new Set((await run('git', ['ls-files', '-z'], { cwd })).stdout.split('\0').filter(Boolean));
-    const trackedAllowed = [...allowed].filter((path) => tracked.has(path));
-    if (trackedAllowed.length > 0) await run('git', ['add', '-u', '--', ...trackedAllowed], { cwd });
-    const present = [...allowed].filter((path) => existsSync(join(resolve(cwd), path)));
-    if (present.length > 0) await run('git', ['add', '--', ...present], { cwd });
+    // 存档之后 index 里若仍有范围外的暂存，是真故障（不该由我们造成）。
     const staged = (await run('git', ['diff', '--cached', '--name-only', '-z'], { cwd })).stdout
       .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
-    const stagedOutside = staged.filter((path) => !allowed.has(path));
+    const stagedOutside = staged.filter((path) => !allowed.some((entry) => scopeMatches(entry, path)));
     if (stagedOutside.length) {
       throw new CheckpointRejectedError(
         'index_outside_scope',
@@ -574,8 +728,7 @@ export class GitWorktreeManager implements WorkspaceManager {
         stagedOutside,
       );
     }
-    if (staged.length === 0) return;
-    await run('git', ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', `chore(mission): ${workItemId} 检查点 ${missionId}`], { cwd });
+    return archived;
   }
 
   async getMissionConflictFiles(missionId: string, projectRoot: string): Promise<string[]> {

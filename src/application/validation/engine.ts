@@ -20,7 +20,7 @@ import type {
 import type { Clock, IdGenerator } from '../ports.ts';
 import type { ChangedPathReader, CommandRunner, DiffFactReader, DiffLineFacts } from './ports.ts';
 import { redactSecrets } from '../redact.ts';
-import { isEscapePath, normalizeScopePath, scopeMatches } from '../scope-paths.ts';
+import { isEscapePath, isJunkPath, normalizeScopePath, scopeMatches } from '../scope-paths.ts';
 
 export const VALIDATION_POLICY_REVISION = 1;
 export const OUTPUT_TAIL_MAX_CHARS = 4096;
@@ -52,6 +52,8 @@ export interface ValidationInput {
   readonly forbiddenPaths?: readonly string[];
   /** 显式体积上限；`undefined` = 检查不在 force。 */
   readonly diffSize?: WorkOrderValidationDiffSize;
+  /** Standard 路径置 true：diff-size 超限或无法计量只提醒，不让整份报告失败（maxChangedFiles 0 仍硬卡）。 */
+  readonly diffSizeAdvisory?: boolean;
 }
 
 export interface ValidationEngineResult {
@@ -98,7 +100,7 @@ export class ValidationEngine {
     }
 
     const endedAt = this.#clock.now().toISOString();
-    const passed = checks.every((c) => c.passed);
+    const passed = checks.every((c) => c.passed || c.advisory === true);
 
     const report = freezeDeep({
       id: this.#ids.next('VR'),
@@ -325,12 +327,19 @@ export class ValidationEngine {
     // 预算（budget-usage 的 compareUsage）仍是 `>=`：那是「下一步动作前」的闸，用满额度就不该
     // 再开新的一跳；这里是对已经产出的结果做事后检查，两者语义本来就不同。
     const over = overLimitMessages(limits, used);
+    const zeroCodeHard = limits.maxChangedFiles === 0;
+    const remind =
+      input.diffSizeAdvisory === true && !zeroCodeHard && (unknown.length > 0 || over.length > 0);
+    const passed = unknown.length === 0 && over.length === 0;
     return freezeDeep({
       kind: 'diff-size' as const,
-      passed: unknown.length === 0 && over.length === 0,
+      passed,
       startedAt,
       endedAt,
-      summary: diffSizeSummary(unknown, over, used, facts.unmeasurable),
+      ...(remind ? { advisory: true as const } : {}),
+      summary: remind
+        ? `diff-size advisory: ${diffSizeSummary(unknown, over, used, facts.unmeasurable)}`
+        : diffSizeSummary(unknown, over, used, facts.unmeasurable),
       diffSize: {
         limits: Object.freeze({ ...limits }),
         used: Object.freeze({ ...used }),
@@ -519,6 +528,7 @@ function copyCheck(check: ValidationCheckResult): ValidationCheckResult {
     endedAt: check.endedAt,
     summary: check.summary,
     ...(check.failureCode !== undefined ? { failureCode: check.failureCode } : {}),
+    ...(check.advisory === true ? { advisory: true as const } : {}),
   };
   if (check.command) {
     return {
@@ -651,6 +661,9 @@ function evaluateChangedPaths(
 
   const violations: string[] = [];
   for (const path of actual) {
+    // 杂文件（__pycache__ / .pyc / .pyo / .DS_Store …）不算越界：它们是工具生成的垃圾，
+    // 不是执行者扩大范围写的代码，检查点那边也只存档不提交。
+    if (isJunkPath(path)) continue;
     if (isEscapePath(path) || path === '') {
       violations.push(path);
       continue;

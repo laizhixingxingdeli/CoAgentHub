@@ -2759,7 +2759,19 @@ export class Orchestrator {
             if (!input.workItemId || !Array.isArray(allowedScope) || allowedScope.length === 0) {
               throw new Error(`缺少工作项 ${input.workItemId ?? '(未指定)'} 的冻结 allowedScope，无法检查点`);
             }
-            await this.#workspace.checkpoint(input.cwd, input.missionId, input.workItemId, allowedScope);
+            const archived = await this.#workspace.checkpoint(input.cwd, input.missionId, input.workItemId, allowedScope);
+            if (Array.isArray(archived) && archived.length > 0 && input.workItemId) {
+              await this.#platform
+                .recordValidationSettlement({
+                  missionId: input.missionId,
+                  workItemId: input.workItemId,
+                  committed: [],
+                  left: [],
+                  archived,
+                  archiveWhen: 'checkpoint',
+                })
+                .catch(() => undefined);
+            }
           } else if (!(this.#workspace instanceof InPlaceWorkspaceManager)) {
             throw new Error('WorkspaceManager 未实现 checkpoint，无法验证已交回成果');
           }

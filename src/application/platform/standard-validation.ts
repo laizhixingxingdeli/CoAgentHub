@@ -193,6 +193,8 @@ export async function validateStandardWorkItem(ctx: PlatformContext, input: {
       })),
       ...(forbiddenPaths !== undefined ? { forbiddenPaths: [...forbiddenPaths] } : {}),
       ...(diffSize !== undefined ? { diffSize: copyDiffSizeLimits(diffSize) } : {}),
+      // Standard：diff-size 超限或无法计量只提醒，不卡报告（maxChangedFiles 0 仍在 engine 里硬卡）。
+      diffSizeAdvisory: true,
     });
 
     // 跑命令可能要几分钟，不能占着事务（与 Lightweight 同理）：跑完再开事务存报告 + 记事件。

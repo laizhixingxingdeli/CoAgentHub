@@ -634,6 +634,26 @@ const EVENT_TABLE = {
     };
   },
 
+  // 范围外 / 杂 / 被忽略的脏改动被移出工作树存档：不提交也不删除，改动在工作树之外可找回。
+  // 来源沿用现有归因：哪张工单的验证命令 / 执行者 / 来源不明。
+  'workspace.scope_archived': (event) => {
+    const data = (event && event.data) || {};
+    const entries = list(data.entries);
+    const sourceText = (entry) => {
+      if (entry.source === 'validation') return `${entry.originWorkItemId || '（未知工单）'} 的验证`;
+      if (entry.source === 'executor') return `${entry.originWorkItemId || '（未知工单）'} 的执行者`;
+      return '来源不明';
+    };
+    const detail = entries.length
+      ? entries.map((entry) => `${entry.path}（存档于 ${entry.archivePath}，${sourceText(entry)}）`).join('；')
+      : '（无路径）';
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '范围外改动已存档',
+      detail,
+    };
+  },
+
   // Mission 级模型约束：协调者 / 执行者允许用哪些模型，平台在派发前强制。最新一条生效，旧的留在历史里。
   'mission.model_policy_set': (event) => {
     const data = (event && event.data) || {};

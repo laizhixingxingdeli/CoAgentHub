@@ -2,9 +2,10 @@
  * 工作区卫生（P0：验证与检查点闭环）——真 git worktree 上的端到端。
  *
  * 案例（MiRing-V0-probe）：验证命令在 Mission 工作区里改文件（构建改写文档、安装脚本追加记录），
- * 发生在执行者的检查点之后，没人收口；下一张工单交卷时被检查点以「越界」拒掉。
- * 这里守三件事：授权范围内的验证副作用被收口提交；范围外的改动原样保留并在下一张工单
- * 开跑前被拦下（不启动执行者、说清来源）；范围内的残留被并入并留记录。
+ * 发生在执行者的检查点之后，没人收口。这里守四件事：授权范围内的验证副作用被收口提交；
+ * 范围外的改动（含杂文件、被 .gitignore 忽略的）**移出工作树存档**——不提交也不删除，
+ * 存档在工作树之外可找回，并且不再把下一张工单收成 blocked；机器验证照旧点名越界；
+ * 范围内的残留被并入并留记录。
  */
 
 import { after, describe, test } from 'node:test';
@@ -12,12 +13,13 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createApi } from '../src/api/server.ts';
 import { RunTokenRegistry } from '../src/api/run-tokens.ts';
+import { narrateEvent } from '../src/web/narrate.js';
 import {
   FixedClock,
   InMemoryActivityLog,
@@ -254,8 +256,8 @@ describe('验证后收口：授权范围内的副作用提交，下一张工单�
   });
 });
 
-describe('验证留下范围外的改动：保留、记来源、不提交，验证报告判失败（不静默放行）', () => {
-  test('验证命令在授权范围外生成文件：文件原样留着，没有被提交或删除；报告点名它；事件记下是谁的验证留下的', async () => {
+describe('验证留下范围外的改动：移出工作树存档、记来源、不提交、不删除（不静默放行）', () => {
+  test('验证命令在授权范围外生成文件：文件不在工作树、没被提交或删除；报告点名它；事件记下是谁的验证留下的', async () => {
     const repo = gitRepo();
     const runner: CommandRunner = {
       run: async ({ cwd }) => {
@@ -276,6 +278,7 @@ describe('验证留下范围外的改动：保留、记来源、不提交，验�
             { tool: 'coagent_dispatch_work_item', body: (previous) => ({ workItemIds: [previous.workItemId] }) },
           ],
         },
+        'coordinator:-:1': { steps: [{ tool: 'coagent_get_mission', body: {} }] },
       },
       executorScripts: { 'executor:W-1': executorScript(['src/foo.ts']) },
       effects: (spec) => writeFileSync(join(spec.cwd, 'src', 'foo.ts'), 'export const foo = 1;\n'),
@@ -284,21 +287,52 @@ describe('验证留下范围外的改动：保留、记来源、不提交，验�
     await h.orchestrator.runMission('M-stray', { projectRoot: repo, maxRounds: 2 });
 
     const worktree = h.workspace.worktreePath('M-stray', repo);
-    assert.equal(readFileSync(join(worktree, 'scratch', 'cache.tmp'), 'utf8'), 'build leftovers\n', '范围外的改动原样保留');
-    assert.match(git(worktree, 'status', '--porcelain'), /scratch\//, '没有被提交，也没有被删');
+    // 存档：文件不得留在工作树，也不得被提交；存档内容仍找得回。
+    assert.equal(existsSync(join(worktree, 'scratch', 'cache.tmp')), false, '范围外的改动已移出工作树');
+    assert.equal(git(worktree, 'status', '--porcelain'), '', '存档后工作区干净');
     assert.doesNotMatch(git(worktree, 'log', '--format=%s'), /验证副作用/, '范围外的不自动提交');
+    assert.equal(
+      git(worktree, 'ls-files', '--', 'scratch/cache.tmp'),
+      '',
+      '没有被跟踪或提交',
+    );
 
-    const [settled] = await eventsOf(h, 'M-stray', 'workspace.validation_settled');
-    const data = settled!.data as { committed: string[]; left: string[]; reportId?: string };
-    assert.deepEqual(data.committed, []);
-    assert.deepEqual(data.left, ['scratch/cache.tmp']);
-    assert.equal(settled!.workItemId, 'W-1', '记在这张工单名下：之后能查到残留是谁的验证留下的');
+    // 这条存档是执行者交卷时的检查点做的。
+    const [archivedEvent] = await eventsOf(h, 'M-stray', 'workspace.scope_archived');
+    const archived = archivedEvent!.data as {
+      entries: { path: string; archivePath: string; tracked: boolean; source: string; originWorkItemId?: string }[];
+    };
+    const entry = archived.entries[0]!;
+    assert.equal(entry.path, 'scratch/cache.tmp');
+    assert.equal(entry.tracked, false);
+    assert.equal(entry.source, 'validation', 'scratch/cache.tmp 是验证命令留下的（同一张工单），归给它的验证');
+    assert.equal(entry.originWorkItemId, 'W-1');
+    // 存档在工作树之外，内容仍是未跟踪、原样移走的那份。
+    assert.equal(entry.archivePath.includes(worktree.replace(/\\/g, '/')), false, '存档不在工作树内');
+    assert.equal(readFileSync(entry.archivePath, 'utf8'), 'build leftovers\n', '内容可找回');
 
     const view = await h.platform.getMissionView('M-stray');
     const report = view.workItems.find((item) => item.id === 'W-1')?.validationReport;
-    assert.equal(report?.passed, false, '越界不会被放行');
+    assert.equal(report?.passed, false, '验证在收口之前跑：越界不会被放行');
     assert.deepEqual(report?.changedPaths?.violations, ['scratch/cache.tmp']);
-    assert.equal(data.reportId, report?.reportId);
+
+    // narrate 与协调者简报都要看得见这条存档。
+    const narrated = narrateEvent({
+      kind: 'workspace.scope_archived',
+      workItemId: 'W-1',
+      data: archivedEvent!.data,
+    });
+    assert.equal(narrated.untranslated, false);
+    assert.equal(narrated.action, '范围外改动已存档');
+    assert.match(narrated.detail, /scratch\/cache\.tmp/);
+
+    const { attemptId } = await h.platform.startCoordinatorAttempt('M-stray');
+    const brief = await h.platform.getStartupBrief('M-stray', attemptId);
+    const since = brief.contextBundle.entries.find((entry) => entry.source === 'since_last_hop')
+      ?.content as readonly { summary: string }[] | undefined;
+    const summaries = (since ?? []).map((entry) => entry.summary).join('\n');
+    assert.match(summaries, /范围外改动已存档/);
+    assert.match(summaries, /scratch\/cache\.tmp/);
   });
 });
 
@@ -330,27 +364,28 @@ describe('开跑前核对工作区：别的工单留下的改动不让新工单�
     return { h, repo, cwd: prepared.cwd, oldId: old.workItemId, nextId: next.workItemId };
   }
 
-  test('不属于 W-2 范围的残留：不启动执行者，W-2 收成 blocked，改动原样保留且说清来源', async () => {
+  test('不属于 W-2 范围的残留：移出工作树存档，W-2 照常开跑，不再收成 blocked', async () => {
     const { h, repo, cwd, oldId, nextId } = await dirtyMission('M-dirty', ['src/bar.ts']);
     await h.orchestrator.runMission('M-dirty', { projectRoot: repo, maxRounds: 2 });
 
-    assert.equal(h.executorRuntime.specs.length, 0, '拦在花钱之前');
+    assert.ok(h.executorRuntime.specs.length >= 1, '不再拦在花钱之前：执行者照常启动');
     const view = await h.platform.getMissionView('M-dirty');
-    assert.equal(view.workItems.find((item) => item.id === nextId)?.status, 'blocked');
-    const [blocked] = await eventsOf(h, 'M-dirty', PLATFORM_BLOCKED_EVENT_KIND);
-    const data = blocked!.data as { source: string; paths: string[]; origins: Record<string, { workItemId: string }>; reason: string };
-    assert.equal(data.source, 'workspace_dirty');
-    assert.deepEqual(data.paths, ['docs/log.md']);
-    assert.equal(data.origins['docs/log.md']?.workItemId, oldId);
-    assert.match(data.reason, new RegExp(`docs/log\\.md（${oldId} 的验证`));
+    assert.notEqual(view.workItems.find((item) => item.id === nextId)?.status, 'blocked', '不再把工单收成 blocked');
+    // 没有以「工作区不干净」为名的停机事件。
+    const blocked = await eventsOf(h, 'M-dirty', PLATFORM_BLOCKED_EVENT_KIND);
     assert.equal(
-      Object.hasOwn(blocked!.data as object, 'orderRevision'),
-      false,
-      '卡住的是工作区不是工单正文：残留处理完，原工单不用修订也能再派',
+      blocked.filter((event) => (event.data as { source?: string }).source === 'workspace_dirty').length,
+      0,
     );
-    // 不删、不提交：改动还在，也没有被偷偷带进任何提交。
-    assert.match(readFileSync(join(cwd, 'docs', 'log.md'), 'utf8'), /left by validation/);
-    assert.match(git(cwd, 'status', '--porcelain'), /docs\/log\.md/);
+    // docs/log.md 在 W-2 范围外：已还原（工作区副本不含那句话），但改动找得回。
+    assert.doesNotMatch(readFileSync(join(cwd, 'docs', 'log.md'), 'utf8'), /left by validation/);
+    const [archivedEvent] = await eventsOf(h, 'M-dirty', 'workspace.scope_archived');
+    const entries = (archivedEvent!.data as { entries: { path: string; archivePath: string; tracked: boolean; source: string; originWorkItemId?: string }[] }).entries;
+    const entry = entries.find((candidate) => candidate.path === 'docs/log.md')!;
+    assert.equal(entry.tracked, true, '已跟踪文件先存补丁再还原');
+    assert.equal(entry.source, 'validation', '来源沿用现有归因：这条是 W-1 的验证留下的');
+    assert.equal(entry.originWorkItemId, oldId);
+    assert.match(readFileSync(entry.archivePath, 'utf8'), /left by validation/, '补丁能找回那句话');
   });
 
   test('范围内的残留：并入这张工单，留下来源记录，执行者照常启动', async () => {
@@ -365,6 +400,46 @@ describe('开跑前核对工作区：别的工单留下的改动不让新工单�
     // 检查点把它连同这张工单的交付一起提交：工作区干净，残留有了归属。
     assert.equal(git(cwd, 'status', '--porcelain'), '');
     assert.match(git(cwd, 'log', '-1', '--format=%s'), /检查点/);
+  });
+});
+
+describe('检查点：范围内的照常提交，范围内外的杂文件 / 被忽略文件移出存档不报错', () => {
+  test('目录范围提交改动；__pycache__ 与范围外文件不抛、不提交、存档可找回；被忽略文件不提交也不报错', async () => {
+    const repo = gitRepo();
+    const ws = new GitWorktreeManager();
+    const prep = await ws.prepare('M-cp', repo);
+    const cwd = prep.cwd;
+
+    // 范围内：src/foo.ts 的修改应当被提交。
+    writeFileSync(join(cwd, 'src', 'foo.ts'), 'export const foo = 1;\n');
+    // 范围内的杂文件：__pycache__/x.pyc 不提交、移出工作树存档。
+    mkdirSync(join(cwd, 'src', '__pycache__'), { recursive: true });
+    writeFileSync(join(cwd, 'src', '__pycache__', 'x.pyc'), 'PYC\n');
+    // 范围外的未跟踪文件。
+    mkdirSync(join(cwd, 'scratch'), { recursive: true });
+    writeFileSync(join(cwd, 'scratch', 'cache.tmp'), 'junk\n');
+
+    const archived = await ws.checkpoint(cwd, 'M-cp', 'W-1', ['src/']);
+    assert.ok(Array.isArray(archived));
+    assert.equal(git(cwd, 'status', '--porcelain'), '', '杂文件与范围外都不在工作树');
+    assert.match(git(cwd, 'log', '--format=%s'), /检查点/, '范围内的 src/foo.ts 被提交');
+    assert.equal(git(cwd, 'ls-files', '--', 'src/foo.ts'), 'src/foo.ts');
+    assert.equal(git(cwd, 'ls-files', '--', 'src/__pycache__/x.pyc'), '', '杂文件没被提交');
+    assert.equal(existsSync(join(cwd, 'src', '__pycache__', 'x.pyc')), false, '杂文件已移出工作树');
+    const byPath = new Map(archived.map((record) => [record.path, record]));
+    assert.equal(readFileSync(byPath.get('src/__pycache__/x.pyc')!.archivePath, 'utf8'), 'PYC\n');
+    assert.equal(byPath.get('scratch/cache.tmp')!.tracked, false);
+    assert.equal(readFileSync(byPath.get('scratch/cache.tmp')!.archivePath, 'utf8'), 'junk\n');
+    assert.equal(byPath.get('src/__pycache__/x.pyc')!.archivePath.includes(cwd.replace(/\\/g, '/')), false, '存档在工作树之外');
+
+    // 被 .gitignore 忽略、不在 git status 里的文件：即使 allowedScope 点了名也不提交、不报错、仍在磁盘。
+    writeFileSync(join(cwd, '.gitignore'), 'ignored.tmp\n');
+    await ws.checkpoint(cwd, 'M-cp', 'W-1', ['.gitignore']);
+    writeFileSync(join(cwd, 'ignored.tmp'), 'skip me\n');
+    const second = await ws.checkpoint(cwd, 'M-cp', 'W-1', ['ignored.tmp']);
+    assert.deepEqual(second, [], '被忽略文件不存档也不报错');
+    assert.equal(existsSync(join(cwd, 'ignored.tmp')), true, '被忽略文件仍留在磁盘');
+    assert.equal(git(cwd, 'ls-files', '--', 'ignored.tmp'), '', '没有 git add -f 它');
   });
 });
 

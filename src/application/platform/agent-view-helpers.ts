@@ -161,6 +161,21 @@ function summarizeSinceLastHop(
         );
         break;
       }
+      case 'workspace.scope_archived': {
+        const data = event.data as
+          | { entries?: { path?: string; archivePath?: string }[] }
+          | undefined;
+        const entries = Array.isArray(data?.entries) ? data!.entries : [];
+        if (entries.length === 0) {
+          push('范围外改动已存档：（无路径）');
+          break;
+        }
+        const parts = entries
+          .map((entry) => `${entry.path ?? '?'}（存档于 ${entry.archivePath ?? '?'}）`)
+          .join('、');
+        push(`范围外改动已存档：${parts}`);
+        break;
+      }
       case 'final_review.send_back':
       case 'final_review.abandoned':
       case 'final_review.merged':
@@ -229,13 +244,13 @@ export function coordinatorStartupSources(
     // 活动压成摘要（已提交结果、证据、机器验证报告），用的是后续各跳同一份
     // summarizeSinceLastHop，不另造投影。standard 保持旧行为：它本来就有逐跳增量，
     // 一次性灌进来只会淹掉重点。
-    if (mission.executionMode !== 'lightweight') {
-      return { workItemsIndex: index, sinceLastHop: [] };
+    if (mission.executionMode === 'lightweight') {
+      return {
+        workItemsIndex: index,
+        sinceLastHop: summarizeSinceLastHop(mission, events, validationReports),
+      };
     }
-    return {
-      workItemsIndex: index,
-      sinceLastHop: summarizeSinceLastHop(mission, events, validationReports),
-    };
+    return { workItemsIndex: index, sinceLastHop: [] };
   }
   const prevIndex = events.findIndex((e) => e === prevEnd);
   const after = events.slice(prevIndex + 1);

@@ -35,8 +35,8 @@ export function isEscapePath(path: string): boolean {
  * - 普通 scope：精确匹配
  * - 以 `/` 结尾：目录前缀（目录自身 + descendants）
  *
- * 目录前缀只在验证器一侧成立（契约层 / 快车道的范围可以写到目录）；
- * Standard 工单的范围必须是精确文件，见 {@link exactFileScopeIssue}。
+ * 目录前缀在验证器与 Standard 工单两侧都成立；Standard 工单的条目可以是精确文件，
+ * 也可以是以 `/` 结尾的目录，见 {@link exactFileScopeIssue}。
  */
 export function scopeMatches(allowed: string, actual: string): boolean {
   if (allowed.endsWith('/')) {
@@ -68,10 +68,11 @@ export interface ScopeIssue {
 const GLOB_CHARS = /[*?[\]{}]/;
 
 /**
- * Standard 工单的 allowedScope 条目必须是「相对仓库根的精确文件路径」。
+ * Standard 工单的 allowedScope 条目可以是「相对仓库根的精确文件」，或以 `/` 结尾的目录
+ * （目录下新增 / 修改 / 删除的文件都算授权）。
  *
- * 检查点只提交被点名的文件：目录与通配符会替将来才出现的文件预先授权，
- * 生成物、缓存、别人的文件都会被一并带进提交——这正是检查点要挡的事。
+ * 绝对路径、盘符、`..`、空段 / `.` 段、通配符仍不能作为授权范围：通配符会替将来才
+ * 出现的文件预先授权，生成物、缓存、别人的文件都会被一并带进提交——这正是检查点要挡的事。
  * 没问题返回 undefined；有问题给出原因与改法。
  */
 export function exactFileScopeIssue(entry: unknown): ScopeIssue | undefined {
@@ -103,12 +104,16 @@ export function exactFileScopeIssue(entry: unknown): ScopeIssue | undefined {
     return issue('traversal', '路径含 ".."，会跳出仓库', '去掉 ".."，写成相对仓库根的路径');
   }
   if (normalized.endsWith('/')) {
+    // 以单个尾斜线结尾的目录合法；去掉这一个尾斜线后仍不能含 `.` 段、空段或通配符。
     const dir = normalized.slice(0, -1);
-    return issue(
-      'directory',
-      '目录形式的范围会替还不存在的文件预先授权，检查点只提交被点名的文件',
-      `把 "${entry}" 换成目录下实际要改的具体文件，例如 "${dir}/<文件名>"；文件太多就拆成几张工单`,
-    );
+    const dirSegments = dir.split('/');
+    if (dirSegments.some((part) => part === '.' || part === '')) {
+      return issue('dot_segment', '路径含 "." 或空段', '去掉多余的 "./" 或重复的 "/"');
+    }
+    if (GLOB_CHARS.test(dir)) {
+      return issue('glob', '通配符不能作为授权范围', '逐个列出具体文件，不要用 * ? [] {}');
+    }
+    return undefined;
   }
   if (segments.some((part) => part === '.' || part === '')) {
     return issue('dot_segment', '路径含 "." 或空段', '去掉多余的 "./" 或重复的 "/"');
@@ -117,6 +122,21 @@ export function exactFileScopeIssue(entry: unknown): ScopeIssue | undefined {
     return issue('glob', '通配符不能作为授权范围', '逐个列出具体文件，不要用 * ? [] {}');
   }
   return undefined;
+}
+
+/**
+ * 是否是杂文件 / 生成物路径：`__pycache__` 段、`.pyc` / `.pyo`、`.DS_Store` / `Thumbs.db` /
+ * `desktop.ini`。检查点 / 验证器用这一份判据把杂文件排除在提交与越界之外。
+ */
+export function isJunkPath(path: string): boolean {
+  const normalized = normalizeScopePath(path);
+  const segments = normalized.split('/');
+  if (segments.some((part) => part === '__pycache__')) return true;
+  const last = segments[segments.length - 1] ?? '';
+  if (last === '.DS_Store' || last === 'Thumbs.db' || last === 'desktop.ini') return true;
+  const dot = last.lastIndexOf('.');
+  const ext = dot === -1 ? '' : last.slice(dot).toLowerCase();
+  return ext === '.pyc' || ext === '.pyo';
 }
 
 export function exactFileScopeIssues(entries: readonly unknown[]): ScopeIssue[] {
