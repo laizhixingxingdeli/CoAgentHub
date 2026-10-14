@@ -2805,6 +2805,7 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     assert.equal(ruleHop?.lastFailure?.retryable, false);
     assert.equal(ruleHop?.lastFailure?.classification, 'rule');
     assert.notEqual((await ruleEnv.platform.getMissionView('M-rule')).status, 'completed');
+    assert.ok((await ruleEnv.platform.getMissionView('M-rule')).waitResumeAt, '规则错误死信也应写入 waitResumeAt');
 
     const unreachableRows: QueuedHop[] = [];
     const inner = memoryCapacityRepo(unreachableRows);
@@ -2854,6 +2855,14 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
     if (unreachableOutcome.kind === 'waiting') {
       assert.equal(unreachableOutcome.reason, 'platform_unreachable');
     }
+    const unreachView = await unreachableEnv.platform.getMissionView('M-unreach');
+    assert.equal(unreachView.waitReason, 'platform_unreachable');
+    assert.ok(unreachView.waitResumeAt, 'platform_unreachable 应写入 waitResumeAt');
+    const unreachDelay = Date.parse(unreachView.waitResumeAt!) - Date.now();
+    assert.ok(
+      unreachDelay > 40_000 && unreachDelay < 80_000,
+      `第一次 platform_unreachable 退避应约 1 分钟，实际 ${unreachDelay}ms`,
+    );
     assert.equal(reports, 0);
     const unreachHop = (await unreachableQueue.list()).find((row) => row.role === 'executor');
     assert.notEqual(unreachHop?.status, 'retry_wait');
