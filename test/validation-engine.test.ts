@@ -971,6 +971,53 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
     (diffSize as { maxChangedFiles: number }).maxChangedFiles = 0;
     assert.equal(ds.diffSize!.limits.maxChangedFiles, 5);
   });
+
+  test('diffSizeAdvisory：Standard 只提醒，超限/无法计量不让报告失败（maxChangedFiles 0 仍硬卡）', async () => {
+    const over = await engine({ paths: fakePaths(['a.ts', 'b.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts', 'b.ts'],
+        diffSize: { maxChangedFiles: 1 },
+        diffSizeAdvisory: true,
+      }),
+    );
+    assert.equal(over.report.passed, true);
+    assert.ok(over.authority);
+    const dsOver = over.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsOver.passed, false);
+    assert.equal(dsOver.advisory, true);
+    assert.match(dsOver.summary, /^diff-size advisory:/);
+    assert.ok(dsOver.summary.includes('changedFiles 2 > maxChangedFiles 1'));
+    assert.equal(dsOver.diffSize?.used.changedFiles, 2);
+    assert.equal(dsOver.diffSize?.limits.maxChangedFiles, 1);
+
+    // maxChangedFiles 为 0 的零代码验证单仍硬卡：不提醒。
+    const zero = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedFiles: 0 },
+        diffSizeAdvisory: true,
+      }),
+    );
+    assert.equal(zero.report.passed, false);
+    const dsZero = zero.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsZero.advisory, undefined);
+    assert.equal(dsZero.passed, false);
+
+    // 无法计量（缺 reader）：提醒，报告仍通过。
+    const unknown = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 5 },
+        diffSizeAdvisory: true,
+      }),
+    );
+    assert.equal(unknown.report.passed, true);
+    const dsUnknown = unknown.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsUnknown.advisory, true);
+    assert.match(dsUnknown.summary, /diff-size advisory:/);
+    assert.ok(dsUnknown.summary.includes('changedLines'));
+    assert.ok(dsUnknown.diffSize?.unknown.includes('changedLines'));
+  });
 });
 
 describe('WorkspaceDiffFactReader — trusted line facts', () => {
