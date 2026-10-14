@@ -31,6 +31,7 @@ import { QueryRunner } from './application/query-run.ts';
 import type { AgentRuntime } from './application/ports.ts';
 import { MissionQueueWorker } from './application/mission-queue-worker.ts';
 import { RetryWakeScheduler } from './application/retry-wake.ts';
+import { ProbeReclaim } from './application/platform/probe-reclaim.ts';
 import { InMemoryAgentPoolRepository, loadRoleProfiles } from './application/agent-pool.ts';
 import { FileArtifactStore } from './application/artifact-store.ts';
 import { InMemoryLiveOutput, InMemoryPlanRunLiveOutput } from './application/live.ts';
@@ -70,6 +71,10 @@ import {
   tryPgAdvisoryLock,
 } from './application/pg-store.ts';
 import { acquireLock, acquireRecoverableLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
+import {
+  collectHeartbeatContinuationIds,
+  readPreviousServiceHeartbeatAt,
+} from './application/platform/heartbeat-continuation.ts';
 import { attachLoopbackWriterIdentity, listenLoopback } from './application/loopback-listen.ts';
 import {
   parseReconcileIntervalMs,
@@ -1006,6 +1011,48 @@ function rememberHostedAdapter(body: Record<string, unknown>): void {
   rememberAdapterDir(resolve(body.adapter, '../..'));
 }
 
+/**
+ * 启动收敛判为 interrupted 的托管 Mission：替它们请求一次续跑。
+ *
+ * 为什么需要这一步：托管运行是被上次进程的中断掐死的，进程没了，没有任何组件会再去接着跑
+ * 这条 Mission——状态里留着「有启动参数、没在跑」，却要等 L3 手动 start_mission。这里只把
+ * 「请服务续跑一次」这件事记下来（mission.resume_requested），跑不跑仍是 RetryWakeScheduler
+ * 那一侧按既有门禁决定，所以不会绕过暂停 / 挂起 / 待 L3 / 硬门禁这些闸。
+ *
+ * 去重按 missionId：一次中断会留下多个 attempt 的残留记录，同一个 Mission 只能续跑一次，
+ * 否则同一拍里会有多条唤醒挤进来。单条请求失败只警告——一条 Mission 卡住不该拦下整次启动，
+ * 也不该让后面的 Mission 不再被请求。
+ *
+ * PG 部署不请求：托管运行本来就不在 PG 上装配（见 startServer 里 retryWake 的注释），
+ * 请求了也没有组件会去接。
+ */
+export async function requestInterruptedContinuations(
+  platform: { requestHostedContinuation(missionId: string, cause: string): Promise<void> },
+  interrupted: readonly { missionId: string }[],
+  env: { COAGENT_RESUME_INTERRUPTED?: string; COAGENT_AUTO_RESUME?: string },
+  usePg: boolean,
+  warn: (message: string) => void,
+): Promise<void> {
+  if (usePg) return;
+  if (env.COAGENT_RESUME_INTERRUPTED === '0') return;
+  if (env.COAGENT_AUTO_RESUME === '0') return;
+
+  const seen = new Set<string>();
+  for (const item of interrupted) {
+    if (seen.has(item.missionId)) continue;
+    seen.add(item.missionId);
+    try {
+      await platform.requestHostedContinuation(item.missionId, 'service_interrupted');
+    } catch (error) {
+      warn(
+        `[启动续跑] ${item.missionId} 请求续跑失败：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+}
+
 export async function startServer(
   port = 3101,
   statePath = '.coagent-state.json',
@@ -1204,6 +1251,36 @@ export async function startServer(
         `[live reconcile] ${failed.missionId}/${failed.attemptId} 实时输出未能裁剪：${failed.message}`,
       );
     }
+    // 只在这里请求续跑，不在单次 runMission 的收敛路径上：那条路径本身就是这条 Mission 在跑，
+    // 再请求一次会把「刚开跑」记成「需要续跑」。
+    //
+    // 并上 (b) 路：本进程是接管旧锁上来的话，旧服务死前还在动、且收敛判不出残留 attempt 的
+    // 那些 Mission 也一起请求。它们和 (a) 路共用这一次调用，按 missionId 去重。
+    let continuationCandidates: { missionId: string }[] = [...built.reconciled.interrupted];
+    if (!usePg && env.COAGENT_RESUME_INTERRUPTED !== '0' && env.COAGENT_AUTO_RESUME !== '0') {
+      try {
+        const stoppedAt = readPreviousServiceHeartbeatAt(statePath, process.pid, warnPeriodicRepair);
+        if (stoppedAt !== undefined) {
+          const extra = await collectHeartbeatContinuationIds(built.platform, stoppedAt, warnPeriodicRepair);
+          continuationCandidates = [...continuationCandidates, ...extra.map((missionId) => ({ missionId }))];
+        }
+      } catch (error) {
+        // (b) 路只是加菜：审计读不动或列表读不了时仍要走完 (a) 路，否则接管场景下
+        // 「本来能自动恢复的 Mission」会因为一个新加的旁路而全都起不来。
+        warnPeriodicRepair(
+          `[启动续跑] 心跳窗口续跑收集失败，只按收敛结果请求：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    await requestInterruptedContinuations(
+      built.platform,
+      continuationCandidates,
+      env,
+      usePg,
+      warnPeriodicRepair,
+    );
     const missionQueueWorker = new MissionQueueWorker({
       read: async () => Promise.all((await built.platform.listProjects()).map((project) => built.platform.getMissionQueue(project.projectId))),
       run: async (entry, _config, projectId) => {
@@ -1226,9 +1303,38 @@ export async function startServer(
     // 持久的是 Mission.waitResumeAt 与托管启动参数，重启后第一个 tick 就从状态里找回来；
     // 入过队列的 Mission 归队列 worker 驱动，这里不插手。PG 不支持托管运行，不装配。
     // COAGENT_AUTO_RESUME=0 可整体关掉（运维开关）。
+    //
+    // 孤儿探测名额回收挂在下面这个调度器已有的 tick 上，不另开定时器：再多一个 setInterval
+    // 就多一份生命周期（关闭时要记得清掉，漏了会让进程停不下来），而 tick 本来就在跑。
+    // 代价是 COAGENT_AUTO_RESUME=0 时回收也跟着不跑——那表示运维整体关掉了自动恢复，
+    // 不该还由本进程悄悄动仓储。
+    const probeReclaim = usePg
+      ? undefined
+      : new ProbeReclaim({
+          // 快照按 role 分组只是仓储的组织方式；回收看的是候选本身，
+          // 同一 profile 出现在多个 role 下也只观察一次，否则会重复读同一行熔断。
+          listProfiles: async () => {
+            const snapshot = await built.agentPool.list();
+            return [
+              ...new Set(
+                [
+                  ...snapshot.classifier,
+                  ...snapshot.coordinator,
+                  ...snapshot.executor,
+                  ...snapshot.independent_reviewer,
+                ].map((candidate) => candidate.profileId),
+              ),
+            ];
+          },
+          getCircuit: (profileId) => built.candidateCircuits.get(profileId),
+          listHops: () => built.queuedHops.list(),
+          reset: (input) => built.candidateCircuits.reset(input),
+          warn: (error) => warnPeriodicRepair(error instanceof Error ? error.message : String(error)),
+        });
     retryWake = usePg
       ? undefined
       : new RetryWakeScheduler({
+          ...(probeReclaim ? { onTick: (nowMs: number) => probeReclaim.tick(nowMs) } : {}),
           listDue: (nowIso) => built.platform.listAutoResumeDue(nowIso),
           runDriver: (missionId) => built.platform.getRunDriver(missionId),
           isRunning: (missionId) =>

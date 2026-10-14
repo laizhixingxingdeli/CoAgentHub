@@ -41,6 +41,13 @@ export interface RetryWakeDeps {
   maxIntervalMs?: number;
   /** 同时在跑的自动续跑数上限，默认 3：服务重启后一次涌进来一大批也不会全部同时启动。 */
   maxConcurrent?: number;
+  /**
+   * 每次 tick 收尾时的钩子（例如孤儿探测名额回收）。走 finally 而不是顺序执行：#dispatch
+   * 里有提前 return（已停止 / 并发满了 / 无候选要跑），写在末尾会被这些路径整条跳过，
+   * 回收器就只在「恰好有 Mission 要被唤醒」的那几拍才跑。钩子只挂在已有 tick 上，
+   * 由此不再新开定时器。
+   */
+  onTick?(nowMs: number): Promise<void>;
 }
 
 interface WakeState {
@@ -86,28 +93,39 @@ export class RetryWakeScheduler {
 
   async #dispatch(): Promise<void> {
     const nowMs = this.#deps.now?.() ?? Date.now();
-    const due = await this.#deps.listDue(new Date(nowMs).toISOString());
-    const limit = this.#deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
-    for (const item of due) {
-      if (this.#stopped || this.#running.size >= limit) return;
-      if (this.#running.has(item.missionId) || this.#deps.isRunning(item.missionId)) continue;
-      if (this.#throttled(item.missionId, nowMs)) continue;
-      const driver = await this.#deps.runDriver(item.missionId);
-      if (driver.queued || driver.request === undefined) continue;
-      if (this.#deps.prepare !== undefined) {
-        let verdict: 'start' | 'skip';
+    try {
+      const due = await this.#deps.listDue(new Date(nowMs).toISOString());
+      const limit = this.#deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+      for (const item of due) {
+        if (this.#stopped || this.#running.size >= limit) return;
+        if (this.#running.has(item.missionId) || this.#deps.isRunning(item.missionId)) continue;
+        if (this.#throttled(item.missionId, nowMs)) continue;
+        const driver = await this.#deps.runDriver(item.missionId);
+        if (driver.queued || driver.request === undefined) continue;
+        if (this.#deps.prepare !== undefined) {
+          let verdict: 'start' | 'skip';
+          try {
+            verdict = await this.#deps.prepare(item.missionId, item.reason);
+          } catch (error) {
+            this.#deps.warn(error);
+            continue;
+          }
+          if (verdict === 'skip') continue;
+        }
+        const streak = this.#nextStreak(item.missionId, nowMs);
+        // 先占位再 await：同一个 tick 里或并发的下一个 tick 看到的都是「已经在跑」。
+        const run = this.#launch(item, driver.request, streak, nowMs);
+        this.#running.set(item.missionId, run);
+      }
+    } finally {
+      // 侧路钩子：停止后不再跑；抛错只 warn，否则一次回收失败会连带让整拍恢复扫描失败。
+      if (!this.#stopped && this.#deps.onTick !== undefined) {
         try {
-          verdict = await this.#deps.prepare(item.missionId, item.reason);
+          await this.#deps.onTick(nowMs);
         } catch (error) {
           this.#deps.warn(error);
-          continue;
         }
-        if (verdict === 'skip') continue;
       }
-      const streak = this.#nextStreak(item.missionId, nowMs);
-      // 先占位再 await：同一个 tick 里或并发的下一个 tick 看到的都是「已经在跑」。
-      const run = this.#launch(item, driver.request, streak, nowMs);
-      this.#running.set(item.missionId, run);
     }
   }
 

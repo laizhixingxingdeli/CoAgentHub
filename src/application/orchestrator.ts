@@ -48,6 +48,7 @@ import {
   consecutivePlatformUnreachable,
   coordinatorRunawayStreak,
   platformUnreachableResumeAt,
+  upstreamOutageStop,
 } from './platform/auto-resume.ts';
 import { findUsageRow, getRuntimeUsage } from './runtime-catalog.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
@@ -2894,6 +2895,38 @@ export class Orchestrator {
           .setWaitReason(input.missionId, 'platform_unreachable', undefined, resumeAt)
           .catch(() => undefined);
         return { exhausted: 'platform_unreachable', ...(resumeAt !== undefined ? { resumeAt } : {}) };
+      }
+
+      // 上游网络中断：这一跳的失败不是「这个候选不行」，是**外面断了**。
+      //
+      // 上面的 platform_unreachable 只认「连不上平台自己」；这里认的是适配层的
+      // 上游（provider）网络错误 —— 它俩的失败长得很像，都是 fetch failed，
+      // 处置却相反：换候选只会把同一片网里的每个候选挨个冻一遍，向队列报失败
+      // 会把一次断网记成三次候选故障，攒满次数就进死信。
+      //
+      // 所以命中就只做三件事：回滚执行者这一跳（状态不明），释放这一跳的租约
+      // （名额不该被一次断网占着），把恢复时刻交给平台到点自动续跑。
+      // 绝不 #cooldown.set、绝不 #reportClaimedHopFailure、绝不 continue 到下一候选。
+      const outage = upstreamOutageStop(
+        await this.#platform.getActivity(input.missionId),
+        this.#now().toISOString(),
+      );
+      if (outage) {
+        if (input.role === 'executor' && startRevision) {
+          await this.#workspace.rollback(input.cwd, startRevision).catch(() => undefined);
+        }
+        await this.#completeHopLease(claimedHop);
+        if (outage.exhausted === 'attempt_limit_reached') {
+          // 已经自动等过 1、5、15 分钟，再自动试只是空转：停下来等人。
+          // **不走 #stopResumeAt** —— 那会对执行者补上 nowIso，等于假装现在就能续跑。
+          return { exhausted: 'attempt_limit_reached', detail: outage.detail };
+        }
+        return {
+          exhausted: 'no_available_agent',
+          candidateRole: input.role,
+          detail: outage.detail,
+          resumeAt: outage.resumeAt,
+        };
       }
 
       // upstream_failure 与 killed_idle **处置相同、记录不同**。

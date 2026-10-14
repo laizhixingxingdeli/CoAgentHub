@@ -406,7 +406,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 四件事要分开看：**HTTP 受理**（`POST /api/control/run-mission` 的流打开，只说明启动请求被接收，断线不取消）、**runner 在跑**（`runner.running`）、**等待**（`waitReason` / `waitInfo`：runner 退出后仍可能「会自动恢复」）、**完成**（`status` / `result` 与终审）。一个在退避的 Mission：`runner.running=false`、`waitInfo.autoResume=true`——不需要人动手，服务到点自己续跑。
 
-**服务重启与自动恢复**：恢复时刻和托管启动参数（事件 `mission.run_requested`）都持久化，重启后第一个调度周期就从状态里找回到点的等待，不重复启动已在跑的 Mission。入过 Mission 队列的由队列 worker 驱动。`COAGENT_AUTO_RESUME=0` 关闭自动恢复（运维开关）；暂停、挂起、待 L3、预算、检查点、尝试上限、不可重试失败一律不会被自动恢复绕过。
+**服务重启与自动恢复**：恢复时刻和托管启动参数（事件 `mission.run_requested`）都持久化，重启后第一个调度周期就从状态里找回到点的等待，不重复启动已在跑的 Mission。入过 Mission 队列的由队列 worker 驱动。`COAGENT_AUTO_RESUME=0` 关闭自动恢复（运维开关）；暂停、挂起、待 L3、预算、检查点、尝试上限、不可重试失败一律不会被自动恢复绕过。启动收敛判为 `interrupted` 的 Mission 会请求续跑一次（事件仍是 `mission.resume_requested`，`cause` 为 `service_interrupted`），并照旧受暂停、挂起、未答复升级、硬门禁、没有托管启动参数、入过队列这些既有门禁约束；`COAGENT_RESUME_INTERRUPTED=0` 关闭这一步，`COAGENT_AUTO_RESUME=0` 与 PG 部署同样不请求。此外，本进程经锁审计（`.lock-audit-<状态文件名>.jsonl`）确认是接管旧锁启动的（审计里 `newPid` 等于本进程 pid，取其 `oldHeartbeatAt` 作为上一个服务停摆的时刻 `D`）时，还会把满足全部条件的 Mission 并入**同一次**续跑请求（`cause` 仍是 `service_interrupted`，按 `missionId` 去重）：`status` 为 `investigating` / `planning` / `executing`；没有等待原因；未暂停、未挂起；没有未答复升级；有 `mission.run_requested` 且未入过队列；最近一条活动事件的时间落在 `[D − 20 分钟, D + 2 分钟]` 内。审计读不到或解析失败则跳过这一路并警告；审计里没有本进程记录的干净启动不做这一路；`COAGENT_RESUME_INTERRUPTED=0`、`COAGENT_AUTO_RESUME=0` 与 PG 部署同样不做这一路。
 
 `timeAttribution` 为**只读派生**字段，取值规则：
 
