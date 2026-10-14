@@ -1486,7 +1486,7 @@ describe('HTTP 简报与按需引用权限',
           assert.equal((order.json as { orderRevision?: string }).orderRevision, 'r1');
           assert.equal(
             (order.json as { pointer?: string }).pointer,
-            `工单 ${workItemId} r1 全文已在本跳简报里。`,
+            `工单 ${workItemId} r1 全文已在本跳简报里。若你的上下文里确实没有它，用 full:true 再调一次。`,
           );
           assert.equal('order' in (order.json as Record<string, unknown>), false);
 
@@ -1592,7 +1592,7 @@ describe('HTTP 简报与按需引用权限',
           );
           assert.equal(
             (coordContractTool.json as { pointer?: string }).pointer,
-            '契约 r2 全文已在本跳简报里。',
+            '契约 r2 全文已在本跳简报里。若你的上下文里确实没有它，用 full:true 再调一次。',
           );
           assert.equal('contract' in (coordContractTool.json as Record<string, unknown>), false);
           // 执行者简报不含契约，记录里自然没有 contractRevision，仍是全文。
@@ -1713,10 +1713,30 @@ describe('简报包含后的指向返回与工单预览', () => {
       const afterOrder = await postJson(local, '/api/agent/coagent_get_work_order', {}, execToken);
       assert.equal(afterOrder.status, 200);
       assert.deepEqual(Object.keys(afterOrder.json).sort(), ['orderRevision', 'pointer', 'workItemId']);
-      assert.equal((afterOrder.json as { pointer?: string }).pointer, `工单 ${workItemId} r1 全文已在本跳简报里。`);
+      assert.equal((afterOrder.json as { pointer?: string }).pointer, `工单 ${workItemId} r1 全文已在本跳简报里。若你的上下文里确实没有它，用 full:true 再调一次。`);
       assert.equal((afterOrder.json as { orderRevision?: string }).orderRevision, 'r1');
       assert.equal((afterOrder.json as { workItemId?: string }).workItemId, workItemId);
       assert.equal('order' in (afterOrder.json as Record<string, unknown>), false);
+
+      // full:true 是退路：即使简报里有同一修订，也要能把全文拿回来（形状同没取过简报）。
+      const orderFull = await postJson(local, '/api/agent/coagent_get_work_order', { full: true }, execToken);
+      assert.equal(orderFull.status, 200);
+      assert.equal('pointer' in (orderFull.json as Record<string, unknown>), false);
+      assert.equal(typeof (orderFull.json as { order?: unknown }).order, 'object');
+      assert.equal((orderFull.json as { order?: { objective?: string } }).order?.objective, order.objective);
+      assert.equal((orderFull.json as { workItemId?: string }).workItemId, workItemId);
+      // 全文形状就是没取过简报的那套：工作项视图没有 orderRevision 键。
+      assert.equal('orderRevision' in (orderFull.json as Record<string, unknown>), false);
+
+      // 非布尔 full 一律 400，不能让 'yes' 静默当成 false 再给出指向。
+      const orderBadFull = await postJson(local, '/api/agent/coagent_get_work_order', { full: 'yes' }, execToken);
+      assert.equal(orderBadFull.status, 400);
+      assert.equal(orderBadFull.json.error, 'BAD_REQUEST');
+
+      // 身份检查在前：协调者没绑工作项，带了 full:true 也还是 409。
+      const coordFullOrder = await postJson(local, '/api/agent/coagent_get_work_order', { full: true }, coordToken);
+      assert.equal(coordFullOrder.status, 409);
+      assert.equal(coordFullOrder.json.error, 'ATTEMPT_NOT_BOUND');
 
       // 协调者取简报后：契约全文已在这跳简报里，只给指向。
       const coordBrief = await getJson(local, '/api/run/brief', coordToken);
@@ -1724,9 +1744,20 @@ describe('简报包含后的指向返回与工单预览', () => {
       const coordContract = await postJson(local, '/api/agent/coagent_get_contract', {}, coordToken);
       assert.equal(coordContract.status, 200);
       assert.deepEqual(Object.keys(coordContract.json).sort(), ['contractRevision', 'pointer']);
-      assert.equal((coordContract.json as { pointer?: string }).pointer, '契约 r1 全文已在本跳简报里。');
+      assert.equal((coordContract.json as { pointer?: string }).pointer, '契约 r1 全文已在本跳简报里。若你的上下文里确实没有它，用 full:true 再调一次。');
       assert.equal((coordContract.json as { contractRevision?: number }).contractRevision, 1);
       assert.equal('contract' in (coordContract.json as Record<string, unknown>), false);
+
+      // 契约也有同样的退路：full:true 绕过指向，给 r1 的全文。
+      const coordContractFull = await postJson(local, '/api/agent/coagent_get_contract', { full: true }, coordToken);
+      assert.equal(coordContractFull.status, 200);
+      assert.equal('pointer' in (coordContractFull.json as Record<string, unknown>), false);
+      assert.equal((coordContractFull.json as { contractRevision?: number }).contractRevision, 1);
+      assert.equal(typeof (coordContractFull.json as { contract?: unknown }).contract, 'object');
+
+      const coordContractBadFull = await postJson(local, '/api/agent/coagent_get_contract', { full: 1 }, coordToken);
+      assert.equal(coordContractBadFull.status, 400);
+      assert.equal(coordContractBadFull.json.error, 'BAD_REQUEST');
 
       // 契约修订到 r2 后：记的 r1 对不上，get_contract 必须重新给全文。
       const revised = await platform.reviseContract('M-slim', {

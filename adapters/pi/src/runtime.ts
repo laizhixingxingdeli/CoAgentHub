@@ -21,7 +21,7 @@ import { installHttpDispatcher } from "./http.js";
 import { systemPrompt, toolAllowlist } from "./roles.js";
 import type { Role } from "./roles.js";
 import { PlatformClient } from "./platform-client.js";
-import { PROFILE_TABLE_REVISION, resolveProfile } from "./profiles.js";
+import { PROFILE_TABLE_REVISION, resolveProfile, resolvePromptChannel } from "./profiles.js";
 import {
 	classifyUpstreamFailure,
 	withFailure,
@@ -660,6 +660,7 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 					createCoagentExtension({
 						client: client!,
 						role: spec.role,
+						promptChannel: resolvePromptChannel(spec.profile.facts),
 						cwd: spec.cwd,
 						completion,
 						onBriefInjected: (brief) => contextCollector.onBriefInjected(brief),
