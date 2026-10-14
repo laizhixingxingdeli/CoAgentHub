@@ -84,17 +84,18 @@ describe('自动恢复候选：只挑「等时间」的 Mission，门禁一个�
       'mission_cost_cap_reached',
       'execution_budget_exceeded',
       'work_item_checkpoint',
-      'attempt_limit_reached',
       'checkpoint_failed',
       'cancelled_by_user',
     ] as const) {
       await waiting(platform, `gate-${reason}`, reason, PAST);
     }
+    // 死信收尾后平台会自己接着跑：带过去 resumeAt 的 attempt_limit_reached 会被挑中。
+    await waiting(platform, 'due-attempt-limit', 'attempt_limit_reached', PAST);
 
     const due = await platform.listAutoResumeDue(NOW);
     assert.deepEqual(
       due.map((row) => row.missionId).sort(),
-      ['due-backoff', 'due-cooldown'],
+      ['due-attempt-limit', 'due-backoff', 'due-cooldown'],
     );
   });
 

@@ -329,15 +329,15 @@ export function stateLabel(row) {
  */
 export const WAIT_REASON = {
   no_available_agent: '候选全在冷却，等一会儿重跑',
-  platform_unreachable: '连不上平台自己 —— 平台侧故障，不是候选的问题',
+  platform_unreachable: '连不上平台自己 —— 平台侧故障，不是候选的问题；平台会在能续跑时自动接着跑',
   waiting_l3: '等你处理',
   escalated: '执行者升级了问题，等你答复',
-  project_busy: '同项目有别的 Mission 占着改动名额',
-  attempt_limit_reached: '尝试到上限了 —— 继续换候选不会产生新信息',
+  project_busy: '同项目有别的 Mission 占着改动名额；不用升级，名额释放后平台自动接着派',
+  attempt_limit_reached: '尝试到上限了 —— 继续换候选不会产生新信息；平台会在能续跑时自动接着跑',
   target_changed: '目标分支在检视期间变了',
   base_revision_stale: '分叉基线已过期，需要重新核对',
   cancelled_by_user: '被叫停了',
-  runaway_suspected: '一跳跑太久，已停下来等人看',
+  runaway_suspected: '一跳跑太久，已停下来等人看；平台会在能续跑时自动接着跑',
   execution_budget_exceeded: '执行预算硬上限已耗尽',
   // 票级费用独立门禁：单 Mission 累计花费到上限，不是内核 ExecutionBudget 硬维度。
   mission_cost_cap_reached: '票级费用已到上限，等检视者批准追加预算',
@@ -703,6 +703,32 @@ const EVENT_TABLE = {
       badge: PLATFORM_ROLE_LABEL,
       action: '到点自动接着跑',
       detail: `原因 ${reason ? WAIT_REASON[reason] || reason : '（没有写原因）'} · 第 ${num(data.streak)} 次连续唤醒`,
+    };
+  },
+
+  // 执行者死信 / 打转收尾交回协调者：原因、第几次、候选都要看得见。
+  'mission.coordinator_handoff': (event) => {
+    const data = (event && event.data) || {};
+    const reason = text(data.reason);
+    const candidates = list(data.candidates).join('、') || '（无）';
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '把执行者的卡住交回协调者',
+      detail:
+        `原因 ${reason ? WAIT_REASON[reason] || reason : '（没有写原因）'}` +
+        `${data.workItemId ? ` · 工作项 ${text(data.workItemId)}` : ''}` +
+        ` · 第 ${num(data.count)} 次 · 候选 ${candidates}` +
+        `${text(data.detail) ? ` · ${text(data.detail)}` : ''}`,
+    };
+  },
+
+  // 托管运行过的 Mission 被解闸后，请服务续跑一次。
+  'mission.resume_requested': (event) => {
+    const data = (event && event.data) || {};
+    return {
+      badge: PLATFORM_ROLE_LABEL,
+      action: '请服务续跑一次',
+      detail: `cause ${or(data.cause, '（没有写 cause）')}`,
     };
   },
 

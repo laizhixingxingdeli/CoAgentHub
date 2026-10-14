@@ -5,6 +5,7 @@ import { isActiveHopLease } from '../durable-scheduler.ts';
 import { autoRedispatchEventsFor } from './redispatch-helpers.ts';
 import { submittedAttemptReportId } from './standard-validation.ts';
 import { PLATFORM_BLOCKED_EVENT_KIND } from './stalled-work-item.ts';
+import { requestHostedContinuation } from './auto-resume.ts';
 
 /**
  * 工作项状态恢复（P0：状态一致性）：把「有执行结果、却停在 dispatched、没有活执行者」的工单
@@ -65,7 +66,11 @@ export async function recoverStrandedWorkItem(
     const refusal =
       refusalOnState(input, mission, item, events) ?? (await refusalOnLiveness(ctx, mission, item));
     if (refusal) return { converted: false, reason: refusal };
-    return convertToBlocked(ctx, input, mission, item, events);
+    const result = await convertToBlocked(ctx, input, mission, item, events);
+    if (result.converted) {
+      await requestHostedContinuation(ctx, mission.id, 'work_item_recovered');
+    }
+    return result;
   });
 }
 

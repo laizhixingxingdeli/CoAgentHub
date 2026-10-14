@@ -1525,6 +1525,16 @@ export class Platform {
     return this.#tx(() => autoResume.recordAutoResume(this.#context, missionId, data));
   }
 
+  /** 自动续跑前的收尾：把执行者死信 / 打转收成 blocked 并写 coordinator_handoff。返 'skip' 表示不能 start。 */
+  async prepareAutoResume(missionId: string): Promise<'start' | 'skip'> {
+    return this.#tx(() => autoResume.prepareAutoResume(this.#context, missionId));
+  }
+
+  /** 托管运行过的 Mission 被解闸后，请服务续跑一次（写 mission.resume_requested）。 */
+  async requestHostedContinuation(missionId: string, cause: string): Promise<void> {
+    return this.#tx(() => autoResume.requestHostedContinuation(this.#context, missionId, cause));
+  }
+
   /** 验证跑完、授权范围内的副作用已收口提交后，记下提交了什么、范围外留下了什么。 */
   async recordValidationSettlement(
     input: workspaceHygiene.ValidationSettlementInput,
