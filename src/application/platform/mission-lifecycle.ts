@@ -1,6 +1,7 @@
 import type { MissionContract, WaitReason } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { recordContractAcceptance } from './mission-intake.ts';
+import { SCOPE_ARCHIVED_EVENT_KIND } from './workspace-hygiene.ts';
 type AnswerEscalation = (missionId: string, answer: string) => Promise<{ question: string; answer: string }>;
 
 export async function reviseContract(ctx: PlatformContext, answerEscalation: AnswerEscalation, 
@@ -109,7 +110,17 @@ export async function parkMission(ctx: PlatformContext, answerEscalation: Answer
         if (!workspace.checkpoint) {
           throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', 'park 已验收成果需要 checkpoint 能力。');
         }
-        await workspace.checkpoint(cwd, mission.id, 'park', [...authorized].sort());
+        const archived = await workspace.checkpoint(cwd, mission.id, 'park', [...authorized].sort());
+        if (Array.isArray(archived) && archived.length > 0) {
+          await ctx.event(mission, SCOPE_ARCHIVED_EVENT_KIND, {
+            entries: archived.map((record) => ({
+              path: record.path,
+              archivePath: record.archivePath,
+              tracked: record.tracked,
+              source: 'unknown' as const,
+            })),
+          });
+        }
       } else {
         if (!workspace.assertMissionWorktreeClean) {
           throw new PlatformRuleError('TRUSTED_WORKSPACE_REQUIRED', '零验收项 park 需要 Mission worktree 洁净检查能力。');
