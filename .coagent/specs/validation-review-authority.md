@@ -48,7 +48,7 @@ Mission 级追加记录，**不是** WorkItem `ReviewRecord`，也**不是** `Fi
 |---|---|---|
 | `commands` | 必填（可 `[]`） | 每条跑 command check |
 | `forbiddenPaths` | 不跑 forbidden-paths | 含 `[]`（空 denylist → pass）；命中 deny → fail（无 failureCode）；glob/escape/`''` → `unsupported_scope` |
-| `diffSize` | 不跑 diff-size | `maxChangedFiles` / `maxChangedLines`（≥1 键，非负整数）；上限按字面「最多」：`used > limit` 才 fail，恰好到上限通过（`0` = 一个都不许改）；in-force 维 unknown fail。Standard 置 diffSizeAdvisory 时，超限或无法计量只提醒（check.advisory，summary 前缀 diff-size advisory），报告仍可 passed；`maxChangedFiles` 为 0 仍硬卡。Lightweight 不置该标志，超限仍失败。 |
+| `diffSize` | 不跑 diff-size | `maxChangedFiles` / `maxChangedLines`（≥1 键，非负整数）；上限按字面「最多」：`used > limit` 才 fail，恰好到上限通过（`0` = 一个都不许改）；in-force 维 unknown fail。Standard 置 diffSizeAdvisory 时，超限或无法计量只提醒（check.advisory，summary 前缀 diff-size advisory），报告仍可 passed；cloneCheck 落盘保留 advisory:true，重读与落盘前一致；`maxChangedFiles` 为 0 仍硬卡。Lightweight 不置该标志，超限仍失败。 |
 
 > 2026-09-23 由 `used >= limit` 改为 `used > limit`。旧写法让 `maxChangedFiles: 1` 等于「一个文件都不许改」，E1 单文件金丝雀改对了却被判超限、Mission 停在 stalled。执行预算（`budget-usage`）仍是 `>=`——那是「下一步动作前」的闸，用满额度就不再开新一跳；diff-size 是对已产出结果的事后检查，语义不同。
 
