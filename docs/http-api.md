@@ -242,7 +242,7 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 
 ### GET /api/pools
 
-鉴权：控制面（可选resolver）。参数：无。只读候选池，附加健康、用量及熔断事实，不播种或清除候选。
+鉴权：控制面（可选resolver）。参数：fresh 可选。只读候选池，附加健康、用量及熔断事实，不播种或清除候选。fresh=1 时绕过短缓存并刷新缓存；不带 fresh 时，服务在 poolsHealthCacheMs 内有缓存就直接复用（并发请求共用同一次扫描）。
 
 请求示例及本机curl：
 

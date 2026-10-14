@@ -224,6 +224,17 @@ export interface ApiDeps {
    */
   now?: () => number;
   /**
+   * GET /api/pools 最终响应（含脱敏之后）的短缓存时长。缺省 0 = 不缓存，行为与改前完全一致。
+   *
+   * 为什么要有它：每次请求都对全部 Mission 构完整视图，实测单次 1.1–1.4 秒纯同步 CPU，
+   * 页面每 5 秒拉一次，期间同进程的轻请求全排在后面。
+   *
+   * 大于 0 时：该毫秒数内复用成功响应（TTL 从成功完成开始算），并发的多个请求共用同一次
+   * 扫描（single-flight），扫描失败不进缓存。?fresh=1 绕过缓存并刷新缓存。
+   * 缓存里只放脱敏之后的最终 body；身份与权限检查（requireControl）不在缓存之内，每次照做。
+   */
+  poolsHealthCacheMs?: number;
+  /**
    * 方案运行记录目录。缺省 `resolve('.coagent-plans')`，给独立 createApi 实例用。
    * 常驻服务的状态文件旁目录与 hosted `--run-dir` 由装配方注入；这里不猜 main 的路径，
    * 否则独立实例和测试会去读装配环境的目录。
@@ -814,6 +825,74 @@ export function createApi(deps: ApiDeps): Server {
     } catch {
       return [];
     }
+  };
+
+  const poolsHealthCacheMs = deps.poolsHealthCacheMs ?? 0;
+
+  /**
+   * 构造 GET /api/pools 的最终响应。顺序与改前逐字段一致：先读候选快照、再取用量行，
+   * 然后构健康视图，最后整体脱敏。这一步**只**产出给调用方看的最终 body；鉴权在调用方，
+   * 不在这里，也不缓存请求/响应对象或任何身份。
+   */
+  const buildPoolsResponse = async (): Promise<unknown> => {
+    const snapshot = await agentPool.list();
+    const usageRows = await readUsageRows();
+    return redactSecretsDeep(
+      await buildPoolsHealth(
+        platform,
+        snapshot,
+        deps.queuedHops,
+        deps.candidateCircuits,
+        nowMs(),
+        usageRows,
+        deps.queryRuns,
+      ),
+    );
+  };
+
+  /**
+   * 池健康短缓存与 single-flight。
+   *
+   * 缺省 poolsHealthCacheMs<=0 时每请求一次扫描、无 single-flight，行为与改前完全一致
+   * （缓存是逐步上线的优化，不是默认行为）。正数时命中复用成功脱敏最终 body，TTL 从
+   * **成功完成**开始算；并发的多个读共用同一次在途扫描；失败不进缓存、可重试。
+   * ?fresh=1 不返回完成缓存（真重算并刷新缓存），但仍可加入当前同代在途扫描。
+   *
+   * 写路径成功之后调 invalidatePoolsHealthCache：代次自增并清空缓存与当前 flight，
+   * 于是旧扫描不得回填新缓存，新读也不会加入旧 flight。
+   */
+  let poolsHealthGeneration = 0;
+  let poolsHealthCache: { readonly at: number; readonly body: unknown } | undefined;
+  let poolsHealthFlight: { readonly generation: number; readonly promise: Promise<unknown> } | undefined;
+
+  const invalidatePoolsHealthCache = (): void => {
+    poolsHealthGeneration += 1;
+    poolsHealthCache = undefined;
+    poolsHealthFlight = undefined;
+  };
+
+  const getPoolsResponse = async (fresh: boolean): Promise<unknown> => {
+    if (poolsHealthCacheMs <= 0) return buildPoolsResponse();
+    const cached = poolsHealthCache;
+    if (!fresh && cached && nowMs() - cached.at < poolsHealthCacheMs) return cached.body;
+    const generation = poolsHealthGeneration;
+    let flight = poolsHealthFlight;
+    if (!flight || flight.generation !== generation) {
+      const started = { generation, promise: buildPoolsResponse() };
+      flight = started;
+      poolsHealthFlight = started;
+      started.promise.then(
+        (body) => {
+          // 旧代扫描完成后不得回填：写操作已经把这一代作废了。
+          if (generation === poolsHealthGeneration) poolsHealthCache = { at: nowMs(), body };
+        },
+        () => {},
+      ).finally(() => {
+        // 只清自己那一次：旧任务不能清掉刚开的新 flight。
+        if (poolsHealthFlight === started) poolsHealthFlight = undefined;
+      });
+    }
+    return flight.promise;
   };
 
   const requireRun = (req: IncomingMessage): RunContext => {
@@ -2004,6 +2083,7 @@ export function createApi(deps: ApiDeps): Server {
       const circuit = await circuits.reset({ profileId, actor, at, reason }).catch((error: unknown) => {
         throw circuitResetHttpError(error, profileId);
       });
+      invalidatePoolsHealthCache();
       return send(res, 200, { profileId, circuit: circuitHealth(circuit) });
     }
 
@@ -2028,29 +2108,14 @@ export function createApi(deps: ApiDeps): Server {
       await requireControl(req, POLICY_ACTION.poolAdd);
       const body = await readJson(req);
       const snapshot = await agentPool.replaceRole({ ...body, role: replacePoolMatch[1] } as Parameters<typeof agentPool.replaceRole>[0]);
+      invalidatePoolsHealthCache();
       return send(res, 200, { revision: agentPoolSnapshotRevision(snapshot), ...snapshot });
     }
     if (method === 'GET' && path === '/api/pools') {
       await requireControl(req, POLICY_ACTION.poolList);
-      const snapshot = await agentPool.list();
-      // 用量是附加信息：它读不到（失败 / 适配层不在 / 抛异常）时资源池仍要原样
-      // 返回。先取再拼，取失败就当没有 —— 一个页面的可选列不该让整个池 500。
-      const usageRows = await readUsageRows();
-      return send(
-        res,
-        200,
-        redactSecretsDeep(
-          await buildPoolsHealth(
-            platform,
-            snapshot,
-            deps.queuedHops,
-            deps.candidateCircuits,
-            nowMs(),
-            usageRows,
-            deps.queryRuns,
-          ),
-        ),
-      );
+      // ?fresh=1 绕过完成缓存并刷新它：运维怀疑页面拿到旧值时用这条。
+      const fresh = url.searchParams.get('fresh') === '1';
+      return send(res, 200, await getPoolsResponse(fresh));
     }
 
     if (method === 'POST' && path === '/api/pools') {
@@ -2058,6 +2123,7 @@ export function createApi(deps: ApiDeps): Server {
       const body = await readJson(req);
       const input: AgentPoolAddInput = body as unknown as AgentPoolAddInput;
       const added = await agentPool.add(input);
+      invalidatePoolsHealthCache();
       // add 能返回就说明 role 已过校验，回显它才不会与请求里那个是两个字。
       return send(res, 201, { role: input.role, ...added });
     }

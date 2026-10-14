@@ -1,8 +1,10 @@
 /**
- * 资源池健康扫描的并发轻请求等待量化（W-687）。
+ * 资源池健康扫描的并发轻请求等待量化（W-687），并在 W-690 补上「缓存命中耗时」。
  *
- * 测的是什么：GET /api/pools（未命中，扫全部 Mission）进行期间，一条轻请求
- * （GET /api/health）从**发起到读完整份响应**要等多久。
+ * 测的是什么：
+ *   1. GET /api/pools（未命中，扫全部 Mission）进行期间，一条轻请求
+ *      （GET /api/health）从**发起到读完整份响应**要等多久。
+ *   2. 启用 poolsHealthCacheMs 后，warm 一次未命中，再连发几次命中读的耗时。
  *
  * 为什么轻请求必须从扫描内部驱动：等扫描结束再计时发请求，量到的永远是 0 ——
  * 那时候事件循环已经空了。所以计时发起点挂在夹具的 onMissionStart 上（扫描
@@ -27,6 +29,9 @@ import {
 
 /** 每隔这么多条 Mission 发一条已计时的轻请求，覆盖整段扫描而非只在开头。 */
 const LIGHT_REQUEST_STRIDE = 10;
+
+/** 命中量化每轮连发多少次缓存命中读。 */
+const CACHE_HIT_SAMPLES = 5;
 
 interface LightSample {
   /** 相对本轮扫描起点的发出时刻（ms）。 */
@@ -95,6 +100,54 @@ async function runSample(missionCount: number, attemptsPerMission: number): Prom
   }
 }
 
+interface CacheHitSample {
+  /** 每个命中样本的耗时（ms）。 */
+  readonly hitMs: readonly number[];
+  readonly maxHitMs: number;
+  /** 命中计时段里 scanned 是否始终不增长（应当为 true）。 */
+  readonly scannedStable: boolean;
+  /** 命中计时段结束时的扫描计数（应等于一次扫描的规模）。 */
+  readonly scannedAfter: number;
+  /** 命中返回与未命中响应是否逐字段一致。 */
+  readonly bodyEqualsMiss: boolean;
+}
+
+/**
+ * 量化缓存命中：同一份夹具启用缓存，先 warm 一次未命中扫描，再连发若干次读，
+ * 每条都计「从发起到读完整份响应」的耗时；期间 scanned 不得增长。
+ */
+async function runCacheHitSample(
+  missionCount: number,
+  attemptsPerMission: number,
+  hits: number,
+): Promise<CacheHitSample> {
+  const fixture = await createPoolsHealthFixture({ missions: missionCount, attemptsPerMission, poolsHealthCacheMs: 60_000 });
+  try {
+    const miss = await httpGetJson(`${fixture.base}/api/pools`);
+    if (miss.status !== 200) throw new Error(`GET /api/pools warm 返回 ${miss.status}`);
+    const scannedAtWarm = fixture.scanned();
+    const hitMs: number[] = [];
+    let scannedStable = true;
+    let bodyEqualsMiss = true;
+    for (let i = 0; i < hits; i += 1) {
+      const hit = await httpGetJson(`${fixture.base}/api/pools`);
+      if (hit.status !== 200) throw new Error(`GET /api/pools 命中返回 ${hit.status}`);
+      hitMs.push(Number(hit.ms.toFixed(3)));
+      if (fixture.scanned() !== scannedAtWarm) scannedStable = false;
+      bodyEqualsMiss = bodyEqualsMiss && JSON.stringify(hit.json) === JSON.stringify(miss.json);
+    }
+    return {
+      hitMs,
+      maxHitMs: Number(Math.max(...hitMs).toFixed(3)),
+      scannedStable,
+      scannedAfter: fixture.scanned(),
+      bodyEqualsMiss,
+    };
+  } finally {
+    await fixture.close();
+  }
+}
+
 export async function runPoolsHealthBenchmark(
   rounds = 3,
   missionCount = POOLS_HEALTH_BENCHMARK_MISSIONS,
@@ -107,6 +160,7 @@ export async function runPoolsHealthBenchmark(
     samples.push(await runSample(missionCount, attemptsPerMission));
   }
   const longest = Math.max(...samples.map((sample) => sample.longestLightWaitMs));
+  const cacheHit = await runCacheHitSample(missionCount, attemptsPerMission, CACHE_HIT_SAMPLES);
   return {
     node: process.version,
     platform: process.platform,
@@ -120,6 +174,7 @@ export async function runPoolsHealthBenchmark(
     rounds,
     longestLightWaitMs: longest,
     samples,
+    cacheHit,
   };
 }
 

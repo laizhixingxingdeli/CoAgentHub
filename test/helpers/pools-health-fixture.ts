@@ -22,11 +22,12 @@ import type { Server } from 'node:http';
 import { createApi } from '../../src/api/server.ts';
 import { RunTokenRegistry } from '../../src/api/run-tokens.ts';
 import type { Platform } from '../../src/application/platform.ts';
+import type { ControlPrincipalResolver } from '../../src/api/control-auth.ts';
 import { InMemoryAgentPoolRepository } from '../../src/application/agent-pool.ts';
 import { InMemoryDeliveryRepository } from '../../src/application/delivery.ts';
 import { FixedClock, SequentialIds } from '../../src/application/in-memory.ts';
 import { listenLoopback } from '../../src/application/loopback-listen.ts';
-import type { ActivityEvent } from '../../src/application/ports.ts';
+import type { ActivityEvent, CandidateCircuitRepository } from '../../src/application/ports.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -90,6 +91,12 @@ export interface PoolsHealthFixtureOptions {
    */
   readonly order?: string[];
   readonly hooks?: PoolsHealthFixtureHooks;
+  /** 池健康最终响应缓存时长。缺省 0（不缓存）。后单的缓存断言传正数。 */
+  readonly poolsHealthCacheMs?: number;
+  /** 控制面身份 resolver。注入后 GET /api/pools 会逐请求鉴权。 */
+  readonly resolveControlPrincipal?: ControlPrincipalResolver;
+  /** 候选熔断仓储。注入后 GET /api/pools 会带 circuit 事实。 */
+  readonly candidateCircuits?: CandidateCircuitRepository;
 }
 
 export interface PoolsHealthFixture {
@@ -108,6 +115,10 @@ export interface PoolsHealthFixture {
    */
   readonly holdAt: (index: number) => void;
   readonly release: () => void;
+  /** 缓存 TTL 与「完成计时」需要拨动夹具时钟；只拨服务看的那只，不动数据时间戳。 */
+  readonly setNow: (ms: number) => void;
+  /** 候选举例：测试要可控地让**下一次扫描**从顶层拒绝（如 agentPool.list 抛错）。 */
+  readonly pool: InMemoryAgentPoolRepository;
   readonly close: () => Promise<void>;
 }
 
@@ -225,6 +236,9 @@ export async function createPoolsHealthFixture(
   }
   await pool.add({ role: 'executor', profileId: POOLS_HEALTH_OLD_PROFILE_ID, endpoint: 'local' });
 
+  // 缓存 TTL 要能拨：服务看的是这一只，Mission 数据的时间戳用的仍是固定的 nowMs。
+  let currentNow = nowMs;
+
   let scanned = 0;
   let holdIndex: number | undefined;
   let holdReleased = false;
@@ -276,7 +290,10 @@ export async function createPoolsHealthFixture(
     agentPool: pool,
     // 用量行注入空数组：缺省会去敲真实适配层，量化就会变成「等适配层」。
     getRuntimeUsage: async () => [],
-    now: () => nowMs,
+    now: () => currentNow,
+    ...(options.poolsHealthCacheMs === undefined ? {} : { poolsHealthCacheMs: options.poolsHealthCacheMs }),
+    ...(options.resolveControlPrincipal === undefined ? {} : { resolveControlPrincipal: options.resolveControlPrincipal }),
+    ...(options.candidateCircuits === undefined ? {} : { candidateCircuits: options.candidateCircuits }),
   });
   const port = await listenLoopback(server, 0);
 
@@ -295,6 +312,10 @@ export async function createPoolsHealthFixture(
       holdReleased = true;
       while (holdWaiters.length > 0) holdWaiters.shift()?.();
     },
+    setNow: (ms: number) => {
+      currentNow = ms;
+    },
+    pool,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((closed) => {

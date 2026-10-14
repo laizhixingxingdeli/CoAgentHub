@@ -1149,6 +1149,8 @@ export async function startServer(
       queuedHops: built.queuedHops,
       candidateCircuits: built.candidateCircuits,
       queryRuns: built.queryRuns,
+      // 池健康扫描一次 1.1–1.4 秒纯 CPU，页面每 5 秒拉一次；15 秒内复用成功响应并合并并发。
+      poolsHealthCacheMs: 15000,
       runnerState: {
         isRunning: (missionId) => hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
         running: () => hostedRuns.snapshot().filter((run) => run.kind === 'mission').map((run) => run.id),
