@@ -14,6 +14,8 @@
 - 心跳仍新鲜 → 进 `alive`，**一律不动**。看得见才知道收敛为什么没收它。
 - 判成 `interrupted` 而非失败：它没交出任何技术结论，属于可重试那一类。
 
+启动收敛之后，文件存储且 `COAGENT_RESUME_INTERRUPTED` / `COAGENT_AUTO_RESUME` 都不是 `0` 时，请求一次托管续跑（事件仍是 `mission.resume_requested`，`cause` 为 `service_interrupted`，按 missionId 去重）。候选是两路并集：(a) 本次收敛判为 interrupted 的 Mission；(b) 锁审计里有 `newPid` 等于本进程 pid 的接管记录时，取该行 `oldHeartbeatAt` 为 D，并入 status 为 investigating / planning / executing、没有等待原因、未暂停、未挂起、没有未答复升级、有 mission.run_requested 且未入队、最近活动时间落在 [D−20 分钟, D+2 分钟] 的 Mission。干净启动不做 (b)；审计读不到或解析失败则跳过 (b) 并警告，不挡住 (a)。PG 不请求。请求仍受暂停、挂起、未答复升级、硬门禁、无托管参数、入队这些既有门禁约束。
+
 ## 实时输出补裁
 
 - 正常收尾在 Orchestrator 的 `finally` 里已裁（留尾部 `KEEP_TAIL_ON_FINISH` 行 + 一条裁剪说明）。跑不到 `finally` 的**只有编排进程自己死掉**这一种情况——而那恰好是收敛正在收的这些跳。不补裁的话留存策略是反的：正常结束的留 500 行，被猝死带走的整跳全留着且再无人回收。
