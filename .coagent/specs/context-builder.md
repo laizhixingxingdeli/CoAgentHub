@@ -8,7 +8,7 @@
 
 - 协调者 Bundle 的固定来源顺序：`project_rules`、`environment_notes`、`contract`、`classification`（仅有路由事件时）、`plan`、`final_review`；投影旧字段 `projectRules`、`environmentNotes`、`contract`、`contractRevision`、`classification`（可选）、`plan`、`planRevision`、`finalReview`，不含 `workItem`。
 - 执行者 Bundle 的固定来源顺序：`project_rules`、`environment_notes`、`work_order`；投影旧字段 `projectRules`、`environmentNotes`、绑定的 `workItem`（含 `id`、`title`、`order`，及适用时最近一次 reject 的修改要求、L3 send_back 理由、已答问答），不含完整契约、规划、终审正文及它们的修订字段，也不含 `classification`。两个角色均保留简报原有 `role`、`projectId`、`missionId`、`status`。
-- 来源缺省仍占位，旧投影保持对应 `undefined` 缺省；没有 `.coagent` 项目记忆也能取得简报，`projectRules` 缺省。`environmentNotes` 保持既有系统注记。`classification` 例外：没有 `mission.routed` 时不创建空来源。
+- 来源缺省仍占位，旧投影保持对应 `undefined` 缺省；没有 `.coagent` 项目记忆也能取得简报，`projectRules` 缺省。标题含「（仅 L3）」的章节在写入 Bundle 前从 `projectRules` 去掉；无该标记时字符串原样。`get_project_context` 仍返回全文。`environmentNotes` 保持既有系统注记。`classification` 例外：没有 `mission.routed` 时不创建空来源。
 
 ## 分类阶段已查明
 
@@ -20,7 +20,7 @@
 
 ## 按需引用边界
 
-执行者工单中的 `contextRefs` 原样留在 `order`，Bundle 构造器不读盘、不预取 living_spec、contract、previous_result 或 file 的引用正文。`getContext` 继续按既有执行者绑定工单的声明引用权限查询：未声明引用返回 `found=false`；已声明引用维持原返回语义（如不存在的文件提示、未有结果的 previous_result 为 `found=false`）。`getWorkOrder`、`getMissionView`、`getProjectContext`、`getContract` 及对应 HTTP 工具原权限和响应不由 Bundle 改变。
+执行者工单中的 `contextRefs` 原样留在 `order`，Bundle 构造器不读盘、不预取 living_spec、contract、previous_result 或 file 的引用正文。`getContext` 继续按既有执行者绑定工单的声明引用权限查询：未声明引用返回 `found=false`；已声明引用维持原返回语义（如不存在的文件提示、未有结果的 previous_result 为 `found=false`）。`getWorkOrder`、`getMissionView`、`getProjectContext`、`getContract` 的权限不由 Bundle 改变。简报成功返回且记下实际包含的修订号后，读工具可以只返回指向：本跳简报已含同一契约修订全文时，协调者 `getContract` 只返回 `{ pointer, contractRevision }`；执行者简报已含同一工单修订全文时，`getWorkOrder` 只返回 `{ pointer, orderRevision, workItemId }`。修订号不一致、简报未含该全文、被预算裁掉或没取过简报，仍返回全文。
 
 ## 显式简报尺寸预算
 
