@@ -221,7 +221,6 @@ export function coordinatorStartupSources(
   attemptId: string,
   events: readonly ActivityEvent[],
   validationReports: ReadonlyMap<string, ValidationReportView>,
-  includeInitialHistory: boolean | undefined = mission.executionMode === 'lightweight',
 ): {
   workItemsIndex: readonly CoordinatorWorkItemIndexEntry[];
   sinceLastHop: CoordinatorSinceLastHopEntry;
@@ -238,9 +237,6 @@ export function coordinatorStartupSources(
     criteria: entry.criteria,
     ...(entry.validationReport !== undefined ? { validationReport: entry.validationReport } : {}),
   }));
-  // 有显式的「从开跑开始算」要求（与 executionMode 无关）时，快车道首跳行为；
-  // 缺省仍按 executionMode 判：standard 保持旧行为，lightweight 首跳给全量。
-  const initialHistory = includeInitialHistory === true;
   const prevEnd = previousCoordinatorEndEvent(mission, attemptId, events);
   if (!prevEnd) {
     // 快车道首跳：前面没有 coordinator，“上一跳增量”无从算起，但这一跳要验收的正是
@@ -248,7 +244,7 @@ export function coordinatorStartupSources(
     // 活动压成摘要（已提交结果、证据、机器验证报告），用的是后续各跳同一份
     // summarizeSinceLastHop，不另造投影。standard 保持旧行为：它本来就有逐跳增量，
     // 一次性灌进来只会淹掉重点。
-    if (initialHistory || mission.executionMode === 'lightweight') {
+    if (mission.executionMode === 'lightweight') {
       return {
         workItemsIndex: index,
         sinceLastHop: summarizeSinceLastHop(mission, events, validationReports),

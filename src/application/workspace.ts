@@ -659,14 +659,33 @@ export class GitWorktreeManager implements WorkspaceManager {
   }
 
   /**
-   * pathspec 一律按字面量理解，并且 commit 也限定在这些路径上：index 里即便有别的暂存内容
-   * 也不会被带进来。只 add 分类为可提交的具体路径，不 add 目录条目本身。
+   * pathspec 一律按字面量理解。已跟踪文件被 `git rm` 之后工作区里没有这个路径，
+   * `--literal-pathspecs add -A` 会 exit 128（pathspec 不匹配任何文件），所以存在的
+   * 路径走 literal `add -A`，已不存在的路径走 `git update-index --remove`（把删除记进 index；
+   * `git add -u -- <缺失路径>` 同样会因 pathspec 不匹配而 exit 128，用不得）。
+   * 只 add 分类为可提交的具体路径，不 add 目录条目本身。
    */
   async #commitPaths(cwd: string, paths: readonly string[], message: string): Promise<string> {
-    await run('git', ['--literal-pathspecs', 'add', '-A', '--', ...paths], { cwd });
+    const missing: string[] = [];
+    const present: string[] = [];
+    for (const path of paths) {
+      (existsSync(join(resolve(cwd), path)) ? present : missing).push(path);
+    }
+    if (missing.length > 0) await run('git', ['update-index', '--remove', '--', ...missing], { cwd });
+    if (present.length > 0) await run('git', ['--literal-pathspecs', 'add', '-A', '--', ...present], { cwd });
+    // commit 不传 pathspec：对已删除路径 `--literal-pathspecs commit -- <path>` 同样 exit 128。
+    // 先确认暂存区里的路径都在本次 paths 里，再无 pathspec 提交：index 里即便有别的暂存
+    // 内容也不会被带进来，越界由调用方（checkpoint）显式判成故障。
+    const wanted = new Set(paths);
+    const staged = (await run('git', ['diff', '--cached', '--name-only', '-z'], { cwd })).stdout
+      .split('\0').filter(Boolean).map((path) => path.replace(/\\/g, '/'));
+    const extra = staged.filter((path) => !wanted.has(path));
+    if (extra.length > 0) {
+      throw new Error(`暂存区包含本次提交之外的路径：${extra.join(', ')}`);
+    }
     await run(
       'git',
-      ['--literal-pathspecs', '-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', message, '--', ...paths],
+      ['-c', 'user.name=coagenthub', '-c', 'user.email=noreply@local', 'commit', '-m', message],
       { cwd },
     );
     return this.head(cwd);
