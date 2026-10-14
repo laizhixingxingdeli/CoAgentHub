@@ -176,6 +176,156 @@ export function consecutivePlatformUnreachable(events: readonly StreakEvent[]): 
 }
 
 /**
+ * 上游网络中断的文案指纹。适配层把 fetch / 超时 / DNS 这些底层错误原样塞进 failureMessage，
+ * 各家的措辞不统一，所以按子串命中。**不要把「需要充值」「503 上游不可用」这类收进来**：
+ * 它们要人处理，混进来会把该停的停机自动续跑，白烧一轮预算。
+ */
+const UPSTREAM_FAILURE_PHRASES: readonly string[] = [
+  'fetch failed',
+  'request timed out',
+  'connection error',
+  'etimedout',
+  'econnreset',
+  'econnrefused',
+  'enotfound',
+  'eai_again',
+  'socket hang up',
+  'und_err_',
+  'other side closed',
+];
+
+/** 相邻两条疑似断网的最大间隔：超过就不算同一次断网——隔太久多半是两次不同的故障。 */
+const UPSTREAM_OUTAGE_MAX_GAP_MS = 30 * 60 * 1000;
+
+interface OutageEvent {
+  readonly kind: string;
+  readonly at?: string;
+  readonly attemptId?: string;
+  readonly data: unknown;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+/**
+ * 这一条 attempt.ended 算不算疑似断网。只有这两条路径算：
+ *   - upstream_failure 且 failureMessage 命中网络错误指纹（大小写不敏感，子串）；
+ *   - killed_idle 且 usage.total 恰好是数字 0（真的一个 token 都没吐）。
+ * 没有 usage 的 killed_idle **不算**：那多半是别的死法，「没吐 token」当不了断网证据。
+ */
+function isSuspectedOutage(event: OutageEvent): boolean {
+  const data = asRecord(event.data);
+  if (data === undefined) return false;
+  if (data.endedBy === 'upstream_failure') {
+    const message = data.failureMessage;
+    if (typeof message !== 'string') return false;
+    const lowered = message.toLowerCase();
+    return UPSTREAM_FAILURE_PHRASES.some((phrase) => lowered.includes(phrase));
+  }
+  if (data.endedBy === 'killed_idle') {
+    const usage = asRecord(data.usage);
+    return usage !== undefined && typeof usage.total === 'number' && usage.total === 0;
+  }
+  return false;
+}
+
+/** 同一 attemptId 的最后一条 attempt.started 里的 profile；取不到就没有。 */
+function outageStartedProfile(events: readonly OutageEvent[], attemptId: string | undefined): Record<string, unknown> | undefined {
+  if (attemptId === undefined) return undefined;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (event.kind !== 'attempt.started' || event.attemptId !== attemptId) continue;
+    return asRecord(asRecord(event.data)?.profile);
+  }
+  return undefined;
+}
+
+/** facts 里 key==='provider' 的 value；没有、不是字符串、空串都算没有 provider。 */
+function outageProvider(profile: Record<string, unknown> | undefined): string | undefined {
+  const facts = profile?.facts;
+  if (!Array.isArray(facts)) return undefined;
+  for (const fact of facts) {
+    const row = asRecord(fact);
+    if (row?.key !== 'provider') continue;
+    return typeof row.value === 'string' && row.value !== '' ? row.value : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * 活动尾部是不是一次上游网络中断，是的话该不该自动重试。
+ *
+ * 从尾部倒数连续的疑似断网：遇到别的 attempt.ended、或相邻两条相隔超过 30 分钟就断链。
+ * 条数 ≥3，或条数 ≥2 且涉及 ≥2 个 provider 才算中断——**宁可漏判**：把一个真实故障
+ * 当成断网只是多等一轮，把一次偶发失败当成断网会无谓地等 15 分钟再试。
+ */
+export function upstreamOutageStop(
+  events: readonly OutageEvent[],
+  nowIso: string,
+):
+  | {
+      exhausted: 'no_available_agent' | 'attempt_limit_reached';
+      detail: string;
+      resumeAt?: string;
+      count: number;
+      providers: readonly string[];
+    }
+  | undefined {
+  const chain: { readonly event: OutageEvent; readonly at: number }[] = [];
+  let newerAt: number | undefined;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (event.kind !== 'attempt.ended') continue;
+    if (!isSuspectedOutage(event)) break;
+    const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN;
+    // 时间读不出来也算断链：算不出间隔就分不清是一次断网还是两次。
+    if (!Number.isFinite(at)) break;
+    if (newerAt !== undefined && newerAt - at > UPSTREAM_OUTAGE_MAX_GAP_MS) break;
+    chain.push({ event, at });
+    newerAt = at;
+  }
+  if (chain.length === 0) return undefined;
+
+  const parts: string[] = [];
+  const providers = new Set<string>();
+  // detail 按链从旧到新；chain 是从新往旧攒的。
+  for (const { event } of [...chain].reverse()) {
+    const profile = outageStartedProfile(events, event.attemptId);
+    const profileId = typeof profile?.profileId === 'string' && profile.profileId !== ''
+      ? profile.profileId
+      : (event.attemptId ?? '未知候选');
+    const data = asRecord(event.data);
+    const message = data?.failureMessage;
+    parts.push(`${profileId}「${typeof message === 'string' ? message : String(data?.endedBy ?? '')}」`);
+    const provider = outageProvider(profile);
+    if (provider !== undefined) providers.add(provider);
+  }
+
+  const count = chain.length;
+  const providerList = [...providers].sort();
+  if (count < 3 && !(count >= 2 && providerList.length >= 2)) return undefined;
+
+  const resumeAt = platformUnreachableResumeAt(nowIso, count - 1);
+  // 分钟数从退避函数的结果反推，而不是再抄一份映射表：抄一份就会和
+  // PLATFORM_UNREACHABLE_BACKOFF_MS 各自漂移，改成 1/5/15 之外的档位就报错话。
+  const minutes = resumeAt !== undefined ? (Date.parse(resumeAt) - Date.parse(nowIso)) / 60_000 : 0;
+  const detail = resumeAt !== undefined
+    ? `上游网络中断：第${count}次；${parts.join('；')}。约${minutes}分钟后自动重试。`
+    : `上游网络中断：第${count}次；${parts.join('；')}。已自动等过 1、5、15 分钟，停下来等人。`;
+  // resumeAt 无值就没有这个字段：调用方用 hasOwnProperty 判断「还等不等」，
+  // 显式的 undefined 会让 JSON 往返后凭空多一个 null。
+  return {
+    exhausted: resumeAt !== undefined ? 'no_available_agent' : 'attempt_limit_reached',
+    detail,
+    ...(resumeAt !== undefined ? { resumeAt } : {}),
+    count,
+    providers: providerList,
+  };
+}
+
+/**
  * 协调者连续打转的次数：从尾部数 attempt.ended 且 workItemId===undefined 且
  * endedBy==='killed_wall_clock'。有 workItemId 的事件忽略（执行者的不算）；
  * 遇到无 workItemId 且 endedBy 不是 killed_wall_clock 的 attempt.ended 停。
