@@ -68,6 +68,10 @@ export function priorGuidanceForWorkItem(
  * 改的是不存在的问题。理由本身不重写，只把里面这句版本号刷新成当前修订。
  *
  * 只认 send_back；没有版本号句子、或号本来就对，原样返回同一个对象。
+ *
+ * 只往「前」刷，不往回改：L3 的打回理由可能原样引用了这句模板，而契约还没走到
+ * 那个号——往回改会把执行者要读的原文改掉。要解决的只是「理由停在更小的号、契约
+ * 已经更后面」，所以只有理由里的号严格小于当前修订号时才刷新。
  */
 export function withCurrentContractSendBack(
   review: Readonly<FinalReview> | undefined,
@@ -76,8 +80,12 @@ export function withCurrentContractSendBack(
   if (review === undefined || review.verdict !== 'send_back') return review;
   let changed = false;
   const reasons = review.reasons.map((reason) => {
-    const next = reason.replace(/Contract 已更新到 r\d+/g, `Contract 已更新到 r${contractRevision}`);
-    if (next !== reason) changed = true;
+    const next = reason.replace(/Contract 已更新到 r(\d+)/g, (match, raw: string) => {
+      const baked = Number(raw);
+      if (!Number.isInteger(baked) || baked >= contractRevision) return match;
+      changed = true;
+      return `Contract 已更新到 r${contractRevision}`;
+    });
     return next;
   });
   if (!changed) return review;
