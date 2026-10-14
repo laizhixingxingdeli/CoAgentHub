@@ -899,15 +899,26 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
     const paths = ok.report.checks.find((c) => c.kind === 'changed-paths')!;
     assert.equal(paths.passed, true, '这一例里只有授权文件');
 
-    // 未授权二进制：changed-paths 仍然失败，不因为分开计量就放过。
-    const stray = await engine({
+    // 未授权二进制：changed-paths 仍失败，不因为分开计量就放过。
+    const binaryStray = await engine({
+      paths: fakePaths(['src/a.kt', 'libs/other.aar']),
+      diffFacts: fakeDiffFacts(facts),
+    }).validate(baseInput({ allowedScope: ['src/a.kt'], diffSize: { maxChangedLines: 20 } }));
+    assert.equal(binaryStray.report.passed, false);
+    assert.deepEqual(
+      binaryStray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
+      ['libs/other.aar'],
+    );
+
+    // 杂文件（__pycache__/.pyc）不再算越界：检查点那边也只存档不提交。
+    const junkStray = await engine({
       paths: fakePaths(['src/a.kt', 'tests/__pycache__/x.pyc']),
       diffFacts: fakeDiffFacts(facts),
     }).validate(baseInput({ allowedScope: ['src/a.kt'], diffSize: { maxChangedLines: 20 } }));
-    assert.equal(stray.report.passed, false);
+    assert.equal(junkStray.report.passed, true, '杂文件不推进 violations');
     assert.deepEqual(
-      stray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
-      ['tests/__pycache__/x.pyc'],
+      junkStray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
+      [],
     );
 
     // 二进制上限被超过：点名是二进制维度，而不是文本行数。

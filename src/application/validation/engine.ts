@@ -20,7 +20,7 @@ import type {
 import type { Clock, IdGenerator } from '../ports.ts';
 import type { ChangedPathReader, CommandRunner, DiffFactReader, DiffLineFacts } from './ports.ts';
 import { redactSecrets } from '../redact.ts';
-import { isEscapePath, normalizeScopePath, scopeMatches } from '../scope-paths.ts';
+import { isEscapePath, isJunkPath, normalizeScopePath, scopeMatches } from '../scope-paths.ts';
 
 export const VALIDATION_POLICY_REVISION = 1;
 export const OUTPUT_TAIL_MAX_CHARS = 4096;
@@ -661,6 +661,9 @@ function evaluateChangedPaths(
 
   const violations: string[] = [];
   for (const path of actual) {
+    // 杂文件（__pycache__ / .pyc / .pyo / .DS_Store …）不算越界：它们是工具生成的垃圾，
+    // 不是执行者扩大范围写的代码，检查点那边也只存档不提交。
+    if (isJunkPath(path)) continue;
     if (isEscapePath(path) || path === '') {
       violations.push(path);
       continue;

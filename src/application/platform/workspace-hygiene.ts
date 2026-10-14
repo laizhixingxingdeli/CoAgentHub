@@ -14,6 +14,7 @@ import { PLATFORM_BLOCKED_EVENT_KIND } from './stalled-work-item.ts';
  */
 
 export const VALIDATION_SETTLED_EVENT_KIND = 'workspace.validation_settled';
+export const SCOPE_ARCHIVED_EVENT_KIND = 'workspace.scope_archived';
 export const RESIDUE_ADOPTED_EVENT_KIND = 'workspace.residue_adopted';
 export const CHECKPOINT_FAILED_EVENT_KIND = 'workspace.checkpoint_failed';
 
@@ -34,6 +35,57 @@ export interface ValidationSettlementInput {
   readonly left: readonly string[];
   /** 收口本身失败时的原因；失败也要记，不能让脏改动无声无息地留在那里。 */
   readonly error?: string;
+  /** 本次移出工作树存档的范围外 / 杂 / 被忽略路径。 */
+  readonly archived?: readonly { path: string; archivePath: string; tracked: boolean }[];
+  /** 这次存档发生在哪一道：记来源时区分验证命令 / 执行者 / 来源不明。 */
+  readonly archiveWhen?: 'checkpoint' | 'settle' | 'preflight';
+}
+
+/** 一条存档路径的来源与位置；`source` 沿用现有归因：validation / executor / unknown。 */
+type ArchiveEntry = {
+  path: string;
+  archivePath: string;
+  tracked: boolean;
+  source: 'validation' | 'executor' | 'unknown';
+  originWorkItemId?: string;
+  reportId?: string;
+};
+
+/**
+ * 一次存档的每条路径该归给谁。协调者要看得出这是谁的验证、还是执行者自己带出来的：
+ * settle 一定是本次验证命令；checkpoint 先查残留来源，命中就是那条验证，否则是执行者；
+ * preflight / 其它查不到来源就老实写来源不明。
+ */
+async function archiveEntries(
+  ctx: PlatformContext,
+  input: ValidationSettlementInput,
+  reportId: string | undefined,
+): Promise<ArchiveEntry[]> {
+  const archived = input.archived ?? [];
+  const origins = await workspaceResidueOrigins(
+    ctx,
+    input.missionId,
+    archived.map((record) => record.path),
+  ).catch(() => ({} as Record<string, ResidueOrigin>));
+  return archived.map((record) => {
+    const origin = origins[record.path];
+    if (input.archiveWhen === 'settle') {
+      return {
+        ...record,
+        source: 'validation',
+        originWorkItemId: input.workItemId,
+        ...(reportId !== undefined ? { reportId } : {}),
+      };
+    }
+    if (input.archiveWhen === 'checkpoint') {
+      return origin
+        ? { ...record, source: 'validation', originWorkItemId: origin.workItemId, ...(origin.reportId !== undefined ? { reportId: origin.reportId } : {}) }
+        : { ...record, source: 'executor', originWorkItemId: input.workItemId };
+    }
+    return origin
+      ? { ...record, source: 'validation', originWorkItemId: origin.workItemId, ...(origin.reportId !== undefined ? { reportId: origin.reportId } : {}) }
+      : { ...record, source: 'unknown' };
+  });
 }
 
 /** 记一次验证后收口。什么都没发生（干净）就不写事件，避免每张工单多一条空记录。 */
@@ -41,25 +93,38 @@ export async function recordValidationSettlement(
   ctx: PlatformContext,
   input: ValidationSettlementInput,
 ): Promise<{ recorded: boolean }> {
-  if (input.committed.length === 0 && input.left.length === 0 && input.error === undefined) {
+  const archived = input.archived ?? [];
+  const hasSettlement =
+    input.committed.length > 0 || input.left.length > 0 || input.error !== undefined;
+  if (!hasSettlement && archived.length === 0) {
     return { recorded: false };
   }
   const { mission, item } = await ctx.locateItem(input.missionId, input.workItemId);
   const reportId = item.submittedAttemptId
     ? await submittedAttemptReportId(ctx, mission.id, item.id, item.submittedAttemptId)
     : undefined;
-  await ctx.event(
-    mission,
-    VALIDATION_SETTLED_EVENT_KIND,
-    {
-      committed: [...input.committed],
-      left: [...input.left],
-      ...(input.commit !== undefined ? { commit: input.commit } : {}),
-      ...(reportId !== undefined ? { reportId } : {}),
-      ...(input.error !== undefined ? { error: input.error } : {}),
-    },
-    item.id,
-  );
+  if (hasSettlement) {
+    await ctx.event(
+      mission,
+      VALIDATION_SETTLED_EVENT_KIND,
+      {
+        committed: [...input.committed],
+        left: [...input.left],
+        ...(input.commit !== undefined ? { commit: input.commit } : {}),
+        ...(reportId !== undefined ? { reportId } : {}),
+        ...(input.error !== undefined ? { error: input.error } : {}),
+      },
+      item.id,
+    );
+  }
+  if (archived.length > 0) {
+    await ctx.event(
+      mission,
+      SCOPE_ARCHIVED_EVENT_KIND,
+      { entries: await archiveEntries(ctx, input, reportId) },
+      item.id,
+    );
+  }
   return { recorded: true };
 }
 
