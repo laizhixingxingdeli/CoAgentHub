@@ -119,12 +119,12 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 冻结票和验收时不要求穷举测试；协调者验收不得要求超出契约点名的测试。否则测试越写越多，便宜的执行者反复返工。
 - 前端换框架的判据：需要虚拟滚动 / 拖拽 / 富文本这类复杂组件，或页面数超过 8。在那之前，「换成 React 会更好写」不是理由。
 
-## 已确认 Mission 的连续运行（2026-10-04）
+## 已确认 Mission 的连续运行（2026-10-04）（仅 L3）
 
 基本单位仍是 Mission；用户确认冻结清单后通过项目 mission-queue 入队，执行目录、适配器、检视者与集成验证属于项目 execution-config。队列只提供顺序和依赖，门禁、费用、失败和最终审查按 Mission 处理。配置变化仅影响未启动任务；人工签字也必须跑项目集成验证，失败回滚并留待审查。使用步骤见 reviewer-runbook 的 Mission 队列节；生产旧 run-plan 已退役，历史记录保留恢复兼容。
 
 
-## AC4 收尾记录（2026-10-04）
+## AC4 收尾记录（2026-10-04）（仅 L3）
 
 AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-20261004 经执行者证据、协调者逐条 L2 与 L3 最终审查 completed，通过插件合入 codex/communication-integration（a756fc5）。全量 2365 tests / 2358 pass / 0 fail / 7 既有 HAOFF1 skip；报告见 docs/ac4-platform-closeout-20261004.md。3101 常驻服务托管了本收尾任务，但本票未另跑真实 lightweight Mission 作端到端验证。
 
