@@ -200,7 +200,7 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
   按 `missions/PLAN-*.json` 的资格候选顺序逐项推进；`node src/run-plan.ts` 驱动，独立 JSON PlanRun 记录方案层状态、升级、决定和停止原因，与 Mission 和 Mission 内 
 - **prompt-channel** — 角色提示的通道交付
-  pi 适配层按候选把角色规则与开跑简报放进系统提示或一条用户消息。看不见客户端系统提示的上游（已核实：10Router 的 qdc / qd / cbai）否则会丢掉角色规则与简报。不改 10Router、资源池顺序或候选 facts；上线
+  pi 适配层按候选把角色规则与开跑简报放进系统提示或一条用户消息。看不见客户端系统提示的上游（10Router 的 qdc 与 cbai 已实测；qd 与 qdc 走同一个执行器，按代码同样处理，被限流未能实测）否则会丢掉角色规则与简报。不
 - **query-run** — 独立 QueryRun（只读问答）
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
 - **reviewer-workflow** — 检视者工作流
