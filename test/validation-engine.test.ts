@@ -899,15 +899,26 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
     const paths = ok.report.checks.find((c) => c.kind === 'changed-paths')!;
     assert.equal(paths.passed, true, '这一例里只有授权文件');
 
-    // 未授权二进制：changed-paths 仍然失败，不因为分开计量就放过。
-    const stray = await engine({
+    // 未授权二进制：changed-paths 仍失败，不因为分开计量就放过。
+    const binaryStray = await engine({
+      paths: fakePaths(['src/a.kt', 'libs/other.aar']),
+      diffFacts: fakeDiffFacts(facts),
+    }).validate(baseInput({ allowedScope: ['src/a.kt'], diffSize: { maxChangedLines: 20 } }));
+    assert.equal(binaryStray.report.passed, false);
+    assert.deepEqual(
+      binaryStray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
+      ['libs/other.aar'],
+    );
+
+    // 杂文件（__pycache__/.pyc）不再算越界：检查点那边也只存档不提交。
+    const junkStray = await engine({
       paths: fakePaths(['src/a.kt', 'tests/__pycache__/x.pyc']),
       diffFacts: fakeDiffFacts(facts),
     }).validate(baseInput({ allowedScope: ['src/a.kt'], diffSize: { maxChangedLines: 20 } }));
-    assert.equal(stray.report.passed, false);
+    assert.equal(junkStray.report.passed, true, '杂文件不推进 violations');
     assert.deepEqual(
-      stray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
-      ['tests/__pycache__/x.pyc'],
+      junkStray.report.checks.find((c) => c.kind === 'changed-paths')!.changedPaths?.violations,
+      [],
     );
 
     // 二进制上限被超过：点名是二进制维度，而不是文本行数。
@@ -970,6 +981,53 @@ describe('ValidationEngine — diff-size (VAL-002)', () => {
     assertFrozen(ds.diffSize!.unknown);
     (diffSize as { maxChangedFiles: number }).maxChangedFiles = 0;
     assert.equal(ds.diffSize!.limits.maxChangedFiles, 5);
+  });
+
+  test('diffSizeAdvisory：Standard 只提醒，超限/无法计量不让报告失败（maxChangedFiles 0 仍硬卡）', async () => {
+    const over = await engine({ paths: fakePaths(['a.ts', 'b.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts', 'b.ts'],
+        diffSize: { maxChangedFiles: 1 },
+        diffSizeAdvisory: true,
+      }),
+    );
+    assert.equal(over.report.passed, true);
+    assert.ok(over.authority);
+    const dsOver = over.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsOver.passed, false);
+    assert.equal(dsOver.advisory, true);
+    assert.match(dsOver.summary, /^diff-size advisory:/);
+    assert.ok(dsOver.summary.includes('changedFiles 2 > maxChangedFiles 1'));
+    assert.equal(dsOver.diffSize?.used.changedFiles, 2);
+    assert.equal(dsOver.diffSize?.limits.maxChangedFiles, 1);
+
+    // maxChangedFiles 为 0 的零代码验证单仍硬卡：不提醒。
+    const zero = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedFiles: 0 },
+        diffSizeAdvisory: true,
+      }),
+    );
+    assert.equal(zero.report.passed, false);
+    const dsZero = zero.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsZero.advisory, undefined);
+    assert.equal(dsZero.passed, false);
+
+    // 无法计量（缺 reader）：提醒，报告仍通过。
+    const unknown = await engine({ paths: fakePaths(['a.ts']) }).validate(
+      baseInput({
+        allowedScope: ['a.ts'],
+        diffSize: { maxChangedLines: 5 },
+        diffSizeAdvisory: true,
+      }),
+    );
+    assert.equal(unknown.report.passed, true);
+    const dsUnknown = unknown.report.checks.find((c) => c.kind === 'diff-size')!;
+    assert.equal(dsUnknown.advisory, true);
+    assert.match(dsUnknown.summary, /diff-size advisory:/);
+    assert.ok(dsUnknown.summary.includes('changedLines'));
+    assert.ok(dsUnknown.diffSize?.unknown.includes('changedLines'));
   });
 });
 

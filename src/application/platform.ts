@@ -81,8 +81,8 @@ import type { ChangeReceipt } from './change-receipt.ts';
 import type { ChangeCoverage } from './change-coverage.ts';
 import type { AcceptanceDispositionRecord } from './acceptance-disposition.ts';
 import type { ChangeDelivery } from './platform/change-receipt.ts';
-import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
-export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
+import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, WorkOrderPointer, ContractPointer, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
+export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, WorkOrderPointer, ContractPointer, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 import { PlatformContext, PlatformRuleError, PROTOCOL_VERSION, ATTEMPT_STARTED_KIND } from './platform/context.ts';
 /**
  * 平台用例层 —— coagent_* 工具背后的真实实现。
@@ -1208,11 +1208,14 @@ export class Platform {
     return startupBrief.recordContextTruncated(this.#context, missionId, attemptId, claim, data);
   }
 
-  async getContract(missionId: string): Promise<{
-    contract: Readonly<MissionContract> | undefined;
-    contractRevision: number;
-  }> {
-    return views.getContract(this.#context, missionId);
+  async getContract(
+    missionId: string,
+    attemptId?: string,
+  ): Promise<
+    | { contract: Readonly<MissionContract> | undefined; contractRevision: number }
+    | ContractPointer
+  > {
+    return views.getContract(this.#context, missionId, attemptId);
   }
 
   /**
@@ -1523,6 +1526,16 @@ export class Platform {
     data: { readonly reason: string; readonly resumeAt: string; readonly streak: number },
   ): Promise<void> {
     return this.#tx(() => autoResume.recordAutoResume(this.#context, missionId, data));
+  }
+
+  /** 自动续跑前的收尾：把执行者死信 / 打转收成 blocked 并写 coordinator_handoff。返 'skip' 表示不能 start。 */
+  async prepareAutoResume(missionId: string): Promise<'start' | 'skip'> {
+    return this.#tx(() => autoResume.prepareAutoResume(this.#context, missionId));
+  }
+
+  /** 托管运行过的 Mission 被解闸后，请服务续跑一次（写 mission.resume_requested）。 */
+  async requestHostedContinuation(missionId: string, cause: string): Promise<void> {
+    return this.#tx(() => autoResume.requestHostedContinuation(this.#context, missionId, cause));
   }
 
   /** 验证跑完、授权范围内的副作用已收口提交后，记下提交了什么、范围外留下了什么。 */
@@ -2165,12 +2178,12 @@ export class Platform {
 
   /* ============================ L1 执行者面 ============================ */
 
-  async getWorkOrder(missionId: string, workItemId: string): Promise<WorkOrderView> {
-    return views.getWorkOrder(this.#context, missionId, workItemId);
+  async getWorkOrder(missionId: string, workItemId: string, attemptId?: string): Promise<WorkOrderView | WorkOrderPointer> {
+    return views.getWorkOrder(this.#context, missionId, workItemId, attemptId);
   }
 
-  async getAgentWorkItem(missionId: string, workItemId: string): Promise<AgentWorkItemView> {
-    return views.getAgentWorkItem(this.#context, { workItemValidationReportViews: (m, e) => this.#workItemValidationReportViews(m, e), haReviewHold: (m) => this.#haReviewHold(m) }, missionId, workItemId);
+  async getAgentWorkItem(missionId: string, workItemId: string, options?: { full?: boolean }): Promise<AgentWorkItemView> {
+    return views.getAgentWorkItem(this.#context, { workItemValidationReportViews: (m, e) => this.#workItemValidationReportViews(m, e), haReviewHold: (m) => this.#haReviewHold(m) }, missionId, workItemId, options);
   }
 
   async getContext(

@@ -1234,6 +1234,7 @@ export async function startServer(
           isRunning: (missionId) =>
             hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
           record: (missionId, data) => built.platform.recordAutoResume(missionId, data),
+          prepare: (missionId) => built.platform.prepareAutoResume(missionId),
           start: async (missionId, request) => {
             const view = await built.platform.getMissionView(missionId);
             if (!view.contract) return;

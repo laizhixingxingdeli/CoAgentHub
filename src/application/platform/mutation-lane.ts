@@ -15,18 +15,20 @@ export async function acquireMutationSlotForDispatch(ctx: PlatformContext, missi
           // 先歇着去跑别的，而不是当成出错。
           // 点名占着名额的是谁。只说"忙"的话，人下一步只能挨个 Mission 去翻。
           const holder = project.missions.find((m) => m.id !== mission.id && m.isMutating);
+          const resumeAt = new Date(ctx.clock.now().getTime() + 5_000).toISOString();
           mission.setWaitReason(
             'project_busy',
             holder
               ? `${holder.id} 正占着 ${mission.projectId} 的改动名额（${holder.status}）。` +
                 '它落地或被放弃之后，这条会自动接上。'
               : undefined,
+            resumeAt,
           );
-          await ctx.event(mission, 'mission.waiting', { reason: 'project_busy' });
+          await ctx.event(mission, 'mission.waiting', { reason: 'project_busy', resumeAt });
           throw new PlatformRuleError(
             'PROJECT_BUSY',
             `本 Project 已经有别的 Mission 在改代码了。可以继续调查和规划，` +
-              `但要等它结束才能派发实现任务。`,
+              `但要等它结束才能派发实现任务；不用升级，平台会自动接着派。`,
           );
         }
         throw error;

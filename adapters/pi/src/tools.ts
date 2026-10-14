@@ -114,7 +114,7 @@ const COORDINATOR: ToolSpec[] = [
 		name: "coagent_get_contract",
 		label: "Get Contract",
 		description:
-			"只读契约：意图、验收标准、约束、非目标、红线。调查中要回看验收标准或红线时用它，比 coagent_get_mission 便宜得多——后者会把全部工作项、尝试、时间线一起带回来。",
+			"只读契约：意图、验收标准、约束、非目标、红线。调查中要回看验收标准或红线时用它，比 coagent_get_mission 便宜得多——后者会把全部工作项、尝试、时间线一起带回来。本跳简报已含同一修订号全文时，这个工具只返回 pointer 与 contractRevision，不是契约正文；修订号不同或简报里没有全文时仍是全文。",
 		promptSnippet: "只读契约（比读整个 Mission 便宜）",
 		parameters: Type.Object({}),
 	},
@@ -122,10 +122,15 @@ const COORDINATOR: ToolSpec[] = [
 		name: "coagent_get_work_item",
 		label: "Get Work Item",
 		description:
-			"按 id 读一个工作项的细节：工单正文、状态、尝试与证据。coagent_get_mission 只给索引，要动手审某张单之前用这个把细节拿全。",
+			"按 id 读一个工作项的细节：工单正文、状态、尝试与证据。coagent_get_mission 只给索引，要动手审某张单之前用这个把细节拿全。缺省不是原文：只给（N 字节）加开头 200 字；要 requiredBehaviour 与 contextRefs 原文就传 full:true。",
 		promptSnippet: "按 id 读工作项细节（Mission 只给索引）",
 		parameters: Type.Object({
 			workItemId: Type.String({ description: "要看的工作项 id。" }),
+			full: Type.Optional(
+				Type.Boolean({
+					description: "true 才返回 requiredBehaviour 与 contextRefs 原文；缺省只给（N 字节）加开头 200 字。",
+				}),
+			),
 		}),
 	},
 	{
@@ -373,7 +378,7 @@ const EXECUTOR: ToolSpec[] = [
 		name: "coagent_get_work_order",
 		label: "Get Work Order",
 		description:
-			"读取本次指派给你的工单：目标、允许改动范围、约束、验收标准、验证命令、禁止事项。被打回重做时，上一次的 requiredChanges 也在里面。动手前第一件事。",
+			"读取本次指派给你的工单：目标、允许改动范围、约束、验收标准、验证命令、禁止事项。被打回重做时，上一次的 requiredChanges 也在里面。简报里已有同一修订号全文时这个工具只返回 pointer，不要为了再读一遍而调用；只有简报里没有工单时才用它补全文。",
 		promptSnippet: "读取本次工单",
 		parameters: Type.Object({}),
 	},

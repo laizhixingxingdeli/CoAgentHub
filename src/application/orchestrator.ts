@@ -44,6 +44,11 @@ import type { AttemptEndReason, TokenUsage, WaitReason } from '../kernel/index.t
 import { anyHardAuthoritativeExceeded } from './budget-usage.ts';
 import { redactSecrets } from './redact.ts';
 import { classifyCandidateFailure, resolveQuotaResetTime, type CandidateCircuit } from './candidate-circuit.ts';
+import {
+  consecutivePlatformUnreachable,
+  coordinatorRunawayStreak,
+  platformUnreachableResumeAt,
+} from './platform/auto-resume.ts';
 import { findUsageRow, getRuntimeUsage } from './runtime-catalog.ts';
 import { lightweightGateTrigger } from './promotion/lightweight-gate.ts';
 import {
@@ -2360,6 +2365,7 @@ export class Orchestrator {
     let used = 0;
     // 只调一次：同一跳换候选之前工作区已回滚到 startRevision，HEAD 没有变。
     let startHook = input.onExecutorStart;
+    let quotaResetAt: string | null = null;
     for (const profile of usable) {
       // Attempt 起点。换候选之前要回到这里：下一个候选应该从干净的起点
       // 开始，而不是接手上一个改到一半的代码（S06.3）。
@@ -2383,7 +2389,9 @@ export class Orchestrator {
             profileId: profile.profileId, succeeded: false, failureClass: circuit.failureClass, openUntil: circuit.openUntil,
           });
         }
-        return { exhausted: 'attempt_limit_reached' };
+        const exhausted = 'attempt_limit_reached' as const;
+        const resumeAt = await this.#stopResumeAt(input.missionId, input.role, exhausted);
+        return { exhausted, ...(resumeAt !== undefined ? { resumeAt } : {}) };
       }
       const identity = { runtimeKind: input.pool.runtime.kind, profileId: profile.profileId };
       if (claimedHop && this.#leaseIdentityMismatch(claimedHop, identity)) {
@@ -2759,7 +2767,19 @@ export class Orchestrator {
             if (!input.workItemId || !Array.isArray(allowedScope) || allowedScope.length === 0) {
               throw new Error(`缺少工作项 ${input.workItemId ?? '(未指定)'} 的冻结 allowedScope，无法检查点`);
             }
-            await this.#workspace.checkpoint(input.cwd, input.missionId, input.workItemId, allowedScope);
+            const archived = await this.#workspace.checkpoint(input.cwd, input.missionId, input.workItemId, allowedScope);
+            if (Array.isArray(archived) && archived.length > 0 && input.workItemId) {
+              await this.#platform
+                .recordValidationSettlement({
+                  missionId: input.missionId,
+                  workItemId: input.workItemId,
+                  committed: [],
+                  left: [],
+                  archived,
+                  archiveWhen: 'checkpoint',
+                })
+                .catch(() => undefined);
+            }
           } else if (!(this.#workspace instanceof InPlaceWorkspaceManager)) {
             throw new Error('WorkspaceManager 未实现 checkpoint，无法验证已交回成果');
           }
@@ -2781,6 +2801,9 @@ export class Orchestrator {
       const durableCandidateFailure =
         endedBy === 'upstream_failure' || endedBy === 'killed_idle' ||
         classification?.failureClass === 'local_adapter_error';
+      if (failureClass === 'quota') {
+        quotaResetAt = resolveQuotaResetTime({ message, now: this.#now().toISOString() });
+      }
       if (this.#candidateCircuits) {
         const openUntil = failureClass === 'quota'
           ? resolveQuotaResetTime({ message, now: this.#now().toISOString() })
@@ -2844,8 +2867,10 @@ export class Orchestrator {
             claim,
           );
         }
+        const resumeAt = await this.#stopResumeAt(input.missionId, input.role, 'runaway_suspected');
         return {
           exhausted: 'runaway_suspected',
+          ...(resumeAt !== undefined ? { resumeAt } : {}),
           // detail 跟着返回，不在这里写平台：调用方那边紧接着就会用
           // #stallDetail 拼一句泛泛的话覆盖掉它，而这一句里的"跑了多久、
           // 改动还在哪、哪个尝试"才是人接下来要用的。
@@ -2864,10 +2889,11 @@ export class Orchestrator {
       if (endedBy === 'platform_unreachable') {
         // **不冷却候选**：问题在平台自己这边。直接停下来喊人——
         // 继续换候选只会把整个池子白白冻掉。
+        const resumeAt = await this.#stopResumeAt(input.missionId, input.role, 'platform_unreachable');
         await this.#platform
-          .setWaitReason(input.missionId, 'platform_unreachable')
+          .setWaitReason(input.missionId, 'platform_unreachable', undefined, resumeAt)
           .catch(() => undefined);
-        return { exhausted: 'platform_unreachable' };
+        return { exhausted: 'platform_unreachable', ...(resumeAt !== undefined ? { resumeAt } : {}) };
       }
 
       // upstream_failure 与 killed_idle **处置相同、记录不同**。
@@ -2882,6 +2908,22 @@ export class Orchestrator {
       const shouldFailover = this.#candidateCircuits
         ? classification?.failover === true
         : endedBy === 'upstream_failure' || endedBy === 'killed_idle' || endedBy === 'quota' || endedBy === 'auth' || endedBy === 'upstream_5xx';
+      // 额度耗尽、且已知下一次重置时刻、且这一跳已经用满重试名额（会被记成死信）：
+      // 这不该进死信。释放租约，把恢复时刻交给平台到点自动续跑。
+      if (
+        failureClass === 'quota' &&
+        quotaResetAt !== null &&
+        claimedHop !== undefined &&
+        claimedHop.attemptCount + 1 >= claimedHop.maxAttempts
+      ) {
+        await this.#completeHopLease(claimedHop);
+        return {
+          exhausted: 'no_available_agent',
+          candidateRole: input.role,
+          detail: `额度已用尽，最早 ${quotaResetAt} 自动重试`,
+          resumeAt: quotaResetAt,
+        };
+      }
       const reportableFailure = thrownRuleError || shouldFailover || durableCandidateFailure;
       if (
         reportableFailure &&
@@ -2910,8 +2952,10 @@ export class Orchestrator {
           retryable: !thrownRuleError,
         });
         if (reported.status === 'dead_letter') {
+          const resumeAt = await this.#stopResumeAt(input.missionId, input.role, 'attempt_limit_reached');
           return {
             exhausted: 'attempt_limit_reached',
+            ...(resumeAt !== undefined ? { resumeAt } : {}),
             detail: queuedHopWaitDetail({ kind: 'waiting', hop: reported, wait: 'dead_letter' }),
           };
         }
@@ -3545,6 +3589,36 @@ export class Orchestrator {
       return undefined;
     }
     return { id: hop.id, owner: hop.owner, claimGeneration: hop.claimGeneration };
+  }
+
+  /**
+   * 停机时把「什么时候能自动接着跑」算出来，交给调用方顺着已有的 resumeAt 通道写库。
+   *
+   * 只算恢复时刻，不改停机原因字符串：
+   * - 执行者跳的死信/打转：工作项被收成 blocked 后交回协调者，平台立刻就能续跑 ——
+   *   nowIso；协调者自己打转则要先换执行者试试，所以同 nowIso，只有连续第二次
+   *   （coordinatorRunawayStreak>=2）才 undefined（停下等人）。
+   * - platform_unreachable：按连续第 1/2/3 次的 1/5/15 分钟退避；第 4 次及以后
+   *   platformUnreachableResumeAt 返回 undefined，原样往下传（停下来等人）。
+   */
+  async #stopResumeAt(
+    missionId: string,
+    role: 'coordinator' | 'executor',
+    exhausted: 'platform_unreachable' | 'runaway_suspected' | 'attempt_limit_reached',
+  ): Promise<string | undefined> {
+    const nowIso = this.#now().toISOString();
+    if (exhausted === 'attempt_limit_reached') {
+      // 执行者规则错误/重试耗尽：工单被收成 blocked，交回协调者自动续跑。
+      // 协调者没有这条出口可等（role!=='executor'），不动活动。
+      return role === 'executor' ? nowIso : undefined;
+    }
+    const events = await this.#platform.getActivity(missionId);
+    if (exhausted === 'platform_unreachable') {
+      return platformUnreachableResumeAt(nowIso, consecutivePlatformUnreachable(events));
+    }
+    // runaway_suspected：协调者连续第二次打转才停下等人，否则 now；执行者永远 now。
+    if (role === 'coordinator' && coordinatorRunawayStreak(events) >= 2) return undefined;
+    return nowIso;
   }
 
   async #completeHopLease(hop: QueuedHop | undefined): Promise<void> {

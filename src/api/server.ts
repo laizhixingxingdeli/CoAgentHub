@@ -1315,16 +1315,20 @@ export function createApi(deps: ApiDeps): Server {
     },
 
     async coagent_get_work_item(run, body) {
-      const { workItemId } = body as unknown as { workItemId: unknown };
+      const { workItemId, full } = body as unknown as { workItemId: unknown; full?: unknown };
       if (typeof workItemId !== 'string' || workItemId.length === 0) {
         throw new HttpError(400, 'BAD_REQUEST', 'workItemId 必须是非空字符串。');
+      }
+      if (full !== undefined && typeof full !== 'boolean') {
+        throw new HttpError(400, 'BAD_REQUEST', 'full 必须是布尔值。');
       }
       // 只有协调者能取精简详情：executor 在 enforceAgentPolicy 的旧兼容回退下会落到放行，
       // 故这里 fail-closed 明确挡住非协调者，避免详情被越权读取。
       if (run.role !== 'coordinator') {
         throw new HttpError(403, 'ACTION_DENIED', '只有协调者能读取工作项详情。');
       }
-      return platform.getAgentWorkItem(run.missionId, workItemId);
+      // 缺省与 false 都是预览（长度 + 开头一段），显式 full:true 才给原文。
+      return platform.getAgentWorkItem(run.missionId, workItemId, { full: full === true });
     },
 
     async coagent_get_validation_report(run, body) {
@@ -1481,7 +1485,7 @@ export function createApi(deps: ApiDeps): Server {
     },
 
     async coagent_get_contract(run) {
-      return platform.getContract(run.missionId);
+      return platform.getContract(run.missionId, run.attemptId);
     },
 
     async coagent_submit_contract_check(run, body) {
@@ -1583,7 +1587,7 @@ export function createApi(deps: ApiDeps): Server {
     },
 
     async coagent_get_work_order(run) {
-      return platform.getWorkOrder(run.missionId, requireWorkItem(run));
+      return platform.getWorkOrder(run.missionId, requireWorkItem(run), run.attemptId);
     },
 
     async coagent_get_context(run, body) {

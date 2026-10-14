@@ -20,6 +20,6 @@ L3 打回后，可修订的 `created/rejected/blocked` 项先修订再派发；`
 
 ## 按需读取
 
-协调者 `coagent_get_mission` 只给契约、完整规划、工作项紧凑索引、升级和答复摘要，不内嵌每张工单、执行结果和评审历史。`POST /api/agent/coagent_get_work_item` 以 `{ workItemId: string }` 取当前 Run Token 所绑定 Mission 的单项详情，只准协调者；返回工单和修订号、最新一次执行结果全文、平台已存证据摘要与评审。历次提交只有事件保存的 outcome、changedFiles、orderRevision、时间，非最新正文标明「旧正文未保存」，不虚构已遗失的正文。超长详情截断且注明；序列化 UTF-8 JSON 不超过 20480 字节。60 个短工作项的 Mission 精简视图序列化 JSON 不超过 30720 字节。网页控制面 `GET /api/missions/:id` 继续返回完整视图，不采用 agent 精简视图。
+协调者 `coagent_get_mission` 只给契约、完整规划、工作项紧凑索引、升级和答复摘要，不内嵌每张工单、执行结果和评审历史。`POST /api/agent/coagent_get_work_item` 以 `{ workItemId: string, full?: boolean }` 取当前 Run Token 所绑定 Mission 的单项详情，只准协调者；返回工单和修订号、最新一次执行结果全文、平台已存证据摘要与评审。`full` 缺省或 false 时，`requiredBehaviour` 与 `contextRefs` 只给「（N 字节）」加开头 200 字；`full: true` 才给原文。直接调用不传 options 仍是原文。历次提交只有事件保存的 outcome、changedFiles、orderRevision、时间，非最新正文标明「旧正文未保存」，不虚构已遗失的正文。超长详情截断且注明；序列化 UTF-8 JSON 不超过 20480 字节。60 个短工作项的 Mission 精简视图序列化 JSON 不超过 30720 字节。网页控制面 `GET /api/missions/:id` 继续返回完整视图，不采用 agent 精简视图。
 
 此能力仅在 application/api 层投影已有状态，不改变 kernel 或持久化模型。适配器 coagent-pi 的工具注册和提示词属于单独的 HO4。

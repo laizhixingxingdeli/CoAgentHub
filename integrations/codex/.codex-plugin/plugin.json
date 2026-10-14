@@ -1,6 +1,6 @@
 {
   "name": "coagenthub-codex",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Bind Codex to CoAgentHub v5 as an L3 reviewer with durable Delivery Inbox callbacks.",
   "author": {
     "name": "CoAgentHub contributors"

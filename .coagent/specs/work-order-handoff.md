@@ -4,7 +4,7 @@
 
 协调者 `coagent_get_mission` 的 submitted 工作项展示最新提交 attempt 的逐条证据命令、退出码、摘要及输出末尾 1,000 字；命令、摘要和输出均先按 `src/application/redact.ts` 脱敏，输出再截尾。accepted/rejected 工作项只展示证据条数和最后评审结论，不展示证据输出。
 
-执行者绑定的工单视图和开跑简报中的工单条目包含工单修订号、已答问题的问答，以及最近一次协调者 reject 的 `requiredChanges`（若最后评审为 accept，不以空数组冒充修改要求）。Mission 被 L3 send_back 后还包含该次 L3 理由；这些交接信息只是视图投影，不修改冻结工单。简报仍不下发完整契约或规划。
+执行者绑定的工单视图和开跑简报中的工单条目包含工单修订号、已答问题的问答，以及最近一次协调者 reject 的 `requiredChanges`（若最后评审为 accept，不以空数组冒充修改要求）。Mission 被 L3 send_back 后还包含该次 L3 理由；这些交接信息只是视图投影，不修改冻结工单。投影里「Contract 已更新到 rN」只在 N 严格小于当前契约修订号时刷成当前号；等于或高于当前号的原文不改。简报仍不下发完整契约或规划。
 
 ## 完整工单修订
 
@@ -18,7 +18,7 @@ accepted 项不能修订；要补做就新建补修单，在 requiredBehaviour �
 
 dispatched 项仍不能修订。平台内部可信收尾只用于 Standard，在同一围栏事务中确认当前仍 dispatched、所有执行者 Attempt 已结束、最新 Attempt 与工单修订号匹配调用快照后，使用既有 recordBlocked 转 blocked，不新增状态边。条件不成立或已经 blocked 时返回未转换及原因，无副作用；迟到调用不能收掉新执行跳。
 
-调用来源只有两处：墙钟强杀完成进程退出等待、Attempt 收尾与令牌吊销后（runaway）；COM8 同一项连续无结果封顶或候选局部排除耗尽、交回协调者前（no_result_limit）。普通无结果、killed_idle、上游失败仍按原规则重试；runaway 的停机等待语义不变，不回滚工作区，不处理半成品恢复。
+调用来源只有两处：墙钟强杀完成进程退出等待、Attempt 收尾与令牌吊销后（runaway）；COM8 同一项连续无结果封顶或候选局部排除耗尽、交回协调者前（no_result_limit）。普通无结果、killed_idle、上游失败仍按原规则重试；runaway 仍不回滚工作区、不处理半成品恢复。执行者 runaway 收成 blocked 后由服务交回协调者续跑，见 auto-resume；编排器这一跳仍返回 runaway_suspected。
 
 平台填写 BlockedRecord，列明来源、次数或分钟数、尝试 id 与结束原因，并提示核对工单后 coagent_revise_work_order 再派发。写独立事件 work_item.platform_blocked，data 含 source、orderRevision、attemptId、reason；不复用 blocked.reported，不计入验收标准连续失败计数。该事件参与未修订不得原样重派门禁，修订同一张单后可再派发。网页以「平台」徽章显示来源与原因。
 

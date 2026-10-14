@@ -31,6 +31,9 @@ export type CoagentBriefSource = (typeof BRIEF_SOURCES)[number];
 /** 执行者只需要 projectRules 里的这一节；整份 project.md 是协调者的东西。 */
 const EXECUTOR_RULES_HEADING = "执行者红线";
 
+/** 标题带这个标记的整节只给 L3（人）看，协调者与执行者都不该拿到。 */
+const L3_ONLY_HEADING_MARK = "（仅 L3）";
+
 const BRIEF_SOURCE_SET: ReadonlySet<string> = new Set(BRIEF_SOURCES);
 const MAX_BRIEF_SOURCES = BRIEF_SOURCES.length;
 const MAX_ESTIMATED_TOKENS = 1_000_000_000;
@@ -258,6 +261,34 @@ function extractSafeSources(data: unknown): CoagentBriefInjected["sources"] | un
  * 截不到返回 undefined —— 调用方据此决定不渲染，**不回退成整份规则**：
  * 回退就等于把「只给执行者红线」这个决定悄悄撤掉。
  */
+/**
+ * 去掉标题含「（仅 L3）」的整节：从该标题起，丢到下一个同级或更高级标题；子标题算在该节内。
+ * 算法与平台一致：行匹配 `/^(#{1,6})\s+(.+?)\s*$/`。无该标记时原样返回。
+ */
+function stripL3OnlySections(rules: string): string {
+	if (!rules.includes(L3_ONLY_HEADING_MARK)) return rules;
+	const lines = rules.split(/\r?\n/);
+	const kept: string[] = [];
+	let droppingLevel = 0;
+	for (const line of lines) {
+		const m = /^(#{1,6})\s+(.+?)\s*$/.exec(line.trim());
+		if (m) {
+			const level = m[1].length;
+			if (droppingLevel > 0) {
+				// 同级或更高级标题结束当前被丢的节；这一行要按新标题重新判。
+				if (level <= droppingLevel) droppingLevel = 0;
+			}
+			if (droppingLevel === 0 && m[2].includes(L3_ONLY_HEADING_MARK)) {
+				droppingLevel = level;
+				continue;
+			}
+		}
+		if (droppingLevel > 0) continue;
+		kept.push(line);
+	}
+	return kept.join("\n");
+}
+
 function extractRulesSection(rules: string, title: string): string | undefined {
 	const lines = rules.split(/\r?\n/);
 	let level = 0;
@@ -279,6 +310,63 @@ function extractRulesSection(rules: string, title: string): string | undefined {
 	}
 	const text = lines.slice(start, end).join("\n").trim();
 	return text.length > 0 ? text : undefined;
+}
+
+/**
+ * 把一份验证报告拼成一行摘要。**不** JSON.stringify 整份对象：命令输出可能几千字，
+ * 每跳重塞一遍就是在为同一堆字反复付钱。给协调者的只有：报告编号、尝试编号、通过与否、失败项摘要。
+ */
+function renderValidationReport(report: unknown): string | undefined {
+	if (report === null || typeof report !== "object") return undefined;
+	const rec = report as Record<string, unknown>;
+
+	const parts: string[] = [];
+	if (typeof rec.reportId === "string") parts.push(`报告 ${rec.reportId}`);
+	if (typeof rec.submittedAttemptId === "string") parts.push(`尝试 ${rec.submittedAttemptId}`);
+	if (typeof rec.attemptId === "string") parts.push(`尝试 ${rec.attemptId}`);
+	if (rec.passed === true) parts.push("passed");
+	else if (rec.passed === false) parts.push("failed");
+
+	const failures: string[] = [];
+	if (Array.isArray(rec.commands)) {
+		for (const command of rec.commands) {
+			if (command === null || typeof command !== "object") continue;
+			const c = command as Record<string, unknown>;
+			if (c.passed !== false) continue;
+			const argv = Array.isArray(c.argv) ? c.argv.join(" ") : undefined;
+			const tail = typeof c.outputTail === "string" ? c.outputTail.slice(0, 200) : undefined;
+			failures.push([argv, tail].filter((s) => s !== undefined).join("："));
+		}
+	}
+	const changedPathsFail = rec.changedPaths;
+	if (changedPathsFail !== null && typeof changedPathsFail === "object") {
+		const cp = changedPathsFail as { passed?: unknown; violations?: unknown };
+		if (cp.passed === false) {
+			const violations = Array.isArray(cp.violations) ? cp.violations.join("，") : "";
+			failures.push(`changed-paths：${violations}`);
+		}
+	}
+
+	let text = `机器验证：${parts.join(" ")}`;
+	if (failures.length > 0) text += `；失败项：${failures.join("；")}`;
+	return text;
+}
+
+/**
+ * 工作项索引里只留这三个字段的验证报告摘要；整份报告不进渲染。
+ * 没有 validationReport 的索引项原样返回（渲染结果与现在相同）。
+ */
+function slimIndexItem(item: unknown): unknown {
+	if (item === null || typeof item !== "object") return item;
+	const rec = item as Record<string, unknown>;
+	const report = rec.validationReport;
+	if (report === null || typeof report !== "object") return item;
+	const r = report as Record<string, unknown>;
+	const slim: Record<string, unknown> = {};
+	for (const key of ["reportId", "submittedAttemptId", "passed"] as const) {
+		if (Object.prototype.hasOwnProperty.call(r, key)) slim[key] = r[key];
+	}
+	return { ...rec, validationReport: slim };
 }
 
 /**
@@ -333,14 +421,14 @@ async function fetchBrief(
 
 	// 协调者管全局，看整份规则；执行者只拿「执行者红线」那一节 —— 整份
 	// project.md 比工单本身还长，每跳塞一遍是在反复付这份钱。
+	const projectRules = data.projectRules ? stripL3OnlySections(data.projectRules) : undefined;
 	if (role === "coordinator") {
-		if (data.projectRules) {
-			lines.push("", "## 架构红线（项目级，不可协商）", "", data.projectRules.trim());
+		if (projectRules) {
+			lines.push("", "## 架构红线（项目级，不可协商）", "", projectRules.trim());
 		}
 	} else {
-		const redLines = data.projectRules
-			? extractRulesSection(data.projectRules, EXECUTOR_RULES_HEADING)
-			: undefined;
+		// 截不到不回退成整份：回退就等于把「只给执行者红线」这个决定悄悄撤掉。
+		const redLines = projectRules ? extractRulesSection(projectRules, EXECUTOR_RULES_HEADING) : undefined;
 		if (redLines) lines.push("", redLines);
 	}
 
@@ -370,9 +458,16 @@ async function fetchBrief(
 			}
 		}
 		if (data.contractCheck) lines.push("", "## 当前契约核对", JSON.stringify(data.contractCheck));
-		if (data.workItemsIndex?.length) lines.push("", "## 工作项索引", ...data.workItemsIndex.map((item) => JSON.stringify(item)));
+		if (data.workItemsIndex?.length) lines.push("", "## 工作项索引", ...data.workItemsIndex.map((item) => JSON.stringify(slimIndexItem(item))));
 		if (data.sinceLastHop?.length) {
-			lines.push("", "## 上一跳以来的变化", ...data.sinceLastHop.map((entry) => `- ${entry.summary}${entry.validationReport === undefined ? "" : "\n机器验证：" + JSON.stringify(entry.validationReport)}`));
+			lines.push(
+				"",
+				"## 上一跳以来的变化",
+				...data.sinceLastHop.map((entry) => {
+					const verification = renderValidationReport(entry.validationReport);
+					return `- ${entry.summary}${verification === undefined ? "" : `\n${verification}`}`;
+				}),
+			);
 		}
 		if (data.finalReview?.verdict === "send_back") {
 			lines.push("", "## L3 把它打回了，理由", "", ...data.finalReview.reasons.map((r) => `- ${r}`));

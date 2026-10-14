@@ -427,6 +427,11 @@ export interface ValidationCheckResult {
   readonly summary: string;
   /** 仅结构性契约缺陷；旧报告无此字段，不得据此触发 unrepairable。 */
   readonly failureCode?: ValidationCheckFailureCode;
+  /**
+   * Standard 的 diff-size 超限或无法计量只是提醒：该检查的 passed 仍如实为 false，
+   * 但不参与整份报告的 passed。旧报告无此字段（缺省 = 不提醒）。
+   */
+  readonly advisory?: boolean;
   readonly command?: {
     readonly argv: readonly string[];
     readonly cwd: string;

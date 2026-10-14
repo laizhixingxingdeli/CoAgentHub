@@ -26,6 +26,11 @@ export interface RetryWakeDeps {
   record(missionId: string, data: { reason: string; resumeAt: string; streak: number }): Promise<void>;
   /** 用持久的启动参数接着跑；跑到这次运行结束才 resolve。 */
   start(missionId: string, request: HostedRunRequest): Promise<void>;
+  /**
+   * 续跑前的收尾：把死信 / 打转收成 blocked 并留下事实。返回 'skip' 则不 record、
+   * 不 start（例如连续第二次打转）。缺省视为 'start'。
+   */
+  prepare?(missionId: string, reason: string): Promise<'start' | 'skip'>;
   warn(error: unknown): void;
   now?: () => number;
   /** 扫描周期，默认 5 秒。 */
@@ -89,6 +94,16 @@ export class RetryWakeScheduler {
       if (this.#throttled(item.missionId, nowMs)) continue;
       const driver = await this.#deps.runDriver(item.missionId);
       if (driver.queued || driver.request === undefined) continue;
+      if (this.#deps.prepare !== undefined) {
+        let verdict: 'start' | 'skip';
+        try {
+          verdict = await this.#deps.prepare(item.missionId, item.reason);
+        } catch (error) {
+          this.#deps.warn(error);
+          continue;
+        }
+        if (verdict === 'skip') continue;
+      }
       const streak = this.#nextStreak(item.missionId, nowMs);
       // 先占位再 await：同一个 tick 里或并发的下一个 tick 看到的都是「已经在跑」。
       const run = this.#launch(item, driver.request, streak, nowMs);

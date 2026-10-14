@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -76,15 +76,25 @@ test('checkpoint commits only authorized paths, including new/deleted files, and
   assert.throws(() => git(cwd, 'show', 'HEAD:base'));
 });
 
-test('checkpoint rejects outside changes and ambiguous authorization without deleting files', async () => {
+test('checkpoint archives outside untracked files without rejecting, and still rejects wildcards', async () => {
   const cwd = repo();
   writeFileSync(join(cwd, 'outside'), 'keep');
-  await assert.rejects(new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['base']), /未授权/);
-  assert.equal(readFileSync(join(cwd, 'outside'), 'utf8'), 'keep');
+  const archived = await new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['base']);
+  // 范围外未跟踪文件不抛未授权：被存档移出工作树，不进提交、不删除。
+  assert.equal(existsSync(join(cwd, 'outside')), false, 'outside 仍留在工作树');
+  assert.equal(git(cwd, 'log', '--all', '--format=%s').includes('outside'), false);
+  assert.equal(git(cwd, 'status', '--porcelain').includes('outside'), false);
+  const record = archived.find((entry) => entry.path === 'outside');
+  assert.ok(record, '没有 outside 的存档记录');
+  assert.equal(record.path, 'outside');
+  assert.equal(record.tracked, false);
+  // 存档内容与原文一致：可找回，不是删除。
+  assert.equal(readFileSync(record.archivePath, 'utf8'), 'keep');
+  // 通配符仍在检查点被拒，消息含「不确定」。
   await assert.rejects(new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['src/*']), /不确定/);
-  // 目录形式同样拒绝，并且说得出改法（与建单时的前置校验同一份判据）。
-  await assert.rejects(new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['app/']), /不确定.*目录形式.*app\/<文件名>/s);
-  assert.equal(git(cwd, 'status', '--porcelain').includes('outside'), true);
+  // 以 / 结尾的目录范围不再因目录形式被拒：只有 outside 脏文件时调用本身不抛。
+  writeFileSync(join(cwd, 'outside'), 'keep');
+  await new GitWorktreeManager().checkpoint!(cwd, 'm', 'w', ['app/']);
 });
 
 test('Mission worktree cleanliness check distinguishes clean, modified, staged, and untracked states without mutation', async () => {

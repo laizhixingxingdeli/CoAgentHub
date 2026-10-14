@@ -543,3 +543,96 @@ test("续跑简报透传已有差距与增量，协调者和执行者材料不�
   }
  }
 });
+
+test("标题带「（仅 L3）」的整节不进协调者与执行者简报，未标记章节与执行者红线照旧", async () => {
+	const SECRET_L3 = "SECRET_L3_只有人该看到_9f8e7d6c";
+	const rulesWithL3 = [
+		"# coagent-pi",
+		"",
+		"## 内部（仅 L3）",
+		"",
+		SECRET_L3,
+		"",
+		"### 内部子节",
+		"",
+		`子节里的 ${SECRET_L3} 也算在这一节内。`,
+		"",
+		"## 执行者红线",
+		"",
+		"写代码时必须遵守。",
+		"",
+		"### 测试",
+		"",
+		"- 「已修复 / 已完成」必须有可验证证据。",
+		"",
+		"## 结构",
+		"",
+		"- src/roles.ts：角色提示词。",
+	].join("\n");
+
+	for (const role of ["coordinator", "executor"] as const) {
+		const payload = {
+			role,
+			projectId: "P",
+			missionId: "M",
+			status: "executing",
+			projectRules: rulesWithL3,
+			workItem: { id: "W-1", title: "do it" },
+		};
+		const { client } = recordingClient({ get: async () => payload });
+		const { handlers, api } = stubPi();
+		await createCoagentExtension({ client, role, cwd: process.cwd(), completion: { submitted: false } })(api);
+		const brief = briefFromPrompt(role, await handlers.before_agent_start?.());
+		assert.equal(brief.includes(SECRET_L3), false, `${role} 不得看到「（仅 L3）」章节正文`);
+		assert.equal(brief.includes("内部（仅 L3）"), false, `${role} 不得看到「（仅 L3）」章节标题`);
+		if (role === "coordinator") {
+			assert.ok(brief.includes("## 执行者红线"), "协调者仍看得到整份滤后的项目规则");
+			assert.ok(brief.includes("## 结构"), "协调者仍看得到其它未标记章节");
+		} else {
+			assert.ok(brief.includes("## 执行者红线"), "执行者仍含「执行者红线」");
+			assert.equal(brief.includes("## 结构"), false, "执行者仍只有「执行者红线」一节");
+		}
+	}
+});
+
+test("协调者机器验证只给编号/通过与否/失败项摘要，不再内嵌整份报告 JSON；打印前缀前后字节数", async () => {
+	const report = {
+		reportId: "VR-7",
+		submittedAttemptId: "W-1.exec-1",
+		attemptId: "A-9",
+		passed: false,
+		commands: [
+			{
+				argv: ["node", "--test", "x.spec.ts"],
+				passed: false,
+				outputTail: "x".repeat(2000),
+			},
+		],
+	};
+	const payload = {
+		role: "coordinator",
+		projectId: "P",
+		missionId: "M",
+		status: "executing",
+		sinceLastHop: [{ summary: "仅边界断言失败", validationReport: report }],
+	};
+	const { client } = recordingClient({ get: async () => payload });
+	const { handlers, api } = stubPi();
+	await createCoagentExtension({ client, role: "coordinator", cwd: process.cwd(), completion: { submitted: false } })(api);
+	const prompt = await handlers.before_agent_start?.();
+	const brief = briefFromPrompt("coordinator", prompt);
+
+	assert.ok(brief.includes("W-1.exec-1"), "必须仍看得到尝试编号");
+	assert.ok(brief.includes("VR-7"), "必须看得到报告编号");
+	assert.ok(brief.includes("failed"), "必须看得到通过与否");
+	assert.ok(brief.includes("node --test x.spec.ts"), "失败项要带上 argv");
+	assert.equal(brief.includes("x".repeat(2000)), false, "不得内嵌完整 outputTail");
+	assert.equal(brief.includes("x".repeat(201)), false, "outputTail 截到前 200 字");
+	assert.equal(brief.includes(JSON.stringify(report)), false, "不得 JSON.stringify 整份报告");
+
+	const beforeBytes = 11745 + Buffer.byteLength(JSON.stringify(report), "utf8");
+	const verificationLine = brief.split("\n").find((line) => line.startsWith("机器验证：")) ?? "";
+	const afterBytes = Buffer.byteLength(systemPrompt("coordinator"), "utf8") + Buffer.byteLength(verificationLine, "utf8");
+	console.log(`prefix before=${beforeBytes} after=${afterBytes}`);
+	assert.ok(afterBytes < beforeBytes, "精简后应更小");
+});

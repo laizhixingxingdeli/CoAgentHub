@@ -64,7 +64,7 @@ export const WAIT_RULES: Readonly<Record<WaitReason, ReasonRule>> = {
   project_busy: {
     owner: 'platform',
     fallback: 'platform',
-    action: () => '同项目别的 Mission 占着改动名额或队列容量；对方落地或释放后重跑这条',
+    action: () => '同项目别的 Mission 占着改动名额或队列容量；不用升级，名额释放后平台自动接着派',
   },
   checkpoint_failed: {
     owner: 'l3',
@@ -74,15 +74,32 @@ export const WAIT_RULES: Readonly<Record<WaitReason, ReasonRule>> = {
   },
   waiting_l3: { owner: 'l3', fallback: 'l3', action: () => '等检视者答复升级或做最终检视' },
   attempt_limit_reached: {
-    owner: 'l3',
+    owner: 'auto',
     fallback: 'l3',
-    action: () => '同一跳连续失败到顶，继续换候选不会产生新信息：先看是不是工单本身有问题（拆单、改单或停）',
+    action: (auto) =>
+      auto
+        ? '同一跳连续失败到顶，平台会在能续跑时自动接着跑；先看是不是工单本身有问题（拆单、改单或停）'
+        : '同一跳连续失败到顶，继续换候选不会产生新信息：先看是不是工单本身有问题（拆单、改单或停）',
   },
   target_changed: { owner: 'l3', fallback: 'l3', action: () => '目标分支在检视期间变了：重新同步后再检视' },
   base_revision_stale: { owner: 'l3', fallback: 'l3', action: () => '分叉基线已过期：核对影响后加 --accept-stale-base 或重新同步' },
   cancelled_by_user: { owner: 'user', fallback: 'user', action: () => '被叫停或暂停了：resume 之后重跑' },
-  platform_unreachable: { owner: 'l3', fallback: 'l3', action: () => 'agent 连不上平台自己（平台侧故障）：确认平台还活着，再重跑' },
-  runaway_suspected: { owner: 'l3', fallback: 'l3', action: () => '一跳跑太久被掐断，改动没回滚：看它这段时间在做什么，再决定拆单、继续或作废' },
+  platform_unreachable: {
+    owner: 'auto',
+    fallback: 'l3',
+    action: (auto) =>
+      auto
+        ? 'agent 连不上平台自己（平台侧故障），平台会在能续跑时自动接着跑；先确认平台还活着'
+        : 'agent 连不上平台自己（平台侧故障）：确认平台还活着，再重跑',
+  },
+  runaway_suspected: {
+    owner: 'auto',
+    fallback: 'l3',
+    action: (auto) =>
+      auto
+        ? '一跳跑太久被掐断，平台会在能续跑时自动接着跑；也要看它这段时间在做什么，再决定拆单、继续或作废'
+        : '一跳跑太久被掐断，改动没回滚：看它这段时间在做什么，再决定拆单、继续或作废',
+  },
   execution_budget_exceeded: { owner: 'l3', fallback: 'l3', action: () => '执行预算硬上限已耗尽：由检视者决定是否追加预算' },
   mission_cost_cap_reached: { owner: 'l3', fallback: 'l3', action: () => '票级费用到上限：检视者批准追加预算后继续' },
   work_item_checkpoint: { owner: 'l3', fallback: 'l3', action: () => '工作项到检查点：检视者判断是否拆票并显式批准' },

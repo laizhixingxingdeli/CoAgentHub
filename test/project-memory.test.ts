@@ -23,6 +23,7 @@ import {
   applyMemoryDelta,
   generateVibe,
   initProjectMemory,
+  omitSectionsWithMarker,
   readProjectMemory,
 } from '../src/application/project-memory.ts';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
@@ -533,5 +534,48 @@ describe('给 agent 的项目上下文', () => {
     };
     assert.equal(context.available, false);
     assert.match(context.note, /没有 \.coagent/);
+  });
+});
+
+describe('omitSectionsWithMarker', () => {
+  test('删掉标题含标记的整节（含子标题），无标记原样返回，正文里的标记不算', () => {
+    const doc = [
+      '# 项目',
+      '',
+      '## 约束',
+      '',
+      '不要引三方包。',
+      '',
+      '## 内部（仅 L3）',
+      '',
+      '这是只给 L3 看的历史。',
+      '',
+      '### 子标题',
+      '',
+      '子标题也属于这一节。',
+      '',
+      '## 结尾',
+      '',
+      '结尾正文。',
+      '',
+    ].join('\n');
+    const omitted = omitSectionsWithMarker(doc);
+    assert.doesNotMatch(omitted, /内部（仅 L3）/);
+    assert.doesNotMatch(omitted, /只给 L3 看的历史/);
+    assert.doesNotMatch(omitted, /子标题也属于这一节/);
+    // 前后章节都保留。
+    assert.match(omitted, /## 约束/);
+    assert.match(omitted, /不要引三方包。/);
+    assert.match(omitted, /## 结尾/);
+    assert.match(omitted, /结尾正文。/);
+
+    // 无标记：必须是同一个字符串，不 trim、不改换行。
+    const plain = '## A\n\ntext\n\n## B\n';
+    assert.equal(omitSectionsWithMarker(plain), plain);
+    assert.equal(omitSectionsWithMarker(plain, '（仅 L3）'), plain);
+
+    // marker 只出现在正文、不在标题时：同样原样返回（===）。
+    const inBody = '## 说明\n\n这里提到（仅 L3）三个字但不是标题。\n';
+    assert.equal(omitSectionsWithMarker(inBody), inBody);
   });
 });

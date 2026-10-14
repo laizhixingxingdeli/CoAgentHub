@@ -437,6 +437,22 @@ export interface WorkOrderView {
 }
 
 /**
+ * 契约指向：这一跳简报已含同一修订的全文，读工具只回一句指向而不是再给一遍正文。
+ * 修订号必须带上——对不上就得给全文，不能让 agent 拿旧内容干活。
+ */
+export interface ContractPointer {
+  readonly pointer: string;
+  readonly contractRevision: number;
+}
+
+/** 工单指向：同 ContractPointer，带工单 id 与修订号。 */
+export interface WorkOrderPointer {
+  readonly pointer: string;
+  readonly orderRevision: string;
+  readonly workItemId: string;
+}
+
+/**
  * 同一个任务的一次运行。listRuns 的行。
  *
  * 刻意**不含**"哪个模型跑的"：那是候选池的事，一条 Mission 里不同跳可能

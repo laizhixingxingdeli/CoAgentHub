@@ -116,15 +116,29 @@ export function checkWorkOrderValidationArgv(order: WorkOrder): void {
 /**
  * 工单 `allowedScope` 合法性校验（建单 / 修订 / 派发共用，P1 范围前置校验）。
  *
- * 执行者交卷之后，检查点只提交范围里点名的精确文件；范围写成目录或通配符，到那时才被拒，
- * 一整跳执行者白跑、改动还留在工作区里。所以拒绝提前到收单这一刻，并说出哪一条、为什么、
- * 改成什么。
+ * 执行者交卷之后，检查点只提交范围里点名的文件（精确文件，或以 `/` 结尾的目录）；
+ * 范围写成通配符、绝对路径、`..`、空段 / `.` 段，到那时才被拒，一整跳执行者白跑、
+ * 改动还留在工作区里。所以拒绝提前到收单这一刻，并说出哪一条、为什么、改成什么。
  *
  * 只在装配了检查点的工作区上生效（`enforcing`）：原地模式与内存测试平台没有检查点，
  * 目录前缀对它们仍是合法的验证器语义——校验必须和它之后要执行的那道检查点一样严，
  * 不能比它更严。
+ *
+ * `validation.forbiddenPaths` 无论 `enforcing` 与否都按同一判据校验：它是冻结时就
+ * 定下的 denylist，写法错了（绝对路径、通配符……）到验证阶段才被发现同样是白跑。
  */
 export function checkWorkOrderScope(order: WorkOrder, enforcing: boolean): void {
+  const forbidden = order.validation?.forbiddenPaths;
+  if (Array.isArray(forbidden)) {
+    const forbiddenIssues = exactFileScopeIssues(forbidden);
+    if (forbiddenIssues.length > 0) {
+      throw new PlatformRuleError(
+        'WORK_ORDER_SCOPE_INVALID',
+        `工单 validation.forbiddenPaths 有 ${forbiddenIssues.length} 条不能作为授权范围：${describeScopeIssues(forbiddenIssues)}。` +
+          'forbiddenPaths 可写相对仓库根的精确文件，或以 / 结尾的目录；绝对路径、..、空段、. 段、通配符不行。',
+      );
+    }
+  }
   if (!enforcing) return;
   const scope = order.allowedScope;
   if (!Array.isArray(scope) || scope.length === 0) {
@@ -139,7 +153,7 @@ export function checkWorkOrderScope(order: WorkOrder, enforcing: boolean): void 
   throw new PlatformRuleError(
     'WORK_ORDER_SCOPE_INVALID',
     `工单 allowedScope 有 ${issues.length} 条不能作为授权范围：${describeScopeIssues(issues)}。` +
-      '工单范围必须是相对仓库根的精确文件路径（契约层的范围可以写到目录，工单不行）。',
+      '工单范围可写相对仓库根的精确文件，或以 / 结尾的目录；绝对路径、..、空段、. 段、通配符不行。',
   );
 }
 
@@ -147,7 +161,6 @@ export function checkWorkOrderScope(order: WorkOrder, enforcing: boolean): void 
  * 纯校验：工单是否超出「工单标准」又不至于硬拒。
  *
  * 规则放在 Platform 而非 HTTP handler：两个 coordinator 工具共用同一份真话。
- * 仅按末尾扩展名识别文件、把纯目录路径剔除——目录不得冒充文件；
  * 不发明任何新硬拒，所有命中项都只是软警告。
  */
 export function checkWorkOrderStandard(order: WorkOrder): WorkOrderStandardWarning[] {
@@ -159,11 +172,6 @@ export function checkWorkOrderStandard(order: WorkOrder): WorkOrderStandardWarni
       rule: 'allowedScope',
       suggestion:
         'allowedScope 超过 2 项：一张工单只做一个行为、改 1–2 个文件，请拆成多张工单。',
-    });
-  } else if (dirs.length > 0) {
-    warnings.push({
-      rule: 'allowedScope',
-      suggestion: 'allowedScope 含纯目录路径，不得冒充文件：请列出具体文件（带扩展名）。',
     });
   }
   if ((order.verification ?? []).length > 2) {

@@ -1,4 +1,4 @@
-import type { Mission, WorkItem, EscalationBody, ValidationReport, WorkOrder, EvidenceRecord, ExecutionResultBody } from '../../kernel/index.ts';
+import type { Mission, WorkItem, EscalationBody, ValidationReport, WorkOrder, EvidenceRecord, ExecutionResultBody, FinalReview } from '../../kernel/index.ts';
 import type { ActivityEvent } from '../ports.ts';
 import type { BoundWorkItem, WorkItemIndexEntry } from '../context-builder.ts';
 import type { ValidationReportView, ValidationReportCommandView, CriteriaFailureDiagnostic, AgentWorkItemIndexEntry, AgentEscalationAnswer, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView } from './types.ts';
@@ -51,13 +51,45 @@ export function priorGuidanceForWorkItem(
     .find((review) => review.verdict === 'reject');
   const finalReview = mission.finalReview;
   const answered = answeredQaForWorkItem(mission, item);
+  const currentFinalReview = withCurrentContractSendBack(finalReview, mission.contractRevision);
   return {
     ...(latestReject ? { previousRequiredChanges: latestReject.requiredChanges } : {}),
-    ...(finalReview?.verdict === 'send_back' && finalReview.reasons.length > 0
-      ? { l3SendBackReasons: finalReview.reasons }
+    ...(currentFinalReview?.verdict === 'send_back' && currentFinalReview.reasons.length > 0
+      ? { l3SendBackReasons: currentFinalReview.reasons }
       : {}),
     ...(answered ?? {}),
   };
+}
+
+/**
+ * 打回理由原文在写下的那一刻把「Contract 已更新到 rN」烤成了死字符串。契约在规划
+ * 阶段再次修订（status 是 planning，reviseContract 不会再写新 finalReview）时，
+ * 那句 rN 就停在旧号上，而契约已经走到更后面——执行者照着一句对不上的版本号去改，
+ * 改的是不存在的问题。理由本身不重写，只把里面这句版本号刷新成当前修订。
+ *
+ * 只认 send_back；没有版本号句子、或号本来就对，原样返回同一个对象。
+ *
+ * 只往「前」刷，不往回改：L3 的打回理由可能原样引用了这句模板，而契约还没走到
+ * 那个号——往回改会把执行者要读的原文改掉。要解决的只是「理由停在更小的号、契约
+ * 已经更后面」，所以只有理由里的号严格小于当前修订号时才刷新。
+ */
+export function withCurrentContractSendBack(
+  review: Readonly<FinalReview> | undefined,
+  contractRevision: number,
+): Readonly<FinalReview> | undefined {
+  if (review === undefined || review.verdict !== 'send_back') return review;
+  let changed = false;
+  const reasons = review.reasons.map((reason) => {
+    const next = reason.replace(/Contract 已更新到 r(\d+)/g, (match, raw: string) => {
+      const baked = Number(raw);
+      if (!Number.isInteger(baked) || baked >= contractRevision) return match;
+      changed = true;
+      return `Contract 已更新到 r${contractRevision}`;
+    });
+    return next;
+  });
+  if (!changed) return review;
+  return { ...review, reasons };
 }
 
 /* ===================== 协调者简报：工作项索引 + 上一跳增量 ===================== */
@@ -161,6 +193,29 @@ function summarizeSinceLastHop(
         );
         break;
       }
+      case 'mission.coordinator_handoff': {
+        const data = event.data as
+          | { reason?: string; count?: number; candidates?: string[]; workItemId?: string; detail?: string }
+          | undefined;
+        const candidates = (data?.candidates ?? []).join(', ') || '（无）';
+        push(`交回协调者：${data?.reason ?? '（无理由）'}，第 ${data?.count ?? '?'} 次，候选 ${candidates}`);
+        break;
+      }
+      case 'workspace.scope_archived': {
+        const data = event.data as
+          | { entries?: { path?: string; archivePath?: string }[] }
+          | undefined;
+        const entries = Array.isArray(data?.entries) ? data!.entries : [];
+        if (entries.length === 0) {
+          push('范围外改动已存档：（无路径）');
+          break;
+        }
+        const parts = entries
+          .map((entry) => `${entry.path ?? '?'}（存档于 ${entry.archivePath ?? '?'}）`)
+          .join('、');
+        push(`范围外改动已存档：${parts}`);
+        break;
+      }
       case 'final_review.send_back':
       case 'final_review.abandoned':
       case 'final_review.merged':
@@ -229,13 +284,13 @@ export function coordinatorStartupSources(
     // 活动压成摘要（已提交结果、证据、机器验证报告），用的是后续各跳同一份
     // summarizeSinceLastHop，不另造投影。standard 保持旧行为：它本来就有逐跳增量，
     // 一次性灌进来只会淹掉重点。
-    if (mission.executionMode !== 'lightweight') {
-      return { workItemsIndex: index, sinceLastHop: [] };
+    if (mission.executionMode === 'lightweight') {
+      return {
+        workItemsIndex: index,
+        sinceLastHop: summarizeSinceLastHop(mission, events, validationReports),
+      };
     }
-    return {
-      workItemsIndex: index,
-      sinceLastHop: summarizeSinceLastHop(mission, events, validationReports),
-    };
+    return { workItemsIndex: index, sinceLastHop: [] };
   }
   const prevIndex = events.findIndex((e) => e === prevEnd);
   const after = events.slice(prevIndex + 1);
