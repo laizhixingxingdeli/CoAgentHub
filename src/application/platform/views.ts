@@ -1,14 +1,15 @@
 import type { Mission, MissionContract } from '../../kernel/index.ts';
 import type { ActivityEvent } from '../ports.ts';
 import type { MissionWaitInfo } from './wait-info.ts';
-import type { RunSummary, MissionSummary, MissionView, AgentMissionView, WorkOrderView, AgentWorkItemView, AgentWorkItemSubmissionSummary, ValidationReportView } from './types.ts';
+import type { RunSummary, MissionSummary, MissionView, AgentMissionView, WorkOrderView, WorkOrderPointer, AgentWorkItemView, AgentWorkItemSubmissionSummary, ValidationReportView, ContractPointer } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { readMissionModelPolicy } from './model-policy.ts';
+import { readBriefInclusion } from './startup-brief.ts';
 import { deriveWaitInfo } from './wait-info.ts';
 import { elapsedMs, sumUsage, combine } from './usage-helpers.ts';
 import { priorGuidanceForWorkItem, agentWorkItemIndex, agentEscalationAnswers, buildAgentWorkItemView } from './agent-view-helpers.ts';
 import { plannedMemoryFiles, readProjectMemory } from '../project-memory.ts';
-import { redactSecrets } from '../redact.ts';
+import { redactSecrets, redactSecretsDeep } from '../redact.ts';
 
 interface ViewDeps {
   workItemValidationReportViews(mission: Mission, events?: readonly ActivityEvent[]): Promise<Map<string, ValidationReportView>>;
@@ -288,11 +289,24 @@ export async function getAgentMissionView(ctx: PlatformContext, deps: ViewDeps, 
    * 和红线，而整个 MissionView 带着全部工作项、尝试、时间线——每看一眼红线
    * 就得连着几千 token 一起读进去。契约本身只有几行。
    */
-export async function getContract(ctx: PlatformContext, missionId: string): Promise<{
-    contract: Readonly<MissionContract> | undefined;
-    contractRevision: number;
-  }> {
+export async function getContract(
+    ctx: PlatformContext,
+    missionId: string,
+    attemptId?: string,
+  ): Promise<
+    | { contract: Readonly<MissionContract> | undefined; contractRevision: number }
+    | ContractPointer
+  > {
     const { mission } = await ctx.locate(missionId);
+    // 这一跳简报里已是同一修订的全文时，只回一句指向——别再传一遍。
+    // 修订号对不上（或没取过简报）一律给全文。
+    if (attemptId !== undefined) {
+      const inclusion = readBriefInclusion(ctx, missionId, attemptId);
+      if (inclusion?.contractRevision === mission.contractRevision) {
+        const n = mission.contractRevision;
+        return { pointer: `契约 r${n} 全文已在本跳简报里。`, contractRevision: n };
+      }
+    }
     return { contract: mission.contract, contractRevision: mission.contractRevision };
   }
 
@@ -317,10 +331,23 @@ export async function getMissionDiff(ctx: PlatformContext,
     return { ...diff, pendingMemory };
   }
 
-export async function getWorkOrder(ctx: PlatformContext, missionId: string, workItemId: string): Promise<WorkOrderView> {
+export async function getWorkOrder(
+    ctx: PlatformContext,
+    missionId: string,
+    workItemId: string,
+    attemptId?: string,
+  ): Promise<WorkOrderView | WorkOrderPointer> {
     const { mission, item } = await ctx.locateItem(missionId, workItemId);
     if (!item.order) {
       throw new PlatformRuleError('NO_WORK_ORDER', `工作项 ${workItemId} 没有工单正文。`);
+    }
+    const rev = item.order.orderRevision ?? 'r1';
+    // 执行者这一跳简报已含同一修订的工单全文时，只回一句指向。
+    if (attemptId !== undefined) {
+      const inclusion = readBriefInclusion(ctx, missionId, attemptId);
+      if (inclusion?.orderRevision === rev) {
+        return { pointer: `工单 ${workItemId} ${rev} 全文已在本跳简报里。`, orderRevision: rev, workItemId };
+      }
     }
     const contract = mission.contract;
     return {
@@ -340,7 +367,7 @@ export async function getWorkOrder(ctx: PlatformContext, missionId: string, work
    * 返回工单及 orderRevision、历次执行结果证据摘要（脱敏截尾）与评审信息。
    * 单项序列化 UTF-8 不超过 20 KB，超长显式标记 truncated。只读投影，不写状态。
    */
-export async function getAgentWorkItem(ctx: PlatformContext, deps: ViewDeps, missionId: string, workItemId: string): Promise<AgentWorkItemView> {
+export async function getAgentWorkItem(ctx: PlatformContext, deps: ViewDeps, missionId: string, workItemId: string, options?: { full?: boolean }): Promise<AgentWorkItemView> {
     const { mission, item } = await ctx.locateItem(missionId, workItemId);
     // 取该工作项全部 execution_result.submitted 事件，保留原时间顺序，
     // 仅提取事件里实际存的 outcome / changedFiles(数量) / orderRevision / at。
@@ -367,12 +394,34 @@ export async function getAgentWorkItem(ctx: PlatformContext, deps: ViewDeps, mis
     return buildAgentWorkItemView(
       item,
       item.order?.orderRevision,
-      item.order,
+      options?.full === false ? previewedOrder(item.order) : item.order,
       item.executionResult ?? undefined,
       submissionSummaries,
       (await deps.workItemValidationReportViews(mission, events)).get(item.id),
     );
   }
+
+/**
+ * 默认视图里的工单正文预览：只给「（N 字节）+ 开头 200 字」。
+ *
+ * 不新增字段、不另起结构——需求是"缩小"，不是"把原文换个地方放"；
+ * contextRefs 做成一条 preview 字符串，免得整份 JSON 被预览撑破 20KB。
+ * 先 redactSecretsDeep 再预览，与 buildAgentWorkItemView 内部同一顺序，
+ * 以免预览把凭据明文露出去。
+ */
+function previewedOrder(order: NonNullable<AgentWorkItemView['order']>): NonNullable<AgentWorkItemView['order']> {
+  const redacted = redactSecretsDeep(order);
+  return {
+    ...redacted,
+    requiredBehaviour: previewText(redacted.requiredBehaviour),
+    contextRefs: [previewText(JSON.stringify(redacted.contextRefs))] as never,
+  };
+}
+
+/** 固定格式：`（UTF-8 字节数）` + 开头 200 字。 */
+function previewText(text: string): string {
+  return `（${Buffer.byteLength(text, 'utf8')} 字节）${text.slice(0, 200)}`;
+}
 
 /**
    * 解析工单里的 ContextRef（S09.3 的 coagent_get_context）。

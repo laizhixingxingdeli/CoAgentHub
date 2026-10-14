@@ -89,3 +89,18 @@ coordinator/executor 启动参数仅作兼容候选校验；实际派发使用�
 get_document_proposals/decide_document 读取完整精确差异并独立 approve/edit/withdraw；提交真实 reviewer/reason 及已审查 revision/baseHash，平台核实空档后提交，不能因代码合入而自动批准文档。
 
 运行排障使用 coagenthub_get_attempt 和 coagenthub_get_mission_live（cursor增量）；二者只读，不消费或ACK交卷。
+
+## 契约与难以自动验证的项目
+
+手册 `docs/l3-guide.md` 的同名一节是权威版本，写契约与带实机项目时照它做。要点：
+
+- 契约只放目标、验收、范围、红线四样，别的都不往里塞。
+- 实机观察与恢复指令写成证据文件，经升级答复下发，不写进契约。
+- 覆盖旧条款时删掉旧的，不要新旧并存。
+- 契约超过约 5 千字或修订超过 3 次，就拆票重写。
+- 实机项目一票验证一个假设，先让设备经已打通的通道自报状态。
+- 不在契约里指定模型，按资源池顺序派发。
+- 集成分支合入由检视者签，合主干要用户签。
+- `.coagent/project.md` 里标题含「（仅 L3）」的章节不进协调者与执行者简报；执行者简报照旧只有「执行者红线」。该标记由检视者在 Mission 之间写入。
+
+详见 `docs/l3-guide.md` 的「契约与难以自动验证的项目」一节。

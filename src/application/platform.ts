@@ -81,8 +81,8 @@ import type { ChangeReceipt } from './change-receipt.ts';
 import type { ChangeCoverage } from './change-coverage.ts';
 import type { AcceptanceDispositionRecord } from './acceptance-disposition.ts';
 import type { ChangeDelivery } from './platform/change-receipt.ts';
-import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
-export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
+import type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, WorkOrderPointer, ContractPointer, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
+export type { PlatformValidationDeps, QueueClaimIdentity, StandardAutoRedispatchHandoff, StandardAutoRedispatchResult, PlatformDeps, CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult, MissionView, MissionSummary, WorkOrderView, WorkOrderPointer, ContractPointer, RunSummary, WorkOrderStandardWarning, ValidationReportCommandView, ValidationReportView, AgentWorkItemIndexEntry, CriteriaFailureDiagnostic, AgentEscalationAnswer, AgentMissionView, AgentWorkItemEvidenceSummary, AgentWorkItemSubmissionSummary, AgentWorkItemView, UsageBucket, UsageReport } from './platform/types.ts';
 import { PlatformContext, PlatformRuleError, PROTOCOL_VERSION, ATTEMPT_STARTED_KIND } from './platform/context.ts';
 /**
  * 平台用例层 —— coagent_* 工具背后的真实实现。
@@ -1208,11 +1208,14 @@ export class Platform {
     return startupBrief.recordContextTruncated(this.#context, missionId, attemptId, claim, data);
   }
 
-  async getContract(missionId: string): Promise<{
-    contract: Readonly<MissionContract> | undefined;
-    contractRevision: number;
-  }> {
-    return views.getContract(this.#context, missionId);
+  async getContract(
+    missionId: string,
+    attemptId?: string,
+  ): Promise<
+    | { contract: Readonly<MissionContract> | undefined; contractRevision: number }
+    | ContractPointer
+  > {
+    return views.getContract(this.#context, missionId, attemptId);
   }
 
   /**
@@ -2175,12 +2178,12 @@ export class Platform {
 
   /* ============================ L1 执行者面 ============================ */
 
-  async getWorkOrder(missionId: string, workItemId: string): Promise<WorkOrderView> {
-    return views.getWorkOrder(this.#context, missionId, workItemId);
+  async getWorkOrder(missionId: string, workItemId: string, attemptId?: string): Promise<WorkOrderView | WorkOrderPointer> {
+    return views.getWorkOrder(this.#context, missionId, workItemId, attemptId);
   }
 
-  async getAgentWorkItem(missionId: string, workItemId: string): Promise<AgentWorkItemView> {
-    return views.getAgentWorkItem(this.#context, { workItemValidationReportViews: (m, e) => this.#workItemValidationReportViews(m, e), haReviewHold: (m) => this.#haReviewHold(m) }, missionId, workItemId);
+  async getAgentWorkItem(missionId: string, workItemId: string, options?: { full?: boolean }): Promise<AgentWorkItemView> {
+    return views.getAgentWorkItem(this.#context, { workItemValidationReportViews: (m, e) => this.#workItemValidationReportViews(m, e), haReviewHold: (m) => this.#haReviewHold(m) }, missionId, workItemId, options);
   }
 
   async getContext(

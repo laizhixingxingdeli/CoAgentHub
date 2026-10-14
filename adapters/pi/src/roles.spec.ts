@@ -192,13 +192,13 @@ test("协调者提示词含 pr1 新增四段要点且不含旧工单时限文字
 	const prompt = systemPrompt("coordinator");
 	// 第一段：开工先核对契约
 	assert.ok(prompt.includes("按任务复杂度调整工单详细程度"));
-	assert.ok(prompt.includes("不填写长模板"));
-	assert.ok(prompt.includes("文件数量是建议"));
-	assert.ok(prompt.includes("拆单仍增加执行会话与交接成本"));
+	assert.ok(prompt.includes("不按行数评级"));
+	assert.ok(prompt.includes("一条能独立验收的完整小路径"));
+	assert.ok(prompt.includes("不要把接线拆成无意义往返"));
 	assert.ok(prompt.includes("修复验证"));
 	assert.ok(prompt.includes("先核实真实接口"));
-	assert.ok(prompt.includes("先调查并确定方案"));
-	assert.ok(prompt.includes("不设搜索次数或探索时长硬门禁"));
+	assert.ok(prompt.includes("先定方案再按调用点或用例组拆"));
+	assert.ok(prompt.includes("不设次数硬门禁"));
 	for (const role of ["executor", "reviewer", "independent_reviewer"] as const) {
 		assert.ok(!systemPrompt(role).includes("按任务复杂度调整工单详细程度"));
 	}
@@ -206,11 +206,11 @@ test("协调者提示词含 pr1 新增四段要点且不含旧工单时限文字
 	assert.ok(prompt.includes("每一跳都要以结构化动作结束"), "应含结构化动作结束");
 	// 第二段：工单标准
 	assert.ok(prompt.includes("工单标准"), "应含『工单标准』");
-	assert.ok(prompt.includes("contextRefs 写明要读的文件和行段"), "应含 contextRefs 说明");
+	assert.ok(prompt.includes("contextRefs 写明文件和行段"), "应含 contextRefs 说明");
 	// 第三段：测试尽量少 / 验收省着读
 	assert.ok(prompt.includes("测试尽量少"), "应含『测试尽量少』");
 	assert.ok(prompt.includes("验收省着读"), "应含『验收省着读』");
-	assert.ok(prompt.includes("全量测试只在交卷前跑一次"), "应含全量测试只在交卷前跑一次");
+	assert.ok(prompt.includes("不要跑全量"), "应含跑定向命令、不要跑全量");
 	// 旧工单时限文字应已移除
 	assert.ok(
 		!prompt.includes("一张工单要能在半小时内做完"),
@@ -225,16 +225,16 @@ test("协调者提示词含 pr1 新增四段要点且不含旧工单时限文字
 
 test("协调者 issues 自动升级：issue 写进 issues、当跳结束不派工，且原有升级场景说明保留", () => {
 	const prompt = systemPrompt("coordinator");
-	assert.ok(prompt.includes("平台会自动把 issues 升级给 L3"), "应写明 issues 自动升级");
+	assert.ok(prompt.includes("平台会自动升级给 L3"), "应写明 issues 自动升级");
 	assert.ok(prompt.includes("不要再调 coagent_escalate_to_l3"), "应写明不要再调升级工具");
-	assert.ok(prompt.includes("要 L3 裁决的问题、证据和推荐做法都写进 issues"), "应写明问题/证据/推荐写进 issues");
+	assert.ok(prompt.includes("在 issues 里逐条列问题、证据和推荐做法"), "应写明问题/证据/推荐写进 issues");
 	assert.ok(prompt.includes("这一跳不派工、直接结束"), "应写明当跳不派工、直接结束");
 	// 其他升级场景不变：契约本身不成立、执行中卡在契约问题上。
 	assert.ok(
-		prompt.includes("技术发现动到它们时，\n用 coagent_escalate_to_l3，不要自行调整目标。"),
+		prompt.includes("动到用户目标、验收标准或架构边界时用 coagent_escalate_to_l3"),
 		"契约问题升级说明应保留",
 	);
-	assert.ok(prompt.includes("若卡住的是契约本身，用 coagent_escalate_to_l3 升级"), "执行阻塞升级说明应保留");
+	assert.ok(prompt.includes("契约问题用 coagent_escalate_to_l3"), "执行阻塞升级说明应保留");
 });
 
 test("协调者提示词：验证报告摘要不够时读全文，不为索取全文升级 L3", () => {
@@ -248,12 +248,25 @@ test("执行者提示词含『只执行，不分析』且限定只读/只跑工�
 	const prompt = systemPrompt("executor");
 	assert.ok(prompt.includes("只执行，不分析"), "应含『只执行，不分析』");
 	assert.ok(!prompt.includes("加起来不超过 5 次"));
-	assert.ok(prompt.includes("不设搜索次数硬上限"));
-	assert.ok(prompt.includes("不能自行改接口契约"));
-	assert.ok(prompt.includes("一次写清不符事实"));
+	assert.ok(prompt.includes("不设次数上限"));
+	assert.ok(prompt.includes("不能改接口契约"));
+	assert.ok(prompt.includes("写清不符事实"));
 	assert.ok(
-		prompt.includes("只跑工单 verification 列出的命令，原样复制"),
-		"应含『只跑工单 verification 列出的命令，原样复制』",
+		prompt.includes("只跑 verification 里的命令，原样复制"),
+		"应含『只跑 verification 里的命令，原样复制』",
 	);
 	assert.ok(!prompt.includes("一张工单要能在半小时内做完"), "执行者提示词本就没这行，回归确认不出现");
+});
+
+test("精简后协调者与执行者提示词字节上限，且协调者含偏差判 pass 规则", () => {
+	const coordinator = systemPrompt("coordinator");
+	const executor = systemPrompt("executor");
+	const coordinatorBytes = Buffer.byteLength(coordinator, "utf8");
+	const executorBytes = Buffer.byteLength(executor, "utf8");
+	console.log(`coordinator bytes=${coordinatorBytes}`);
+	console.log(`executor bytes=${executorBytes}`);
+	assert.ok(coordinatorBytes <= 7 * 1024, `协调者提示词 ${coordinatorBytes} 字节，应 <= ${7 * 1024}`);
+	assert.ok(executorBytes <= 3584, `执行者提示词 ${executorBytes} 字节，应 <= 3584`);
+	assert.ok(coordinator.includes("不能判 pass"), "协调者应写明承认的偏差不能判 pass");
+	assert.ok(coordinator.includes("openRisks"), "协调者应写明交卷 openRisks 里的偏差");
 });
