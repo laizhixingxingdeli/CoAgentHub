@@ -122,12 +122,12 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 冻结票和验收时不要求穷举测试；协调者验收不得要求超出契约点名的测试。否则测试越写越多，便宜的执行者反复返工。
 - 前端换框架的判据：需要虚拟滚动 / 拖拽 / 富文本这类复杂组件，或页面数超过 8。在那之前，「换成 React 会更好写」不是理由。
 
-## 已确认 Mission 的连续运行（2026-10-04）
+## 已确认 Mission 的连续运行（2026-10-04）（仅 L3）
 
 基本单位仍是 Mission；用户确认冻结清单后通过项目 mission-queue 入队，执行目录、适配器、检视者与集成验证属于项目 execution-config。队列只提供顺序和依赖，门禁、费用、失败和最终审查按 Mission 处理。配置变化仅影响未启动任务；人工签字也必须跑项目集成验证，失败回滚并留待审查。使用步骤见 reviewer-runbook 的 Mission 队列节；生产旧 run-plan 已退役，历史记录保留恢复兼容。
 
 
-## AC4 收尾记录（2026-10-04）
+## AC4 收尾记录（2026-10-04）（仅 L3）
 
 AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-20261004 经执行者证据、协调者逐条 L2 与 L3 最终审查 completed，通过插件合入 codex/communication-integration（a756fc5）。全量 2365 tests / 2358 pass / 0 fail / 7 既有 HAOFF1 skip；报告见 docs/ac4-platform-closeout-20261004.md。3101 常驻服务托管了本收尾任务，但本票未另跑真实 lightweight Mission 作端到端验证。
 
@@ -199,6 +199,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   本能力只投影已有 PlanRun/Mission 和服务内存输出，不改变 `plan-run` 的记录格式、驱动资格、升级决定、停止或合并语义。Web 是无构建的浏览器原生 ES module，只经 `/api/*` 读，不提供启动方案或作
 - **plan-run** — 方案运行（PlanRun）：无人值守驱动、升级握手与停止条件
   按 `missions/PLAN-*.json` 的资格候选顺序逐项推进；`node src/run-plan.ts` 驱动，独立 JSON PlanRun 记录方案层状态、升级、决定和停止原因，与 Mission 和 Mission 内 
+- **prompt-channel** — 角色提示的通道交付
+  pi 适配层按候选把角色规则与开跑简报放进系统提示或一条用户消息。看不见客户端系统提示的上游（10Router 的 qdc 与 cbai 已实测；qd 与 qdc 走同一个执行器，按代码同样处理，被限流未能实测）否则会丢掉角色规则与简报。不
 - **query-run** — 独立 QueryRun（只读问答）
   `QueryRunner.runQuery` 是与 `runMission` **并列**的 application 用例：只读问答，**不进入 Mission 状态机**。
 - **reviewer-workflow** — 检视者工作流

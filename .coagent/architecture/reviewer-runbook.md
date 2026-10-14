@@ -55,7 +55,7 @@
 5. runaway 的恢复：先核实真实承载者是 PlanRun 还是 run-mission，不凭历史 origin 选决策口。暂停 Mission，查实际尝试及租约；作废卡住的工单并保留成果，按调用点或用例组重划，写明真实接口、fixture、定向命令与交卷条件。确认旧执行者退出且租约不再有效后才恢复同一 Mission；原样重派不算恢复。技术拆单由 L3 判断，需求变更或超预算交用户。检查点误答使用显式 `checkpoint approve`，必须带真实 reviewer/reason，费用门禁不变；不编辑状态文件。
 6. 为止损往启动脚本里加环境变量之前，先想它会进哪里：服务拉起的所有子进程都继承，包括平台的校验命令。10-07 为止损设的 `COAGENT_TENROUTER_URL=http://127.0.0.1:9`（让适配器查不到额度、平台当未知放行）使 pi 的 `usage.test.ts` 断言「默认地址」的既有测试在平台校验里红了（VR-228；执行者自己复现，并把那条测试改成不读宿主环境）。先 grep 测试里读该变量的地方；止损用完立刻删，修复合入后重启生效。
 7. 复位候选熔断：quota 类熔断由适配器的用量行触发，用量解析改好之后旧熔断不会自己解开，要先用真实数据核对修复、再复位。插件没有复位工具；v5 自带的 reviewer MCP 在 L3MCP1（10-08）之后有 `coagenthub_candidate_reset`，合 master 并重启服务后才可用：经 reviewer MCP（`node scripts/reviewer-mcp.ts`）调用 `coagenthub_candidate_reset '{"profileId":"…","reviewer":"…","reason":"…"}'`，reviewer 署名会前缀进审计里的 reason（生产里审计的 actor 恒为 operator），一次只复位一个已核实的候选。在它可用之前只能 `node src/l3.ts candidate reset <profileId> --reason "…"`（经本机回环转给持锁服务，违反「平台操作只经插件」的约定），那样每次先问用户；10-07 用户一次性同意复位 3 条协调者候补（coordinator-tr-ds-v4-pro / glm53 / kimi-k3），10-08 已复位。
-8. 常驻服务是用户会话里的控制台进程：用户关机、注销、睡眠（哪怕关机被别的应用否决后改成睡眠）都会把它杀掉，而且不留崩溃记录。10-08 02:53 用户点了关机，微信否决后系统转入睡眠又恢复，服务当时就没了（心跳停在 02:53:18，`service.err` 无记录，系统事件里是 Kernel-Power 42 / 107 与 User32 1074）；待终审的交卷在状态里没丢，12:52 重启即恢复。长时间等待（待终审、等用户）后每次醒来先核 3101 监听与 `holder.json` 心跳，别只信托管运行的退出码；重启按「2026-10-06 补充」的做法。
+8. 常驻服务是用户会话里的控制台进程：用户关机、注销、睡眠（哪怕关机被别的应用否决后改成睡眠）都会把它杀掉，而且不留崩溃记录。10-08 02:53 用户点了关机，微信否决后系统转入睡眠又恢复，服务当时就没了（心跳停在 02:53:18，`service.err` 无记录，系统事件里是 Kernel-Power 42 / 107 与 User32 1074）；待终审的交卷在状态里没丢，12:52 重启即恢复。长时间等待（待终审、等用户）后每次醒来先核 3101 监听与 `holder.json` 心跳，别只信托管运行的退出码；重启按「2026-10-06 补充」的做法。RESUME2（10-15，合 master 并重启后生效）之后，服务启动会自动请求续跑被杀时在跑的托管 Mission（`mission.resume_requested`，cause `service_interrupted`），不必再手动 start_mission，只要看 `GET /api/missions/<id>` 的 `runner.running` 变 true；`COAGENT_RESUME_INTERRUPTED=0` 可关。10-14 22:13 重启电脑杀掉 RESUME2 自己的 W-684 执行者那次还没有这条，当时手动 start 的。
 
 ## 4. 票与票之间
 
@@ -99,6 +99,7 @@
 2. 经适配器实测一次（query 角色读一个文件，确认工具调用正常）。
 3. 三种执行角色的配置后端：先读 `GET /api/pools/config`，保留 revision，再经 `POST /api/pools/<role>/configure` 提交完整有序列表。可编辑模型与思考 facts、停用、排序、删除；旧版本拒绝，失败不部分落库。原 `POST /api/pools` 追加入口保留兼容。网页编辑入口仍待前端设计。
 4. 不再通过启动脚本改候选。启动只读配置，不为空池播种；旧 `--coordinator` / `--executor` 参数只做兼容校验，不覆盖实际调度顺序。下一跳重新读取当前启用列表，在途 attempt 保留启动身份。分类用只读角色池尚待独立接线，不能把本阶段标作完整 UI1。
+5. 加候选或换通道前先确认它看得见系统提示：把一个假工单号只放进系统提示问一遍（工具包 `ops/system-prompt-canary.mts`）。10-14 实测 10Router 的 qdc / qd（Qoder）与 cbai（CodeBuddy 国际）通道不把客户端系统提示交给模型（cbai 是 10Router 代码写死丢弃，Qoder 是服务端不交给模型，qd 被限流未能实测），cbcn、xai、openai-codex 看得见。适配层按候选 facts 的 `prompt_channel`（缺省按 tenrouter 的 qdc/、qd/、cbai/ 前缀判 user）把角色规则与简报放进一条用户消息（`specs/prompt-channel.md`）；加了新通道或改了判定后，用工具包 `ops/prompt-channel-e2e.mts` 对真实模型再验一遍，不要只信单测。
 
 ## 9. 检视者值守与统一待办（2026-10-03 后端）
 
@@ -154,4 +155,5 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 - **验证与工作区**（GATE1，2026-10-14）：检查点、验证后收口、开跑前核对都只提交授权范围内的改动；范围外的脏文件、杂文件（`__pycache__`、`.pyc`、`.DS_Store` 等）移出工作树存档到 `.coagent-worktrees/.scope-archive/<missionId>/<workItemId>/`——已跟踪文件存补丁后还原，未跟踪文件原样移走——不提交、不删除、不停机，记事件 `workspace.scope_archived`（路径、来源、存档位置），协调者下一跳简报里能看到。要找回：补丁用 `git apply`，未跟踪文件从存档目录拷回。被 .gitignore 忽略的未跟踪文件（例如签名私钥）不在 git status 里，不会被移动，也不会被提交。验证子进程带 `PYTHONDONTWRITEBYTECODE=1`。
 - **工单范围**（GATE1，2026-10-14）：Standard 工单的 `allowedScope` 与 `validation.forbiddenPaths` 可写相对仓库根的精确文件，或以 `/` 结尾的目录（目录下新增、修改、删除都算授权）；通配符、绝对 / 盘符路径、`..`、空段在建单、修订、派发时被 `WORK_ORDER_SCOPE_INVALID` 拒绝并给出改法。Standard 的 diff-size 超限只提醒（报告里 `diff-size advisory:`），`maxChangedFiles: 0` 的零代码验证单仍硬卡。
 - **停机自动恢复（RESUME1，2026-10-14，合 master 并重启后生效）**：执行者死信（`attempt_limit_reached`）与执行者打转（`runaway_suspected`）不再等人，服务续跑前先把工作项收成 blocked、写 `mission.coordinator_handoff` 交回协调者；**这类停机不要手动 start**，手动开跑会跳过这步收尾，可能再停一次。额度用完先换候选，都不可用就等已知重置时刻；`platform_unreachable` 按约 1、5、15 分钟自动重试，连续第 4 次才等人；`project_busy` 名额释放后自动续派。L3 答复升级、修订契约、加预算、批准检查点、恢复工作项之后，托管启动过的 Mission 由服务自动接着跑，不必再 start_mission（上文第 2 节「答复后要重新 start」那条到此作废）。仍要人的：真需要判断的升级、费用上限、15 项检查点、检查点真故障、取消、终审合入。
+- **断网与启动续跑（RESUME2，2026-10-15，合 master 并重启后生效）**：多家候选连续出现断网类失败（fetch failed / Request timed out / 连不上 / 静默 0 token 被杀）时，不再逐个换候选冻结、也不再进死信：这一跳释放租约，`no_available_agent` + `waitResumeAt`，按约 1、5、15 分钟自动重试，第 5 次才 `attempt_limit_reached` 等人（`waitDetail` 以「上游网络中断」开头，不要当成票的问题去拆单）。半开探测名额被占却无人结算的候选（以前要靠人发现再 `candidate_reset`），连续 2 分钟没有活租约会自动 reset（审计 actor `platform:probe-reclaim`）。
 - **部署**：合 master 之后服务仍是旧代码，要重启才加载（静态网页文件按磁盘现读，新网页对老接口向后兼容）。重启前提不变——没有在跑的 agent（第 7 节）；合并本身不重启、不推送。

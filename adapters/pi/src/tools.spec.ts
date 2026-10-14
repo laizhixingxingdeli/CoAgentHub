@@ -383,6 +383,32 @@ test("协调者独占 coagent_get_validation_report：schema 必填 workItemId /
 	]);
 });
 
+test("coagent_get_contract 与 coagent_get_work_order 声明可选 full，且原样转发", async () => {
+	const { client, calls } = recordingClient();
+	const cases = [
+		{ role: "coordinator" as const, name: "coagent_get_contract" },
+		{ role: "executor" as const, name: "coagent_get_work_order" },
+	];
+	for (const { role, name } of cases) {
+		const tool = coagentTools(role, client).find((t) => t.name === name);
+		assert.ok(tool, `${role} 要有 ${name}`);
+		const schema = tool.parameters as unknown as {
+			required?: string[];
+			properties: Record<string, unknown>;
+		};
+		assert.ok(!schema.required?.includes("full"), `${name}: full 必须可选`);
+		assert.ok("full" in schema.properties, `${name}: 表里要有 full`);
+		assert.ok(tool.description.includes("full:true"), `${name}: description 要指向 full:true`);
+
+		const result = await tool.execute("c1", { full: true } as never, undefined, undefined, undefined as never);
+		assert.ok(!result.isError);
+	}
+	assert.deepEqual(calls, [
+		{ tool: "coagent_get_contract", body: { full: true } },
+		{ tool: "coagent_get_work_order", body: { full: true } },
+	]);
+});
+
 test("independent_reviewer 工具 HTTP 失败不 terminate", async () => {
 	const client = {
 		call: async () => ({ ok: false, text: "平台拒绝了这次调用（HTTP 500）", json: null }),

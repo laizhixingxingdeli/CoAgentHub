@@ -1653,6 +1653,11 @@ async function capacityHarness(opts: {
   attemptWallClockMs?: number;
   owner?: string;
   candidateCircuits?: CandidateCircuitRepository;
+  /**
+   * 编排器自己的时钟。断网退避要按「现在」算出 resumeAt，不钉住就跟着墙钟走。
+   * 不传时与以前完全一样（deps.now 省略 ⇒ 墙钟）。
+   */
+  now?: () => Date;
 }) {
   const clock = new FixedClock(CAP_NOW);
   const activity = new InMemoryActivityLog(clock);
@@ -1698,11 +1703,14 @@ async function capacityHarness(opts: {
     attemptWallClockMs: opts.attemptWallClockMs,
     owner: opts.owner ?? 'runner-cap',
     candidateCircuits: opts.candidateCircuits,
+    now: opts.now,
   };
   return {
     platform,
     tokens,
     baseUrl,
+    // 活动日志要能直接播种：断网判定读的是活动尾部，没有播种就凑不出断网链。
+    activity,
     makeOrchestrator: () => new Orchestrator(deps),
   };
 }
@@ -3116,6 +3124,71 @@ describe('调度器：失败 Attempt 持久退避与死信', () => {
       assert.equal(hop?.lastFailure?.classification, 'rule');
       assert.equal(hop?.lastFailure?.disposition, 'do_not_retry');
       assert.notEqual((await env.platform.getMissionView('M-rule-wait')).status, 'completed');
+    });
+
+  test('上游网络中断不换候选、不进死信：释放租约按退避等人',
+    async () => {
+      // 这一条守的是「断网不是候选的错」：命中上游网络中断指纹时，这一跳
+      // 既不该把候选冻进冷却、也不该向队列报失败（报满次数就进死信），
+      // 而应该放掉这一跳的名额、把恢复时刻交给平台到点自动续跑。
+      //
+      // 时钟必须钉住：resumeAt 是按「现在」算出来的，跟墙钟走的话断言永远对不上。
+      const rows: QueuedHop[] = [];
+      const queuedHops = memoryCapacityRepo(rows);
+      const starts: { role: string; profileId: string }[] = [];
+      const env = await capacityHarness({
+        // 协调者自己就撞上断网。用例只给第 0 轮脚本：断网出口必须在换候选之前拦住，
+        // 真换了候选第 1 轮就会因「没有脚本匹配」炸出来。
+        coordinator: trackingStarts(
+          new ScriptedRuntime({ 'coordinator:-:0': { steps: [], upstreamFailure: 'fetch failed' } }),
+          starts,
+        ),
+        executor: trackingStarts(new ScriptedRuntime(EXECUTOR_HAPPY), starts),
+        queuedHops,
+        hopClock: new FixedClock(CAP_NOW),
+        hopCapacityLimits: capLimits(),
+        inRunBackoffWaitMs: 0,
+        now: () => new Date(CAP_NOW),
+      });
+      await env.platform.createMission({ projectId: 'P', missionId: 'M-outage', contract: CONTRACT });
+      // 播种两条之前的疑似断网。加上这一跳自己的那条，尾部连成 3 条链：
+      // 3 条 → count-1 = 2 → 退避表第 2 档 5 分钟。
+      // ActivityLog.append 不接受调用方回填 at，两条都落在 FixedClock(CAP_NOW)，
+      // 间隔 0 秒，不会超过 30 分钟的断链阈值。
+      for (const attemptId of ['seed-1', 'seed-2']) {
+        await env.activity.append({
+          projectId: 'P',
+          missionId: 'M-outage',
+          attemptId,
+          kind: 'attempt.ended',
+          data: { endedBy: 'upstream_failure', failureMessage: 'fetch failed' },
+        });
+      }
+      const expectedResumeAt = new Date(Date.parse(CAP_NOW) + 5 * 60 * 1000).toISOString();
+      const outcome = await env.makeOrchestrator().runMission('M-outage', {
+        projectRoot: process.cwd(),
+      });
+      assert.equal(outcome.kind, 'waiting');
+      if (outcome.kind === 'waiting') {
+        assert.equal(outcome.reason, 'no_available_agent');
+        assert.equal(outcome.candidateRole, 'coordinator');
+        assert.equal(outcome.resumeAt, expectedResumeAt);
+        assert.match(outcome.detail, /第3次/);
+        assert.match(outcome.detail, /约5分钟/);
+        assert.match(outcome.detail, /fetch failed/);
+      }
+      const view = await env.platform.getMissionView('M-outage');
+      assert.equal(view.waitReason, 'no_available_agent');
+      assert.equal(view.waitResumeAt, expectedResumeAt);
+      // 协调者失败时不该启动执行者。
+      assert.deepEqual(starts.filter((row) => row.role === 'executor'), []);
+      const hops = await queuedHops.list();
+      const coordHop = hops.find((row) => row.role === 'coordinator');
+      assert.equal(coordHop?.status, 'completed');
+      // 没报过失败：不累计次数，也不留 lastFailure。
+      assert.equal(coordHop?.attemptCount, 0);
+      assert.equal(coordHop?.lastFailure, undefined);
+      assert.equal(hops.some((row) => row.status === 'dead_letter'), false);
     });
 });
 
