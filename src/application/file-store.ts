@@ -50,6 +50,7 @@ import type {
 } from './ports.ts';
 import type { Delivery, DeliveryRepository } from './delivery.ts';
 import { withDeliveryKey } from './delivery.ts';
+import { ActivityIndex } from './activity-index.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -1059,6 +1060,17 @@ export class FileDeliveryRepository implements DeliveryRepository {
 export class FileActivityLog implements ActivityLog {
   #store: FileStateStore;
   #clock: Clock;
+  /**
+   * 每实例一份工作集索引。
+   *
+   * 为什么字段挂在实例上而不是模块级：索引记着「上次那个数组对象、长度、末项引用」
+   * 用来判断能不能只读尾巴。多个 store / 多个状态文件共用一份索引时，这些身份会
+   * 互相顶掉，每次 list 都退化成整表重建——结果还是对的，只是说好的增量没了。
+   *
+   * 为什么只索引**非归档**事件：归档事件的来源是 package（`archivedEvents`），
+   * 不是 `raw().events`，把它塞进同一个索引会把两种来源混成一桶。
+   */
+  #index = new ActivityIndex();
 
   constructor(store: FileStateStore, clock: Clock) {
     this.#store = store;
@@ -1076,10 +1088,13 @@ export class FileActivityLog implements ActivityLog {
 
   async list(missionId: string): Promise<readonly ActivityEvent[]> {
     this.#store.refreshIfChanged();
+    // 归档判断在 sync 之前：归档事件不在工作集里，先同步一次只会白扫一遍
+    // 数组尾巴（而且归档只能发生在事务外，refresh 之后这份 events 不会再变）。
     if (this.#store.hasArchivedMission(missionId)) {
       return this.#store.archivedEvents(missionId);
     }
-    return this.#store.raw().events.filter((event) => event.missionId === missionId);
+    this.#index.sync(this.#store.raw().events);
+    return this.#index.list(missionId);
   }
 
   async all(): Promise<readonly ActivityEvent[]> {
