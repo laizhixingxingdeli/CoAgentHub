@@ -2,16 +2,21 @@
  * langfuse-observer 的两条综合验收：
  * 1) 用真实 observer factory 注册到 fake ExtensionAPI，驱动 context_with_system 与
  *    真实声明形状的 assistant start/end（外加工具/agent_end/无请求合成消息），
- *    断言「恰两条 GENERATION」、稳定关联、内容脱敏截断且不修改上下文，再用同一
- *    会话文件重开验证序号前进且不重发历史（顺带覆盖默认 metadata-only）。
+ *    断言「恰两条 GENERATION」、稳定关联、内容脱敏截断且不修改上下文；核心窗口是
+ *    **首条 assistant 从未 appendMessage**（SDK 会话文件都还没写出来）时已导出的序号
+ *    也必须已独立落盘，重开同一会话/Attempt 后编号前进且不重发历史。
  * 2) 默认关闭、角色/任务不匹配、依赖抛错/拒绝/超时时不抛、不产生未处理拒绝、
- *    flush 有界，并核对 runtime 的生产接线位置。
+ *    flush 有界，序号落点不可用/损坏时关观测而不抛，并核对 runtime 的生产接线位置。
+ *
+ * 为什么第一条偏偏不 appendMessage：旧版本正是靠测试里补一次 appendMessage 让会话
+ * 文件落盘，才掩盖了真实窗口——生产里首个 assistant 持久化之前进程就退出时没有
+ * 任何 durable 记录。现在不再合法地制造这个假象。
  *
  * 一律用临时目录与合成配置：不读真实 ~/.coagent/langfuse.json、不连网、不连真实模型。
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
@@ -20,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { callIndexSidecarPath } from "./langfuse-call-index.ts";
 import { createLangfuseObserver, createNoopLangfuseObserver } from "./langfuse-observer.ts";
 import type { LangfuseConfig, LangfuseObserverDeps, LangfuseTransport } from "./langfuse-observer.ts";
 import { captureValue, stableIds } from "../../../scripts/langfuse-transport.mjs";
@@ -196,9 +202,21 @@ test("综合 1：真实 observer factory 驱动 SDK 形状事件 → 恰两条 G
 		});
 		await observer.flush();
 
-		// 真实 SDK 在 message_end 之后把 assistant 持久化（agent-session.js）。
-		// 这里照同顺序补上，否则会话文件不落盘，续跑无从恢复高水位。
-		sessionManager.appendMessage(assistantMessage({ content: [{ type: "text", text: "done" }] }));
+		// —— 关键窗口：故意不 appendMessage ——
+		// 生产里 SDK 在首个 assistant 持久化之前不写会话文件，进程此时退出就没有
+		// 任何会话记录。若序号只记在 custom entry 里，这里的高水位跟着消失，
+		// 重开的进程会把已导出的 0/1 再发一遍。
+		const sessionFile = sessionManager.getSessionFile();
+		assert.ok(sessionFile, "SDK 必须给出会话文件路径");
+		assert.equal(existsSync(sessionFile), false, "首条 assistant 未持久化时会话文件尚不存在（这正是旧实现丢失序号的窗口）");
+		const sidecarFile = callIndexSidecarPath(sessionFile, ATTEMPT_ID);
+		assert.equal(existsSync(sidecarFile), true, "已导出的调用编号必须在会话文件之外先落盘");
+		// sidecar 只允许一条非内容元数据记录：不含正文、配置或凭据。
+		const sidecarRecord = JSON.parse(readFileSync(sidecarFile, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(Object.keys(sidecarRecord).sort(), ["attemptId", "callIndex", "version"]);
+		assert.equal(sidecarRecord.attemptId, ATTEMPT_ID);
+		assert.equal(sidecarRecord.callIndex, 1, "高水位必须等于最后一条已导出调用的序号");
+		assert.equal(readFileSync(sidecarFile, "utf8").includes(API_KEY_SENTINEL), false);
 
 		assert.equal(spans.length, 2, "两次真实响应应恰形成两条 GENERATION");
 		const [first, second] = spans;
@@ -263,10 +281,9 @@ test("综合 1：真实 observer factory 驱动 SDK 形状事件 → 恰两条 G
 		assert.ok((attrString(first, "langfuse.observation.input") ?? "").length > 0);
 		assert.ok((attrString(first, "langfuse.observation.output") ?? "").length > 0);
 
-		// —— 续跑：同一会话文件重开，新响应序号前进，且不重发历史 ——
-		const reopenFile = sessionManager.getSessionFile();
-		assert.ok(reopenFile);
-		const resumedManager = SessionManager.open(reopenFile, dir, dir);
+		// —— 续跑：同一会话文件重开（此时会话文件仍不存在），序号前进且不重发历史 ——
+		assert.equal(existsSync(sessionFile), false, "重开前会话文件仍不存在，恢复只能靠 sidecar");
+		const resumedManager = SessionManager.open(sessionFile, dir, dir);
 		const resumed = await createLangfuseObserver({
 			subject: { missionId: MISSION_ID, workItemId: WORK_ITEM_ID, attemptId: ATTEMPT_ID, role: "executor" },
 			profile: { provider: "resolved-provider", model: "resolved-model", reasoning: "medium" },
@@ -286,8 +303,43 @@ test("综合 1：真实 observer factory 驱动 SDK 形状事件 → 恰两条 G
 		assert.equal(
 			(attr(appended[0], "coagent.call_index") as { intValue: number }).intValue,
 			2,
-			"序号必须从会话里的高水位继续，而不是按消息条数或从 0 重来",
+			"序号必须从 sidecar 的耐久高水位继续，而不是按消息条数或从 0 重来",
 		);
+		// 重开后的预留同样先落盘：sidecar 升到 2，不需要任何 appendMessage。
+		assert.equal((JSON.parse(readFileSync(sidecarFile, "utf8")) as { callIndex: number }).callIndex, 2);
+		// 观测只写自己的 sidecar，不得创建或改动 SDK 会话文件。
+		assert.equal(existsSync(sessionFile), false, "观测不得写 SDK 会话文件");
+
+		// —— 向后兼容：只有 custom entry 的老会话（sidecar 不存在）也能接着编 ——
+		const legacyDir = mkdtempSync(join(tmpdir(), "langfuse-observer-legacy-"));
+		try {
+			const legacyManager = SessionManager.create(legacyDir, legacyDir);
+			legacyManager.appendCustomEntry("coagent.langfuse.call-index.v1", {
+				attemptId: ATTEMPT_ID,
+				callIndex: 6,
+			});
+			const legacyTransport = captureTransport();
+			const legacy = await createLangfuseObserver({
+				subject: { missionId: MISSION_ID, attemptId: ATTEMPT_ID, role: "executor" },
+				profile: { provider: "resolved-provider", model: "resolved-model", reasoning: "medium" },
+				deps: { ...deps, createTransport: () => legacyTransport.transport },
+			});
+			legacy.attachSessionManager(legacyManager);
+			const legacyApi = fakeExtensionApi();
+			await legacy.extensionFactory(legacyApi.api);
+			legacyApi.handlers.get("context_with_system")?.({ type: "context_with_system", messages: [] });
+			legacy.onEvent({ type: "message_start", message: assistantMessage() });
+			legacy.onEvent({ type: "message_end", message: assistantMessage() });
+			await legacy.flush();
+			assert.equal(legacyTransport.spans.length, 1);
+			assert.equal(
+				(attr(legacyTransport.spans[0], "coagent.call_index") as { intValue: number }).intValue,
+				7,
+				"已有 custom 序号必须被兼容：取 max(custom high-water, sidecar) + 1",
+			);
+		} finally {
+			rmSync(legacyDir, { recursive: true, force: true });
+		}
 
 		// —— 默认 metadata-only：不开启内容时绝不带正文 ——
 		const metadataOnly = captureTransport();
@@ -410,6 +462,7 @@ test("综合 2：默认关闭/角色不匹配/依赖抛错或挂起时事件不�
 			});
 			assert.equal(observer.enabled, true);
 			observer.attachSessionManager(manager);
+			// 序号落点由真实 SessionManager 的临时会话路径给出（不读真实用户会话或凭据）。
 			const { api, handlers } = fakeExtensionApi();
 			await observer.extensionFactory(api);
 			const handler = handlers.get("context_with_system");
@@ -425,32 +478,61 @@ test("综合 2：默认关闭/角色不匹配/依赖抛错或挂起时事件不�
 			assert.ok(Date.now() - startedAt < 2_000, "flush 必须自带上界，不能等挂起的传输");
 		}
 
-		// 会话元数据写不进去：关闭本次观测（避免序号碰撞），但不抛、不影响调用方。
-		const metadataFails = await createLangfuseObserver({
-			subject: { missionId: MISSION_ID, attemptId: ATTEMPT_ID, role: "executor" },
-			profile: { provider: "p", model: "m", reasoning: "medium" },
-			deps: {
-				loadConfig: async () => enabledConfig,
-				createTransport: () => captureTransport().transport,
-				captureValue,
-				stableIds,
-			},
-		});
-		metadataFails.attachSessionManager({
-			getEntries: () => [],
-			appendCustomEntry: () => {
-				throw new Error("read-only session");
-			},
-		});
-		const failApi = fakeExtensionApi();
-		await metadataFails.extensionFactory(failApi.api);
-		failApi.handlers.get("context_with_system")?.({
-			type: "context_with_system",
-			messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-		});
-		assert.doesNotThrow(() => metadataFails.onEvent({ type: "message_start", message: assistantMessage() }));
-		assert.doesNotThrow(() => metadataFails.onEvent({ type: "message_end", message: assistantMessage() }));
-		await metadataFails.flush();
+		// —— 序号耐久落点不可用：关观测、不抛、不改模型路径，且宁可不导出也不撞号 ——
+		// 三种都验：无会话路径、sidecar 损坏、预留时写入失败（目录不存在，不靠权限模拟）。
+		const corruptedDir = mkdtempSync(join(tmpdir(), "langfuse-observer-corrupt-"));
+		try {
+			const corruptedFile = join(corruptedDir, "corrupt.jsonl");
+			writeFileSync(callIndexSidecarPath(corruptedFile, ATTEMPT_ID), "{\"version\":1", "utf8");
+			const durableFailures: { label: string; manager: { getEntries(): unknown[]; appendCustomEntry(): string; getSessionFile?(): string | undefined } }[] = [
+				{
+					label: "无 getSessionFile",
+					manager: { getEntries: () => [], appendCustomEntry: () => "id" },
+				},
+				{
+					label: "sidecar 损坏",
+					manager: { getEntries: () => [], appendCustomEntry: () => "id", getSessionFile: () => corruptedFile },
+				},
+				{
+					label: "预留写入失败",
+					manager: {
+						getEntries: () => [],
+						appendCustomEntry: () => "id",
+						// 同目录不存在：临时文件写不进去，等价于磁盘/目录不可写。
+						getSessionFile: () => join(corruptedDir, "no-such-dir", "session.jsonl"),
+					},
+				},
+			];
+			for (const failure of durableFailures) {
+				const spans = captureTransport();
+				const observer = await createLangfuseObserver({
+					subject: { missionId: MISSION_ID, attemptId: ATTEMPT_ID, role: "executor" },
+					profile: { provider: "p", model: "m", reasoning: "medium" },
+					deps: {
+						loadConfig: async () => enabledConfig,
+						createTransport: () => spans.transport,
+						captureValue,
+						stableIds,
+					},
+				});
+				assert.doesNotThrow(() => observer.attachSessionManager(failure.manager), `${failure.label}：attach 不得抛`);
+				const failureApi = fakeExtensionApi();
+				await observer.extensionFactory(failureApi.api);
+				const messages = [{ role: "user", content: [{ type: "text", text: "hi" }] }];
+				// 返回 undefined：上下文不被替换，模型路径不受影响。
+				assert.equal(
+					failureApi.handlers.get("context_with_system")?.({ type: "context_with_system", messages }),
+					undefined,
+				);
+				assert.doesNotThrow(() => observer.onEvent({ type: "message_start", message: assistantMessage() }), `${failure.label}：start 不得抛`);
+				assert.doesNotThrow(() => observer.onEvent({ type: "message_end", message: assistantMessage() }), `${failure.label}：end 不得抛`);
+				await observer.flush();
+				assert.equal(observer.enabled, false, `${failure.label}：必须关掉本次观测`);
+				assert.equal(spans.spans.length, 0, `${failure.label}：序号不能可靠落盘时不得导出记录`);
+			}
+		} finally {
+			rmSync(corruptedDir, { recursive: true, force: true });
+		}
 
 		// no-op 观测器本身也可安全调用。
 		const noop = createNoopLangfuseObserver();

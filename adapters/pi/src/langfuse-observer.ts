@@ -15,11 +15,19 @@
  * 会让复核数据凭空多出一次「上游已经回了话」。
  *
  * 调用序号不能靠 session 消息条数推算：SDK 重试与压缩都会改变活动消息，
- * 且 message_end 监听先于持久化。所以序号在会话的 custom entry 里记高水位
- * （不进入 LLM 上下文），进程重开、续跑同一 Attempt 都接着往后编。
+ * 且 message_end 监听先于持久化。所以序号单独记高水位，进程重开、续跑同一
+ * Attempt 都接着往后编。
+ *
+ * 为什么高水位不能只写在会话的 custom entry 里：pi 0.87.1 的 session-manager
+ * 在首个 assistant 消息进入 fileEntries 之前不写会话文件，因此「已导出本次调用、
+ * 但该 assistant 尚未持久化」这段窗口里，custom entry 会随进程一起消失，
+ * 重开的进程从 0 重编并重发已导出的编号，Langfuse 里两次调用被合成一次。
+ * 所以要有一个不依赖 assistant 持久化的本地 sidecar（见 langfuse-call-index.ts）。
  */
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { createDurableCallIndex } from "./langfuse-call-index.ts";
+import type { DurableCallIndex } from "./langfuse-call-index.ts";
 import type { Role } from "./roles.js";
 
 /** 共享传输（W-718 已接受）是 .mjs：本层只按名字调用，不复制它的任何实现。 */
@@ -79,10 +87,15 @@ export interface LangfuseTransportModule {
 	}): LangfuseStableIds;
 }
 
-/** 只读的会话元数据面（SessionManager 的这两条已核实）。 */
+/**
+ * 只读的会话元数据面（SessionManager 的这几条已核实）。
+ * getSessionFile 只用来定位 sidecar 的目录与文件名；本层绝不读、也绝不改
+ * SDK 的会话 JSONL 本身。
+ */
 export interface LangfuseSessionMetadataPort {
 	getEntries(): unknown[];
 	appendCustomEntry(customType: string, data?: unknown): string;
+	getSessionFile?(): string | undefined;
 }
 
 export interface LangfuseObserverSubject {
@@ -271,6 +284,8 @@ export async function createLangfuseObserver(
 		let enabled = true;
 		let highWater = -1;
 		let metadata: LangfuseSessionMetadataPort | undefined;
+		/** 序号耐久落点；取不到会话路径或读写失败时关观测。 */
+		let callIndex: DurableCallIndex | undefined;
 		let pendingRequest: PendingRequest | undefined;
 		let activeCall: ActiveCall | undefined;
 
@@ -283,6 +298,10 @@ export async function createLangfuseObserver(
 			enabled = false;
 			pendingRequest = undefined;
 			activeCall = undefined;
+			// 只清自己可能留下的临时文件；已落盘的高水位必须保留，
+			// 否则重开的进程会把导出的编号再发一遍。
+			callIndex?.dispose();
+			callIndex = undefined;
 		};
 
 		const capture = (value: unknown) => {
@@ -465,23 +484,33 @@ export async function createLangfuseObserver(
 		};
 
 		/**
-		 * 预留序号：先落高水位再返回，进程在两次调用之间死掉也会从最大值接着编。
-		 * 写不进去就关掉观测（见 disable 的理由）。
+		 * 预留序号：先把高水位耐久落盘，返回成功之后调用方才能记住 activeCall 并导出。
+		 * 顺序不能反：先导出后落盘等于回到「窗口丢失」的老问题——进程一死，
+		 * 已导出的编号就没人知道。
+		 * 落盘失败就关掉观测（见 disable 的理由），并让本次调用不被导出。
 		 */
 		const reserveCallIndex = (): number | undefined => {
-			if (!metadata) {
+			const durable = callIndex;
+			if (!durable) {
 				disable();
 				return undefined;
 			}
 			const next = highWater + 1;
 			try {
-				metadata.appendCustomEntry(CALL_INDEX_CUSTOM_TYPE, {
+				durable.write(next);
+			} catch {
+				disable();
+				return undefined;
+			}
+			// custom entry 继续写：向后兼容的恢复来源，人也能在会话里看到序号。
+			// 但它不再是耐久依据，写失败不该影响已经 durable 的序号。
+			try {
+				metadata?.appendCustomEntry(CALL_INDEX_CUSTOM_TYPE, {
 					attemptId: subject.attemptId,
 					callIndex: next,
 				});
 			} catch {
-				disable();
-				return undefined;
+				// 忽略：sidecar 已经落盘。
 			}
 			highWater = next;
 			return next;
@@ -555,7 +584,20 @@ export async function createLangfuseObserver(
 						const index = data.callIndex;
 						if (typeof index === "number" && Number.isInteger(index) && index > max) max = index;
 					}
-					highWater = max;
+
+					// sidecar 是耐久依据：会话文件此时可能还不存在（首个 assistant 未持久化），
+					// 这没关系——sidecar 只借用它的路径做定位，不依赖它已经写出来。
+					const sessionFile = manager.getSessionFile?.();
+					if (typeof sessionFile !== "string" || sessionFile.length === 0) {
+						// 没有可靠落点就不观测：宁可没有数据，也不要撞号的数据。
+						disable();
+						return;
+					}
+					const durable = createDurableCallIndex({ sessionFile, attemptId: subject.attemptId });
+					// read 在损坏 / identity 不匹配时抛，被外层 catch 接住 → 关观测。
+					const persisted = durable.read();
+					callIndex = durable;
+					highWater = Math.max(max, persisted);
 				} catch {
 					disable();
 				}
@@ -573,6 +615,8 @@ export async function createLangfuseObserver(
 			},
 			async flush() {
 				if (!enabled) return;
+				// 只清临时文件残留，不清高水位记录。
+				callIndex?.dispose();
 				try {
 					// 已开始但没等到 end 的调用：标 incomplete 后一并发出，不补任何结论。
 					if (activeCall) {
