@@ -167,20 +167,51 @@ const nanos = (ms: number): string => `${BigInt(Math.trunc(Math.max(0, ms))) * 1
 const finiteNonNegative = (value: unknown): number | undefined =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 
-function blockText(block: unknown): string {
-	if (typeof block === "string") return block.slice(0, MAX_BLOCK_CHARS);
-	if (!block || typeof block !== "object") return "";
-	const record = block as { type?: unknown; text?: unknown; thinking?: unknown };
-	if (typeof record.text === "string") return record.text.slice(0, MAX_BLOCK_CHARS);
-	if (typeof record.thinking === "string") return record.thinking.slice(0, MAX_BLOCK_CHARS);
-	// 工具调用等无正文块也只留形状，不缓存整个对象。
-	return typeof record.type === "string" ? `[${record.type}]` : "";
+/**
+ * 投影片段带自己的截断事实。
+ *
+ * 为什么不能只返回 string：共享 capture 只按**最终字符串长度**判截断，而预投影
+ * 的裁切发生在它之前。块里 3 万字符被裁到 2 万之后再脱敏（长 token 被替换成
+ * `[REDACTED]`）或本来就在预算内时，最终字符串很短，capture 会说「没截断」——
+ * 复核者就以为看到的是完整输入。裁切这件事只有这一层知道，所以必须在这里记下。
+ */
+interface ProjectedText {
+	text: string;
+	truncated: boolean;
 }
 
-function contentText(content: unknown): string {
-	if (typeof content === "string") return content.slice(0, MAX_BLOCK_CHARS);
-	if (!Array.isArray(content)) return "";
-	return content.map(blockText).join("");
+const NONE_PROJECTED: ProjectedText = { text: "", truncated: false };
+
+/** 任何丢字符的 slice 都必须报告 truncated；否则丢掉的那段无声无息。 */
+function clipped(value: string): ProjectedText {
+	if (value.length <= MAX_BLOCK_CHARS) return { text: value, truncated: false };
+	return { text: value.slice(0, MAX_BLOCK_CHARS), truncated: true };
+}
+
+function blockText(block: unknown): ProjectedText {
+	if (typeof block === "string") return clipped(block);
+	if (!block || typeof block !== "object") return NONE_PROJECTED;
+	const record = block as { type?: unknown; text?: unknown; thinking?: unknown };
+	if (typeof record.text === "string") return clipped(record.text);
+	if (typeof record.thinking === "string") return clipped(record.thinking);
+	// 工具调用等无正文块也只留形状，不缓存整个对象。
+	return typeof record.type === "string"
+		? { text: `[${record.type}]`, truncated: false }
+		: NONE_PROJECTED;
+}
+
+/** 数组合并要把每块的截断事实带上去：任何一块被裁过，这条消息的正文就不完整。 */
+function contentText(content: unknown): ProjectedText {
+	if (typeof content === "string") return clipped(content);
+	if (!Array.isArray(content)) return NONE_PROJECTED;
+	let text = "";
+	let truncated = false;
+	for (const block of content) {
+		const piece = blockText(block);
+		text += piece.text;
+		truncated = truncated || piece.truncated;
+	}
+	return { text, truncated };
 }
 
 /**
@@ -188,24 +219,33 @@ function contentText(content: unknown): string {
  * 只保留角色与可见正文，不保存消息对象本身——SDK 的 transcript 会随着
  * 后续回合不断变长，留住引用等于间接留住整段会话。
  */
-function projectTranscript(messages: readonly unknown[]): { text: string; dropped: number } {
+function projectTranscript(messages: readonly unknown[]): {
+	text: string;
+	truncated: boolean;
+	dropped: number;
+} {
 	const kept: string[] = [];
 	let budget = MAX_PROJECTED_CHARS;
 	const start = Math.max(0, messages.length - MAX_PROJECTED_MESSAGES);
 	let dropped = messages.length - (messages.length - start);
+	// 块内裁切与「丢弃整条消息」是两回事：前者正文还在、只是短了，后者正文根本没发。
+	// 分开记、上层一起并进 truncated，才不会漏掉任何一类。
+	let truncated = false;
 	for (let i = messages.length - 1; i >= start; i -= 1) {
 		const message = messages[i] as AssistantLike | undefined;
 		const role = typeof message?.role === "string" ? message.role : "unknown";
-		const line = `${role}: ${contentText(message?.content)}`;
+		const content = contentText(message?.content);
+		const line = `${role}: ${content.text}`;
 		if (line.length > budget) {
 			dropped += i - start + 1;
 			break;
 		}
 		budget -= line.length;
+		truncated = truncated || content.truncated;
 		kept.push(line);
 	}
 	kept.reverse();
-	return { text: kept.join("\n"), dropped };
+	return { text: kept.join("\n"), truncated, dropped };
 }
 
 /**
@@ -550,9 +590,13 @@ export async function createLangfuseObserver(
 					if (config.captureContent === true) {
 						const projected = projectTranscript(messages);
 						const captured = capture(projected.text);
+						// 三处会丢内容的路径都要并进来：预算丢弃整条消息、块内裁切、共享 capture
+						// 的最终长度裁切。少算块内裁切时，裁切后的正文若再被脱敏（长 token 换成
+						// `[REDACTED]`）或本就短于上限，capture 会报「没截断」，复核者于是以为
+						// 自己看到的是完整输入。
 						input = {
 							missing: captured.missing,
-							truncated: captured.truncated || projected.dropped > 0,
+							truncated: captured.truncated || projected.truncated || projected.dropped > 0,
 							...(typeof captured.value === "string" ? { value: captured.value } : {}),
 						};
 					}

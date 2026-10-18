@@ -370,6 +370,95 @@ test("综合 1：真实 observer factory 驱动 SDK 形状事件 → 恰两条 G
 		assert.equal(attr(metadataSpan, "coagent.input.source"), undefined);
 		assert.equal(attrString(metadataSpan, "langfuse.observation.type"), "GENERATION");
 		assert.equal(JSON.stringify(metadataOnly.spans).includes(API_KEY_SENTINEL), false);
+
+		// —— 子段：块内预裁切也必须让 input.truncated 为 true ——
+		// 共享 capture 只按**最终字符串长度**判截断。投影先把每个块 slice 到 20000，
+		// 若这段正文里还有凭据（脱敏后整块变成 `[REDACTED]`），发给 capture 的字符串
+		// 就很短，capture 会说「没截断」。旧实现据此报了 false，复核者于是看到一段
+		// 被裁过的输入却被告知完整。这里用 maxContentChars 远大于投影后长度的配置，
+		// 让判定只能来自投影本身。
+		const projectionConfig = syntheticConfig({ maxContentChars: 20_000 });
+		const projectionFixtures: { label: string; content: unknown; rawChars: number }[] = [
+			{
+				label: "字符串 content",
+				content: `apiKey=${"A".repeat(20_000)}`,
+				rawChars: 20_000 + "apiKey=".length,
+			},
+			{
+				// 数组合并：每块都超 20000，截断事实必须从块传到消息再到 input。
+				// 第二块以换行开头不是装饰：块之间的分隔就是换行，没有它（或者没有空白）
+				// 时，`apiKey=` 的值正则会把后面的 `Bearer` 一起吞掉，剩下约 4 万字符的
+				// C 串没被脱敏，共享 capture 自己就会报 truncated=true——用例就验不出
+				// “预投影裁切”这一条了。写成换行后两块各自脱敏，拼起来只有几十字符，
+				// 于是 truncated 只能来自投影本身。
+				label: "数组 text/thinking 块",
+				content: [
+					{ type: "text", text: `apiKey=${"B".repeat(30_000)}` },
+					{ type: "thinking", thinking: `\nBearer ${"C".repeat(30_000)}` },
+				],
+				rawChars: 2 * (30_000 + 8),
+			},
+		];
+		for (const [index, fixture] of projectionFixtures.entries()) {
+			assert.ok(fixture.rawChars > 20_000, `${fixture.label}：用例本身的正文必须超过块上限才有判别力`);
+			// 独立 observer + 独立临时会话目录：sidecar 是每条 session 的，不能互相踩。
+			const projectionDir = mkdtempSync(join(tmpdir(), "langfuse-observer-projection-"));
+			try {
+				const projectionTransport = captureTransport();
+				const projectionObserver = await createLangfuseObserver({
+					subject: {
+						missionId: MISSION_ID,
+						attemptId: `attempt-projection-${index}`,
+						role: "executor",
+					},
+					profile: { provider: "resolved-provider", model: "resolved-model", reasoning: "medium" },
+					deps: {
+						...deps,
+						loadConfig: async () => projectionConfig,
+						createTransport: () => projectionTransport.transport,
+					},
+				});
+				projectionObserver.attachSessionManager(SessionManager.create(projectionDir, projectionDir));
+				const projectionApi = fakeExtensionApi();
+				await projectionObserver.extensionFactory(projectionApi.api);
+				const projectionContext = projectionApi.handlers.get("context_with_system");
+				assert.ok(projectionContext);
+
+				const messages = [{ role: "user", content: fixture.content, timestamp: 1 }];
+				const messagesSnapshot = JSON.parse(JSON.stringify(messages));
+				assert.equal(
+					projectionContext({ type: "context_with_system", messages }),
+					undefined,
+				`${fixture.label}：context hook 必须不返回 messages`,
+				);
+				assert.deepEqual(messages, messagesSnapshot, `${fixture.label}：不得修改/替换原 messages`);
+
+				projectionObserver.onEvent({ type: "message_start", message: assistantMessage() });
+				projectionObserver.onEvent({ type: "message_end", message: assistantMessage() });
+				await projectionObserver.flush();
+
+				assert.equal(projectionTransport.spans.length, 1, `${fixture.label}：应恰形成一条 GENERATION`);
+				const projectionSpan = projectionTransport.spans[0];
+				assert.equal(
+					(attr(projectionSpan, "coagent.input.truncated") as { boolValue: boolean }).boolValue,
+					true,
+					`${fixture.label}：块内预裁切必须标成 truncated`,
+				);
+				// 正文仍然有界：标记变了，预算与发出去的长度不变。
+				const projectedValue = attrString(projectionSpan, "langfuse.observation.input") ?? "";
+				assert.ok(projectedValue.length > 0 && projectedValue.length <= 20_000, `${fixture.label}：输入正文必须有界`);
+				// 判别力就在这里：同一份投影后的正文再交给 capture，它不会报截断。
+				const recaptured = captureValue(projectedValue, projectionConfig);
+				assert.equal(recaptured.missing, false);
+				assert.equal(
+					recaptured.truncated,
+					false,
+					`${fixture.label}：capture 对这段正文本会返回 truncated=false，标记只能来自投影`,
+				);
+			} finally {
+				rmSync(projectionDir, { recursive: true, force: true });
+			}
+		}
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
