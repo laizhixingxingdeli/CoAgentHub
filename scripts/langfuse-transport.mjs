@@ -145,6 +145,8 @@ export function stableIds({ missionId, attemptId = null, callIndex = null, event
 const SENSITIVE_NAMES = new Set([
   'authorization',
   'auth',
+  'authconfig',
+  'authheader',
   'apikey',
   'secret',
   'secretkey',
@@ -164,11 +166,43 @@ const SENSITIVE_NAMES = new Set([
   'setcookie',
   'proxy',
   'proxyurl',
+  'proxyaddress',
   'httpproxy',
   'httpsproxy',
+  'no_proxy',
+  'proxybypass',
 ]);
 
-/** 先归一化再判：`api-key`/`apiKey`/`API_KEY` 指同一个东西，漏一种就是一个泄露口。 */
+const AUTH_CONFIG_NAMES = new Set([
+  'authconfig',
+  'authentication',
+  'authorizationconfig',
+  'bearertoken',
+  'accesstoken',
+  'refreshtoken',
+]);
+
+/** 代理字段的**名字**：命中就整块换成固定占位，不能只清掉 userinfo 留一个地址。 */
+const PROXY_NAME_RE = /proxy/i;
+/** 主机字段只在与代理同处一个对象时才清（见 stripProxyHosts），普通配置里的 host 不该被抹。 */
+const PROXY_HOST_NAME_RE = /^(?:host|hostname|hostaddress|port|server|endpoint)$/;
+
+/**
+ * 一行里提到代理时清掉其中的具体地址。
+ * 保留原值的引号：`"proxy":"http://host:7890"` 清完必须是 `"proxy":"[REDACTED]"`，
+ * 否则周围整段字符串化 JSON 就不再是合法 JSON，后续的字段级清理和重排全部失效。
+ */
+const scrubProxyUrls = (line) =>
+  line.replace(/["']?(?:https?|socks[45]?):\/\/[^\s"'`,;)]*["']?/gi, (match) => {
+    const quote = /^["']/.test(match) ? match[0] : '';
+    return `${quote}${REDACTED}${quote}`;
+  });
+
+/**
+ * 先归一化再判：`api-key`/`apiKey`/`API_KEY` 指同一个东西，漏一种就是一个泄露口。
+ * 不写 `name.includes('token')` 这种宽匹配：`max_tokens`/`num_tokens`/`top_logprobs`
+ * 都在正常模型输出里，抹掉就把复核正文损毁了。
+ */
 function sensitiveKey(key) {
   if (typeof key !== 'string' || !key) return false;
   const name = key.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -181,8 +215,157 @@ function sensitiveKey(key) {
     name.includes('apikey') ||
     name.includes('privatekey') ||
     name.includes('proxy') ||
-    name.endsWith('token')
+    // `authorization-header` 这类前缀变体不是恰好同名。
+    name.startsWith('authorization') ||
+    AUTH_CONFIG_NAMES.has(name) ||
+    // 任意取值的 `*Token` 字段（runToken/accessToken/...）。
+    (name.endsWith('token') && !name.startsWith('max') && !name.startsWith('num') && !name.startsWith('top'))
   );
+}
+
+/**
+ * 字符串化 JSON 里的一对 `"key": value`。
+ *
+ * 为什么先用字段正则再用 JSON.parse：正则阶段不重建文本，能处理非严格 JSON
+ * （`{'a':1}`、被截断的片段），而解析阶段才能看到嵌套结构。两层都做，
+ * 因为只做解析的话，不合法的片段就完全没人管。
+ */
+const JSON_FIELD_RE = /(")([^"\\]{1,120})\1[ \t]*(?::|=>)[ \t]*(?:"((?:[^"\\]|\\.)*)"|([^\s,}\]{\["][^,}\]\r\n]*))/g;
+const JSON_TEXT_MAX = 1024 * 1024;
+
+/**
+ * 有界解析：嵌套 JSON 字符串（工具参数被再 stringify 一层）要清到里层，
+ * 但输入长度和深度都必须有界，否则一段畸形长文本就能把采集拖住。
+ */
+const parseEmbedded = (text) => {
+  if (text.length > JSON_TEXT_MAX) return undefined;
+  let depth = 0;
+  for (const ch of text) {
+    if (ch === '{' || ch === '[') depth += 1;
+    else if (ch === '}' || ch === ']') depth -= 1;
+    if (depth > MAX_DEPTH) return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * 带续行处理的行扫描：Authorization/Cookie 这类头行的值可能折到下一行。
+ * 不处理续行的话，凭据的后半段会留在日志里，等于只遮了一半。
+ * 值一律整行换成替代标记：`Basic <base64>` 这种形式没有任何可识别的前缀
+ * （不是 sk-，也不是 Bearer），只清“看起来像凭据”的部分等于把凭据留下。
+ * 续行只认「以空白开头」的行，否则下一行正常的头会被一并当成续行抹掉。
+ */
+const scrubLines = (text) => {
+  const lines = text.split(/\r?\n/);
+  let inHeader = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (inHeader && /^[ \t]+\S/.test(line)) {
+      lines[i] = REDACTED;
+      continue;
+    }
+    inHeader = false;
+    const header = /^([ \t]*[A-Za-z0-9_.-]*(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key)[A-Za-z0-9_.-]*[ \t]*:[ \t]*).+/i.exec(
+      line,
+    );
+    if (header) {
+      lines[i] = `${header[1]}${REDACTED}`;
+      inHeader = true;
+      continue;
+    }
+    // 没有引号的 `proxy: http://host:7890` / `HTTP_PROXY=...` 行：地址整块清。
+    // 必须在通用 key=value 规则之前，否则那条规则只清 userinfo，地址仍在。
+    const proxy = /^([ \t]*[a-z0-9_.-]*proxy[a-z0-9_.-]*[ \t]*[:=][ \t]*)(.+)$/i.exec(line);
+    if (proxy && !proxy[2].includes(REDACTED)) {
+      lines[i] = `${proxy[1]}${REDACTED}`;
+      continue;
+    }
+    lines[i] = scrubString(line);
+    // 一行里提到代理、又带着具体地址（比如工具描述 `proxy -> http://10.5.5.5:8080`）：
+    // “代理字段必须清除整个地址”意味着这种松散写法也不能放过。
+    if (PROXY_NAME_RE.test(lines[i])) lines[i] = scrubProxyUrls(lines[i]);
+  }
+  return lines.join('\n');
+};
+
+/**
+ * 同一行里的多处赋值（`a=1; Proxy=http://...`）：行首扫描只能处理第一条，
+ * 剩下的必须按边界再扫一遍，否则后面的代理地址整块留在原处。
+ */
+const scrubProxyAssignments = (text) =>
+  text.replace(
+    /(^|[\s;&,])([a-z0-9_.-]*proxy[a-z0-9_.-]*[ \t]*[:=][ \t]*)(?!\[REDACTED\])([^\s;&,)\]}]+)/gi,
+    (match, lead, name, value) => (value.includes(REDACTED) ? match : `${lead}${name}${REDACTED}`),
+  );
+
+/**
+ * 去掉同一对象里的主机字段。
+ *
+ * 为什么需要：`"proxy":{"host":"127.0.0.1","port":7890}` 这种写法里，
+ * 只把 `proxy` 这一项换成占位符，地址仍然以 `host`/`port` 的形状完整留在输出里；
+ * 而这个地址正是用户机器上的出口。但 `host` 本身是常见配置名（API base、DB），
+ * 全局抹掉会毁掉复核需要的正文，所以只在同一个对象里出现过代理字段时才清。
+ */
+const stripProxyHosts = (value, seen = new WeakSet()) => {
+  if (!isPlainObject(value) && !Array.isArray(value)) return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) stripProxyHosts(item, seen);
+    return;
+  }
+  const entries = Object.entries(value);
+  const hasProxy = entries.some(([key]) => PROXY_NAME_RE.test(key));
+  for (const [key, item] of entries) {
+    if (hasProxy) {
+      const name = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (PROXY_HOST_NAME_RE.test(name) || AUTH_CONFIG_NAMES.has(name)) value[key] = REDACTED;
+    }
+    stripProxyHosts(item, seen);
+  }
+};
+
+/**
+ * 文本级清理：行扫描 -> 代理赋值 -> 字段/前缀规则 -> 内层 JSON 递归。
+ *
+ * 递归不会 parse->scrub 无限互调：解析结果交给 `sanitize`，而 `sanitize`
+ * 遇到字符串只走 `scrubText(text, depth + 1)`，`depth` 一旦超过 MAX_DEPTH
+ * 就退回只跑 STRING_RULES。
+ *
+ * 取舍：能解析成 JSON 的文本会被重排成紧凑单行。Langfuse 侧存的是字符串正文，
+ * 紧凑化不影响复核内容，但确实会丢掉调用方原本的缩进。
+ */
+function scrubText(text, depth = 0) {
+  if (depth > MAX_DEPTH) return scrubString(text);
+  let out = scrubLines(text);
+  out = scrubProxyAssignments(out);
+  out = out.replace(JSON_FIELD_RE, (match, quote, label, stringValue, bareValue) => {
+    if (!sensitiveKey(label)) return match;
+    const value = bareValue ?? stringValue;
+    // 已带替代标记的值原样留着，否则二次清理会把占位符叠成 `"[REDACTED]"`。
+    if (typeof value === 'string' && value.includes(REDACTED)) return match;
+    // 原本带引号的值清完还要带引号：这是字符串化 JSON，少一对引号就整段不可解析。
+    if (bareValue === undefined) return `${quote}${label}${quote}: ${quote}${REDACTED}${quote}`;
+    return `${quote}${label}${quote}: ${REDACTED}`;
+  });
+  // 只对看起来是对象/数组的文本做解析重建。
+  // 为什么这么窄：裸数字串（OTLP 纳秒时间戳、`"1750000000000000000"`）走一遍
+  // JSON.parse/stringify 会被 float64 舍入改值，接收端就对不上了。
+  const trimmed = out.trim();
+  if (!/^[[{]/.test(trimmed) || !/[\]}]$/.test(trimmed)) return out;
+  const parsed = parseEmbedded(out);
+  if (parsed === undefined) return out;
+  try {
+    // 结构化的那一半工作（"proxy"/"apiKey" 键、代理主机字段）交给 sanitize，
+    // 文本规则认不出 `"apiKey":"任意值"` 这种没前缀的值。
+    return JSON.stringify(sanitize(parsed, { seen: new WeakSet(), count: 0 }, depth));
+  } catch {
+    return out;
+  }
 }
 
 const STRING_RULES = [
@@ -213,6 +396,16 @@ const scrubString = (text) => {
 };
 
 /**
+ * 采集与 wire 共用的字符串清理入口。
+ *
+ * 为什么会漏：原先字符串只过 STRING_RULES，规则认的是 `sk-`/`Bearer`/`token=`
+ * 这些**形状**；工具结果的字符串化 JSON 里 `"apiKey":"<任意值>"` 和
+ * `"proxy":"http://127.0.0.1:7890"` 两种形状都不匹配，于是原样发到了 Langfuse。
+ * 任意取值的凭据只能按**字段名**识别，所以这里补上字段匹配。
+ */
+const scrubTextDeep = (text) => scrubText(text, 0);
+
+/**
  * 递归脱敏。数字/布尔原样保留——OTLP 的 intValue、纳秒时间戳都靠类型正确，
  * 一律转字符串会把 trace 发成不可用的形状。循环引用返回占位符而不是抛异常：
  * 工具参数里出现自引用对象时，整条观测链路不该因此炸掉。
@@ -220,7 +413,8 @@ const scrubString = (text) => {
 function sanitize(value, ctx, depth) {
   if (depth > MAX_DEPTH || ctx.count > MAX_NODES) return '[TRUNCATED]';
   ctx.count += 1;
-  if (typeof value === 'string') return scrubString(value);
+  // 字符串走带字段识别的清理：只靠前缀规则会漏掉任意取值的 apiKey/密码。
+  if (typeof value === 'string') return scrubTextDeep(value);
   if (value === undefined || value === null) return value;
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'bigint') return String(value);
@@ -247,6 +441,9 @@ function sanitize(value, ctx, depth) {
   }
   // 只防环，不误伤复用同一对象的 DAG。
   ctx.seen.delete(value);
+  // 值级清理之后再按字段名收代理地址：`proxy.host` / `proxy.port` 这类拆开写的地址，
+  // 只换掉 `proxy` 那一项是不够的。
+  stripProxyHosts(out);
   return out;
 }
 

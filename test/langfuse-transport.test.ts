@@ -22,6 +22,25 @@ const SECRET_KEY = 'sk-lf-0123456789abcdef'; // 只作为被脱敏的哨兵，�
 const RUN_TOKEN = 'RUNTOKEN-SENTINEL-abcdef123456';
 const PASSWORD = 'hunter2-SENTINEL';
 const PROXY_CRED = 'proxyuser:proxypass-SENTINEL';
+// 不带 sk-/Bearer 前缀的合成哨兵：前缀规则认不出来，只能按字段名识别。
+// 键名故意混用 camelCase / snake_case，覆盖 `api-key`/`API_KEY` 这类写法差异。
+const STRINGIFIED_TOOL_OUTPUT = {
+  command: 'ls -la',
+  apiKey: 'GK-9f8e7d6c5b4a',
+  password: 'PW-Q1w2E3r4T5y6',
+  run_token: 'RT-Z9x8C7v6B5n4M',
+  authConfig: { scheme: 'basic', value: 'AUTHCFG-M4n3B2v1C0x9' },
+  // 代理地址没有 userinfo：地址本身也不能留。
+  proxy: 'http://10.23.45.67:7890',
+};
+const STRINGIFIED_SENTINELS = [
+  'GK-9f8e7d6c5b4a',
+  'PW-Q1w2E3r4T5y6',
+  'RT-Z9x8C7v6B5n4M',
+  'AUTHCFG-M4n3B2v1C0x9',
+  '10.23.45.67:7890',
+];
+const toolOutputText = JSON.stringify(STRINGIFIED_TOOL_OUTPUT);
 
 async function readJsonBody(req) {
   const chunks = [];
@@ -157,6 +176,8 @@ test('writes v4 OTLP spans and confirmed ingestion scores to a local endpoint, w
         { key: 'agent.attempt', value: { intValue: 42 } },
         { key: 'authorization', value: { stringValue: `Bearer ${RUN_TOKEN}` } },
         { key: 'tool.args', value: { stringValue: `{"apiKey":"${SECRET_KEY}","proxy":"http://${PROXY_CRED}@127.0.0.1:8080"}` } },
+        // 工具结果是字符串化 JSON 时，凭据是任意取值：靠前缀规则一定漏。
+        { key: 'tool.output', value: { stringValue: toolOutputText } },
         { key: 'session.id', value: { stringValue: 'W-718' } },
       ],
     });
@@ -204,10 +225,20 @@ test('writes v4 OTLP spans and confirmed ingestion scores to a local endpoint, w
     const toolText = toolAttr.value.stringValue;
     assert.equal(toolText.includes(SECRET_KEY), false);
     assert.equal(toolText.includes('proxypass-SENTINEL'), false);
+    // 最终 wire 上的字符串化工具输出：非 sk-/Bearer 形状的也需要做靠字段名脱敏。
+    const outputText = span.attributes.find((attr) => attr.key === 'tool.output').value.stringValue;
+    for (const sentinel of STRINGIFIED_SENTINELS) {
+      assert.equal(outputText.includes(sentinel), false, sentinel);
+    }
+    // 脱敏不能把整段正文一并吃掉：无关字段必须还在，否则复核内容不可用。
+    assert.equal(outputText.includes('ls -la'), true);
     for (const entry of server.seen) {
       assert.equal(entry.body.includes(SECRET_KEY), false, entry.url);
       assert.equal(entry.body.includes(RUN_TOKEN), false, entry.url);
       assert.equal(entry.body.includes(PASSWORD), false, entry.url);
+      for (const sentinel of STRINGIFIED_SENTINELS) {
+        assert.equal(entry.body.includes(sentinel), false, `${sentinel} @ ${entry.url}`);
+      }
     }
     const scoreBody = JSON.parse(ingestion[0].body);
     assert.equal(scoreBody.batch[0].type, 'score-create');
@@ -236,18 +267,35 @@ test('writes v4 OTLP spans and confirmed ingestion scores to a local endpoint, w
     assert.equal(truncated.value.length, 6);
     const full = captureValue(
       {
-        tool: { input: { password: PASSWORD, nested: { headers: `x-api-key: ${SECRET_KEY}` } } },
+        tool: { input: { header: `Authorization: Basic ${SECRET_KEY}`, nested: { tail: 'kept' } } },
         proxy: `http://${PROXY_CRED}@127.0.0.1:8080`,
         runToken: RUN_TOKEN,
         list: [`key=${SECRET_KEY}`],
+        toolOutput: toolOutputText,
       },
       { ...config, captureContent: true, maxContentChars: 5000 },
     );
     assert.equal(full.truncated, false);
     assert.equal(full.missing, false);
-    for (const sentinel of [SECRET_KEY, RUN_TOKEN, PASSWORD, 'proxypass-SENTINEL']) {
+    for (const sentinel of [SECRET_KEY, RUN_TOKEN, PASSWORD, 'proxypass-SENTINEL', ...STRINGIFIED_SENTINELS]) {
       assert.equal(full.value.includes(sentinel), false, sentinel);
     }
+    // 无关字段保留下来，才能确认脱敏不是把内容整个吐掉。
+    assert.equal(full.value.includes('ls -la'), true);
+
+    // 协调者复现的形状：只有字符串化 JSON 时，采集结果与最终 wire 都不能带凭据。
+    const stringified = captureValue(
+      { toolOutput: toolOutputText },
+      { ...config, captureContent: true, maxContentChars: 2000 },
+    );
+    assert.equal(stringified.truncated, false);
+    assert.equal(stringified.missing, false);
+    assert.equal(typeof stringified.value, 'string');
+    for (const sentinel of STRINGIFIED_SENTINELS) {
+      assert.equal(stringified.value.includes(sentinel), false, sentinel);
+    }
+    assert.equal(stringified.value.includes('[REDACTED]'), true);
+    assert.equal(stringified.value.includes('ls -la'), true);
     // 循环引用不抛异常，仍然给出行界标记。
     const circular = { name: 'loop' };
     circular.self = circular;
