@@ -3,6 +3,7 @@
 //    历史 review 事件不产生 L2 分、第一次运行把已确认 id 记进进度、第二次相同输入零发送、
 //    Langfuse 断连时新的未确认 id 不进 acked 而已捕获记录仍在；
 // 2) 关闭时零请求、项目范围只取匹配的 Mission、请求路径里没有 Delivery 与运行状态文件、
+//    项目范围共用一个进度文件时两个 Mission 的捕获记录不会被互相覆盖、
 //    有界循环在 abort 后能结束并调用了 flush。
 // 不连真实平台（3101）与真实 Langfuse（3300），不读任何真实配置或凭据：
 // 平台数据取自 test/fixtures 的 synthetic fixture，密钥是临时目录里的合成值。
@@ -328,6 +329,41 @@ test('syncs a mission once, skips confirmed ids on rerun, and never marks unconf
 
 test('stays silent when disabled, scopes project reads, and stops a bounded loop on abort with a flush', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'langfuse-sync-'));
+  // 项目范围下两个匹配 Mission 各带一条完整 lastReview：它们共用同一个进度文件，
+  // 所以这里能看出「写后一个 Mission 时有没有把前一个已捕获的记录清掉」。
+  // 形状对齐 langfuse-quality-records 接受的 lastReview（submittedAttemptId/verdict/acceptanceResults）。
+  const projectMissions = {
+    'M-a1': {
+      missionId: 'M-a1',
+      projectId: 'p-a',
+      workItems: [
+        {
+          id: 'W-a1',
+          lastReview: {
+            submittedAttemptId: 'W-a1.exec-1',
+            verdict: 'accept',
+            reasons: ['synthetic reason a1'],
+            acceptanceResults: [{ criterion: 'synthetic criterion a1', status: 'pass', evidence: 'synthetic evidence a1' }],
+          },
+        },
+      ],
+    },
+    'M-a2': {
+      missionId: 'M-a2',
+      projectId: 'p-a',
+      workItems: [
+        {
+          id: 'W-a2',
+          lastReview: {
+            submittedAttemptId: 'W-a2.exec-1',
+            verdict: 'reject',
+            reasons: ['synthetic reason a2'],
+            acceptanceResults: [{ criterion: 'synthetic criterion a2', status: 'fail', note: 'synthetic note a2' }],
+          },
+        },
+      ],
+    },
+  };
   const platform = await startPlatform((path) => {
     if (path === '/api/missions') {
       return {
@@ -340,7 +376,10 @@ test('stays silent when disabled, scopes project reads, and stops a bounded loop
       };
     }
     const mission = /^\/api\/missions\/([^/]+)$/.exec(path);
-    if (mission) return { status: 200, body: { missionId: mission[1], projectId: 'p-a', workItems: [] } };
+    if (mission) {
+      const body = projectMissions[mission[1]];
+      return body ? { status: 200, body } : { status: 404, body: { error: 'missing' } };
+    }
     if (/^\/api\/missions\/[^/]+\/activity$/.test(path)) return { status: 200, body: [] };
     return null;
   });
@@ -428,9 +467,41 @@ test('stays silent when disabled, scopes project reads, and stops a bounded loop
       assert.deepEqual([...new Set(fetched)].sort(), [
         '/api/missions/M-a1',
         '/api/missions/M-a1/activity',
+        '/api/missions/M-a1/attempts/W-a1.exec-1',
         '/api/missions/M-a2',
         '/api/missions/M-a2/activity',
+        '/api/missions/M-a2/attempts/W-a2.exec-1',
       ]);
+
+      // 共用一份进度时，后同步的 Mission 不能把先同步那个的已捕获记录冲掉：
+      // 冲掉之后它下一轮再也投影不出来，Langfuse 里就永久缺这条评审。
+      const afterFirst = JSON.parse(await readFile(progressPath, 'utf8'));
+      assert.deepEqual(
+        afterFirst.capturedReviews.map((entry) => entry.missionId).sort(),
+        ['M-a1', 'M-a2'],
+        '项目范围共用一个进度文件时，两个 Mission 的捕获记录都必须留在进度里',
+      );
+
+      const projectAgain = await syncQualityOnce({
+        config,
+        platformUrl: platform.baseUrl,
+        projectId: 'p-a',
+        progressPath,
+      });
+      assert.equal(projectAgain.ok, true);
+      const afterSecond = JSON.parse(await readFile(progressPath, 'utf8'));
+      // 第二次同步同样是 M-a1 先写、M-a2 后写：这里断言的是后写那一步没删掉前一个 Mission 的记录。
+      assert.deepEqual(afterSecond.capturedReviews.map((entry) => entry.missionId).sort(), ['M-a1', 'M-a2']);
+      for (const entry of afterSecond.capturedReviews) {
+        assert.equal(entry.complete, true, '进度里留的必须是能投影出分数的完整记录');
+        assert.ok(entry.submittedAttemptId, '完整记录必须带受评 Attempt');
+      }
+      // 同一份记录不能因为「保留旧项 + 再拼当前项」被存两遍：那会让每轮同步都长一条。
+      assert.equal(
+        afterSecond.capturedReviews.length,
+        afterFirst.capturedReviews.length,
+        '重复同步不得复制同一份捕获记录',
+      );
     } finally {
       await langfuse.close();
     }

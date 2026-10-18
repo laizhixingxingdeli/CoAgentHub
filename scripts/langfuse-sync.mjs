@@ -326,7 +326,15 @@ async function syncMission({ missionId, get, progressPath, config, transport, no
     config,
   });
   const acked = new Set(read.progress.acked);
-  const capturedReviews = projected.capturedReviews;
+  // 项目范围下多个 Mission 共用一份进度文件，而投影层会丢掉 missionId 不是当前 Mission 的
+  // 快照（normalizePriorSnapshot）。所以这里不能直接把返回值整表写回：后同步的 Mission
+  // 会清掉先同步那个的捕获记录，那批判定就永远投影不出来、也进不了 Langfuse。
+  // 保留旧进度里属于**别的** Mission 的项；当前 Mission 用投影结果整体替换——投影层
+  // 已经把当前 Mission 的旧快照合并进去了，再把旧项拼回来就会重复存储。
+  const carriedOver = read.progress.capturedReviews.filter(
+    (entry) => isObject(entry) && isText(entry.missionId) && entry.missionId !== missionId,
+  );
+  const capturedReviews = [...carriedOver, ...projected.capturedReviews];
   const snapshot = { version: 1, acked: [...acked], capturedReviews };
 
   // 先落捕获：断连时这一步已经完成，下一轮还能从进度里投影出同样的记录。
