@@ -32,6 +32,7 @@ import { appendRateLimitSummary, startRateLimitProbe } from "./rate-limit-probe.
 import { queryUsage } from "./usage.js";
 import type { UsageRow } from "./usage.js";
 import { registerPendingProviderExtensions, resolveProviderExtensionPaths } from "./provider-extensions.js";
+import { createLangfuseObserver, createNoopLangfuseObserver } from "./langfuse-observer.ts";
 
 /**
  * 平台传下来的 spec。字段刻意与平台的 AgentRunSpec 对齐——
@@ -635,6 +636,22 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		spec.profile.reasoning,
 		spec.profile.facts,
 	);
+	// 观测在 profile 解析之后、装配之前建好：只有协调者/执行者 + 有 missionId 且
+	// 本地显式启用时才真的注册钩子，其它情况拿到 no-op。建失败也是 no-op——
+	// 观测出问题绝不能变成「这次任务跑不起来」。
+	const langfuseObserver = await createLangfuseObserver({
+		subject: {
+			missionId: spec.missionId,
+			workItemId: spec.workItemId,
+			attemptId: spec.attemptId,
+			role: spec.role,
+		},
+		profile: {
+			provider: profile.provider,
+			model: profile.model,
+			reasoning: profile.reasoning,
+		},
+	}).catch(() => createNoopLangfuseObserver());
 	const modelRuntime = await ModelRuntime.create();
 
 	const completion = { submitted: false } as { submitted: boolean; via?: string };
@@ -655,18 +672,23 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		noSkills: true,
 		noPromptTemplates: true,
 		noContextFiles: true,
-		extensionFactories: bindPlatform
-			? [
-					createCoagentExtension({
-						client: client!,
-						role: spec.role,
-						promptChannel: resolvePromptChannel(spec.profile.facts),
-						cwd: spec.cwd,
-						completion,
-						onBriefInjected: (brief) => contextCollector.onBriefInjected(brief),
-					}),
-				]
-			: [],
+		extensionFactories: [
+			...(bindPlatform
+				? [
+						createCoagentExtension({
+							client: client!,
+							role: spec.role,
+							promptChannel: resolvePromptChannel(spec.profile.facts),
+							cwd: spec.cwd,
+							completion,
+							onBriefInjected: (brief) => contextCollector.onBriefInjected(brief),
+						}),
+					]
+				: []),
+			// 只读观测 factory 排在 CoAgent factory 之后：它只挂 context_with_system，
+			// 不返回 messages，所以不会改动别人已经装配好的 prompt/tools。
+			...(langfuseObserver.enabled ? [langfuseObserver.extensionFactory] : []),
+		],
 		// query 无 CoAgent extension，角色说明走 loader 覆盖，不拉 Mission brief。
 		...(spec.role === "query"
 			? { systemPromptOverride: () => systemPrompt("query") }
@@ -715,6 +737,10 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		tools: toolAllowlist(spec.role),
 	});
 
+	// 序号高水位要在 prompt 之前从会话里读回来：续跑时同一 Attempt 接着往后编，
+	// 否则重开的进程会从 0 重新发一遍历史编号。
+	langfuseObserver.attachSessionManager(sessionManager);
+
 	let toolCalls = 0;
 	// 工具名序列：Timeline 第二层要的是结构化动作，不是一大段文字。
 	const toolNames: string[] = [];
@@ -759,6 +785,9 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	};
 
 	const unsubscribe = session.subscribe((event) => {
+		// 观测最先、且自身隔离：它吞掉自己的异常并只读事件，后面所有既有分支
+		// 的执行顺序与结果都不因为它而改变。
+		langfuseObserver.onEvent(event);
 		if (event.type === "message_update") {
 			const inner = event.assistantMessageEvent;
 			if (inner.type === "text_delta") {
@@ -859,6 +888,9 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	} finally {
 		transport.stop();
 		rateLimitProbe.stop();
+		// 有界且吞错：正常/异常路径都冲一次，断网时到点就放弃。不 await 每次入队，
+		// 所以工具循环和订阅回调从不被网络阻塞。
+		await langfuseObserver.flush();
 	}
 
 	const stats = session.getSessionStats();
