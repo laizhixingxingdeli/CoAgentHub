@@ -29,6 +29,8 @@ import { ChangeReceiptConflictError } from '../application/change-receipt.ts';
 import { AgentPoolError, InMemoryAgentPoolRepository, agentPoolSnapshotRevision } from '../application/agent-pool.ts';
 import { describeRolePolicy, policyMatches } from '../application/model-policy.ts';
 import { withAutoResumeSwitch } from '../application/platform/wait-info.ts';
+import type { DirectControlCommand } from '../application/platform/direct-control.ts';
+import { parseDirectControlCommand } from '../application/platform/direct-control-command.ts';
 import type {
   AgentPoolAddInput,
   AgentPoolCandidate,
@@ -333,6 +335,43 @@ function controlActor(
     if (resolved && !('status' in resolved) && resolved.id.trim()) return resolved.id;
     return 'operator';
   });
+}
+
+/**
+ * direct-control 是控制面操作，执行者牌（x-coagent-run）不能借控制面自验收：
+ * 带了任何值就 403，也不看它能不能解析。
+ *
+ * 必须在控制面鉴权之前判：先跑 requireControlAuth 的话，没带控制面凭据的
+ * 请求会先变成 401，调用方就分不清「这张牌不能用于控制面」和「你没带凭据」。
+ */
+function rejectExecutorRunTokenOnDirectControl(req: IncomingMessage): void {
+  if (req.headers['x-coagent-run'] === undefined) return;
+  throw new HttpError(
+    403,
+    'CONTROL_FORBIDDEN',
+    '执行者令牌（x-coagent-run）不能用于控制面：direct-control 是主控操作，不能借控制面自验收。',
+  );
+}
+
+/**
+ * 校验 direct-control 请求体，返回交给 Platform 的 command。
+ *
+ * 形状解析只有一处（Platform 的 direct-control-command.ts）：HTTP 层不再维护
+ * 顶层字段白名单或字段取值校验，只把共享解析器的 INVALID_DIRECT_COMMAND 翻成
+ * 本 API 已有的 400 BAD_REQUEST 合同，其余错误照原样抛。
+ */
+function requireDirectControlCommand(body: Record<string, unknown>): DirectControlCommand {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new HttpError(400, 'BAD_REQUEST', 'direct-control 请求体必须是对象。');
+  }
+  try {
+    return parseDirectControlCommand(body);
+  } catch (error) {
+    if (error instanceof PlatformRuleError && error.code === 'INVALID_DIRECT_COMMAND') {
+      throw new HttpError(400, 'BAD_REQUEST', error.message);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -985,7 +1024,7 @@ export function createApi(deps: ApiDeps): Server {
     await requireControlAuth(req, action);
     if (req.method !== 'POST') return;
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|model-policy|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|rerun)$/.exec(path);
+    const controlled = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|model-policy|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|direct-control|rerun)$/.exec(path);
     if (!controlled) return;
     const mission = await platform.getMissionView(controlled[1]);
     const duty = await platform.getReviewerDuty(mission.projectId);
@@ -1930,10 +1969,12 @@ export function createApi(deps: ApiDeps): Server {
     rejectImpactRunOutsideAllowlist(req);
     if (req.method !== 'POST') return handle(req, res);
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|model-policy|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|rerun)$/.exec(path);
+    const missionControl = /^\/api\/missions\/([^/]+)\/(?:budget\/raise|checkpoint\/approve|escalations\/answer|contract|model-policy|park|parked-resume|cancel|pause|resume|finalize(?:\/reviewer)?|work-items\/[^/]+\/(?:retire|recover)|direct-control|rerun)$/.exec(path);
     const planControl = /^\/api\/plan-runs\/([^/]+)\/decide$/.exec(path);
     const projectControl = /^\/api\/projects\/([^/]+)\/(?:mission-queue|execution-config)$/.exec(path);
     if (!missionControl && !planControl && !projectControl) return handle(req, res);
+    // 执行者牌不能拿来走控制面：在控制面鉴权之前就 403，否则缺凭据会先报 401。
+    if (missionControl && path.endsWith('/direct-control')) rejectExecutorRunTokenOnDirectControl(req);
     await requireControlAuth(req, POLICY_ACTION.missionPause);
     let projectId: string | undefined;
     if (projectControl) projectId = decodeURIComponent(projectControl[1]);
@@ -2367,6 +2408,53 @@ export function createApi(deps: ApiDeps): Server {
       await requireControl(req, POLICY_ACTION.missionCreateClassified);
       const body = await readJson(req);
       return send(res, 201, await platform.createClassifiedMission(body as never));
+    }
+
+    /*
+     * direct coordination mode：主控经控制面直接驱动协调者的一次操作。
+     *
+     * 与 agent 工具口（/api/agent/*）刻意分开：那是执行者/协调者牌自己跑活时调的，
+     * 身份来自 x-coagent-run；这里走控制面凭据（requireControl），是主控代替
+     * 协调者开工，不依赖任何 agent 跳在跑。
+     *
+     * 身份只来自 controlActor(resolveControlPrincipal, req)：body.actor 一律不收
+     * （出现在顶层就 400），不让调用方自称是谁。actor 只记进审计，不返回。
+     *
+     * 执行者令牌（x-coagent-run）不能借控制面自验收：带了就 403，且不返回 token。
+     * 这是 direct coordination 的核心安全边界——执行者不能拿控制面给自己签验收结论。
+     * 拒绝写同样在 handleWithReviewerFence 里先做一道，避免先撞 401。
+     *
+     * 权限同时要 attemptStartCoordinator 与 missionRevise：一条命令既开协调者
+     * attempt 又改工单/契约，按 action 只选一个等于给半权身份开后门。
+     */
+    const directControlMatch = /^\/api\/missions\/([^/]+)\/direct-control$/.exec(path);
+    if (method === 'POST' && directControlMatch) {
+      const missionId = directControlMatch[1];
+      rejectExecutorRunTokenOnDirectControl(req);
+      await requireControl(req, POLICY_ACTION.attemptStartCoordinator);
+      await requireControl(req, POLICY_ACTION.missionRevise);
+      const body = await readJson(req);
+      const command = requireDirectControlCommand(body);
+      const actor = await controlActor(resolveControlPrincipal, req);
+      // 窄并发门禁：托管运行（执行与机器验证）还没结束时，主控不得插手。
+      //
+      // 为什么不能只看 core 的 ACTIVE_EXECUTOR_PRESENT：执行者 attempt 已结束、
+      // 机器验证还在跑的那一段，core 里没有活动执行者，但 runner 进程仍占着这条
+      // Mission；此时让主控改工单/契约会与正在跑的验证打架。runnerState 是服务
+      // 进程里「谁真的在跑」的权威探针（isRunning），所以以它为准。
+      // 位置固定在两道 requireControl 通过之后、performDirectControl 之前：
+      // 权限先讲清（缺凭据仍是 401），再谈并发；也不让被拒的命令在 Platform 里
+      // 留下任何副作用（不开协调者 attempt）。
+      if (deps.runnerState?.isRunning(missionId) === true) {
+        throw new HttpError(
+          409,
+          'DIRECT_RUN_ACTIVE',
+          '托管运行尚未结束，请等执行与验证完成再做主控操作',
+        );
+      }
+      const result = await platform.performDirectControl(missionId, actor, command);
+      // 不返回 token：direct-control 是控制面操作，不需要也不应该给调用方 run token。
+      return send(res, 200, result);
     }
 
     // Web 项目规范只读入口：复用 Platform.getProjectContext，不给浏览器直读文件系统。

@@ -1,4 +1,4 @@
-import type { ComplexityAssessment, Mission } from '../../kernel/index.ts';
+import type { ComplexityAssessment, CoordinationMode, Mission } from '../../kernel/index.ts';
 import type { CreateMissionInput, CreateClassifiedMissionInput, CreateClassifiedMissionResult } from './types.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
 import { assertNoCallerRouteOverride, parseComplexityAssessmentStrict, parseTaskFactsStrict } from '../classified-mission-intake.ts';
@@ -78,15 +78,21 @@ export async function recordContractAcceptance(
 }
 
 export async function createMission(ctx: PlatformContext, input: CreateMissionInput): Promise<{ missionId: string }> {
+    // 先校协作方式再 ensureProject / 分配 id：拒绝路径不留空 Project、不烧掉一个 id。
+    const coordinationMode = parseCoordinationMode(input.coordinationMode);
     const project = await ctx.ensureProject(input.projectId);
     const missionId = input.missionId ?? ctx.ids.next('M');
     const mission = project.createMission({
       id: missionId,
       contract: input.contract,
       origin: input.origin,
+      ...(coordinationMode !== undefined ? { coordinationMode } : {}),
     });
     await ctx.projects.save(project);
-    await ctx.event(mission, 'mission.created', { contractRevision: mission.contractRevision });
+    await ctx.event(mission, 'mission.created', {
+      contractRevision: mission.contractRevision,
+      coordinationMode: mission.coordinationMode,
+    });
     // 为什么先判 contract 再取 acceptance：kernel 允许 Mission 没有契约（那时 contractRevision
     // 保持 0），而无条件写 mission.contract.acceptance 会在进入 recordContractAcceptance 之前就
     // 求值 undefined.acceptance，抛 TypeError——「没有仓储就 return」是在函数体里，挡不住传参。
@@ -278,6 +284,10 @@ export async function rerunMission(ctx: PlatformContext, callbacks: IntakeCallba
       missionId: newId,
       contract: mission.contract,
       origin: { ...(mission.origin ?? { clientType: 'cli' }), rerunOf: root },
+      // 协作方式是只读轴，重跑必须原样继承：源头是 direct（外部会话主控）就
+      // 还是 direct。不传的话 createMission 会落到缺省 hierarchical，重跑就
+      // 悄悄换了「谁在派工」——而这是比成本时最不能变的那一格。
+      coordinationMode: mission.coordinationMode,
     });
 
     // **把起点钉死在源头那次的分叉基线上。**
@@ -314,6 +324,21 @@ const HA_FORBIDDEN_SIDE_EFFECTS = [
   'unrecoverableExternalSideEffect',
   'destructiveData',
 ] as const;
+
+/**
+ * 公开 createMission 入口的协作方式白名单。
+ *
+ * undefined 原样返回（kernel 缺省 hierarchical）；只放行两个合法值；其余一律抛。
+ * 不做 trim / 大小写归一 / 兼容别名：静默改写入参会让调用方以为自己指定的值生效了。
+ */
+function parseCoordinationMode(value: unknown): CoordinationMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'hierarchical' || value === 'direct') return value;
+  throw new PlatformRuleError(
+    'INVALID_COORDINATION_MODE',
+    `coordinationMode 只接受 hierarchical / direct，收到：${String(value)}`,
+  );
+}
 
 /** 无法证明为 false 的禁止副作用：true 与 unknown 都算未证明安全。 */
 function haForbiddenSideEffects(ha: {

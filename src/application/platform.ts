@@ -64,6 +64,7 @@ import * as startupBrief from './platform/startup-brief.ts';
 import * as views from './platform/views.ts';
 import * as independentReview from './platform/independent-review.ts';
 import * as attempts from './platform/attempts.ts';
+import * as directControl from './platform/direct-control.ts';
 import * as changeImpact from './platform/change-impact.ts';
 import * as changeReceipt from './platform/change-receipt.ts';
 import * as changeCoverage from './platform/change-coverage.ts';
@@ -357,6 +358,14 @@ export class Platform {
   async decideReviewerTodo(todoId: string, input: reviewerTodos.ReviewerTodoDecision): Promise<reviewerTodos.ReviewerTodo> {
     return this.#tx(() => reviewerTodos.decideReviewerTodo(this.#context,
       (id, request) => this.parkMission(id, request), todoId, input));
+  }
+
+  async performDirectControl(missionId: string, actor: string, command: directControl.DirectControlCommand): Promise<directControl.DirectControlResult> {
+    return directControl.performDirectControl(this.#context, {
+      requireNoOpenDiagnosticEscalation: (mission) => this.#requireNoOpenDiagnosticEscalation(mission),
+      acquireMutationSlotForDispatch: (mission, project) => this.#acquireMutationSlotForDispatch(mission, project),
+      criteriaFailureStop: (mission, item) => this.#criteriaFailureStop(mission, item),
+    }, missionId, actor, command);
   }
 
   async createMission(input: CreateMissionInput): Promise<{ missionId: string }> {
@@ -1624,6 +1633,16 @@ export class Platform {
       acceptanceResults?: readonly AcceptanceResult[];
     },
   ): Promise<{ status: string }> {
+    // direct 模式的机器验收门禁必须在**公开入口**上，不能只挂在 direct 主控命令里：
+    // legacy review 也走这个方法，只在 direct-control 里挡等于留了一条绕过门禁的路。
+    const { mission } = await this.#context.locate(missionId);
+    if (mission.coordinationMode === 'direct' && input.verdict === 'accept') {
+      await directControl.requireDirectAcceptValidation(
+        this.#context,
+        missionId,
+        input.workItemId,
+      );
+    }
     return workItemReview.reviewExecutionResult(this.#context, (mission, item) => this.#criteriaFailureStop(mission, item), missionId, attemptId, input);
   }
 

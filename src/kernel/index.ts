@@ -27,6 +27,7 @@ export type {
   AcceptanceStatus,
   BlockedRecord,
   ComplexityAssessment,
+  CoordinationMode,
   EscalationBody,
   ContextRef,
   ContextRefKind,

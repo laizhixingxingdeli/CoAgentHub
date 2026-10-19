@@ -181,6 +181,8 @@ export async function listMissions(ctx: PlatformContext, ): Promise<MissionSumma
           missionId: mission.id,
           projectId: mission.projectId,
           status: mission.status,
+          // 只读投影；老数据在 restore 时已归为 hierarchical。
+          coordinationMode: mission.coordinationMode,
           waitReason: mission.waitReason,
           waitDetail: mission.waitDetail,
           ...(mission.waitResumeAt !== undefined ? { waitResumeAt: mission.waitResumeAt } : {}),
@@ -535,6 +537,7 @@ function viewOf(
     status: mission.status,
     executionMode: mission.executionMode,
     runKind: mission.runKind,
+    coordinationMode: mission.coordinationMode,
     promotions: mission.promotions,
     waitReason: mission.waitReason,
     waitDetail: mission.waitDetail,

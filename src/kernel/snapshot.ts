@@ -11,6 +11,7 @@
 
 import type {
   ComplexityAssessment,
+  CoordinationMode,
   ExecutionBudget,
   MissionExecutionMode,
   PromotionRecord,
@@ -89,6 +90,8 @@ export interface MissionSnapshot {
   executionMode?: MissionExecutionMode;
   /** 老快照可能没有；restore 时缺省/非法 -> mutation。 */
   runKind?: RunKind;
+  /** 老快照可能没有；restore 时缺省/非法 -> hierarchical（不推断 direct）。 */
+  coordinationMode?: CoordinationMode;
   /** 老快照可能没有；restore 时缺字段/畸形 -> undefined（fail-closed，不默认全 0）。 */
   complexityAssessment?: ComplexityAssessment;
   /** 老快照可能没有；restore 时缺字段/畸形 -> undefined（fail-closed，不填默认预算）。 */

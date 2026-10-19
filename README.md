@@ -65,6 +65,7 @@ node scripts/coagent.mjs start     # 启动平台，浏览器打开 http://127.0
 | 安全边界与已知限制 | [docs/security.md](docs/security.md) |
 | 出错了 | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | HTTP 接口全表 | [docs/http-api.md](docs/http-api.md) |
+| 当前会话主控、执行者改代码的两层协作 | [docs/direct-controller.md](docs/direct-controller.md) |
 | 模块地图与架构决定 | [.coagent/architecture/modules.md](.coagent/architecture/modules.md)、[.coagent/architecture/decisions/](.coagent/architecture/decisions/) |
 | 存储、租约、归因链的设计记录 | [docs/design-notes.md](docs/design-notes.md) |
 

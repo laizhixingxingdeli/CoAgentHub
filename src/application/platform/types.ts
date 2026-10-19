@@ -5,6 +5,7 @@ import type {
   AttemptEndReason,
   AttemptKind,
   BlockedRecord,
+  CoordinationMode,
   EscalationBody,
   EvidenceKind,
   EvidenceRecord,
@@ -262,6 +263,14 @@ export interface CreateMissionInput {
   contract: MissionContract;
   /** 结果最终回到哪里。缺省表示无人认领——结果仍会进收件箱，只是没有收件人。 */
   origin?: OriginChannel;
+  /**
+   * 外部主控协作方式。
+   *
+   * 公开 createMission 入口**只**接受 undefined / 'hierarchical' / 'direct'：
+   * 非法值在 ensureProject 与分配 id 之前就拒掉，不留空 Project、不占用 id。
+   * 缺省（undefined）落到 kernel 的 hierarchical。
+   */
+  coordinationMode?: CoordinationMode;
 }
 
 /**
@@ -299,6 +308,8 @@ export interface MissionView {
   executionMode: MissionExecutionMode;
   /** 创建时选定的运行种类；只读，与 executionMode 正交。 */
   runKind: RunKind;
+  /** 外部主控协作方式；只读，与 executionMode 正交。老数据投影为 hierarchical。 */
+  coordinationMode: CoordinationMode;
   /** Lightweight→Standard 升级历史（只读）；便于观测面显示原模式/当前模式/升级原因。 */
   promotions: readonly PromotionRecord[];
   /** 为什么停着。undefined = 没停。 */
@@ -400,6 +411,8 @@ export interface MissionSummary {
   missionId: string;
   projectId: string;
   status: string;
+  /** 外部主控协作方式；只读。老数据投影为 hierarchical。 */
+  coordinationMode: CoordinationMode;
   waitReason: WaitReason | undefined;
   waitDetail: string | undefined;
   waitResumeAt?: string;

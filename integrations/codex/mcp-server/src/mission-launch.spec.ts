@@ -16,6 +16,51 @@ describe("Mission launch adapter", () => {
   expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ projectId: "p", missionId: "m", contract, origin: { clientType: "codex", conversationRef: "session" } });
   expect(open).not.toHaveBeenCalled();
  });
+ it("passes coordinationMode only when supplied, and verifies direct creation by authoritative read-back", async () => {
+  const { request, open, tools } = setup();
+  // 旧服务可能忽略 coordinationMode 仍返回 201：回读不是一次多余请求，是唯一的证据。
+  request.mockImplementation(async (path: string, init?: { body?: string }) => {
+    if (path === "/missions") return { missionId: JSON.parse(init!.body!).missionId, created: true };
+    if (path === "/missions/d") return { missionId: "d", coordinationMode: "direct" };
+    if (path === "/missions/old") return { missionId: "old", coordinationMode: "hierarchical" };
+    if (path === "/missions/blank") return null;
+    throw new Error("CoAgentHub v5 404: " + path);
+  });
+  const direct = await tools.coagenthub_create_mission.handler({ projectId: "p", missionId: "d", contract, recipient: "session", coordinationMode: "direct" });
+  expect(direct.isError).toBeUndefined();
+  expect(direct.structuredContent).toEqual({ missionId: "d", created: true, coordinationMode: "direct" });
+  const paths = request.mock.calls.map(call => call[0]);
+  // 一次 POST 一次 GET：direct 的承诺只能由回读兑现。
+  expect(paths).toEqual(["/missions", "/missions/d"]);
+  expect(request.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
+  expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ projectId: "p", missionId: "d", contract, origin: { clientType: "codex", conversationRef: "session" }, coordinationMode: "direct" });
+  expect(request.mock.calls[1][1]).toBeUndefined();
+
+  for (const [missionId, expectDetail] of [["old", "hierarchical"], ["blank", "没有返回 Mission 视图"], ["gone", "404"]] as const) {
+    request.mockClear();
+    const res = await tools.coagenthub_create_mission.handler({ projectId: "p", missionId, contract, recipient: "session", coordinationMode: "direct" });
+    expect(res.isError).toBe(true);
+    const message = JSON.parse(res.content[0].text).error;
+    // 任务可能真的建出来了：既不许假装回滚，也不许替 caller 重试或启动。
+    expect(message).toContain(`Mission ${missionId} 可能已经创建`);
+    expect(message).toContain("direct 协调模式未确认");
+    expect(message).toContain(expectDetail);
+    expect(message).toContain("不要盲目重试创建，也不要启动任何 agent");
+    expect(request.mock.calls.map(call => call[0])).toEqual(["/missions", "/missions/" + missionId]);
+    expect(request.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
+    expect(open).not.toHaveBeenCalled();
+  }
+
+  request.mockClear();
+  await tools.coagenthub_create_mission.handler({ projectId: "p", missionId: "h", contract, recipient: "session", coordinationMode: "hierarchical" });
+  await tools.coagenthub_create_mission.handler({ projectId: "p", missionId: "plain", contract, recipient: "session" });
+  const bodies = request.mock.calls.map(call => JSON.parse(call[1].body));
+  expect(request.mock.calls.map(call => call[0])).toEqual(["/missions", "/missions"]);
+  expect(bodies[0].coordinationMode).toBe("hierarchical");
+  // 缺省不得凭空加字段：平台缺省即 hierarchical。
+  expect(bodies[1]).not.toHaveProperty("coordinationMode");
+  expect(bodies[1].origin).toEqual({ clientType: "codex", conversationRef: "session" });
+ });
  it("uses current Contract and single-writer path, streams completion, and prevents concurrent duplicate start", async () => {
   const { request, open, tools } = setup();
   request.mockResolvedValueOnce({ missionId: "m", projectId: "p", contract, status: "executing", origin: { conversationRef: "session" } })

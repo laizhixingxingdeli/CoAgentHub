@@ -48,6 +48,17 @@ export type MissionExecutionMode = 'lightweight' | 'standard' | 'high_assurance'
 export type RunKind = 'mutation' | 'query';
 
 /**
+ * 协作方式的轴：与 executionMode（风险/验证等级）正交，创建后只读。
+ *
+ * - hierarchical：平台协调者主控派工（检视者 → 协调者 → 执行者）。缺省值，兼容既有数据。
+ * - direct：外部会话主控，直接派工给执行者。
+ *
+ * 刻意**不**给 executionMode 增加 'direct'：两条轴互不取值，混在一起会让
+ * 「谁在派工」和「要多严的验证」互相绑死。
+ */
+export type CoordinationMode = 'hierarchical' | 'direct';
+
+/**
  * Mission 六维复杂度评估载荷。可选、只读；不计算总分、不驱动路由。
  *
  * 未评估时整段为 undefined（禁止默认全 0）。分数本身只是数据合同。
