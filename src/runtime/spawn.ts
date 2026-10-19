@@ -400,6 +400,8 @@ export class SpawnRuntime implements AgentRuntime {
             queryOutcome?: RuntimeOutcome['queryOutcome'];
             /** 不可信采集摘要。adapter 不校验、不补伪零、不改 budget/query。 */
             contextMetrics?: unknown;
+            /** 双侧诊断。同样不校验、不改 endedBy：平台收口时再按词表白名单投影。 */
+            runtimeDiagnostics?: unknown;
           };
           if (parsed.usage) emit({ kind: 'usage', usage: parsed.usage });
           const queryOutcome =
@@ -413,6 +415,14 @@ export class SpawnRuntime implements AgentRuntime {
           const contextMetrics = Object.prototype.hasOwnProperty.call(parsed, 'contextMetrics')
             ? parsed.contextMetrics
             : undefined;
+          // 双侧诊断只**透传**：这里既不看内容也不改 endedBy，也不宣称已验证。
+          // 缺字段就不长出该键；畸形值照旧原样带上，让平台那边按白名单收口。
+          const runtimeDiagnostics = Object.prototype.hasOwnProperty.call(
+            parsed,
+            'runtimeDiagnostics',
+          )
+            ? parsed.runtimeDiagnostics
+            : undefined;
           resolve({
             endedBy: parsed.endedBy,
             usage: parsed.usage ?? UNKNOWN_USAGE,
@@ -423,6 +433,7 @@ export class SpawnRuntime implements AgentRuntime {
             resolvedProfile: parsed.resolvedProfile,
             ...(queryOutcome ? { queryOutcome } : {}),
             ...(contextMetrics !== undefined ? { contextMetrics } : {}),
+            ...(runtimeDiagnostics !== undefined ? { runtimeDiagnostics } : {}),
           });
         } catch {
           resolve(fallback);

@@ -1251,6 +1251,10 @@ export class Orchestrator {
             ...(outcome?.contextMetrics !== undefined
               ? { contextMetrics: outcome.contextMetrics }
               : {}),
+            // 双侧诊断同理：只透传。endedBy / 调度 / 费用 / 重试一概不动。
+            ...(outcome?.runtimeDiagnostics !== undefined
+              ? { runtimeDiagnostics: outcome.runtimeDiagnostics }
+              : {}),
           }, claim);
         } catch {
           // 收尾失败不能跳过吊销：迟到的工具调用必须被拒绝。
@@ -2735,6 +2739,12 @@ export class Orchestrator {
           // wait() 竞态里可能仍带回一份自称完整的摘要，这里必须丢掉。
           ...(!runaway && outcome?.contextMetrics !== undefined
             ? { contextMetrics: outcome.contextMetrics }
+            : {}),
+          // 双侧诊断跟着同一份 outcome 走。不因 runaway 丢弃：平台/上游两侧
+          // 的分类是已经发生的事实，与「谁把进程掐了」无关；endedBy 仍由上面
+          // 的 killed_wall_clock 决定，两者互不影响。
+          ...(outcome?.runtimeDiagnostics !== undefined
+            ? { runtimeDiagnostics: outcome.runtimeDiagnostics }
             : {}),
         };
         if (input.purpose === 'impact') {

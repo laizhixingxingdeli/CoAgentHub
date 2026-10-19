@@ -54,6 +54,11 @@ export {
   describeResidue,
 } from './platform/workspace-hygiene.ts';
 import * as workItemReview from './platform/work-item-review.ts';
+import * as reviewHistory from './platform/review-history.ts';
+export type {
+  WorkItemReviewHistory,
+  WorkItemReviewHistoryEntry,
+} from './platform/review-history.ts';
 import * as workOrders from './platform/work-orders.ts';
 import * as startupBrief from './platform/startup-brief.ts';
 import * as views from './platform/views.ts';
@@ -908,6 +913,11 @@ export class Platform {
       };
       /** 不可信采集摘要。校验失败则忽略，不挡旧收尾。 */
       contextMetrics?: unknown;
+      /**
+       * 本跳双侧诊断（平台侧 / 上游侧）。同样不可信：落盘前按固定词表白名单投影，
+       * 畸形值直接忽略，不挡收尾、不改 endedBy。
+       */
+      runtimeDiagnostics?: unknown;
     },
     claim?: QueueClaimIdentity,
   ): Promise<void> {
@@ -934,6 +944,7 @@ export class Platform {
         readonly resolved: readonly { readonly key: string; readonly value: string }[];
       };
       contextMetrics?: unknown;
+      runtimeDiagnostics?: unknown;
     },
   ): Promise<void> {
     return attempts.finishAttempt(this.#context, missionId, attemptId, outcome);
@@ -2377,6 +2388,20 @@ export class Platform {
     reportId: string,
   ): Promise<ValidationReport | undefined> {
     return validationReportViews.getValidationReport(this.#context, missionId, reportId);
+  }
+
+  /**
+   * 一张工单的验收历史（分页、只读）。
+   *
+   * 与视图里的 `lastReview` 分开：那是「当前这一条」，这里是全部记录。只读，
+   * 不记事件、不改 `item.reviews`，也不动 `lastReview`。
+   */
+  async getWorkItemReviewHistory(
+    missionId: string,
+    workItemId: string,
+    options: { readonly cursor?: number; readonly limit?: number } = {},
+  ): Promise<reviewHistory.WorkItemReviewHistory> {
+    return reviewHistory.getWorkItemReviewHistory(this.#context, missionId, workItemId, options);
   }
 
   /**

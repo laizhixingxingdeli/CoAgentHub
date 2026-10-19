@@ -543,6 +543,47 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 }
 ```
 
+### GET /api/missions/:missionId/work-items/:workItemId/reviews
+
+鉴权：控制面（可选resolver），权限 `missionRead`（operator / viewer 都可读）。只读：不记事件、不改工单的 `lastReview`，也不追加评审记录。
+
+参数：路径 `missionId`、`workItemId`；查询 `cursor`（缺省 0，>= 0 的整数）、`limit`（缺省 50，1..100 的整数）。两个参数都**只在完全不传时**取缺省值：`?cursor=`、`?limit=`、`1.5`、`abc`、`NaN`、负数一律 400（`INVALID_CURSOR` / `INVALID_LIMIT`），不静默回落到第一页。`cursor` 超出历史长度不算错，回空 `items` 与 `nextCursor: null`——历史只增不减，拿旧 cursor 重放是正常调用。
+
+响应：`items[]` 按 `reviewIndex` 升序，每条是 `{reviewId, reviewIndex, review}`。`reviewId` 由 `(missionId, workItemId, reviewIndex)` 拼成，跨页、跨追加都稳定，可直接当列表 key。`review` 是这条验收记录本身（`verdict`、`reasons`、`requiredChanges`、`submittedAttemptId`、`acceptanceResults`），即它当时验的那次提交，不会被后来那次评审覆盖；文本字段已脱敏。`nextCursor` 到底了是 `null`，否则是下一页起点；`total` 是该工单当前的评审总条数。
+
+与 `GET /api/missions/:missionId` 里的 `workItems[].lastReview` 分工：那里只有最后一条（当前结论），这里给全部历史。未知 Mission / 工单 404（`UNKNOWN_MISSION` / `UNKNOWN_WORK_ITEM`），缺控制面凭据 401。
+
+请求示例及本机curl：
+
+```bash
+curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127.0.0.1:3101/api/missions/M-example/work-items/W-1/reviews?cursor=0&limit=50'
+```
+
+响应结构摘录：
+
+```json
+{
+  "items": [
+    {
+      "reviewId": "[\"M-example\",\"W-1\",0]",
+      "reviewIndex": 0,
+      "review": {
+        "attemptId": "coord-1",
+        "submittedAttemptId": "exec-1",
+        "verdict": "reject",
+        "reasons": ["测试没真跑"],
+        "requiredChanges": ["把 verification 里的命令实际执行并交退出码"],
+        "acceptanceResults": [
+          { "criterion": "A 行为成立", "status": "fail", "note": "没有退出码" }
+        ]
+      }
+    }
+  ],
+  "nextCursor": 1,
+  "total": 2
+}
+```
+
 ### GET /api/missions/:missionId/diff
 
 鉴权：控制面（可选resolver）。参数：路径missionId。返回统计与路径清单，非完整补丁。

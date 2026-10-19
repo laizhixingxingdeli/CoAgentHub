@@ -1,0 +1,371 @@
+{
+  "_comment": "W-721 fixture：形状取自本地 HTTP 200 实读（GET /api/missions/:id、/activity、/attempts/:id、/validation-reports/:id），字段严格白名单，ID 与正文全部改写为 synthetic，不含真实工单/执行输出/凭据。",
+  "mission": {
+    "missionId": "M-q-synthetic",
+    "projectId": "p-synthetic",
+    "status": "completed",
+    "executionMode": "standard",
+    "workItems": [
+      {
+        "id": "W-1",
+        "title": "synthetic work item with full lastReview",
+        "status": "accepted",
+        "attempts": 1,
+        "attemptIds": ["W-1.exec-1"],
+        "lastReview": {
+          "verdict": "accept",
+          "reasons": [
+            "synthetic reason A: only the two allowed files changed",
+            "synthetic reason B: independent command exit 0 (synthetic tail)"
+          ],
+          "requiredChanges": [],
+          "attemptId": "coord-1",
+          "submittedAttemptId": "W-1.exec-1",
+          "acceptanceResults": [
+            { "criterion": "synthetic AC1 text", "status": "pass", "evidence": "synthetic evidence E-11" },
+            { "criterion": "synthetic AC2 text", "status": "unverified", "note": "synthetic note: no device available" },
+            { "criterion": "synthetic AC3 text", "status": "pass", "evidence": "synthetic evidence E-12" }
+          ]
+        }
+      },
+      {
+        "id": "W-2",
+        "title": "synthetic work item with legacy lastReview",
+        "status": "accepted",
+        "attempts": 1,
+        "attemptIds": ["W-2.exec-1"],
+        "lastReview": {
+          "verdict": "accept",
+          "reasons": ["synthetic legacy reason: no submitted attempt recorded"],
+          "requiredChanges": [],
+          "attemptId": "coord-2"
+        }
+      }
+    ]
+  },
+  "activity": [
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "attemptId": "W-1.exec-1",
+      "kind": "execution_result.submitted",
+      "data": { "outcome": "completed", "changedFiles": 2, "orderRevision": "r1", "criteria": [1, 2, 3] },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-submit-1",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:55:34.184Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "kind": "validation.reported",
+      "data": {
+        "reportId": "VR-1",
+        "passed": true,
+        "submittedAttemptId": "W-1.exec-1",
+        "commands": [
+          { "argv": ["node", "--test", "test/synthetic.test.ts"], "timeoutMs": 120000 }
+        ],
+        "allowedScope": ["src/synthetic-a.ts", "test/synthetic.test.ts"]
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-vr-1",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:55:39.023Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "attemptId": "coord-1",
+      "kind": "review.recorded",
+      "data": {
+        "verdict": "accept",
+        "reasons": ["synthetic history reason: this event predates submittedAttemptId"],
+        "criteria": [1, 2, 3],
+        "contractRevision": 1,
+        "acceptance": { "pass": 2, "fail": 0, "unverified": 1, "not_applicable": 0 },
+        "unverified": ["synthetic AC2 text"]
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-review-history",
+      "correlationId": "M-q-synthetic",
+      "causationId": "coord-1",
+      "at": "2026-10-16T04:56:27.572Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "kind": "validation.reported",
+      "data": {
+        "reportId": "VR-2",
+        "passed": true,
+        "submittedAttemptId": "W-1.exec-1"
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-vr-2-skip",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:56:40.000Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "kind": "validation.reported",
+      "data": {
+        "reportId": "VR-3",
+        "passed": false,
+        "submittedAttemptId": "W-1.exec-1"
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-vr-3-infra",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:56:50.000Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "kind": "validation.reported",
+      "data": {
+        "reportId": "VR-4",
+        "passed": true,
+        "submittedAttemptId": "W-1.exec-1"
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-vr-4-unknown",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:57:00.000Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-2",
+      "kind": "validation.reported",
+      "data": {
+        "reportId": "VR-5",
+        "passed": true,
+        "submittedAttemptId": "W-1.exec-1"
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-vr-5-mismatch",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:57:10.000Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "kind": "final_review.merged",
+      "data": {
+        "mergedInto": "synthetic-merge-sha-0001",
+        "reasons": ["synthetic L3 reason: contract criteria verified"],
+        "authority": "reviewer"
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-final-merged",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:58:39.823Z"
+    },
+    {
+      "projectId": "p-synthetic",
+      "missionId": "M-q-synthetic",
+      "kind": "final_review.merge_failed",
+      "data": {
+        "reason": "synthetic merge failure: integration branch moved"
+      },
+      "protocolVersion": "cdp/1",
+      "messageId": "synthetic-msg-final-failed",
+      "correlationId": "M-q-synthetic",
+      "at": "2026-10-16T04:59:00.000Z"
+    }
+  ],
+  "reports": {
+    "VR-1": {
+      "id": "VR-1",
+      "policyRevision": 7,
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "attemptId": "W-1.exec-1",
+      "startedAt": "2026-10-16T04:55:36.000Z",
+      "endedAt": "2026-10-16T04:55:38.000Z",
+      "passed": true,
+      "checks": [
+        {
+          "kind": "command",
+          "passed": true,
+          "startedAt": "2026-10-16T04:55:36.100Z",
+          "endedAt": "2026-10-16T04:55:37.900Z",
+          "summary": "synthetic command summary: node --test",
+          "command": {
+            "argv": ["node", "--test", "test/synthetic.test.ts"],
+            "cwd": "C:/work/synthetic",
+            "exitCode": 0,
+            "timedOut": false,
+            "durationMs": 1800,
+            "outputTail": "✔ synthetic case (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\nℹ skipped 0\n"
+          }
+        },
+        {
+          "kind": "changed-paths",
+          "passed": true,
+          "startedAt": "2026-10-16T04:55:37.910Z",
+          "endedAt": "2026-10-16T04:55:37.950Z",
+          "summary": "synthetic changed-paths summary: 2 changed files inside allowedScope",
+          "changedPaths": {
+            "allowedScope": ["src/synthetic-a.ts", "test/synthetic.test.ts"],
+            "actual": ["src/synthetic-a.ts", "test/synthetic.test.ts"],
+            "violations": [],
+            "unsupportedScope": []
+          }
+        },
+        {
+          "kind": "diff-size",
+          "passed": true,
+          "startedAt": "2026-10-16T04:55:37.960Z",
+          "endedAt": "2026-10-16T04:55:37.980Z",
+          "summary": "synthetic diff-size summary: 2 files / 18 lines",
+          "diffSize": {
+            "limits": { "maxChangedFiles": 12 },
+            "used": { "changedFiles": 2, "changedLines": 18 },
+            "unknown": []
+          }
+        }
+      ]
+    },
+    "VR-2": {
+      "id": "VR-2",
+      "policyRevision": 7,
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "attemptId": "W-1.exec-1",
+      "startedAt": "2026-10-16T04:56:30.000Z",
+      "endedAt": "2026-10-16T04:56:39.000Z",
+      "passed": true,
+      "checks": [
+        {
+          "kind": "command",
+          "passed": true,
+          "startedAt": "2026-10-16T04:56:30.100Z",
+          "endedAt": "2026-10-16T04:56:38.900Z",
+          "summary": "synthetic command summary: partial run with skips",
+          "command": {
+            "argv": ["node", "--test", "test/synthetic-pg.test.ts"],
+            "cwd": "C:/work/synthetic",
+            "exitCode": 0,
+            "timedOut": false,
+            "durationMs": 8800,
+            "outputTail": "✔ synthetic pg case (0.4ms) # SKIP no database\nℹ tests 2\nℹ pass 1\nℹ fail 0\nℹ skipped 1\n"
+          }
+        }
+      ]
+    },
+    "VR-3": {
+      "id": "VR-3",
+      "policyRevision": 7,
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "attemptId": "W-1.exec-1",
+      "startedAt": "2026-10-16T04:56:45.000Z",
+      "endedAt": "2026-10-16T04:56:49.000Z",
+      "passed": false,
+      "checks": [
+        {
+          "kind": "command",
+          "passed": false,
+          "startedAt": "2026-10-16T04:56:45.100Z",
+          "endedAt": "2026-10-16T04:56:49.000Z",
+          "summary": "synthetic command summary: timed out before tests started",
+          "command": {
+            "argv": ["node", "--test", "test/synthetic-slow.test.ts"],
+            "cwd": "C:/work/synthetic",
+            "exitCode": null,
+            "timedOut": true,
+            "durationMs": 120000,
+            "outputTail": ""
+          }
+        }
+      ]
+    },
+    "VR-4": {
+      "id": "VR-4",
+      "policyRevision": 7,
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-1",
+      "attemptId": "W-1.exec-1",
+      "startedAt": "2026-10-16T04:56:55.000Z",
+      "endedAt": "2026-10-16T04:56:59.000Z",
+      "passed": true,
+      "checks": [
+        {
+          "kind": "command",
+          "passed": true,
+          "startedAt": "2026-10-16T04:56:55.100Z",
+          "endedAt": "2026-10-16T04:56:58.900Z",
+          "summary": "synthetic command summary: git status",
+          "command": {
+            "argv": ["git", "status", "--porcelain"],
+            "cwd": "C:/work/synthetic",
+            "exitCode": 0,
+            "timedOut": false,
+            "durationMs": 300,
+            "outputTail": ""
+          }
+        }
+      ]
+    },
+    "VR-5": {
+      "id": "VR-5",
+      "policyRevision": 7,
+      "missionId": "M-q-synthetic",
+      "workItemId": "W-2",
+      "attemptId": "W-2.exec-1",
+      "startedAt": "2026-10-16T04:57:05.000Z",
+      "endedAt": "2026-10-16T04:57:09.000Z",
+      "passed": true,
+      "checks": [
+        {
+          "kind": "command",
+          "passed": true,
+          "startedAt": "2026-10-16T04:57:05.100Z",
+          "endedAt": "2026-10-16T04:57:08.900Z",
+          "summary": "synthetic command summary: report belongs to another work item",
+          "command": {
+            "argv": ["node", "--test", "test/synthetic.test.ts"],
+            "cwd": "C:/work/synthetic",
+            "exitCode": 0,
+            "timedOut": false,
+            "durationMs": 1500,
+            "outputTail": "ℹ pass 1\nℹ fail 0\n"
+          }
+        }
+      ]
+    }
+  },
+  "attempts": {
+    "W-1.exec-1": {
+      "attemptId": "W-1.exec-1",
+      "kind": "executor",
+      "workItemId": "W-1",
+      "status": "succeeded",
+      "endedBy": "structured_submit",
+      "failReason": null,
+      "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "total": 2, "cost": 0, "quality": "reported" },
+      "profile": {
+        "profileId": "exec-synthetic",
+        "endpoint": "local",
+        "facts": [{ "key": "provider", "value": "provider-synthetic" }, { "key": "model", "value": "model-synthetic" }],
+        "revision": "r1",
+        "resolved": [{ "key": "provider", "value": "provider-synthetic" }, { "key": "model", "value": "model-synthetic" }]
+      },
+      "evidence": [
+        { "id": "E-11", "attemptId": "W-1.exec-1", "kind": "test", "summary": "synthetic evidence summary 1", "command": "node --test test/synthetic.test.ts", "exitCode": 0 },
+        { "id": "E-12", "attemptId": "W-1.exec-1", "kind": "diff", "summary": "synthetic evidence summary 2" }
+      ],
+      "output": "synthetic attempt output body that must never be copied into a record",
+      "toolActivity": [{ "name": "synthetic-tool" }]
+    }
+  }
+}

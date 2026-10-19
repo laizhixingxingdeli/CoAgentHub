@@ -377,10 +377,10 @@ test("mapQueryOutcome：independent_reviewer 不产生 queryOutcome", () => {
 test("source/contract：independent_reviewer 走 toolAllowlist(spec.role) 与 completion.submitted → structured_submit", () => {
 	assert.match(runtimeSrc, /tools:\s*toolAllowlist\(spec\.role\)/);
 	assert.match(runtimeSrc, /createCoagentExtension\(\{[\s\S]*role:\s*spec\.role/);
-	assert.match(
-		runtimeSrc,
-		/completion\.submitted[\s\S]*\?[\s\S]*"structured_submit"/,
-	);
+	// 结束判定已抽到 failure-outcome 的纯接缝，语义不变：submitted 仍映射
+	// structured_submit（选择顺序见 failure-outcome.spec.ts）。
+	assert.match(runtimeSrc, /submitted:\s*completion\.submitted/);
+	assert.match(runtimeSrc, /const endedBy = projection\.endedBy;/);
 });
 
 const DIGEST_RE = /^[0-9a-f]{64}$/;

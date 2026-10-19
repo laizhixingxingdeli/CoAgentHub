@@ -317,6 +317,12 @@ export interface RuntimeOutcome {
    * 未通过则整段丢弃，不得原样 spread 进 Activity。
    */
   readonly contextMetrics?: unknown;
+  /**
+   * 本跳的双侧诊断（平台侧 / 上游侧）。适配层报回来、本层**不解释也不校验**，
+   * 只原样透传到 finishAttempt；平台在那里按固定词表白名单投影后才落盘。
+   * 缺省时不产生该字段（不补空对象）。
+   */
+  readonly runtimeDiagnostics?: unknown;
 }
 
 /* ------------------------------ 决策信号端口 ------------------------------ */

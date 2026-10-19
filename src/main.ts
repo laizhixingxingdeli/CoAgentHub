@@ -104,6 +104,7 @@ import type {
   PostExecutionEvaluator,
 } from './application/ports.ts';
 import { resumeMissionBody, runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
+import { createHostedMissionGuard } from './application/hosted-mission-guard.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
@@ -1110,36 +1111,42 @@ export async function startServer(
     const knownPlanRunDirs = new Set<string>([resolve(dirname(statePath), '.coagent-plans')]);
     const planLive = new InMemoryPlanRunLiveOutput();
     const hostedRuns = createHostedRunTracker();
+    // 同一 Mission 只能有一条托管运行：HTTP 手动 start、队列 worker、自动恢复（含答复升级
+    // 的 auto-resume）都走下面同一个 runMission 闭包，占位也必须是这一份。
+    // 占位在闭包最外层、第一个 await 之前完成，adapter 记忆与 Mission / 工作区副作用都在其后。
+    const hostedMissionGuard = createHostedMissionGuard();
     const startedAt = new Date().toISOString();
     const passthroughRaw = env[SPAWN_ENV_PASSTHROUGH_VAR];
     const passthrough = parseAgentEnvPassthrough(
       typeof passthroughRaw === 'string' ? passthroughRaw : undefined,
     );
-    const runMission: NonNullable<ApiDeps['runMission']> = async (body, emit) => {
-      rememberHostedAdapter(body);
-      const token = randomUUID();
-      try {
-        return await runHostedMission(
-          body,
-          {
-            built: hostedBuilt,
-            baseUrl: loopback.baseUrl,
-            workspace,
-            env,
-            ...hostedRuntime,
-            heldState,
-            onStarted: (id) => {
-              // Asynchronous views cannot be synchronously observed in this API; never cache
-              // a result that may become stale while the hosted run remains active.
-              hostedRuns.register(token, { kind: 'mission', id, status: '运行中/状态暂不可读' });
+    const runMission: NonNullable<ApiDeps['runMission']> = hostedMissionGuard.wrap(
+      async (body, emit) => {
+        rememberHostedAdapter(body);
+        const token = randomUUID();
+        try {
+          return await runHostedMission(
+            body,
+            {
+              built: hostedBuilt,
+              baseUrl: loopback.baseUrl,
+              workspace,
+              env,
+              ...hostedRuntime,
+              heldState,
+              onStarted: (id) => {
+                // Asynchronous views cannot be synchronously observed in this API; never cache
+                // a result that may become stale while the hosted run remains active.
+                hostedRuns.register(token, { kind: 'mission', id, status: '运行中/状态暂不可读' });
+              },
             },
-          },
-          emit,
-        );
-      } finally {
-        hostedRuns.finish(token);
-      }
-    };
+            emit,
+          );
+        } finally {
+          hostedRuns.finish(token);
+        }
+      },
+    );
     server = createApi({
       platform: built.platform,
       tokens: built.tokens,

@@ -28,15 +28,22 @@ jobs:
       # The platform needs no install: tests that need Postgres skip themselves when it is absent.
       - run: node --test
 
+  # Required job: a broken adapter or MCP server blocks a merge. The only exemption is the
+  # single test that really resolves a hostname (see the last step), reported but not gating.
   adapter-and-mcp:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
       - run: npm ci
-      - run: npm test -w adapters/pi
-      - run: npm run build -w integrations/codex/mcp-server
-      - run: npm test -w integrations/codex/mcp-server
+      # Deterministic adapter tests. The quoted glob is expanded by node's test runner, not by
+      # the shell. The skipped test is the only one that needs real DNS: on runners behind a
+      # proxy the lookup surfaces as ECONNRESET instead of ENOTFOUND, so it is probed below.
+      - run: node --import tsx --test --test-skip-pattern="DNS 解析不了" "adapters/pi/src/*.spec.ts"
+      - run: node node_modules/typescript/bin/tsc -p integrations/codex/mcp-server/tsconfig.json
+      - run: node node_modules/vitest/vitest.mjs run --root integrations/codex/mcp-server
+      # Visibility only: a failure here depends on the runner's network stack, not on the code.
+      - continue-on-error: true
+        run: node --import tsx --test --test-name-pattern="DNS 解析不了" adapters/pi/src/failure-classify.integration.spec.ts

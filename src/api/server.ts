@@ -297,6 +297,30 @@ function decodeProfileId(raw: string): string {
 }
 
 /**
+ * 验收历史的分页参数。缺省交给 Platform 的默认值；给了就必须是整数——
+ * 写错的 cursor 静默当 0 会让前端以为翻页了，其实一直在看第一页。
+ */
+function parseReviewHistoryCursor(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  // `Number('')` 是 0、`Number('  ')` 也是 0：只认十进制数字串，空串与空白一律算写错。
+  // 不这么写，`?cursor=` 会被静默当成第一页——调用方以为翻页了，其实一直在原地。
+  const cursor = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isInteger(cursor) || cursor < 0) {
+    throw new HttpError(400, 'INVALID_CURSOR', 'cursor 必须是 >= 0 的整数');
+  }
+  return cursor;
+}
+
+function parseReviewHistoryLimit(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  const limit = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new HttpError(400, 'INVALID_LIMIT', 'limit 必须是 1..100 的整数');
+  }
+  return limit;
+}
+
+/**
  * 复位审计里的 actor 必须来自受控主体，不是请求体。没有 resolver 时无从得知身份 ——
  * 记固定的 'operator'，也不放行让调用方自己填名字。
  */
@@ -2396,6 +2420,39 @@ export function createApi(deps: ApiDeps): Server {
         throw new HttpError(404, 'VALIDATION_REPORT_NOT_FOUND', '没有这份验证报告');
       }
       return send(res, 200, report);
+    }
+
+    // 工单验收历史（分页）：视图里的 lastReview 只给当前这一条，这里给全部记录。
+    // 与取 Mission 同级只读，共用 missionRead；数据一律经 Platform 读，不直接碰存储。
+    const reviewHistoryMatch =
+      /^\/api\/missions\/([^/]+)\/work-items\/([^/]+)\/reviews$/.exec(path);
+    if (method === 'GET' && reviewHistoryMatch) {
+      await requireControl(req, POLICY_ACTION.missionRead);
+      const cursor = parseReviewHistoryCursor(url.searchParams.get('cursor'));
+      const limit = parseReviewHistoryLimit(url.searchParams.get('limit'));
+      try {
+        return send(
+          res,
+          200,
+          await platform.getWorkItemReviewHistory(reviewHistoryMatch[1], reviewHistoryMatch[2], {
+            cursor,
+            limit,
+          }),
+        );
+      } catch (error) {
+        // 未知 Mission / 工单在这里是 404：它们是「你指的东西不存在」，
+        // 不是「当前状态不允许」，回 409 会让调用方以为该重试。
+        // 分页参数在这里再兜一道：HTTP 层已验过，Platform 再验一次是为了自调用方。
+        if (error instanceof PlatformRuleError) {
+          if (error.code === 'UNKNOWN_WORK_ITEM' || error.code === 'UNKNOWN_MISSION') {
+            throw new HttpError(404, error.code, error.message);
+          }
+          if (error.code === 'INVALID_CURSOR' || error.code === 'INVALID_LIMIT') {
+            throw new HttpError(400, error.code, error.message);
+          }
+        }
+        throw error;
+      }
     }
 
     /* ---- L3 面：最终检视 ---- */

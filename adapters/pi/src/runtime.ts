@@ -27,11 +27,17 @@ import {
 	withFailure,
 } from "./failure-classify.js";
 import type { FailureDiagnostic, UpstreamFailureClassification } from "./failure-classify.js";
+import {
+	projectFailureOutcome,
+	runtimeDiagnosticRedactor,
+} from "./failure-outcome.js";
+import type { RuntimeDiagnostics } from "./failure-outcome.js";
 import { observationsForOrigin, originOf, recordTransport } from "./transport-evidence.js";
 import { appendRateLimitSummary, startRateLimitProbe } from "./rate-limit-probe.js";
 import { queryUsage } from "./usage.js";
 import type { UsageRow } from "./usage.js";
 import { registerPendingProviderExtensions, resolveProviderExtensionPaths } from "./provider-extensions.js";
+import { createLangfuseObserver, createNoopLangfuseObserver } from "./langfuse-observer.ts";
 
 /**
  * 平台传下来的 spec。字段刻意与平台的 AgentRunSpec 对齐——
@@ -83,9 +89,21 @@ export interface AgentRunOutcome {
 	 * 该等的（限流/网络）、该换的（模型不存在）、该喊人的（凭据/合规）处置互相
 	 * 矛盾，混在一个 `upstream_failure` 里就只能一律换候选去赌。
 	 *
-	 * 只在 `endedBy === "upstream_failure"` 时出现；旧调用方忽略它即可。
+	 * 只要有**真实上游证据**就出现，不再被 `endedBy` 遮住：平台不可达的同时上游报了
+	 * 配额/限流，两个事实各自成立，只报平台故障会把已有的上游证据一起吞掉。
+	 * 纯平台故障（只有工具连不上、没有任何 assistant error / 抛出）不会凭空产出它。
+	 * 旧调用方忽略它即可。
 	 */
 	upstreamFailure?: UpstreamFailureClassification;
+	/**
+	 * 这一跳的双侧诊断（本包新增，纯增字段，可选）。
+	 *
+	 * `endedBy` 是一个单值：平台不可达优先，于是「上游同时报了配额」这件事原本
+	 * 在结束码上就看不见了。这里把两侧的事实分开报：`platform` 只写
+	 * `platform_unreachable`，`upstream` 只写真实上游分类。两边都成立时两个都在。
+	 * 文案已脱敏且有界（复用共享传输的清理实现），不含 URL userinfo / 代理 / token。
+	 */
+	runtimeDiagnostics?: RuntimeDiagnostics;
 	resumeRef?: string;
 	/** 原始输出尾部，给平台的 Timeline 第三层。 */
 	output?: string;
@@ -635,6 +653,22 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		spec.profile.reasoning,
 		spec.profile.facts,
 	);
+	// 观测在 profile 解析之后、装配之前建好：只有协调者/执行者 + 有 missionId 且
+	// 本地显式启用时才真的注册钩子，其它情况拿到 no-op。建失败也是 no-op——
+	// 观测出问题绝不能变成「这次任务跑不起来」。
+	const langfuseObserver = await createLangfuseObserver({
+		subject: {
+			missionId: spec.missionId,
+			workItemId: spec.workItemId,
+			attemptId: spec.attemptId,
+			role: spec.role,
+		},
+		profile: {
+			provider: profile.provider,
+			model: profile.model,
+			reasoning: profile.reasoning,
+		},
+	}).catch(() => createNoopLangfuseObserver());
 	const modelRuntime = await ModelRuntime.create();
 
 	const completion = { submitted: false } as { submitted: boolean; via?: string };
@@ -655,18 +689,23 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		noSkills: true,
 		noPromptTemplates: true,
 		noContextFiles: true,
-		extensionFactories: bindPlatform
-			? [
-					createCoagentExtension({
-						client: client!,
-						role: spec.role,
-						promptChannel: resolvePromptChannel(spec.profile.facts),
-						cwd: spec.cwd,
-						completion,
-						onBriefInjected: (brief) => contextCollector.onBriefInjected(brief),
-					}),
-				]
-			: [],
+		extensionFactories: [
+			...(bindPlatform
+				? [
+						createCoagentExtension({
+							client: client!,
+							role: spec.role,
+							promptChannel: resolvePromptChannel(spec.profile.facts),
+							cwd: spec.cwd,
+							completion,
+							onBriefInjected: (brief) => contextCollector.onBriefInjected(brief),
+						}),
+					]
+				: []),
+			// 只读观测 factory 排在 CoAgent factory 之后：它只挂 context_with_system，
+			// 不返回 messages，所以不会改动别人已经装配好的 prompt/tools。
+			...(langfuseObserver.enabled ? [langfuseObserver.extensionFactory] : []),
+		],
 		// query 无 CoAgent extension，角色说明走 loader 覆盖，不拉 Mission brief。
 		...(spec.role === "query"
 			? { systemPromptOverride: () => systemPrompt("query") }
@@ -715,6 +754,10 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		tools: toolAllowlist(spec.role),
 	});
 
+	// 序号高水位要在 prompt 之前从会话里读回来：续跑时同一 Attempt 接着往后编，
+	// 否则重开的进程会从 0 重新发一遍历史编号。
+	langfuseObserver.attachSessionManager(sessionManager);
+
 	let toolCalls = 0;
 	// 工具名序列：Timeline 第二层要的是结构化动作，不是一大段文字。
 	const toolNames: string[] = [];
@@ -759,6 +802,9 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	};
 
 	const unsubscribe = session.subscribe((event) => {
+		// 观测最先、且自身隔离：它吞掉自己的异常并只读事件，后面所有既有分支
+		// 的执行顺序与结果都不因为它而改变。
+		langfuseObserver.onEvent(event);
 		if (event.type === "message_update") {
 			const inner = event.assistantMessageEvent;
 			if (inner.type === "text_delta") {
@@ -859,6 +905,9 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	} finally {
 		transport.stop();
 		rateLimitProbe.stop();
+		// 有界且吞错：正常/异常路径都冲一次，断网时到点就放弃。不 await 每次入队，
+		// 所以工具循环和订阅回调从不被网络阻塞。
+		await langfuseObserver.flush();
 	}
 
 	const stats = session.getSessionStats();
@@ -880,31 +929,38 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	// 拒绝重试一个其实该重试的情况。
 	// query 不创建 client，不会因假 endpoint 误判 platform_unreachable；
 	// 也没有终端提交，成功时 endedBy 保持 no_structured_result（不伪装 structured_submit）。
-	const endedBy = client?.sawUnreachable
-		? ("platform_unreachable" as const)
-		: completion.submitted
-			? ("structured_submit" as const)
-			: failureMessage
-				? ("upstream_failure" as const)
-				: ("no_structured_result" as const);
+	// 上游分类只认**真实上游证据**：assistant 消息 stopReason:"error"（failureMessage 来自
+	// 那里）或 prompt() 抛出。平台工具 error 不是模型错误，所以这里不看
+	// client.sawUnreachable——那是平台侧事实，只进 runtimeDiagnostics.platform。
+	const upstreamFailure = failureMessage
+		? classifyUpstreamFailure({
+				modelExists: true,
+				provider: profile.provider,
+				model: profile.model,
+				authConfigured,
+				stopReason: lastErrorAssistant?.stopReason,
+				rawStopReason: lastErrorAssistant?.rawStopReason,
+				diagnostics: lastErrorAssistant?.diagnostics,
+				transport: observationsForOrigin(transport.observations(), originOf(model.baseUrl)),
+				thrown,
+				errorMessage: failureMessage,
+			})
+		: undefined;
 
-	// 只加分辨能力，不改既有的 endedBy 判定：分类挂在新增字段上。
-	const upstreamFailure =
-		endedBy === "upstream_failure" && failureMessage
-			? classifyUpstreamFailure({
-					modelExists: true,
-					provider: profile.provider,
-					model: profile.model,
-					authConfigured,
-					stopReason: lastErrorAssistant?.stopReason,
-					rawStopReason: lastErrorAssistant?.rawStopReason,
-					diagnostics: lastErrorAssistant?.diagnostics,
-					transport: observationsForOrigin(transport.observations(), originOf(model.baseUrl)),
-					thrown,
-					errorMessage: failureMessage,
-				})
-			: undefined;
+	// 结束判定与诊断投影都在这条纯接缝里：endedBy 的选择与调度语义不变（平台不可达
+	// 仍优先），upstreamFailure / runtimeDiagnostics 独立于 endedBy 报出去。
+	const projection = projectFailureOutcome({
+		platformUnreachable: !!client?.sawUnreachable,
+		submitted: completion.submitted,
+		failureMessage,
+		upstreamFailure,
+		upstreamMessage: failureMessage,
+		redact: upstreamFailure ? runtimeDiagnosticRedactor() : undefined,
+	});
+	const endedBy = projection.endedBy;
 
+	// 两段文案增强仍只在 endedBy 真是 upstream_failure 时做（与历史一致）：
+	// 它们只在那一刻作为失败消息上报，纯平台故障时也不该白跑一次用量查询。
 	if (endedBy === "upstream_failure" && failureMessage && upstreamFailure?.category === "quota_exhausted") {
 		failureMessage = await appendXaiQuotaReset({
 			provider: profile.provider,
@@ -919,28 +975,29 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		failureMessage = appendRateLimitSummary(failureMessage, rateLimitProbe.summary());
 	}
 
+	// 平台故障时给平台的仍是那句话：它是「平台自己坏了」的说明，不是模型错误文案。
+	const outcomeFailureMessage =
+		endedBy === "upstream_failure"
+			? failureMessage
+			: endedBy === "platform_unreachable"
+				? "agent 连不上平台"
+				: undefined;
+
 	const queryOutcome = mapQueryOutcome({
 		role: spec.role,
 		endedBy,
-		failureMessage:
-			endedBy === "upstream_failure"
-				? failureMessage
-				: endedBy === "platform_unreachable"
-					? "agent 连不上平台"
-					: undefined,
+		failureMessage: outcomeFailureMessage,
 	});
 
 	return {
 		attemptId: spec.attemptId,
 		endedBy,
 		submittedVia: completion.via,
-		failureMessage:
-			endedBy === "upstream_failure"
-				? failureMessage
-				: endedBy === "platform_unreachable"
-					? "agent 连不上平台"
-					: undefined,
-		upstreamFailure,
+		failureMessage: outcomeFailureMessage,
+		upstreamFailure: projection.upstreamFailure,
+		...(projection.runtimeDiagnostics
+			? { runtimeDiagnostics: projection.runtimeDiagnostics }
+			: {}),
 		resumeRef,
 		output,
 		toolNames,
