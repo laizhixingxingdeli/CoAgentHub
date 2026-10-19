@@ -1,5 +1,5 @@
 /**
- * SpawnRuntime 终态 contextMetrics：合成结果行只作不可信透传。
+ * SpawnRuntime 终态 contextMetrics / runtimeDiagnostics：合成结果行只作不可信透传。
  *
  * adapter 不得宣称已验证、不得从 tool 事件猜 read 返回值、缺字段不得补伪零。
  * 畸形 JSON 仍走原来的失败兜底。
@@ -120,10 +120,46 @@ describe('SpawnRuntime 合成结果行 contextMetrics', () => {
     assert.notEqual(outcome.contextMetrics, 0);
   });
 
-  test('畸形 JSON 结果行仍按原有失败逻辑，不带摘要', async () => {
+  test('可选 runtimeDiagnostics 原样透传，不改 endedBy / usage', async () => {
+    const diagnostics = {
+      platform: { code: 'platform_unreachable' },
+      upstream: { category: 'quota_exhausted', message: '额度耗尽（已脱敏）' },
+    };
+    const { outcome } = await runAdapter([], {
+      endedBy: 'platform_unreachable',
+      usage: USAGE,
+      contextMetrics: VALID_METRICS,
+      runtimeDiagnostics: diagnostics,
+    });
+    // 两侧诊断与采集摘要可以同时在场，互不覆盖。
+    assert.equal(outcome.endedBy, 'platform_unreachable');
+    assert.deepEqual(outcome.usage, USAGE);
+    assert.deepEqual(outcome.runtimeDiagnostics, diagnostics);
+    assert.deepEqual(outcome.contextMetrics, VALID_METRICS);
+  });
+
+  test('旧结果行没有诊断时也不制造该字段', async () => {
+    const { outcome } = await runAdapter([], { endedBy: 'structured_submit', usage: USAGE });
+    assert.equal(Object.prototype.hasOwnProperty.call(outcome, 'runtimeDiagnostics'), false);
+    assert.equal(JSON.stringify(outcome).includes('platform_unreachable'), false);
+  });
+
+  test('诊断畸形也原样透传：spawn 不校验、不宣称已验证', async () => {
+    const dirty = { upstream: { category: 'rate_limited', body: 'SECRET_SENTINEL' } };
+    const { outcome } = await runAdapter([], {
+      endedBy: 'upstream_failure',
+      usage: USAGE,
+      runtimeDiagnostics: dirty,
+    });
+    assert.equal(outcome.endedBy, 'upstream_failure');
+    assert.deepEqual(outcome.runtimeDiagnostics, dirty);
+  });
+
+  test('畸形 JSON 结果行仍按原有失败逻辑，不带诊断', async () => {
     const { outcome } = await runAdapter([], '{not json');
     assert.equal(outcome.endedBy, 'upstream_failure');
     assert.equal(Object.prototype.hasOwnProperty.call(outcome, 'contextMetrics'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(outcome, 'runtimeDiagnostics'), false);
     assert.match(outcome.failureMessage ?? '', /没有回传结果|子进程退出/);
   });
 

@@ -1,19 +1,24 @@
-# 质量同步到 Langfuse（本机回环）
+# Langfuse 观测（本机回环）
 
-这份文档讲三件事：怎么**启用**、怎么**关闭**、以及同步器到底发了什么、不做什么。
+这份文档讲两件事怎么启用、怎么关闭：**pi 的逐调用观测**（每次真实模型响应一条 GENERATION）
+和**质量同步**（把平台的评审/验证/L3 事实投影成观察）。两条路共用同一份本地配置与同一个传输层。
 
-先看清楚适用范围：本仓库里的测试用的是**本地 mock**（临时平台 + 临时 Langfuse），
-证明的是「投影、去重、进度、有界退出」这几件机器可验证的事。**真实 Langfuse v4 与
-真实模型调用的端到端效果，必须由 L3 配好凭据后另行执行；在拿到真实回执之前，
-任何人不得声称「已验证真实端到端」。**
+先看清适用范围。仓库里的测试用的是**本地 mock**（临时平台 + 临时 Langfuse），证明的是
+「属性映射、投影、去重、进度、有界退出」这些机器可验证的事。真实环境的验证分三块，只有
+前两块拿到了回执（明细见第 10 节）：
+
+- 真实 SDK 逐调用 → Langfuse：**已验证**
+- 真实 Langfuse 的评分写入 / 读取：**已用 synthetic 源验证**
+- 平台生产工作流（L2/L3 → 同步 CLI）：**尚未做真实完整验证**
+
+所以「真实端到端」整体仍不成立，局部回执不能外推。
 
 ## 1. 默认关闭，且关闭是彻底的
 
-没有配置文件、配置坏了、或者 `enabled` 不是 `true`，同步器都当作**完全关闭**：
+没有配置文件、配置坏了、或者 `enabled` 不是 `true`，两条路都当作**完全关闭**：
 
-- 不请求平台（一个 GET 都不发）
-- 不请求 Langfuse
-- 不写进度文件
+- 观测不注册任何钩子，一次模型调用也不多看
+- 同步器不请求平台（一个 GET 都不发）、不请求 Langfuse、不写进度文件
 
 这时 `node scripts/langfuse-sync.mjs ...` 退出码是 `0`，stdout 只有一行：
 
@@ -44,14 +49,58 @@ langfuse disabled
 | 字段 | 含义 |
 | --- | --- |
 | `enabled` | 只有显式 `true` 才启用；缺省、`false`、字符串 `"true"` 都等于关闭。 |
-| `baseUrl` | **仅限**本机回环（`127.0.0.1` / `localhost` / `[::1]`），且 `http(s)`、不带用户名密码、不带查询串。建议 `http://127.0.0.1:3300`（Langfuse 默认端口）。写远程地址会被判为非法配置，于是整体关闭。 |
+| `baseUrl` | **仅限**本机回环（`127.0.0.1` / `localhost` / `[::1]`），且 `http(s)`、不带用户名密码、不带查询串。写远程地址会被判为非法配置，于是整体关闭。 |
 | `publicKey` / `secretKey` | Langfuse 项目密钥。两者任一为空即整体关闭。**不会**出现在任何日志、错误或 stdout 里。 |
-| `captureContent` | 默认 `false`：只发结构（有没有、是否被截断），不发正文。开成 `true` 才会带出评审理由/证据正文，且先脱敏再按 `maxContentChars` 截断。 |
+| `captureContent` | 默认 `false`：只发结构（有没有、是否被截断），不发正文。开成 `true` 才会带出输入/输出/评审理由/证据正文，且先脱敏再按 `maxContentChars` 截断。 |
 
 可选字段（都有安全缺省）：`maxContentChars`（默认 2000）、`requestTimeoutMs`（默认 5000）、
 `flushTimeoutMs`（默认 5000）、`maxQueueSize`（默认 100）。
 
-## 3. 单次运行
+示例里的 `3300` 是**本项目部署时选的端口**，不是 Langfuse 的通用默认值（上游默认是 `3000`）。
+换成你自己实例实际监听的端口即可，只要是本机回环。
+
+## 3. pi 逐调用观测
+
+开启后（配置文件 `enabled: true`，且下面三个条件都满足），`startRun` 会把每一次**真实
+assistant 响应**映射成一条 `coagent.llm.generation`：
+
+- 角色必须是 `coordinator` 或 `executor`。`query`、`solo`、`independent_reviewer` 不逐调用观测
+  （`query` 是只读问答，不是 Mission 内的派发角色）。
+- 必须有非空 `missionId` 和 `attemptId`。
+- 本地配置显式启用。
+
+三个层次在 Langfuse 里的关系：
+
+| 层次 | 来源 | 说明 |
+| --- | --- | --- |
+| Mission 会话 | `langfuse.session.id` = `missionId` | 每条导出的 span 都带这个属性，同一 Mission 的调用与质量观察因此聚成一个会话。 |
+| Attempt trace | `stableIds({ missionId, attemptId })` | 一次 Attempt 一条 trace；两次尝试不会被拼在一起。 |
+| 单次 generation | `stableIds({ missionId, attemptId, callIndex })` | 一次真实响应一条 GENERATION，`coagent.call_index` 是该 Attempt 内的序号。 |
+
+字段名用 Langfuse v4 官方映射 `langfuse.session.id`（等价写法 `session.id`），**不是**
+`langfuse.trace.session_id`——后者不会被识别，会话分组会静默失效。
+
+关于数值：`langfuse.observation.usage_details` / `cost_details` 来自 SDK 对**单次响应**的自报，
+并显式标注 `coagent.usage.source` / `coagent.cost.source`。它们是 SDK 计量，**不是 provider 账单**，
+复核时不能当成计费依据。
+
+`captureContent: false`（默认）时只发结构事实：输入/输出是否存在、是否被截断，不带正文。
+需要看正文才显式打开，打开后仍先脱敏再按 `maxContentChars` 截断。
+
+### 两种使用场景怎么提供 subject
+
+观测对象由 `startRun` 的 spec 决定，`missionId` / `workItemId` / `attemptId` / `role` 都在里面：
+
+- **正常平台派发**：平台的 Run Token 与 run spec 已经带齐这四个字段，适配器照原样传进
+  `startRun`，不需要额外配置。`workItemId` 缺省时该属性不写（不猜）。
+- **直接调 `startRun`**（本地对照、脚本）：调用方自己填 `spec.missionId`、`spec.attemptId`、
+  `spec.role`，需要工单归属时再填 `spec.workItemId`。缺 `missionId` 或 `attemptId` 就没有观测
+  （拿到的是 no-op 观测器），不会拿 `attemptId` 冒充 Mission。
+
+观测是旁路：它只读事件、不返回 messages、不改 outcome。任何观测内部失败都停在这一层，
+不会变成一次任务失败。
+
+## 4. 质量同步：单次运行
 
 ```bash
 node scripts/langfuse-sync.mjs --mission <missionId> --once --platform-url http://127.0.0.1:3101
@@ -88,7 +137,7 @@ mission M-q-synthetic ok=true sent=42 skipped=0 unconfirmed=0 missing=1
 stdout 只写计数与 missionId（项目范围被截断时只有一句固定提示）。**不输出**评审理由、
 证据正文、`outputTail`、Langfuse 密钥或 Authorization。
 
-## 4. 持续模式（有界）
+## 5. 持续模式（有界）
 
 持续模式必须同时给出 `--interval-ms` 与 `--iterations`，不接受「一直跑」：
 
@@ -102,7 +151,7 @@ node scripts/langfuse-sync.mjs --project <projectId> \
   只把已经确认的 id 写进进度。信号处理不会挂住进程。
 - 库函数 `runBounded()` 允许测试用更小的正间隔，但 `iterations` 同样必须有限。
 
-## 5. 只读：它到底请求了什么
+## 6. 只读：它到底请求了什么
 
 只发 `GET`，且路径只允许这五个：
 
@@ -123,7 +172,7 @@ node scripts/langfuse-sync.mjs --project <projectId> \
 - 404 或读取失败的那一跳，把该 id 当作**缺失**（不放进 `reports`/`attempts`），
   **不拿别的 Attempt 顶上**。
 
-## 6. 只连回环、不碰系统代理
+## 7. 只连回环、不碰系统代理
 
 平台读取用 `node:http`/`node:https` 直连回环地址，**不用 `fetch`**。原因是 `fetch` 会吃
 `HTTP_PROXY` / `HTTPS_PROXY`，本地回环被代理转走时，错误会伪装成「网络故障」，
@@ -131,7 +180,7 @@ node scripts/langfuse-sync.mjs --project <projectId> \
 
 两处都**不修改系统代理设置**，也不要求用户改环境变量。
 
-## 7. 进度：已捕获 ≠ 已确认
+## 8. 进度：已捕获 ≠ 已确认
 
 进度文件形状：
 
@@ -158,7 +207,7 @@ node scripts/langfuse-sync.mjs --project <projectId> \
 原子写：同目录临时文件写完再 `rename`。Windows 上目标已存在导致 `rename` 失败时，
 先删目标再 `rename` 一次。
 
-## 8. 关联规则（不猜）
+## 9. 关联规则（不猜）
 
 - L2 逐条结果只与 HTTP 实际给出的 `submittedAttemptId`（受评 Attempt）关联；
   评审者自己的 Attempt **绝不**当受评者用——两个 trace 在 Langfuse 里看起来一样正常，
@@ -170,17 +219,40 @@ node scripts/langfuse-sync.mjs --project <projectId> \
   也不声称覆盖了完整历史。
 - L3 终审属于 Mission 层，只落 Mission trace，不会被摊到每个 Attempt 上。
 - 测试跳过 / 未知不算成功；机器通过不算 L2/L3 接受；基础设施故障不算模型能力差。
+- 每一条导出的记录都带 `langfuse.session.id`（值 = `missionId`），与第 3 节的逐调用
+  generation 用同一个会话分组；ID 算法未变，重跑仍得到同样的 trace/span id。
 
-## 9. 复跑验证
+## 10. 复跑验证
 
 在本仓库里，这一层可复跑的验证是（不需要任何真实 Langfuse、不需要凭据）：
 
 ```bash
-node --test test/langfuse-sync.test.ts
-node --test test/langfuse-quality-records.test.ts test/langfuse-transport.test.ts
+node --test test/langfuse-transport.test.ts test/langfuse-quality-records.test.ts test/langfuse-sync.test.ts
+node --import tsx --test adapters/pi/src/langfuse-observer.spec.ts
 ```
 
-再往上的全量 `node --test` 与适配层定向测试由平台 VR 跑。
+再次强调：**上面这些测试的 Langfuse 是进程内的临时 mock**，不需要真实 Langfuse 与凭据。
 
-再次强调：**上面这些测试的 Langfuse 是进程内的临时 mock。** 真实 Langfuse v4 与真实模型
-调用需要 L3 配置凭据后单独执行；在拿到真实回执之前，「已验证真实端到端」这个说法不成立。
+### 真实环境已拿到的回执
+
+- **真实 SDK 逐调用 → Langfuse：已验证。** 2026-10-19 用真实 pi SDK + 生产
+  `createLangfuseObserver` 对 `xai/grok-4.7` 发一次无工具调用，Mission `LF-pi-e2e-20261019`，
+  Attempt `direct-probe-1`。Langfuse 4.63.0 用 Observations API v2 读回：`sessionId` = 该
+  Mission、类型 GENERATION、`model=grok-4.7`、input/output 存在、`totalUsage=1440`、
+  `latency=6.343` 秒。SDK 侧 `cost total=0.001688` 美元，是 SDK 的估算值，**不是真实账单**。
+- **真实 Langfuse 评分写入 / 读取：已用 synthetic 源验证。** 把
+  `test/fixtures/langfuse-quality-http.json` 中明确标注 synthetic 的源，经生产
+  `projectQualityRecords` + `createTransport` 写入真实本地 Langfuse：10 个 span + 17 个 score
+  全部确认，并用 `GET /api/public/v3/scores` 读回 17 项。这验证的是**质量事实的接口**，
+  不是 CoAgentHub 真实 L2/L3 验收的端到端。
+- **平台生产工作流（L2/L3 → 同步 CLI）：尚未做真实完整验证。** 上面两块分别覆盖观测端与
+  传输 / 投影端，「平台真的跑完一次评审、同步 CLI 再拉回」这一段还没有真实回执。
+
+### 读回接口（v4）
+
+```bash
+GET /api/public/v2/observations?fields=basic,usage,model,io,metadata
+GET /api/public/v3/scores
+```
+
+旧的 `GET /api/public/scores` 在 `events_only` 模式下被禁用，读回一律走上面这两条。

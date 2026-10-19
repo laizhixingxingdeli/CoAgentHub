@@ -5,6 +5,7 @@ import { PlatformContext, PlatformRuleError, ATTEMPT_STARTED_KIND } from './cont
 import { redactSecrets } from '../redact.ts';
 import { collectAttemptLiveTail, mergeAttemptOutput } from '../live.ts';
 import { sanitizeAttemptContextMetrics, activityDataHasContextMetrics } from './context-metrics.ts';
+import { sanitizeRuntimeDiagnostics } from '../runtime-diagnostics.ts';
 
 export function queuedAttemptStartedData<T extends { readonly kind: string }>(
   base: T,
@@ -80,6 +81,11 @@ export async function finishAttempt(ctx: PlatformContext,
         readonly resolved: readonly { readonly key: string; readonly value: string }[];
       };
       contextMetrics?: unknown;
+      /**
+       * 本跳双侧诊断。同样不可信：只投影固定词（platform.code / upstream.category），
+       * 不保存 message / stack / URL / 请求体。畸形值忽略，不挡收尾。
+       */
+      runtimeDiagnostics?: unknown;
     },
   ): Promise<void> {
     // 失败原文与输出尾部都会落盘、进界面：agent 打过 `env` 的话，本机的 key 就在里面。
@@ -148,6 +154,12 @@ export async function finishAttempt(ctx: PlatformContext,
         }
       }
     }
+    let runtimeDiagnostics: ReturnType<typeof sanitizeRuntimeDiagnostics> = undefined;
+    if (!alreadyTerminal) {
+      // 在事件落盘前收口：只留固定词，未知键/嵌套文案/堆栈一律不落盘。
+      // 收不出东西就整个字段缺席（不写空对象）。
+      runtimeDiagnostics = sanitizeRuntimeDiagnostics(outcome.runtimeDiagnostics);
+    }
     await ctx.event(
       mission,
       'attempt.ended',
@@ -157,6 +169,7 @@ export async function finishAttempt(ctx: PlatformContext,
         usage: attempt.usage,
         retriable: outcome.endedBy === 'upstream_failure',
         ...(contextMetrics !== undefined ? { contextMetrics } : {}),
+        ...(runtimeDiagnostics !== undefined ? { runtimeDiagnostics } : {}),
       },
       attempt.workItemId,
       attemptId,

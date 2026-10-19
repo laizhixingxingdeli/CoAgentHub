@@ -428,7 +428,10 @@ export async function createLangfuseObserver(
 			}
 			const attributes: { key: string; value: Record<string, unknown> }[] = [
 				str("langfuse.observation.type", "GENERATION"),
-				str("langfuse.trace.session_id", missionId),
+				// Langfuse v4 从 span 属性上读会话分组：官方映射名是 langfuse.session.id
+				// （或 session.id）。写成 langfuse.trace.session_id 不会被识别，同一个
+				// Mission 的调用就不会聚到一个会话里。值仍然是 missionId，ID 算法不变。
+				str("langfuse.session.id", missionId),
 				str("coagent.mission_id", missionId),
 				str("coagent.attempt_id", subject.attemptId),
 				str("coagent.role", subject.role),

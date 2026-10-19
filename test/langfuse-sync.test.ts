@@ -60,9 +60,11 @@ async function startPlatform(route) {
   const seen = [];
   const sockets = new Set();
   const server = http.createServer((req, res) => {
-    const path = new URL(req.url, 'http://127.0.0.1').pathname;
-    seen.push({ method: req.method, path, headers: req.headers });
-    const outcome = route(path, req.method);
+    const parsed = new URL(req.url, 'http://127.0.0.1');
+    const path = parsed.pathname;
+    seen.push({ method: req.method, path, url: req.url, headers: req.headers });
+    // 路由拿到的 path 不带查询串，查询串单独给：分页参数是评审历史契约的一部分。
+    const outcome = route(path, req.method, parsed.searchParams);
     if (!outcome) {
       res.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}');
       return;
@@ -156,7 +158,28 @@ const ALLOWED = [
   /^\/api\/missions\/[^/]+\/activity$/,
   /^\/api\/missions\/[^/]+\/attempts\/[^/]+$/,
   /^\/api\/missions\/[^/]+\/validation-reports\/[^/]+$/,
+  /^\/api\/missions\/[^/]+\/work-items\/[^/]+\/reviews$/,
 ];
+
+/**
+ * 白名单只是路径层。评审历史还允许带查询串，但只允许 cursor/limit 两个键、
+ * 取值只能是数字：`?x=../../` 与 `?limit=100000` 都不该出现。
+ */
+const assertOnlyAllowedQuery = (seen) => {
+  for (const entry of seen) {
+    const query = entry.url?.split('?')[1];
+    if (!query) continue;
+    assert.match(entry.path, /\/work-items\/[^/]+\/reviews$/, `只有评审历史允许带查询串：${entry.path}`);
+    for (const [key, value] of new URLSearchParams(query)) {
+      assert.ok(['cursor', 'limit'].includes(key), `查询串只允许 cursor/limit：${key}`);
+      assert.match(value, /^\d+$/, `查询串值只能是数字：${key}=${value}`);
+      if (key === 'limit') {
+        const limit = Number(value);
+        assert.ok(limit >= 1 && limit <= 100, `limit 必须在 1..100：${limit}`);
+      }
+    }
+  }
+};
 
 const assertOnlyAllowedPaths = (seen) => {
   for (const entry of seen) {
@@ -165,6 +188,7 @@ const assertOnlyAllowedPaths = (seen) => {
     assert.doesNotMatch(entry.path, /\.coagent-state\.json|delivery|\/live$|\/diff$/i);
     assert.ok(ALLOWED.some((pattern) => pattern.test(entry.path)), `路径不在白名单：${entry.path}`);
   }
+  assertOnlyAllowedQuery(seen);
 };
 
 test('syncs a mission once, skips confirmed ids on rerun, and never marks unconfirmed records as synced when langfuse is gone', async () => {
@@ -236,6 +260,19 @@ test('syncs a mission once, skips confirmed ids on rerun, and never marks unconf
     const history = langfuse.spans.filter((span) => span.name === 'coagent.review_history_event');
     assert.equal(history.length, 1);
     assert.equal(history[0].traceId, missionTrace);
+    // 会话分组走 Langfuse v4 的 langfuse.session.id（span 级）：wire 上每条 span 都要带，
+    // 值仍是 missionId；旧名 langfuse.trace.session_id 不会被 Langfuse 识别。
+    const sessionOf = (span) =>
+      span.attributes.find((entry) => entry.key === 'langfuse.session.id')?.value?.stringValue;
+    assert.ok(langfuse.spans.length > 0, '本轮必须真的发出 span');
+    for (const span of langfuse.spans) {
+      assert.equal(sessionOf(span), MISSION_ID, span.name);
+      assert.equal(
+        span.attributes.some((entry) => entry.key === 'langfuse.trace.session_id'),
+        false,
+        span.name,
+      );
+    }
     assert.equal(langfuse.scores.some((score) => score.name.startsWith('coagent.l3.') && score.traceId !== missionTrace), false);
     // L3 属于 Mission 层，不能被拆到 Attempt trace 上。
     for (const score of langfuse.scores) {
@@ -464,13 +501,16 @@ test('stays silent when disabled, scopes project reads, and stops a bounded loop
       assert.deepEqual([...project.missions].sort(), ['M-a1', 'M-a2']);
       assertOnlyAllowedPaths(platform.seen);
       const fetched = platform.seen.map((entry) => entry.path).filter((path) => path !== '/api/missions');
+      // 每件工单先读评审历史（旧平台 404 就退回 lastReview），再读受评 Attempt 明细。
       assert.deepEqual([...new Set(fetched)].sort(), [
         '/api/missions/M-a1',
         '/api/missions/M-a1/activity',
         '/api/missions/M-a1/attempts/W-a1.exec-1',
+        '/api/missions/M-a1/work-items/W-a1/reviews',
         '/api/missions/M-a2',
         '/api/missions/M-a2/activity',
         '/api/missions/M-a2/attempts/W-a2.exec-1',
+        '/api/missions/M-a2/work-items/W-a2/reviews',
       ]);
 
       // 共用一份进度时，后同步的 Mission 不能把先同步那个的已捕获记录冲掉：
@@ -543,6 +583,407 @@ test('stays silent when disabled, scopes project reads, and stops a bounded loop
     assert.ok(flushes >= 1, '中断路径也必须 flush');
   } finally {
     await platform.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 101 个 Mission 的整轮退出（本单要求「不按 50 截断」）：
+ * - 按稳定 missionId 排序，每轮最多 50 个；
+ * - 进度里记 lastMissionId，下一次从它后面继续，走到末尾绕回开头；
+ * - 失败的 Mission 不推进游标，下一轮从同一处重来（不越过失败批次）。
+ */
+test('walks more than 50 project missions across bounded rounds instead of truncating, and never advances past a failed batch', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'langfuse-sync-'));
+  const total = 101;
+  const ids = Array.from({ length: total }, (_, index) => `M-p${String(index + 1).padStart(3, '0')}`);
+  // 平台故意用乱序返回：顺序不是契约，同步器必须自己按 id 稳定排序。
+  const listed = [...ids].reverse().map((missionId) => ({ missionId, projectId: 'p-many' }));
+  const visited = [];
+  let failOn = null;
+  const platform = await startPlatform((path) => {
+    if (path === '/api/missions') return { status: 200, body: listed };
+    const mission = /^\/api\/missions\/([^/]+)$/.exec(path);
+    if (mission) {
+      visited.push(mission[1]);
+      if (mission[1] === failOn) return { status: 500, body: { error: 'boom' } };
+      return {
+        status: 200,
+        body: {
+          missionId: mission[1],
+          projectId: 'p-many',
+          workItems: [
+            {
+              id: 'W-1',
+              lastReview: {
+                verdict: 'accept',
+                reasons: ['synthetic many reason'],
+                requiredChanges: [],
+                attemptId: 'coord-1',
+                submittedAttemptId: 'W-1.exec-1',
+                acceptanceResults: [{ criterion: 'synthetic many AC', status: 'pass' }],
+              },
+            },
+          ],
+        },
+      };
+    }
+    if (/^\/api\/missions\/[^/]+\/activity$/.test(path)) return { status: 200, body: [] };
+    if (/^\/api\/missions\/[^/]+\/work-items\/[^/]+\/reviews$/.test(path)) {
+      // 旧平台形状：404 才允许退回 lastReview。
+      return { status: 404, body: { error: 'not found' } };
+    }
+    if (/^\/api\/missions\/[^/]+\/attempts\/[^/]+$/.test(path)) {
+      return { status: 404, body: { error: 'not found' } };
+    }
+    return null;
+  });
+  const langfuse = await startLangfuse();
+  const progressPath = join(dir, 'progress', 'many.json');
+  const stubTransport = {
+    enqueueSpan: () => Promise.resolve(true),
+    enqueueScore: () => Promise.resolve(true),
+    flush: () => Promise.resolve(true),
+  };
+  try {
+    const { config } = await configFor(dir, langfuse.baseUrl, 'many.json');
+    const round1 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+    });
+    assert.equal(round1.ok, true);
+    assert.equal(round1.truncated, undefined, '超过 50 个不再报截断');
+    assert.equal(round1.missions.length, 50);
+    assert.equal(round1.project.total, total);
+    assert.equal(round1.project.pending, total - 50);
+    assert.deepEqual(round1.missions, ids.slice(0, 50), '第一轮必须按稳定 id 顺序取前 50 个');
+    assertOnlyAllowedPaths(platform.seen);
+
+    const after1 = JSON.parse(await readFile(progressPath, 'utf8'));
+    assert.equal(after1.projects['p-many'].lastMissionId, 'M-p050', '游标停在最后一个成功的 Mission');
+
+    const round2 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+    });
+    assert.equal(round2.missions.length, 50);
+    assert.deepEqual(round2.missions, ids.slice(50, 100), '第二轮从游标后面继续，不重头再来');
+
+    const round3 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+    });
+    // 第三轮从末尾继续并绕回开头补齐到 50 个：这是「遍历末尾再回到开头」的落点。
+    assert.equal(round3.missions.length, 50);
+    assert.equal(round3.missions[0], 'M-p101');
+    assert.equal(round3.missions[1], 'M-p001', '走到末尾必须绕回开头');
+    assert.equal(round3.project.wrapped, true);
+
+    // 三轮下来 101 个 Mission 全部经过，且每个都真的被读过。
+    assert.deepEqual([...new Set(visited)].sort(), ids);
+    assert.ok(visited.length >= total, '轮转不得漏掉任何一个 Mission');
+
+    // 失败不推进游标：让下一轮的第一个（M-p050）失败，游标停在 M-p049。
+    failOn = 'M-p050';
+    const round4 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+    });
+    assert.equal(round4.ok, false, '读取失败必须让本轮未完成');
+    const after4 = JSON.parse(await readFile(progressPath, 'utf8'));
+    assert.equal(after4.projects['p-many'].lastMissionId, 'M-p049', '失败批次不得被跳过');
+    failOn = null;
+    const round5 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+    });
+    assert.equal(round5.ok, true);
+    assert.equal(round5.missions[0], 'M-p050', '下一轮从失败的那个 Mission 重新开始');
+
+    // 游标写失败也必须当场停住本批：用 now 在第 2 次调用上抛错，让**只有**
+    // advanceProjectCursor 的那次写盘失败。这一轮里每条记录都已 acked，所以 syncMission
+    // 只会写一次进度（捕获后那次，入队后那次因为零待发被跳过），第 2 次写盘就是游标。
+    // 本批第一个 Mission（M-p100，round5 已经推进到 M-p099）之后不得再读后面的 Mission，
+    // 盘上的游标留在上一次成功的位置。
+    const visitedBeforeCursorFault = visited.length;
+    let writeCalls = 0;
+    const round6 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+      now: () => {
+        writeCalls += 1;
+        if (writeCalls > 1) throw new Error('synthetic cursor write failure');
+        return Date.now();
+      },
+    });
+    assert.equal(writeCalls, 2, '故障注入必须真的落在游标写盘上');
+    assert.equal(round6.ok, false, '游标写失败必须让本轮未完成');
+    assert.equal(round6.missions.length, 1, '游标写失败后不得继续处理后续 Mission');
+    assert.equal(round6.missions[0], 'M-p100');
+    assert.equal(visited.length, visitedBeforeCursorFault + 1, '后续 Mission 一个都不该被读');
+    assert.equal(round6.project.pending, total, '一个都没推进：剩下的都算没处理');
+    const after6 = JSON.parse(await readFile(progressPath, 'utf8'));
+    assert.equal(after6.projects['p-many'].lastMissionId, 'M-p099', '游标写失败不得前进');
+
+    // 故障消失后从同一个 Mission 重来，证明「停下来」不是把这一批丢掉。
+    const round7 = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      projectId: 'p-many',
+      progressPath,
+      transport: stubTransport,
+    });
+    assert.equal(round7.ok, true);
+    assert.equal(round7.missions[0], 'M-p100', '游标写失败的那个 Mission 下一轮重新开始');
+    const after7 = JSON.parse(await readFile(progressPath, 'utf8'));
+    assert.equal(
+      after7.projects['p-many'].lastMissionId,
+      round7.missions.at(-1),
+      '故障恢复后照常按连续成功前缀推进',
+    );
+  } finally {
+    await platform.close();
+    await langfuse.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 评审历史（新接口）在同步层的两条硬要求：
+ * 1) 同一工单两次评审分页都要准确落到各自的受评 Attempt 上，重跑不重复评分；
+ * 2) 404 才退回 lastReview；错误分页要标 partial 并保留已捕获，且 cursor 留在原地。
+ */
+test('pages work-item review history onto the reviewed attempts, falls back only on 404, and reports partial on a failed page', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'langfuse-sync-'));
+  const missionId = 'M-hist';
+  const workItemId = 'W-h1';
+  // 两条评审：受评 Attempt 不同（第二次是重交后的 exec-2）。
+  const reviews = [
+    {
+      verdict: 'reject',
+      reasons: ['synthetic history reject reason'],
+      requiredChanges: ['synthetic history required change'],
+      attemptId: 'coord-1',
+      submittedAttemptId: 'W-h1.exec-1',
+      acceptanceResults: [{ criterion: 'synthetic AC1', status: 'fail' }],
+    },
+    {
+      verdict: 'accept',
+      reasons: ['synthetic history accept reason'],
+      requiredChanges: [],
+      attemptId: 'coord-2',
+      submittedAttemptId: 'W-h1.exec-2',
+      acceptanceResults: [{ criterion: 'synthetic AC1', status: 'pass' }],
+    },
+  ];
+  const mission = {
+    missionId,
+    projectId: 'p-hist',
+    workItems: [
+      {
+        id: workItemId,
+        // lastReview 就是第二条：历史与 lastReview 是同一事实，不能重复评分。
+        lastReview: reviews[1],
+      },
+      { id: 'W-legacy', lastReview: { verdict: 'accept', reasons: ['synthetic legacy'], requiredChanges: [], attemptId: 'coord-3' } },
+    ],
+  };
+  const pageSize = 1;
+  let failNextPage = false;
+  // 分页契约的两种故障：坏 nextCursor（本轮不算读完）与中间页 404（不是旧接口）。
+  let pageFault = null;
+  const requestedCursors = [];
+  const platform = await startPlatform((path, method, params) => {
+    if (path === `/api/missions/${missionId}`) return { status: 200, body: mission };
+    if (path === `/api/missions/${missionId}/activity`) return { status: 200, body: [] };
+    if (path === `/api/missions/${missionId}/work-items/${workItemId}/reviews`) {
+      const cursor = Number(params.get('cursor') ?? 0);
+      const limit = Number(params.get('limit') ?? 50);
+      requestedCursors.push({ cursor, limit });
+      if (failNextPage && cursor > 0) return { status: 500, body: { error: 'boom' } };
+      if (pageFault?.status && cursor > 0) return { status: pageFault.status, body: { error: 'boom' } };
+      const slice = reviews.slice(cursor, cursor + pageSize).map((review, index) => ({
+        reviewId: JSON.stringify([missionId, workItemId, cursor + index]),
+        reviewIndex: cursor + index,
+        review,
+      }));
+      const next = cursor + slice.length < reviews.length ? cursor + slice.length : null;
+      // 第一页故意给坏 cursor：缺失（undefined 会被 JSON 丢掉）、负数、回退、小数、字符串。
+      if (pageFault && cursor === 0 && 'nextCursor' in pageFault) {
+        return { status: 200, body: { items: slice, nextCursor: pageFault.nextCursor, total: reviews.length } };
+      }
+      return { status: 200, body: { items: slice, nextCursor: next, total: reviews.length } };
+    }
+    if (path === `/api/missions/${missionId}/work-items/W-legacy/reviews`) {
+      return { status: 404, body: { error: 'not found' } };
+    }
+    const attempt = /^\/api\/missions\/[^/]+\/attempts\/([^/]+)$/.exec(path);
+    if (attempt) return { status: 404, body: { error: 'not found' } };
+    return null;
+  });
+  const langfuse = await startLangfuse();
+  const progressPath = join(dir, 'progress', 'history.json');
+  try {
+    const { config } = await configFor(dir, langfuse.baseUrl, 'history.json');
+    const first = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      missionId,
+      progressPath,
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.partial, false, '没截断就不能标 partial');
+    // 分页是真的：每次都用平台给的 nextCursor，limit 落在 1..100 内。
+    assert.ok(requestedCursors.length >= 2, '两次评审必须分页读到');
+    for (const entry of requestedCursors) {
+      assert.ok(entry.limit >= 1 && entry.limit <= 100, `limit 越界：${entry.limit}`);
+    }
+    assertOnlyAllowedPaths(platform.seen);
+
+    const l2 = langfuse.spans.filter((span) => span.name === 'coagent.l2.work_item_review');
+    assert.equal(l2.length, 2, '两条评审各一份快照（lastReview 与历史同一条只算一份）');
+    const traceOf = (submitted) => stableIds({ missionId, attemptId: submitted }).traceId;
+    assert.deepEqual(
+      l2.map((span) => span.traceId).sort(),
+      [traceOf('W-h1.exec-1'), traceOf('W-h1.exec-2')].sort(),
+      '每条评审都必须落在自己受评的 Attempt 上',
+    );
+    const verdicts = langfuse.scores.filter((score) => score.name === 'coagent.l2.verdict');
+    assert.equal(verdicts.length, 2);
+    assert.deepEqual(verdicts.map((score) => score.value).sort(), ['accept', 'reject']);
+    // 旧平台工单：404 才退回 lastReview，而且因为缺受评者只出 unknown 观察，不出分。
+    const unknown = langfuse.spans.filter((span) => span.name === 'coagent.mission_review_observation');
+    assert.equal(unknown.length, 1);
+
+    // 重跑：同一份历史零新增（稳定 ID 去重），进度里也不重复。
+    const spanCount = langfuse.spans.length;
+    const scoreCount = langfuse.scores.length;
+    const second = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      missionId,
+      progressPath,
+    });
+    assert.equal(second.sent, 0, '重跑必须零发送');
+    assert.equal(langfuse.spans.length, spanCount);
+    assert.equal(langfuse.scores.length, scoreCount);
+    const progressAfter = JSON.parse(await readFile(progressPath, 'utf8'));
+    assert.equal(progressAfter.capturedReviews.length, 2, '两条完整快照，不因重跑增长');
+
+    // 分页失败：显式 partial，保留已捕获，cursor 留在失败那一页，下一轮能接着读。
+    const partialPath = join(dir, 'progress', 'history-partial.json');
+    failNextPage = true;
+    const failed = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      missionId,
+      progressPath: partialPath,
+    });
+    // 第一页成功、第二页 500：本轮未完成，并且 partial 是显式的事实。
+    assert.equal(failed.ok, false, '分页失败必须让本轮未完成');
+    assert.equal(failed.partial, true, '截断/失败必须显式标 partial');
+    const partialProgress = JSON.parse(await readFile(partialPath, 'utf8'));
+    assert.equal(partialProgress.reviewCursors[missionId][workItemId], 1, 'cursor 停在失败的那一页');
+    assert.ok(partialProgress.capturedReviews.length >= 1, '已捕获的记录必须保留');
+    failNextPage = false;
+    const resumed = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      missionId,
+      progressPath: partialPath,
+    });
+    assert.equal(resumed.ok, true, '下一轮从失败的那一页继续后应当完整');
+    const resumedProgress = JSON.parse(await readFile(partialPath, 'utf8'));
+    assert.equal(resumedProgress.reviewCursors[missionId]?.[workItemId], undefined, '读完之后清掉游标');
+    assert.equal(resumedProgress.capturedReviews.length, 2);
+
+    // 坏 nextCursor（缺失/负数/回退/相同/小数/字符串）不等于「读完了」：本轮必须未完成、
+    // 不能伪评分，已读条目与当前页起点都要保留，下一轮从同一处重试。
+    for (const badCursor of [undefined, -1, 0, 0.5, '1']) {
+      const badPath = join(dir, 'progress', `history-bad-${String(badCursor).replace(/[^\w]/g, '_')}.json`);
+      pageFault = { nextCursor: badCursor };
+      const spansBefore = langfuse.spans.length;
+      const bad = await syncQualityOnce({
+        config,
+        platformUrl: platform.baseUrl,
+        missionId,
+        progressPath: badPath,
+      });
+      assert.equal(bad.ok, false, `坏 nextCursor 必须让本轮未完成：${String(badCursor)}`);
+      assert.equal(bad.partial, true, `坏 nextCursor 必须显式标 partial：${String(badCursor)}`);
+      const badProgress = JSON.parse(await readFile(badPath, 'utf8'));
+      assert.equal(badProgress.reviewCursors[missionId][workItemId], 0, '坏 cursor 时停在当前页起点');
+      assert.equal(
+        badProgress.capturedReviews.filter((entry) => entry.workItemId === workItemId).length,
+        1,
+        '已读到的那一页要保留，但不能把没读到的当成读完了',
+      );
+      // 不伪评分：没读到的那条评审不得被凭空投影出来（它会落到 exec-2 的 trace 上）。
+      const fresh = langfuse.spans.slice(spansBefore);
+      assert.equal(
+        fresh.filter((span) => span.traceId === traceOf('W-h1.exec-2')).length,
+        0,
+        `坏 cursor 不得为未读到的评审伪造投影：${String(badCursor)}`,
+      );
+      assert.deepEqual(
+        [...new Set(langfuse.scores.filter((score) => score.name === 'coagent.l2.verdict').map((score) => score.value))].sort(),
+        ['accept', 'reject'],
+        '判定值集合不得出现凭空造出来的项',
+      );
+    }
+    pageFault = null;
+
+    // 中间页 404 是读取故障，不是旧接口：不能丢掉之前读到的 items 去退回 lastReview。
+    const midPath = join(dir, 'progress', 'history-mid404.json');
+    pageFault = { status: 404 };
+    const mid = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      missionId,
+      progressPath: midPath,
+    });
+    assert.equal(mid.ok, false, '中间页 404 必须让本轮未完成');
+    assert.equal(mid.partial, true);
+    const midProgress = JSON.parse(await readFile(midPath, 'utf8'));
+    assert.equal(midProgress.reviewCursors[missionId][workItemId], 1, '中间页 404 不推进 cursor');
+    assert.equal(
+      midProgress.capturedReviews.filter((entry) => entry.workItemId === workItemId).length,
+      1,
+      '中间页 404 不得丢掉已读到的评审',
+    );
+    pageFault = null;
+    // 下一轮从中间页重试，读到全部两条。
+    const afterMid = await syncQualityOnce({
+      config,
+      platformUrl: platform.baseUrl,
+      missionId,
+      progressPath: midPath,
+    });
+    assert.equal(afterMid.ok, true, '中间页 404 之后应当能从原处重试成功');
+    const afterMidProgress = JSON.parse(await readFile(midPath, 'utf8'));
+    assert.equal(afterMidProgress.reviewCursors[missionId]?.[workItemId], undefined);
+    assert.equal(afterMidProgress.capturedReviews.length, 2);
+  } finally {
+    await platform.close();
+    await langfuse.close().catch(() => {});
     await rm(dir, { recursive: true, force: true });
   }
 });

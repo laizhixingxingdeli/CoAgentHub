@@ -26,6 +26,10 @@ const pollIntervalMs = positiveInteger(
   1_000,
 );
 const recipient = process.env.COAGENTHUB_INBOX_RECIPIENT?.trim() || undefined;
+const inboxScope =
+  process.env.COAGENTHUB_INBOX_SCOPE?.trim().toLowerCase() === "all"
+    ? ("all" as const)
+    : ("recipient" as const);
 
 let running = true;
 
@@ -41,11 +45,11 @@ process.on("SIGTERM", () => {
 try {
   const client = new CoAgentHubClient();
   let retryMs = pollIntervalMs;
-  log(`started pid=${process.pid} poll=${pollIntervalMs}ms`);
+  log(`started pid=${process.pid} poll=${pollIntervalMs}ms scope=${inboxScope}`);
 
   while (running) {
     try {
-      const handled = await pollOnce({ dataDir, client, recipient });
+      const handled = await pollOnce({ dataDir, client, recipient, inboxScope });
       if (handled > 0) log(`delivered ${handled} inbox item(s)`);
       retryMs = pollIntervalMs;
     } catch (error) {

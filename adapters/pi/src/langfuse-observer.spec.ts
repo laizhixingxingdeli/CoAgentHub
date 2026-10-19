@@ -225,7 +225,9 @@ test("综合 1：真实 observer factory 驱动 SDK 形状事件 → 恰两条 G
 			assert.equal(attrString(span, "langfuse.observation.type"), "GENERATION");
 			assert.equal(span.traceId, expectedTrace);
 			assert.equal(span.name, "coagent.llm.generation");
-			assert.equal(attrString(span, "langfuse.trace.session_id"), MISSION_ID);
+			assert.equal(attrString(span, "langfuse.session.id"), MISSION_ID);
+			// 旧字段 langfuse.trace.session_id 不是 Langfuse v4 的映射名，带了也不会被识别。
+			assert.equal(attr(span, "langfuse.trace.session_id"), undefined);
 			assert.equal(attrString(span, "coagent.attempt_id"), ATTEMPT_ID);
 			assert.equal(attrString(span, "coagent.work_item_id"), WORK_ITEM_ID);
 			assert.equal(attrString(span, "coagent.role"), "executor");

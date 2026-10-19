@@ -19,10 +19,17 @@
  * 接口（后续 CLI 直接用，返回值全部 JSON 可序列化）：
  *
  *   projectQualityRecords({ mission, activity, reports, attempts,
- *                           capturedReviews, config, observedAt })
+ *                           capturedReviews, reviewHistory, lastReviewFallback,
+ *                           config, observedAt })
  *     -> { records, capturedReviews }
  *
  * - mission：GET /api/missions/:id 的顶层对象，只读 workItems[].lastReview。
+ * - reviewHistory：{ [workItemId]: ReviewRecord[] }，来自
+ *   GET /api/missions/:id/work-items/:wid/reviews 的逐页读取。**每条都是完整快照**，
+ *   逐条交给 buildSnapshot；受评者只认每条记录自己的 submittedAttemptId。
+ * - lastReviewFallback：允许退回 workItems[].lastReview 的工单 id 列表。只有历史接口
+ *   404（旧平台）时才由 CLI 填进来；其它读取失败不进这个列表，于是那件工单本轮
+ *   不投影 L2 快照——宁可少一条，也不把「没读到」当成「只有这一条」。
  * - activity：GET /api/missions/:id/activity 的事件数组。
  * - reports：按 reportId 索引的普通对象（GET .../validation-reports/:reportId）。
  * - attempts：按 attemptId 索引的普通对象（GET .../attempts/:attemptId）。只取
@@ -53,6 +60,7 @@ const REVIEW_HISTORY_KIND = 'review.recorded';
 const VALIDATION_REPORTED_KIND = 'validation.reported';
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const isText = (value) => typeof value === 'string' && value.length > 0;
 const asText = (value) => (typeof value === 'string' && value.length > 0 ? value : undefined);
 const asTextList = (value) =>
   Array.isArray(value) ? value.filter((item) => typeof item === 'string') : undefined;
@@ -250,7 +258,8 @@ function snapshotAttributes(snapshot, missionId) {
   const attributes = [
     str('coagent.mission_id', missionId),
     // 与 pi 观测同一个 session 分组：不统一的话，同一次 Mission 在 Langfuse 里会裂成两个会话。
-    str('langfuse.trace.session_id', missionId),
+    // 字段名用 Langfuse v4 的官方映射 langfuse.session.id（值仍是 missionId）。
+    str('langfuse.session.id', missionId),
     str('coagent.observation.source', snapshot.source),
   ];
   if (snapshot.workItemId) attributes.push(str('coagent.work_item_id', snapshot.workItemId));
@@ -363,7 +372,7 @@ function historyReviewRecord({ event, missionId, config }) {
   const data = isObject(event.data) ? event.data : {};
   const attributes = [
     str('coagent.mission_id', missionId),
-    str('langfuse.trace.session_id', missionId),
+    str('langfuse.session.id', missionId),
     str('coagent.observation.source', REVIEW_HISTORY_KIND),
     str('coagent.source.event_kind', REVIEW_HISTORY_KIND),
     str('coagent.source.event_id', identity),
@@ -481,7 +490,7 @@ function validationRecords({ event, missionId, missionTrace, reports, attempts, 
   if (problems.length > 0) {
     const attributes = [
       str('coagent.mission_id', missionId),
-      str('langfuse.trace.session_id', missionId),
+      str('langfuse.session.id', missionId),
       str('coagent.observation.source', VALIDATION_REPORTED_KIND),
       str('coagent.source.event_kind', VALIDATION_REPORTED_KIND),
       str('coagent.source.event_id', identity),
@@ -509,7 +518,7 @@ function validationRecords({ event, missionId, missionTrace, reports, attempts, 
   const checks = Array.isArray(report.checks) ? report.checks : [];
   const attributes = [
     str('coagent.mission_id', missionId),
-    str('langfuse.trace.session_id', missionId),
+    str('langfuse.session.id', missionId),
     str('coagent.observation.source', VALIDATION_REPORTED_KIND),
     str('coagent.source.event_kind', VALIDATION_REPORTED_KIND),
     str('coagent.source.event_id', identity),
@@ -652,7 +661,7 @@ function finalReviewRecord({ event, missionId, missionTrace, config }) {
   const verdict = L3_VERDICTS.get(event.kind);
   const attributes = [
     str('coagent.mission_id', missionId),
-    str('langfuse.trace.session_id', missionId),
+    str('langfuse.session.id', missionId),
     str('coagent.observation.source', event.kind),
     str('coagent.source.event_kind', event.kind),
     str('coagent.source.event_id', identity),
@@ -703,6 +712,8 @@ export function projectQualityRecords({
   reports = {},
   attempts = {},
   capturedReviews = [],
+  reviewHistory,
+  lastReviewFallback = [],
   config = {},
   observedAt,
 } = {}) {
@@ -713,25 +724,51 @@ export function projectQualityRecords({
   const missionTrace = stableIds({ missionId });
   const records = [];
 
-  // 1) L2：当前 lastReview 与上一轮已捕获的完整快照合并。
+  // 1) L2：评审历史（逐条完整快照）与上一轮已捕获的快照合并。
   //    先放旧的再放当前的：lastReview 被替换后旧快照仍在，能继续导出它自己的评分，
   //    而不是跟着当前状态一起消失（这就是「停机错过的 review」唯一还救得回的部分）。
+  //    历史与 lastReview 指向同一条事实时，buildSnapshot 的稳定 key 相同，只留一份。
   const snapshots = new Map();
   for (const entry of Array.isArray(capturedReviews) ? capturedReviews : []) {
     const prior = normalizePriorSnapshot(entry, missionId);
     if (prior) snapshots.set(prior.key, prior);
   }
+  const historyByWorkItem = isObject(reviewHistory) ? reviewHistory : undefined;
+  const fallbackItems = new Set(
+    Array.isArray(lastReviewFallback) ? lastReviewFallback.filter((id) => isText(id)) : [],
+  );
   const workItems = Array.isArray(mission?.workItems) ? mission.workItems : [];
   for (const item of workItems) {
-    if (!isObject(item) || !isObject(item.lastReview)) continue;
+    if (!isObject(item) || !isText(item.id)) continue;
+    const history = historyByWorkItem ? historyByWorkItem[item.id] : undefined;
+    if (Array.isArray(history)) {
+      for (const review of history) {
+        if (!isObject(review)) continue;
+        const snapshot = buildSnapshot({
+          missionId,
+          workItemId: item.id,
+          review,
+          config: captureConfig,
+          source: 'http.reviews',
+        });
+        // 同一条事实（同工单 + 同受评/评审者 + 同内容）只投影一份。
+        if (!snapshots.has(snapshot.key)) snapshots.set(snapshot.key, snapshot);
+      }
+      continue;
+    }
+    // 只有旧平台（历史接口 404）或旧调用方（没给 reviewHistory）才退回 lastReview。
+    // 历史读取失败（既不在 reviewHistory 也不在 fallback 里）本轮什么都不投影，
+    // 由 CLI 把这一轮标成未完成：不拿当前状态补一段没读到的历史。
+    if (historyByWorkItem && !fallbackItems.has(item.id)) continue;
+    if (!isObject(item.lastReview)) continue;
     const snapshot = buildSnapshot({
       missionId,
-      workItemId: asText(item.id),
+      workItemId: item.id,
       review: item.lastReview,
       config: captureConfig,
       source: 'http.lastReview',
     });
-    snapshots.set(snapshot.key, snapshot);
+    if (!snapshots.has(snapshot.key)) snapshots.set(snapshot.key, snapshot);
   }
   const ordered = [...snapshots.values()].sort((a, b) =>
     `${a.workItemId ?? ''}\u0000${a.submittedAttemptId ?? ''}\u0000${a.key}`.localeCompare(

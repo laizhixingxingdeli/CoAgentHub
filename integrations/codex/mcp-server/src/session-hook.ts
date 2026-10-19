@@ -22,9 +22,14 @@ try {
       : "recipient";
   const recipient =
     process.env.COAGENTHUB_INBOX_RECIPIENT?.trim() || undefined;
+  // Binding takeover is opt-in: by default a new chat must not steal the
+  // Delivery bridge from the session that is already receiving.
+  const takeover =
+    process.env.COAGENTHUB_BINDING_TAKEOVER?.trim() === "1";
   const result = bindSessionStart(input, dataDir, {
     inboxScope: scope,
     ...(recipient ? { recipient } : {}),
+    ...(takeover ? { takeover: true } : {}),
   });
   if (result.bound && process.env.COAGENTHUB_L3_BRIDGE !== "0") {
     ensureBridge(dataDir);

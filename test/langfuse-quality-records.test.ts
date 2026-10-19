@@ -74,7 +74,9 @@ test('projects L2 lastReview only onto the reviewed submitted attempt, keeps cap
   assert.equal(strOf(review, 'coagent.reviewer_attempt_id'), 'coord-1');
   assert.equal(boolOf(review, 'coagent.submitted_attempt_id.missing'), undefined);
   // 与 pi 观测统一：session 分组用 missionId，否则同一个 Mission 会裂成两个会话。
-  assert.equal(strOf(review, 'langfuse.trace.session_id'), MISSION_ID);
+  // 字段名必须是 Langfuse v4 官方映射 langfuse.session.id（span 级），旧名不会被识别。
+  assert.equal(strOf(review, 'langfuse.session.id'), MISSION_ID);
+  assert.equal(attr(review, 'langfuse.trace.session_id'), undefined);
   assert.equal(strOf(review, 'coagent.l2.verdict'), 'accept');
   assert.deepEqual(scoreNames(review), [
     'coagent.l2.verdict',
@@ -98,6 +100,13 @@ test('projects L2 lastReview only onto the reviewed submitted attempt, keeps cap
   // lastReview 上没有时间：宁可显式标缺失，也不拿采集时刻冒充评审发生时间。
   assert.equal(boolOf(review, 'coagent.time.start.missing'), true);
   assert.equal(review.span.startTimeUnixNano, undefined);
+
+  // 每一条导出记录（Attempt trace 上的评审、Mission 级的未知/历史/验证/L3 观察）都要带会话分组，
+  // 否则同一 Mission 的部分观察在 Langfuse 里挂不到会话上。
+  for (const record of first.records) {
+    assert.equal(strOf(record, 'langfuse.session.id'), MISSION_ID, record.span.name);
+    assert.equal(attr(record, 'langfuse.trace.session_id'), undefined, record.span.name);
+  }
 
   // 旧形状（无 submittedAttemptId、无 acceptanceResults）：只落 Mission 级 unknown，一个 L2 分都不出。
   const unknown = recordsNamed(first, 'coagent.mission_review_observation');
@@ -362,4 +371,80 @@ test('projects VR checks with separated engine/test observations, keeps skip/unk
     .filter((score) => score.name === 'coagent.l2.verdict');
   assert.equal(l2Verdicts.length, 1);
   assert.equal(l2Verdicts[0].traceId, attemptTraceId('W-1.exec-1'));
+
+  // 评审历史（新接口）：每条记录都是完整快照，逐条投影；受评者只认记录自己的
+  // submittedAttemptId，与 lastReview 指向同一事实时只投影一份（稳定 key 相同）。
+  const w1LastReview = fixture.mission.workItems.find((entry) => entry.id === 'W-1').lastReview;
+  const historyOut = projectQualityRecords({
+    mission: fixture.mission,
+    activity: [],
+    reports: {},
+    attempts: {},
+    capturedReviews: [],
+    reviewHistory: {
+      'W-1': [
+        {
+          verdict: 'reject',
+          reasons: ['synthetic history reason'],
+          requiredChanges: [],
+          attemptId: 'coord-9',
+          submittedAttemptId: 'W-1.exec-1',
+          acceptanceResults: [{ criterion: 'synthetic AC1 text', status: 'fail' }],
+        },
+        // 与 mission.lastReview 完全同一条事实。
+        w1LastReview,
+      ],
+      // 历史为空是「确实没有记录」这个事实：不能再拿 lastReview 顶上。
+      'W-2': [],
+    },
+    config: {},
+  });
+  const historyReviews = recordsNamed(historyOut, 'coagent.l2.work_item_review');
+  assert.equal(historyReviews.length, 2, '两条历史各一份快照，与 lastReview 重复的那条只算一份');
+  assert.equal(recordsNamed(historyOut, 'coagent.mission_review_observation').length, 0);
+  for (const record of historyReviews) {
+    assert.equal(strOf(record, 'coagent.observation.source'), 'http.reviews');
+  }
+  const historyReject = historyReviews.find((record) => strOf(record, 'coagent.l2.verdict') === 'reject');
+  const historyAccept = historyReviews.find((record) => strOf(record, 'coagent.l2.verdict') === 'accept');
+  // 两条记录虽然都属于 W-1，但受评者不同，所以 trace 必须各自落在自己的 Attempt 上。
+  assert.equal(historyReject.span.traceId, attemptTraceId('W-1.exec-1'));
+  assert.equal(historyAccept.span.traceId, attemptTraceId('W-1.exec-1'));
+  assert.equal(strOf(historyReject, 'coagent.reviewer_attempt_id'), 'coord-9');
+  // 与 lastReview 同内容的那份快照得到同一个记录 id / spanId / 同一批 score id（稳定去重），
+  // 只有来源标记不同（http.reviews vs http.lastReview）——它确实是从历史接口读到的。
+  const lastReviewOnly = recordsNamed(
+    projectQualityRecords({ mission: fixture.mission, activity: [], config: {} }),
+    'coagent.l2.work_item_review',
+  ).find((record) => strOf(record, 'coagent.work_item_id') === 'W-1');
+  assert.equal(historyAccept.id, lastReviewOnly.id);
+  assert.equal(historyAccept.span.spanId, lastReviewOnly.span.spanId);
+  assert.deepEqual(
+    historyAccept.scores.map((score) => score.id),
+    lastReviewOnly.scores.map((score) => score.id),
+  );
+  assert.equal(historyOut.capturedReviews.length, 2);
+  assert.equal(new Set(historyOut.capturedReviews.map((entry) => entry.key)).size, 2);
+
+  // 历史读取失败（既不在 reviewHistory 也不在 fallback 里）时，这件工单本轮不投影
+  // 任何 L2 快照：不拿当前 lastReview 补一段没读到的历史。
+  const unreadable = projectQualityRecords({
+    mission: fixture.mission,
+    activity: [],
+    capturedReviews: [],
+    reviewHistory: {},
+    lastReviewFallback: ['W-2'],
+    config: {},
+  });
+  assert.equal(
+    recordsNamed(unreadable, 'coagent.l2.work_item_review').some(
+      (record) => strOf(record, 'coagent.work_item_id') === 'W-1',
+    ),
+    false,
+  );
+  // W-2 在 fallback 里（旧平台 404）：仍然从 lastReview 投影，且因为缺受评者只出 unknown。
+  const fallbackRecords = recordsNamed(unreadable, 'coagent.mission_review_observation');
+  assert.equal(fallbackRecords.length, 1);
+  assert.equal(strOf(fallbackRecords[0], 'coagent.observation.source'), 'http.lastReview');
+  assert.equal(strOf(fallbackRecords[0], 'coagent.work_item_id'), 'W-2');
 });
