@@ -9,6 +9,7 @@ import { CoAgentHubClient } from "./coagenthub-client.js";
 
 import { registerReviewerOperations } from "./reviewer-operations.js";
 import { registerMissionLaunchTools } from "./mission-launch.js";
+import { registerDirectControlTools } from "./direct-control.js";
 
 const dashboardUri = "ui://coagenthub-v5/l3-dashboard.html";
 
@@ -59,6 +60,7 @@ export function registerTools(
 ) {
   registerDashboard(server, client);
   registerMissionLaunchTools(server, client);
+  registerDirectControlTools(server, client);
   registerReviewerOperations(server, client);
 
   server.registerTool(

@@ -589,6 +589,15 @@ export class Orchestrator {
   #inRunBackoffWaitMs: number;
   /** 运行期影响判断监督配置；undefined = 关闭（生产默认）。 */
   #impactSupervision: ImpactSupervisionSettings | undefined;
+  /**
+   * 本次 runMission 是不是 direct 协作模式（每次 run 开头重置）。
+   *
+   * direct 的「两层」是由当前会话主控亲自判断的：平台这一侧不许再起第三个模型。
+   * 只靠 main loop 的 direct guard 不够 —— 自动影响判断监督会经 #dispatchImpactHop
+   * 再走一次 #runHop(role:'coordinator')，绕开 main loop 把协调者模型叫起来。
+   * 放在这里是因为 beginImpactSupervision 与 #runHop 都只有实例状态可读。
+   */
+  #directCoordination = false;
   /** hopClock 上的本次 runMission 墙钟截止；越过则不再睡退避。 */
   #missionDeadlineAt: number | undefined;
   readonly hops: HopRecord[] = [];
@@ -660,6 +669,31 @@ export class Orchestrator {
     // 一 Mission 一个隔离工作区，用户自己的 checkout 从头到尾没被碰过。已记着分叉基线就照它来 ——
     // 重跑靠这个和第一次同版起步；这份视图还回答“进来时停在哪”，下面清等待要用。
     const initialView = await this.#platform.getMissionView(missionId);
+    // 每次 run 都按当前视图重置：同一个 runner 接着跑 hierarchical Mission 时不能
+    // 残留上一条 direct 的禁令（否则自动监督与协调者跳会被无声停掉）。
+    this.#directCoordination = initialView.coordinationMode === 'direct';
+
+    // ---- direct coordinationMode fail-closed ----
+    // direct 仅支持 standard mutation：复用标准执行者路径，不 spawn 协调者。
+    // 其它 executionMode（lightweight / high_assurance）或 runKind=query 的组合没有
+    // 对应的直接控制路径，在动工作区之前就停，不浪费 prepare 与名额。
+    // 公共暂停 / 升级 / 预算 / stalebase / 冲突 / 租约 / 候选逻辑都不变。
+    if (initialView.coordinationMode === 'direct') {
+      // coordinationMode 是只读轴：不能叫人直接改它。这里不写 cancelled_by_user ——
+      // 用户并没有取消，只是当前 Mission 的 routing 与 direct 不匹配。留给主控另建合适的
+      // hierarchical Mission 或换 standard mutation 工单，不动当前 Mission 的等待状态。
+      if (
+        initialView.executionMode !== 'standard' ||
+        initialView.runKind !== 'mutation'
+      ) {
+        const detail =
+          `direct 协作模式仅支持 standard mutation（当前 executionMode=${initialView.executionMode}、` +
+          `runKind=${initialView.runKind}）。coordinationMode 只读、不可改：请新建一个 hierarchical 的 Mission，` +
+          `或换 standard mutation 工单。`;
+        return { kind: 'stalled', reason: detail };
+      }
+    }
+
     const pinnedBase = initialView.workspaceRef?.baseRevision;
     const prepared = await this.#workspace.prepare(missionId, options.projectRoot, pinnedBase);
     this.workspace = prepared;
@@ -938,6 +972,28 @@ export class Orchestrator {
           if (gate.kind === 'stop') return gate.outcome;
           if (gate.kind === 'continue') break;
 
+          // ---- direct coordinationMode：一跳即停 ----
+          // direct 复用标准执行者路径（candidate 轮换 / checkpoint / validation baseline / post shadow /
+          // 预算 GATE-POST 都在 #runHop 与上面这几步里），但**不 spawn 协调者、不自动 redispatch 返工**：
+          // partial / 验证不过 / noresult 都不机器重跑，只有主控显式下一次 start 才再执行。
+          // 跑完这一跳就停下来等主控验收或处理失败，不进下面的协调者段。
+          // 若该 hop 让 Mission 进了 awaiting_review（全部工单交卷），沿用既有门禁。
+          if (view.coordinationMode === 'direct') {
+            const afterDirect = await this.#platform.getMissionView(missionId);
+            if (afterDirect.status === 'awaiting_review') {
+              return afterDirect.result?.outcome === 'delivered'
+                ? { kind: 'awaiting_l3_review' }
+                : {
+                    kind: 'blocked',
+                    reason: afterDirect.result?.summary ?? '协调者交了 blocked',
+                  };
+            }
+            const detail =
+              '两层模式等待当前会话主控验收或处理失败（direct：不自动 redispatch、不 spawn 协调者）';
+            await this.#platform.setWaitReason(missionId, 'waiting_l3', detail);
+            return { kind: 'waiting', reason: 'waiting_l3', detail };
+          }
+
           // 机器接续：partial、或验证没过，平台直接把工单退回执行者（最多两次）。续派成功
           // 就不用叫协调者——下一轮 pending 会把这条工单重新领起来；绿报告 / 缺报告 /
           // blocked / 触顶都返回 false，原样交给 L2。
@@ -971,10 +1027,33 @@ export class Orchestrator {
         // 补上报告、或没有命令可补，之后走**同一判断**：机器能判的退回，不该因为「重启
         // 过」就多叫一次协调者。幂等——同一次提交已续派过 / 已触顶 / 平台判定无可续派依据
         // （绿报告、缺报告、blocked、非 partial），这里都是 no-op，原样交给 L2。
-        if (await this.#autoRedispatchStandard(missionId, item.id)) redispatchedOnRecovery = true;
+        // direct 模式跳过机器自动 redispatch：validation 报告已补，但 partial / 验证不过 /
+        // noresult 都不返工，交主控处理。
+        if (view.coordinationMode !== 'direct') {
+          if (await this.#autoRedispatchStandard(missionId, item.id)) redispatchedOnRecovery = true;
+        }
       }
       // 有工单已经回到执行者手里：下一轮 pending 接住它，这一轮不叫协调者。
       if (redispatchedOnRecovery) continue;
+
+      // ---- direct coordinationMode：无 pending 时绝对拦截，不 spawn 协调者 ----
+      // submitted 的标准 validation 已在上面补过；这里不机器 redispatch、不另起协调者，
+      // 只等主控显式下一次 start。若 Mission 已进 awaiting_review，沿用既有门禁。
+      if (view.coordinationMode === 'direct') {
+        const afterRecovery = await this.#platform.getMissionView(missionId);
+        if (afterRecovery.status === 'awaiting_review') {
+          return afterRecovery.result?.outcome === 'delivered'
+            ? { kind: 'awaiting_l3_review' }
+            : {
+                kind: 'blocked',
+                reason: afterRecovery.result?.summary ?? '协调者交了 blocked',
+              };
+        }
+        const detail =
+          '两层模式等待当前会话主控验收或处理失败（direct：无 pending、不 spawn 协调者）';
+        await this.#platform.setWaitReason(missionId, 'waiting_l3', detail);
+        return { kind: 'waiting', reason: 'waiting_l3', detail };
+      }
 
       // 状态恢复：Mission 不在 executing，却有「带着结果被机器续派回 dispatched」的工单——调度器不会
       // 再为它启动执行者，协调者也无法对 dispatched 工单 reject 或修订（W-621：dispatched -> rejected
@@ -2323,6 +2402,15 @@ export class Orchestrator {
     | { retrySameSlot: true }
     | undefined
   > {
+    // direct 的协调判断由当前会话主控来做：这一侧一个协调者模型都不许起。
+    // 放在候选 / 租约 / Attempt / runtime 之前 —— 否则排队、占名额、留 in_progress 都会发生。
+    // 复用既有等待原因，不新增词。
+    if (input.role === 'coordinator' && this.#directCoordination) {
+      return {
+        exhausted: 'waiting_l3',
+        detail: '两层模式的协调判断由当前会话主控处理，不启动协调者模型',
+      };
+    }
     const parked = await this.#queuedHopPark({
       role: input.role,
       missionId: input.missionId,
@@ -3100,6 +3188,9 @@ export class Orchestrator {
     executorClaim: QueueClaimIdentity | undefined;
     cwd: string;
   }): ImpactSupervisionSession {
+    // direct 整段不监督：它的 impact hop 走 #dispatchImpactHop → #runHop(coordinator)，
+    // 那等于在两层模式里偷偷起第三个模型。放在既有判据之前，任何配置组合都挡住。
+    if (this.#directCoordination) return inertImpactSupervisionSession;
     const settings = this.#impactSupervision;
     if (settings === undefined || input.role !== 'executor' || input.purpose !== undefined) {
       return inertImpactSupervisionSession;

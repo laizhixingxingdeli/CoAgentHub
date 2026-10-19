@@ -2,6 +2,7 @@ import { InvariantViolationError } from './errors.ts';
 import { Mission } from './mission.ts';
 import type {
   ComplexityAssessment,
+  CoordinationMode,
   ExecutionBudget,
   MissionContract,
   MissionExecutionMode,
@@ -23,6 +24,8 @@ export interface ProjectMissionInit {
   origin?: OriginChannel;
   executionMode?: MissionExecutionMode;
   runKind?: RunKind;
+  /** 外部主控协作方式；缺省/非法 -> hierarchical。与 executionMode 正交。 */
+  coordinationMode?: CoordinationMode;
   complexityAssessment?: ComplexityAssessment;
   executionBudget?: ExecutionBudget;
 }
@@ -87,6 +90,7 @@ export class Project {
       origin: init.origin,
       executionMode: init.executionMode,
       runKind: init.runKind,
+      coordinationMode: init.coordinationMode,
       complexityAssessment: init.complexityAssessment,
       executionBudget: init.executionBudget,
     });
@@ -117,6 +121,7 @@ export class Project {
       origin: init.origin,
       executionMode: init.executionMode,
       runKind: init.runKind,
+      coordinationMode: init.coordinationMode,
       complexityAssessment: init.complexityAssessment,
       executionBudget: init.executionBudget,
     });

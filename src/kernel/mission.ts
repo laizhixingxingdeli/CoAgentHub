@@ -12,6 +12,7 @@ import type {
   FinalReview,
   WaitReason,
   WorkspaceRef,
+  CoordinationMode,
   MissionContract,
   MissionExecutionMode,
   MissionResultBody,
@@ -92,6 +93,8 @@ export interface MissionInit {
   executionMode?: MissionExecutionMode;
   /** 运行种类；缺省/非法 -> mutation。与 executionMode 正交。 */
   runKind?: RunKind;
+  /** 协作方式的轴；缺省/非法 -> hierarchical。与 executionMode 正交，创建后只读。 */
+  coordinationMode?: CoordinationMode;
   /** 可选六维复杂度评估；缺省/非法 -> undefined。无 setter。 */
   complexityAssessment?: ComplexityAssessment;
   /** 可选执行预算上限；缺省/非法 -> undefined。无 setter、不填默认预算。 */
@@ -139,6 +142,7 @@ export class Mission {
   #parkReason: string | undefined;
   #executionMode: MissionExecutionMode;
   #runKind: RunKind;
+  #coordinationMode: CoordinationMode;
   #complexityAssessment: Readonly<ComplexityAssessment> | undefined;
   #executionBudget: Readonly<ExecutionBudget> | undefined;
   #costCap: number | undefined;
@@ -150,6 +154,7 @@ export class Mission {
     this.#project = init.project;
     this.#executionMode = Mission.#normalizeExecutionMode(init.executionMode);
     this.#runKind = Mission.#normalizeRunKind(init.runKind);
+    this.#coordinationMode = Mission.#normalizeCoordinationMode(init.coordinationMode);
     this.#complexityAssessment = Mission.#normalizeComplexityAssessment(
       init.complexityAssessment,
     );
@@ -188,6 +193,19 @@ export class Mission {
   /** 创建时选定的运行种类；只读。与 executionMode 正交。 */
   get runKind(): RunKind {
     return this.#runKind;
+  }
+
+  /**
+   * 协作方式的轴；只读，创建后不再改动，也不存在改掉它的入口。
+   *
+   * - direct：外部会话主控派工；
+   * - hierarchical：平台协调者派工。
+   *
+   * 与 executionMode（风险 / 验证等级）正交：两条轴互不取值，谁派工与要多严
+   * 的验证不绑定。重跑等派生 Mission 原样继承源头的这一格。
+   */
+  get coordinationMode(): CoordinationMode {
+    return this.#coordinationMode;
   }
 
   /** 可选六维复杂度评估；只读。未评估为 undefined，禁止默认全 0。 */
@@ -836,6 +854,7 @@ export class Mission {
       parkReason: this.#parkReason,
       executionMode: this.#executionMode,
       runKind: this.#runKind,
+      coordinationMode: this.#coordinationMode,
       complexityAssessment: this.#complexityAssessment,
       executionBudget: this.#executionBudget,
       costCap: this.#costCap,
@@ -872,6 +891,7 @@ export class Mission {
       project,
       executionMode: Mission.#normalizeExecutionMode(snapshot.executionMode),
       runKind: Mission.#normalizeRunKind(snapshot.runKind),
+      coordinationMode: Mission.#normalizeCoordinationMode(snapshot.coordinationMode),
       complexityAssessment: Mission.#normalizeComplexityAssessment(
         snapshot.complexityAssessment,
       ),
@@ -957,6 +977,19 @@ export class Mission {
       return value;
     }
     return 'mutation';
+  }
+
+  /**
+   * 缺省/非法 -> hierarchical。
+   *
+   * 刻意不猜 direct：历史数据没有这一格时，「平台分层协作」才是既有事实；
+   * 把缺失读成 direct 会让老 Mission 凭空换了主控。
+   */
+  static #normalizeCoordinationMode(value: unknown): CoordinationMode {
+    if (value === 'hierarchical' || value === 'direct') {
+      return value;
+    }
+    return 'hierarchical';
   }
 
   /**

@@ -1293,6 +1293,30 @@ const EVENT_TABLE = {
       detail: `hop ${or(data.hopId, '（没有 hopId）')} · 第 ${or(data.attemptCount, '（没有次数）')} 次失败 · 退避到 ${or(data.availableAt, '（没有退避时点）')}`,
     };
   },
+
+  /*
+   * 主控（direct coordination mode）经控制面直接驱动协调者的一次操作。
+   *
+   * 这**不是**又起一个模型去跑：协调者 attempt 仍只有一个，只是这一次由主控
+   * 代为推进 plan / contract_check / create_work_item / dispatch / revise_work_order
+   * / review / submit。所以 badge 必须写「主控」而不是「L2 协调」——
+   * 写成 L2 协调会把「这趟是主控代替协调者做的」说成「协调者自己跑的」，
+   * 而这两件事在归因与值守判断上不是一回事。
+   *
+   * 这里只翻译事件本身：具体哪个 action、由谁发起（actor）、绑哪个 attemptId，
+   * 都在 data 里；取不到就直说没有，不猜、不编。
+   */
+  'direct.controller_action': (event) => {
+    const data = (event && event.data) || {};
+    const action = text(data.action);
+    const actor = or(data.actor, '（没有发起方）');
+    // action 是调用方填的枚举；取不到就把原值端出来，那是排障唯一的线索。
+    return {
+      badge: '主控',
+      action: `主控操作：${action || '（没有动作）'}`,
+      detail: `${actor}${data.attemptId ? ` · 协调者尝试 ${text(data.attemptId)}` : ' · 没有绑定的协调者尝试'}`,
+    };
+  },
 };
 
 /**

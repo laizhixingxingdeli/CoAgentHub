@@ -2,6 +2,16 @@
 
 来源：`src/api/server.ts`；所有JSON响应示例为结构摘录，动态字段取决于持久状态，示例未调用真实服务。路径参数须URL编码。curl使用`curl.exe --noproxy "*"`适合Windows；其它系统用curl。写请求会产生真实副作用，示例ID与token必须换成获授权的对象。
 
+## 当前会话主控的两层协作
+
+创建 Mission 时可显式指定 `coordinationMode: "direct"`，缺省为 `hierarchical`。该字段与 `executionMode` 分开，第一版 direct 托管运行支持 standard mutation。完整操作顺序见 [两层协作](direct-controller.md)。
+
+### POST /api/missions/:missionId/direct-control
+
+供有控制面权限的主控会话操作。请求体是 command 本体，`action` 支持 `plan`、`contract_check`、`create_work_item`、`revise_work_order`、`dispatch`、`review`、`submit`；具体字段沿用 Plan、WorkOrder、逐条验收与 MissionResult 合同。MCP 的 `coagenthub_direct_control` 则用 `{ missionId, command }` 包装这些参数。此接口不启动协调者模型，不返回 Run Token，不接受调用方覆盖 actor；actor 来自已解析控制面身份，未配置身份解析时沿用本机 operator。
+
+执行者 Run Token 不能用于本接口。非 direct、活动执行者、暂停或终态任务遵守平台拒绝规则。托管执行或验证尚未结束时返回 409 `DIRECT_RUN_ACTIVE`，不得提前修改工单。accept 必须有当前受评提交的可信验证报告；返回成功也不代表最终合入。
+
 ## 鉴权与错误
 
 健康/version不需认证。控制面由可选`resolveControlPrincipal`注入；未装配时保持本机兼容放行，装配后读通常需viewer/operator、写需operator。项目没有统一内置Bearer解析器：下列`Authorization: Bearer <token>`仅示意resolver采用该约定时的请求头，部署使用其它头须替换。Agent与run/brief只接受`x-coagent-run: <token>`，身份来自绑定token，不能body自称角色。错误为`{"error":"CODE","message":"说明"}`；输入400、无凭据401、授权403、不存在404、领域状态409、未装配501、暂不可用503。

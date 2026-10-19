@@ -14,6 +14,15 @@ const errorResult = (error: unknown) => ({
   ...result({ error: error instanceof Error ? error.message : String(error) }), isError: true,
 });
 
+/**
+ * direct 未确认时的固定说法：POST 已经发出去过，创建与否不知道；
+ * 不重试、不删除、不启动、不假装回滚——把不确定性交给 caller 去读 Mission。
+ */
+const directUnconfirmed = (missionId: string, detail: string) =>
+  `Mission ${missionId} 可能已经创建，但 direct 协调模式未确认（${detail}）。`
+  + "请先读取该 Mission 视图确认 coordinationMode；不要盲目重试创建，也不要启动任何 agent。"
+  + "本工具没有删除或回滚任何东西。";
+
 type Run = {
   missionId: string; status: "requesting" | "accepted" | "running" | "ended" | "unknown" | "failed";
   exitCode?: number; lines: Array<{ channel: string; line: string }>; error?: string;
@@ -54,6 +63,27 @@ export async function consumeHostedRun(response: Response, run: Run): Promise<vo
   } finally { reader.releaseLock(); }
 }
 
+/**
+ * direct 创建的权威回读：只有 GET 回来的 view.coordinationMode === "direct" 才算数。
+ * 读不到、读失败、读到的不是 direct，一律抛错让 caller 回到"未确认"，绝不替它猜。
+ * 不重试、不删除、不启动——本函数只做一次读。
+ */
+async function confirmDirect(client: CoAgentHubClient, missionId: string): Promise<void> {
+  let view: Record<string, unknown> | null | undefined;
+  try {
+    view = await client.request<Record<string, unknown>>("/missions/" + encodeURIComponent(missionId));
+  } catch (error) {
+    throw new Error(directUnconfirmed(missionId, "回读失败：" + (error instanceof Error ? error.message : String(error))));
+  }
+  if (!view || typeof view !== "object") {
+    throw new Error(directUnconfirmed(missionId, "回读没有返回 Mission 视图"));
+  }
+  if (view.coordinationMode !== "direct") {
+    throw new Error(directUnconfirmed(missionId,
+      `回读到的 coordinationMode 是 ${JSON.stringify(view.coordinationMode ?? null)}，旧服务可能忽略了它`));
+  }
+}
+
 export function registerMissionLaunchTools(server: McpServer, client: CoAgentHubClient) {
   const runs = new Map<string, Run>();
   server.registerTool("coagenthub_get_platform_status", {
@@ -63,17 +93,32 @@ export function registerMissionLaunchTools(server: McpServer, client: CoAgentHub
     catch (error) { return errorResult(error); }
   });
   server.registerTool("coagenthub_create_mission", {
-    description: "Create a Standard Mission from a frozen Contract, without launching agents. Delivery recipient defaults to the real bound Codex session.",
-    inputSchema: { projectId: z.string().min(1), missionId: z.string().min(1), contract: contractSchema, recipient: z.string().min(1).optional() },
-  }, async ({ projectId, missionId, contract, recipient }) => {
+    description: "Create a Mission from a frozen Contract, without launching agents. Delivery recipient defaults to the real bound Codex session. coordinationMode: 'hierarchical' (default, Standard three-layer) or 'direct' (this session is the controller; see coagenthub_direct_control). Omit it to keep the platform default.",
+    inputSchema: { projectId: z.string().min(1), missionId: z.string().min(1), contract: contractSchema, recipient: z.string().min(1).optional(),
+      coordinationMode: z.enum(["hierarchical", "direct"]).optional() },
+  }, async ({ projectId, missionId, contract, recipient, coordinationMode }) => {
+    let target: string | undefined;
     try {
-      const target = recipient ?? readBinding(pluginDataDir())?.recipient;
+      target = recipient ?? readBinding(pluginDataDir())?.recipient;
       if (!target) throw new Error("No bound Delivery recipient; supply the actual recipient explicitly");
-      return result(await client.request<Record<string, unknown>>("/missions", {
-        method: "POST", body: JSON.stringify({ projectId, missionId, contract,
-          origin: { clientType: "codex", conversationRef: target } }),
-      }));
     } catch (error) { return errorResult(error); }
+    let created: Record<string, unknown>;
+    try {
+      created = await client.request<Record<string, unknown>>("/missions", {
+        method: "POST", body: JSON.stringify({ projectId, missionId, contract,
+          origin: { clientType: "codex", conversationRef: target },
+          // 缺省不发这个键：平台缺省即 hierarchical，凭空补字段会掩盖 caller 的真实意图。
+          ...(coordinationMode === undefined ? {} : { coordinationMode }) }),
+      });
+    } catch (error) { return errorResult(error); }
+    // 缺省与 hierarchical 保持原有单次 POST：没有 direct 的承诺，就不多读一次。
+    if (coordinationMode !== "direct") return result(created);
+    // 旧服务可能忽略 coordinationMode 却照旧返回 201。只有权威回读说 direct，
+    // caller 才能当主控；否则它会对 hierarchical Mission 调 start，偷偷跑协调者。
+    try {
+      await confirmDirect(client, missionId);
+    } catch (error) { return errorResult(error); }
+    return result({ ...created, coordinationMode: "direct" as const });
   });
   server.registerTool("coagenthub_start_mission", {
     description: "Start an existing Mission through the single-writer hosted runner. Read current Contract, use explicit cwd/adapter, never auto-retry an uncertain launch. Candidate arguments are compatibility validation only; current platform role configuration determines dispatch. Check no other runner first; local tracking is not a distributed lock.",
