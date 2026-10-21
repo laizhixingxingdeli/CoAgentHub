@@ -314,12 +314,24 @@ describe('项目页的渲染函数喂真数据', () => {
 
   test('状态 chip 是第二根轴，终态词与阶段不撞，且优先级对', async () => {
     const { stateChip, stageChip } = await loaded;
-    // 暂停 > 停机 > 终态 > 进行中。顺序弄反会把"人叫停了"显示成"进行中"。
-    assert.match(stateChip({ paused: true, status: 'completed' }), /cancelled"[^>]*>已暂停/);
+    // 终态 > 暂停 > 停机 > 进行中。平台**不清理**历史字段：机器收尾写 waiting_l3 才进
+    // completed，cancel 在写 blocked 的同一刻留下 cancelled_by_user。先看暂停/停机
+    // 就会给一条已经走完的 Mission 配一个「已暂停」或橙色的「等待中」，于是人一直
+    // 等一件已经结束的事。顺序反过来又会把人的叫停显示成「进行中」，两头都不能错。
+    assert.match(stateChip({ paused: true, status: 'completed' }), /done"[^>]*>已结束/);
+    assert.match(stateChip({ status: 'completed', waitReason: 'waiting_l3' }), /done"[^>]*>已结束/);
+    assert.match(stateChip({ paused: true, status: 'blocked', waitReason: 'cancelled_by_user' }), /failed"[^>]*>已停止/);
+    // 非终态的暂停与停机仍然是这两根轴上的第一顺位——这是既有语义，不许被终态优先挤掉。
+    assert.match(stateChip({ paused: true, status: 'executing' }), /cancelled"[^>]*>已暂停/);
     assert.match(stateChip({ waitReason: 'project_busy' }), /unconfirmed"[^>]*>等待中/);
     assert.match(stateChip({ status: 'completed' }), /done"[^>]*>已结束/);
     assert.match(stateChip({ status: 'blocked' }), /failed"[^>]*>已停止/);
     assert.match(stateChip({ status: 'executing' }), /running"[^>]*>进行中/);
+    // 已结束的行不挂停机提示：那条提示是终态那一刻的旧值（waiting_l3），挂上去等于
+    // 让一条走完的任务带一个「等你处理」的悬停提示。已停止仍挂（cancel 的原因）。
+    assert.equal(stateChip({ status: 'completed', waitReason: 'waiting_l3' }).includes('等你处理'), false,
+      stateChip({ status: 'completed', waitReason: 'waiting_l3' }));
+    assert.ok(stateChip({ status: 'blocked', waitReason: 'cancelled_by_user' }).includes('被叫停了'));
     // 完成品：阶段说「已完成」/「已中止」，状态说「已结束」/「已停止」。同一个
     // 词会让「卡住了」和「做完了」在两列里长得一模一样。
     assert.notEqual(stateChip({ status: 'completed' }), stageChip('completed'));

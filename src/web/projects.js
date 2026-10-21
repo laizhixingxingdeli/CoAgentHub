@@ -67,17 +67,30 @@ export function stageChip(status) {
  * 「已完成」/「已中止」刻意不同词）；取色留在这一页。下面这几行的分支顺序
  * 与 stateLabel 一一对应——对不上就是「等待中」配了「进行中」的颜色，
  * 而那种错在屏幕上说不出哪里不对。
+ *
+ * 所以终态排在最前：平台不清理历史 wait 字段（cancel 在写 blocked 的同一刻
+ * 留下 waitReason，机器收尾也会留下 waiting_l3 才进 completed），先看
+ * waitReason 就会给一条走完的 Mission 配一个橙色「等待中」。
  */
 export function stateChip(row) {
   const r = row || {};
-  const tone = r.paused ? 'cancelled'
-    : r.waitReason ? 'unconfirmed'
-    : r.status === 'completed' ? 'done'
+  const tone = r.status === 'completed' ? 'done'
     : r.status === 'blocked' ? 'failed'
+    : r.paused ? 'cancelled'
+    : r.waitReason ? 'unconfirmed'
     : 'running';
   // 等待中的行，停机原因挂在 chip 上：只写「等待中」等于没说在等什么，
   // 人得去横着一个屏幕的原因栏里找。
-  return chip(tone, stateLabel(r), r.paused || r.waitReason ? reasonText(r) : '');
+  // completed 不挂：那行的原因是停机那一刻的旧值（本例是 waiting_l3），挂上去
+  // 就是让一条走完的任务带一个「等你处理」的悬停提示。
+  // blocked 仍挂：cancel 写 blocked 的同时就会留下 cancelled_by_user，那是
+  // 「为什么中止」而不是「正在等谁」，丢掉就是丢掉排障的唯一线索。
+  const hint = r.status === 'completed'
+    ? ''
+    : r.status === 'blocked'
+      ? reasonText(r)
+      : r.paused || r.waitReason ? reasonText(r) : '';
+  return chip(tone, stateLabel(r), hint);
 }
 
 // 任务详情页也要这个数（实时输出的行数、累计用量），所以是导出的。
