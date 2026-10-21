@@ -138,23 +138,33 @@ export const ROLE_CN = {
  */
 export const CONTROLLER_ROLE_LABEL = '主控';
 
-/** 主控 Attempt 在 attempt.started 里留下的发牌 profile（平台写死的那一份）。 */
+/** 主控 Attempt 在 attempt.started 里留下的发牌 profile（平台写死的那一份，见 direct-control 的 HOST_PROFILE）。 */
 const CONTROLLER_PROFILE_ID = 'external-controller';
-const CONTROLLER_ENDPOINT = 'host';
 
-/** attempt.started.data.profile 是否是外置主控那一份。只看明确写下的两个字段。 */
+/**
+ * attempt.started.data.profile 是不是外置主控那一份。
+ *
+ * **只认 profileId**。endpoint='host' 不算证据：那只说明「接入点在本机会话」这个
+ * 传输事实，普通候选完全可能用同一个 endpoint 名。把它当身份，一条真跑过模型的
+ * 协调者就会被画成「主控操作」，而屏幕上没有任何东西能戳穿它——模型栏也会跟着
+ * 变成「当前会话主控（平台不记录模型）」，等于替它认领了一个它没用过的身份。
+ */
 function isControllerProfile(profile) {
   const p = profile && typeof profile === 'object' ? profile : {};
-  return text(p.profileId) === CONTROLLER_PROFILE_ID || text(p.endpoint) === CONTROLLER_ENDPOINT;
+  return text(p.profileId) === CONTROLLER_PROFILE_ID;
 }
 
 /**
  * 这一组事件是不是「当前会话主控」代替协调者操作的那一跳。
  *
  * 只认本组自己写下的两种证据：
- *   1. 组内有 direct.controller_action（主控经控制面推进一步，平台自己记的）；
- *   2. 本组 attempt.started 的 profile 是外置主控（profileId=external-controller
- *      或 endpoint=host）。
+ *   1. 本组 attempt.started 的 profile 是外置主控（profileId=external-controller）；
+ *   2. 组内有**绑在本组这个 attemptId 上**的 direct.controller_action
+ *      （主控经控制面推进一步，平台自己记的）。
+ *
+ * 第 2 条要求同 attempt：一条没带 attemptId 的动作只能证明「有人主控过」，
+ * 不能证明「这一跳是主控做的」。拿它给整组盖章，等于替一条真跑过模型的协调者
+ * 认领身份——正文、模型栏会一起歪，而看的人没有任何办法发现。
  *
  * **不看 MissionView.coordinationMode**：那是整条 Mission 的属性，一条 direct
  * Mission 里也可能混着别的来源的事件；拿它给每一个 coord-* 组盖章，等于替历史
@@ -163,10 +173,22 @@ function isControllerProfile(profile) {
  */
 export function isControllerAttempt(events) {
   const rows = list(events);
+  const ids = new Set();
+  for (const e of rows) {
+    const id = text(e && e.attemptId);
+    if (id) ids.add(id);
+  }
+  // 组按 attemptId 切，正常只有一个；混进多个说明调用方喂了搅在一起的事件，
+  // 这时宁可不认，也不挑一个去给整组盖章。
+  const attemptId = ids.size === 1 ? [...ids][0] : '';
   for (const e of rows) {
     if (!e) continue;
-    if (text(e.kind) === 'direct.controller_action') return true;
-    if (text(e.kind) === 'attempt.started' && isControllerProfile(e.data && e.data.profile)) return true;
+    const kind = text(e.kind);
+    if (kind === 'attempt.started' && isControllerProfile(e.data && e.data.profile)) return true;
+    if (kind !== 'direct.controller_action') continue;
+    // 动作自己带的 attemptId 必须和本组那个 attempt 是同一个；整组都没有
+    // attemptId 时（历史事件）也只能靠这条动作自证，那就认它。
+    if (attemptId ? text(e.attemptId) === attemptId : text(e.attemptId) === '') return true;
   }
   return false;
 }

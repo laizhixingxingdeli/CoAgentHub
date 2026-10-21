@@ -927,6 +927,41 @@ describe('环节分组', () => {
     assert.ok(detailOf('coord-1').includes('当前会话主控'), detailOf('coord-1'));
     assert.equal(detailOf('coord-1').includes('L2 协调'), false, detailOf('coord-1'));
     assert.ok(detailOf('coord-3').includes('>L2 协调<'), detailOf('coord-3'));
+
+    // endpoint='host' 不是身份证据：那只说明接入点在本机，普通候选完全可能用同一个
+    // endpoint 名。单看它就把整组画成「主控」，这个真跑过模型的协调者会连模型栏
+    // 一起被换成「当前会话主控（平台不记录模型）」——屏幕上没有任何东西能戳穿它。
+    const hostOnly = [
+      { at: t(1), kind: 'attempt.started', attemptId: 'coord-4', data: { kind: 'coordinator', profile: { ...REAL_COORD_PROFILE, endpoint: 'host' } } },
+      { at: t(2), kind: 'plan.updated', attemptId: 'coord-4', data: { planRevision: 1 } },
+    ];
+    const hostHtml = stageListHtml(hostOnly, null, null, ctx);
+    const hostStage = hostHtml.split('<details class="stage ').find((p) => p.includes('data-attempt-id="coord-4"')) || '';
+    assert.ok(hostStage.includes('<span class="chip queued">L2 协调</span>'), hostStage);
+    assert.ok(hostStage.includes('gpt-6.1-sol · 思考 medium'), hostStage);
+    assert.equal(hostStage.includes('主控'), false, `只凭 endpoint=host 就认成了主控：${hostStage}`);
+
+    // direct.controller_action 也要绑在**本组那个 attempt** 上：一条落在别的
+    // attemptId 上的主控动作只能证明「有人主控过这条 Mission」，不能证明这一跳
+    // 是主控做的。拿它给整组盖章，就是替一条真跑过模型的协调者认领身份。
+    const { isControllerAttempt } = await import('../src/web/narrate.js');
+    assert.equal(isControllerAttempt(groups.find((g) => g.attemptId === 'coord-3').events), false);
+    assert.equal(
+      isControllerAttempt([
+        { kind: 'attempt.started', attemptId: 'coord-5', data: { kind: 'coordinator' } },
+        { kind: 'direct.controller_action', attemptId: 'coord-9', data: { actor: 'host-session', action: 'plan' } },
+      ]),
+      false,
+      '落在别的 attemptId 上的主控动作不算这一跳的证据',
+    );
+    assert.equal(
+      isControllerAttempt([
+        { kind: 'attempt.started', attemptId: 'coord-6', data: { kind: 'coordinator' } },
+        { kind: 'direct.controller_action', attemptId: 'coord-6', data: { actor: 'host-session', action: 'plan' } },
+      ]),
+      true,
+      '绑在本组 attempt 上的主控动作才算',
+    );
   });
 });
 
@@ -1063,12 +1098,13 @@ describe('用量卡', () => {
       owner: 'l3', autoResume: false, activeAgent: false, action: '看越界文件',
       reason: 'waiting_l3',
     };
-    const done = headerHtml({
+    const doneView = {
       status: 'completed', updatedAt: '2026-03-04T07:00:00.000Z',
       waitReason: 'waiting_l3', waitDetail: '验收标准未逐条达成', waitInfo: legacyWait,
       contract: { intent: 'x' }, usage: { total: 1 },
       finalReview: { verdict: 'merge', mergedInto: 'abc1234' },
-    }, [{ at: '2026-03-04T05:00:00.000Z' }], '2026-12-31T23:59:00.000Z');
+    };
+    const done = headerHtml(doneView, [{ at: '2026-03-04T05:00:00.000Z' }], '2026-12-31T23:59:00.000Z');
     assert.ok(done.includes('已完成') && done.includes('已结束'), done);
     assert.equal(done.includes('在等'), false, done);
     assert.equal(done.includes('停机原因'), false, '终态不该再提示在等什么');
@@ -1076,6 +1112,28 @@ describe('用量卡', () => {
     assert.equal(done.includes('看越界文件'), false, done);
     // 终态自己的信息仍要在：阶段、状态、结束按钮。
     assert.ok(done.includes('任务已结束') && done.includes('data-task-cancel') === false);
+
+    // 不说「在等」不等于把结论一起吞掉：同一条终态视图上，终审结论与合入的
+    // SHA 仍要在环节里看得见——它是这条任务「最后落到哪」的唯一证据。
+    const { stageListHtml } = await loaded;
+    const stages = stageListHtml(
+      [{ at: '2026-03-04T06:00:00.000Z', kind: 'final_review.merged', data: { mergedInto: 'abc1234' } }],
+      null, null, doneView,
+    );
+    assert.ok(stages.includes('终审：放行并落地'), stages);
+    assert.ok(stages.includes('合入 abc1234'), stages);
+
+    // blocked 同样是终态：同一刻留下的 cancelled_by_user 是「为什么停」，
+    // 不是「正在等谁」，所以只出现在结论句里，不再单开「停机原因 / 下一步」。
+    const stopped = headerHtml({
+      status: 'blocked', paused: true, updatedAt: '2026-03-04T07:00:00.000Z',
+      waitReason: 'cancelled_by_user', waitInfo: legacyWait,
+      contract: { intent: 'x' }, usage: {},
+    }, [{ at: '2026-03-04T05:00:00.000Z' }], '2026-12-31T23:59:00.000Z');
+    assert.ok(stopped.includes('已停止'), stopped);
+    assert.equal(stopped.includes('data-wait-info'), false, '终态不该再给下一步');
+    assert.equal(stopped.includes('停机原因'), false, stopped);
+    assert.ok(stopped.includes('被叫停了'), '为什么停下仍然要说，不能连结论一起吞掉');
 
     // 非终态的真等待：原因、处理方、会不会自动恢复、下一步一个不少。
     const waiting = headerHtml({
