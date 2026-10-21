@@ -255,10 +255,10 @@ pre.term { max-height:280px; }
    没有空格的模型 id 会把整行撑出横向滚动条。 */
 .priority-row .priority-main{flex:1 1 260px;min-width:0;display:grid;gap:6px}
 .priority-row .priority-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
-.priority-row .priority-rank{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:6px;background:var(--accent-faint);color:#2563eb;font-size:12px;font-weight:700}
+.priority-row .priority-rank{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:6px;background:var(--accent-faint);color:var(--accent);font-size:12px;font-weight:700}
 .priority-row .priority-model{min-width:0;overflow-wrap:anywhere;font-size:14px}
 .priority-row .priority-state{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--muted);color:var(--muted-foreground)}
-.priority-row .priority-state[data-priority-state="enabled"]{background:color-mix(in oklch,var(--card) 80%,var(--status-done));color:#127a45}
+.priority-row .priority-state[data-priority-state="enabled"]{background:color-mix(in oklch,var(--card) 80%,var(--status-done));color:var(--status-done)}
 .priority-row .priority-state[data-priority-state="disabled"]{background:color-mix(in oklch,var(--card) 80%,var(--status-cancelled))}
 .priority-row .priority-facts{display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--muted-foreground);font-size:12px;overflow-wrap:anywhere}
 .priority-row .priority-priority{color:var(--muted-foreground)}

@@ -345,11 +345,17 @@ export const PROVIDER_CHANNEL = {
  *
  * 认不出来的 provider 是新接进来的运行时（换一个运行时 facts 里放什么由它定），
  * 替它编一个渠道，等于把「还没人核对过」显示成「核对过是国内/国际」。
+ *
+ * 查表**只认自有属性**（Object.hasOwn）而不是 `PROVIDER_CHANNEL[raw]`：
+ * provider 是外部输入，`constructor` / `toString` / `__proto__` 这类原型键在
+ * 原型链上确实「查得到」，取回来是函数或对象。它会被拼进 `${raw} · ${channel}`，
+ * 界面上就是「constructor · function Object() { [native code] }」，
+ * 而这条根本不是表里登记过的渠道——等于替一个没核对过的值宣称它有渠道。
  */
 export function providerText(provider) {
   const raw = text(provider);
   if (!raw) return '';
-  const channel = PROVIDER_CHANNEL[raw];
+  const channel = Object.hasOwn(PROVIDER_CHANNEL, raw) ? PROVIDER_CHANNEL[raw] : '';
   return channel ? `${raw} · ${channel}` : raw;
 }
 

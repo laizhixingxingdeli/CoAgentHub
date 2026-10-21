@@ -154,6 +154,9 @@ test('模型顺序保存真实 HTTP CAS，保留配置事实与停用，旧版�
       { profileId: 'qcn', endpoint: 'local', facts: [{ key: 'provider', value: 'qoder-cn' }, { key: 'model', value: 'm2' }] },
       { profileId: 'qgl', endpoint: 'local', facts: [{ key: 'provider', value: 'qoder' }, { key: 'model', value: 'm2' }] },
       { profileId: 'unknown', endpoint: 'local', facts: [{ key: 'provider', value: 'some-new-runtime' }, { key: 'model', value: 'm3' }] },
+      { profileId: 'ctor', endpoint: 'local', facts: [{ key: 'provider', value: 'constructor' }, { key: 'model', value: 'm4' }] },
+      { profileId: 'tostr', endpoint: 'local', facts: [{ key: 'provider', value: 'toString' }, { key: 'model', value: 'm4' }] },
+      { profileId: 'proto', endpoint: 'local', facts: [{ key: 'provider', value: '__proto__' }, { key: 'model', value: 'm4' }] },
     ] }, busy: false });
     assert.match(channels, /codebuddy · CodeBuddy 国内/, channels);
     assert.match(channels, /codebuddy-intl · CodeBuddy 国际/, channels);
@@ -161,6 +164,14 @@ test('模型顺序保存真实 HTTP CAS，保留配置事实与停用，旧版�
     assert.match(channels, /qoder · Qoder 国际/, channels);
     assert.match(channels, /data-candidate-provider="some-new-runtime">some-new-runtime</, '认不出的 provider 原样回显、不补渠道');
     assert.equal(/some-new-runtime · /.test(channels), false, '认不出的 provider 不该被编一个渠道');
+    // provider 是外部输入。原型链上那几个键（constructor / toString / __proto__）
+    // 用 PROVIDER_CHANNEL[raw] 查是「查得到」的，取回来是函数或对象，界面上就成了
+    // 「constructor · function Object() { [native code] }」——替一个没核对过的值
+    // 宣称它有渠道。所以查询只认自有属性，这几个键必须原样回显。
+    for (const key of ['constructor', 'toString', '__proto__']) {
+      assert.ok(channels.includes(`data-candidate-provider="${key}">${key}</span>`), `原型键 ${key} 应原样回显：` + channels);
+      assert.equal(channels.includes(`${key} · `), false, `原型键 ${key} 不该被当成渠道：` + channels);
+    }
     // 名称仍是外部输入：facts 与 profileId 里带尖括号不能变成真标签。
     const quoted = priorityHtml({ role: 'executor', saved: {}, drafts: { executor: [{ profileId: '<b>', endpoint: 'local', facts: [{ key: 'provider', value: '<img>' }, { key: 'model', value: '<script>' }] }] }, busy: false });
     assert.ok(!quoted.includes('<img>'), quoted);
