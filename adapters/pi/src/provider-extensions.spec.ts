@@ -20,7 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -30,7 +30,7 @@ import {
 	resolveProviderExtensionPaths,
 } from "./provider-extensions.js";
 import { EXCLUDED_EXPANSION_TOOLS } from "./roles.js";
-import { WORKER_EXCLUDED_TOOLS } from "./pi-runtime-shared.mjs";
+import { findRepoPiInstall, WORKER_EXCLUDED_TOOLS } from "./pi-runtime-shared.mjs";
 
 const SECRET = "SECRET_BODY_SHOULD_NOT_LEAK_9f3a";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -239,6 +239,84 @@ test("同一隔离配置：SDK 与 models CLI 目录一致，显式错误不吞�
 		assert.notEqual(unregistered.code, 0);
 		assert.match(`${unregistered.stdout}\n${unregistered.stderr}`, /pi-runtime 目标 provider 未注册：codebuddy/);
 		assert.equal(`${unregistered.stdout}\n${unregistered.stderr}`.includes(SECRET), false);
+
+		const emptyPkg = join(root, "empty-provider-pkg");
+		writePackage(emptyPkg, "export default function () {}\n");
+		const emptyConfig = writeConfig(root, {
+			version: 1,
+			extensions: { codebuddy: { packageDir: emptyPkg } },
+		});
+		const shimUnregistered = await runNode(
+			[join(adaptersPi, "bin", "pi-cli-shim.mjs"), "--list-models", "--offline"],
+			{ ...env, COAGENT_PI_RUNTIME_CONFIG: emptyConfig, PI_CODING_AGENT_DIR: agentDir },
+			cwd,
+		);
+		const shimUnregisteredOut = `${shimUnregistered.stdout}\n${shimUnregistered.stderr}`;
+		assert.notEqual(shimUnregistered.code, 0);
+		assert.match(shimUnregisteredOut, /pi-runtime 目标 provider 未注册：codebuddy/);
+		assert.equal(/^\s*provider\s+model\s+context/m.test(shimUnregistered.stdout), false);
+		assert.equal(shimUnregisteredOut.includes(SECRET), false);
+
+		const brokenPkg = join(root, "broken-provider-pkg");
+		writePackage(brokenPkg, "throw new Error(\"catalog-ext-load-broken\");\n");
+		const brokenConfig = writeConfig(root, {
+			version: 1,
+			extensions: { codebuddy: { packageDir: brokenPkg } },
+		});
+		const shimBroken = await runNode(
+			[join(adaptersPi, "bin", "pi-cli-shim.mjs"), "--list-models", "--offline"],
+			{ ...env, COAGENT_PI_RUNTIME_CONFIG: brokenConfig, PI_CODING_AGENT_DIR: agentDir },
+			cwd,
+		);
+		const shimBrokenOut = `${shimBroken.stdout}\n${shimBroken.stderr}`;
+		assert.notEqual(shimBroken.code, 0);
+		assert.match(shimBrokenOut, /pi-runtime 扩展加载失败/);
+		assert.equal(/^\s*provider\s+model\s+context/m.test(shimBroken.stdout), false);
+		assert.equal(shimBrokenOut.includes(SECRET), false);
+
+		const shadow = join(root, "install-shadow");
+		const ancestorPkg = join(shadow, "node_modules", "@earendil-works", "pi-coding-agent");
+		const ancestorCli = join(ancestorPkg, "dist", "bundle", "cli.js");
+		mkdirSync(dirname(ancestorCli), { recursive: true });
+		writeFileSync(ancestorCli, "");
+		writeFileSync(
+			join(ancestorPkg, "package.json"),
+			JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				version: "1.3.0",
+				bin: { pi: "dist/bundle/cli.js" },
+			}),
+		);
+		const nearPkg = join(shadow, "mission", "node_modules", "@earendil-works", "pi-coding-agent");
+		mkdirSync(nearPkg, { recursive: true });
+		writeFileSync(
+			join(nearPkg, "package.json"),
+			JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				version: "0.87.1",
+				bin: { pi: "dist/bundle/cli.js" },
+			}),
+		);
+		const nearShim = join(shadow, "mission", "bin", "pi-cli-shim.mjs");
+		mkdirSync(dirname(nearShim), { recursive: true });
+		writeFileSync(nearShim, "");
+		assert.throws(
+			() => findRepoPiInstall(pathToFileURL(nearShim).href),
+			(error) => {
+				const message = String(error);
+				assert.match(message, /0\.87\.1/);
+				assert.match(message, /不越过最近安装/);
+				assert.equal(message.includes(SECRET), false);
+				return true;
+			},
+		);
+		const bareShim = join(shadow, "bare-mission", "bin", "pi-cli-shim.mjs");
+		mkdirSync(dirname(bareShim), { recursive: true });
+		writeFileSync(bareShim, "");
+		const ancestor = findRepoPiInstall(pathToFileURL(bareShim).href);
+		assert.equal(ancestor.version, "1.3.0");
+		assert.match(ancestor.cliPath, /install-shadow/);
+		assert.doesNotMatch(ancestor.pkgPath, /mission/);
 	} finally {
 		if (previousConfig === undefined) delete process.env.COAGENT_PI_RUNTIME_CONFIG;
 		else process.env.COAGENT_PI_RUNTIME_CONFIG = previousConfig;
@@ -349,38 +427,53 @@ child.on("error", (error) => { console.error(error.message); process.exit(1); })
 		PI_WORKER_CLOSURE_FILE: closureFile,
 		PI_WORKER_SPAWN_RECORD: spawnRecord,
 	};
+	let child: ReturnType<typeof spawn> | undefined;
+	let poll: ReturnType<typeof setInterval> | undefined;
+	let exitTimer: ReturnType<typeof setTimeout> | undefined;
+	let limitTimer: ReturnType<typeof setTimeout> | undefined;
+	const clearWaiters = () => {
+		if (poll) clearInterval(poll);
+		if (exitTimer) clearTimeout(exitTimer);
+		if (limitTimer) clearTimeout(limitTimer);
+		poll = undefined;
+		exitTimer = undefined;
+		limitTimer = undefined;
+	};
 	try {
-		const child = spawn(process.execPath, [join(link, "bin", "pi-worker-mcp.mjs"), "--server", stub], {
+		child = spawn(process.execPath, [join(link, "bin", "pi-worker-mcp.mjs"), "--server", stub], {
 			cwd,
 			env,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
+			// Unix 上只有新进程组才能一次杀掉 launcher/stub/shim/CLI。Windows 用 taskkill /T，不需要 detached。
+			detached: process.platform !== "win32",
 		});
 		let stderr = "";
 		child.stderr.on("data", (chunk) => {
 			stderr += chunk.toString("utf8");
 		});
+		child.stderr.on("error", () => {});
 		child.stdout.on("data", () => {});
+		child.stdout.on("error", () => {});
+		child.on("error", (error) => {
+			stderr += error.message;
+		});
 		const found = await new Promise<boolean>((resolveFound) => {
 			let settled = false;
 			const finish = (value: boolean) => {
 				if (settled) return;
 				settled = true;
-				clearInterval(timer);
-				clearTimeout(limit);
+				clearWaiters();
 				resolveFound(value);
 			};
-			const timer = setInterval(() => {
+			poll = setInterval(() => {
 				if (existsSync(closureFile)) finish(true);
 			}, 200);
 			child.on("exit", () => {
-				setTimeout(() => finish(existsSync(closureFile)), 300);
+				exitTimer = setTimeout(() => finish(existsSync(closureFile)), 300);
 			});
-			const limit = setTimeout(() => finish(existsSync(closureFile)), 70_000);
+			limitTimer = setTimeout(() => finish(existsSync(closureFile)), 70_000);
 		});
-		if (child.pid && child.exitCode === null) {
-			spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], { windowsHide: true, stdio: "ignore" });
-		}
 		assert.equal(found, true, stderr);
 		const closure = JSON.parse(readFileSync(closureFile, "utf8")) as {
 			active: string[];
@@ -417,6 +510,8 @@ child.on("error", (error) => { console.error(error.message); process.exit(1); })
 		const pkgJson = JSON.parse(readFileSync(join(dirname(cliPath), "..", "..", "package.json"), "utf8")) as { version?: string };
 		assert.equal(pkgJson.version, "1.3.0");
 	} finally {
+		clearWaiters();
+		await stopProcessTree(child);
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
 		try {
 			if (existsSync(link)) rmdirSync(link);
@@ -426,3 +521,54 @@ child.on("error", (error) => { console.error(error.message); process.exit(1); })
 		}
 	}
 });
+
+/** 只清进程和计时器。失败不能抛出去，否则会盖住上面的断言。 */
+function stopProcessTree(child: ReturnType<typeof spawn> | undefined): Promise<void> {
+	return new Promise((resolve) => {
+		if (!child?.pid || child.exitCode !== null) {
+			resolve();
+			return;
+		}
+		let settled = false;
+		const done = () => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(limit);
+			resolve();
+		};
+		const limit = setTimeout(() => {
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// 进程已经没了。
+			}
+			done();
+		}, 8_000);
+		child.once("exit", done);
+		if (process.platform === "win32") {
+			const killer = spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
+				windowsHide: true,
+				stdio: "ignore",
+			});
+			killer.once("error", () => {
+				try {
+					child.kill();
+				} catch {
+					// 进程已经没了。
+				}
+				done();
+			});
+			killer.once("exit", () => {});
+			return;
+		}
+		try {
+			process.kill(-child.pid, "SIGKILL");
+		} catch {
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				done();
+			}
+		}
+	});
+}

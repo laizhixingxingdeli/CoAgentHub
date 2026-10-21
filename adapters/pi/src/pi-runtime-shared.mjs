@@ -5,10 +5,10 @@
  * 旧的 getAgentDir()/npm/node_modules/pi-codebuddy-oauth 已过时；再回落到它或 global npm，
  * 会把「没装上 1.3.0 / 没声明审核包」伪装成空目录成功。
  */
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const PI_REQUIRED_VERSION = "1.3.0";
@@ -360,6 +360,9 @@ export function catalogRegistrationDiagnostic(registeredIds, env = process.env) 
 /**
  * 从 import.meta.url 的 realpath 向上找仓库安装。先 realpath：Windows junction 别名的
  * import.meta.url 仍是别名，词法向上找不到祖先 node_modules，还会误落到 global。
+ *
+ * 最近一层已经有这份包时必须当场接受或拒绝。跳过 0.87 / 损坏的 package.json 去拿祖先 1.3，
+ * 会和 Node 自己的模块解析分叉：SDK 命中近处错版，薄启动器却拿到祖先。某一层根本没有这份安装时才继续向上。
  */
 export function findRepoPiInstall(fromUrl) {
 	const startFile = fromUrl.startsWith("file:") ? fileURLToPath(fromUrl) : fromUrl;
@@ -372,22 +375,15 @@ export function findRepoPiInstall(fromUrl) {
 	const seen = new Set();
 	while (!seen.has(dir)) {
 		seen.add(dir);
-		const pkgPath = join(dir, "node_modules", PI_PACKAGE_NAME, "package.json");
-		if (existsSync(pkgPath)) {
-			let pkg;
-			try {
-				pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-			} catch {
-				pkg = undefined;
-			}
-			if (pkg?.name === PI_PACKAGE_NAME && pkg.version === PI_REQUIRED_VERSION) {
-				const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.pi;
-				if (!bin) break;
-				const cliPath = resolve(dirname(pkgPath), bin);
-				if (!existsSync(cliPath)) break;
-				return { pkgPath: realpathSync(pkgPath), cliPath: realpathSync(cliPath), version: pkg.version };
-			}
+		const pkgDir = join(dir, "node_modules", PI_PACKAGE_NAME);
+		let found = false;
+		try {
+			lstatSync(pkgDir);
+			found = true;
+		} catch {
+			found = false;
 		}
+		if (found) return acceptNearestInstall(pkgDir);
 		const parent = dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
@@ -395,6 +391,107 @@ export function findRepoPiInstall(fromUrl) {
 	throw new PiRuntimeConfigError(
 		`pi-runtime 找不到仓库内 ${PI_PACKAGE_NAME}@${PI_REQUIRED_VERSION}（从 ${startFile} 向上，不回落 global）`,
 	);
+}
+
+function rejectNearestInstall(pkgPath, detail) {
+	throw new PiRuntimeConfigError(
+		`pi-runtime 最近安装拒绝：${pkgPath} ${detail}（期望 ${PI_PACKAGE_NAME}@${PI_REQUIRED_VERSION}，不越过最近安装找祖先）`,
+	);
+}
+
+function acceptNearestInstall(pkgDir) {
+	const pkgPath = join(pkgDir, "package.json");
+	if (!existsSync(pkgPath)) rejectNearestInstall(pkgDir, "损坏（缺少 package.json）");
+	let pkg;
+	try {
+		pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+	} catch {
+		rejectNearestInstall(pkgPath, "损坏（package.json 无法读取）");
+	}
+	if (!pkg || pkg.name !== PI_PACKAGE_NAME || typeof pkg.version !== "string") {
+		rejectNearestInstall(pkgPath, "损坏（包名或版本缺失）");
+	}
+	if (pkg.version !== PI_REQUIRED_VERSION) {
+		rejectNearestInstall(pkgPath, `版本 ${pkg.version}`);
+	}
+	const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.pi;
+	if (!bin) rejectNearestInstall(pkgPath, "损坏（bin 缺失）");
+	const cliPath = resolve(dirname(pkgPath), bin);
+	if (!existsSync(cliPath)) rejectNearestInstall(pkgPath, "损坏（CLI 入口缺失）");
+	return { pkgPath: realpathSync(pkgPath), cliPath: realpathSync(cliPath), version: pkg.version };
+}
+
+const CATALOG_CHECK_DISABLED_BUILTINS = ["codemode", "llama.cpp", "mcp", "tool-search"];
+
+/**
+ * Pi CLI 的 --list-models 在扩展加载失败时仍会退出 0 并打印 native 目录。
+ * 空扩展能加载但不 registerProvider 时连错误都没有。这里用和 SDK models 相同的登记诊断，
+ * 在薄启动器把真正 CLI 拉起来之前拒绝；否则 shim 会把「没配上」交成一份成功清单。
+ * 从已接受的安装路径导入 SDK，不用裸包名：裸包名会按 Node 解析命中更近的错版。
+ */
+export async function assertCliCatalogRegistered(install, options) {
+	const loaded = loadPiRuntimeConfig();
+	if (!loaded.ok) throw loaded.error;
+	if (loaded.missing || !loaded.config) return;
+	const extensionPaths = resolveCatalogExtensionPaths();
+	const expected = expectedProviderIds(loaded.config);
+	if (expected.length === 0 && extensionPaths.length === 0) return;
+	const piEntry = pathToFileURL(join(dirname(install.pkgPath), "dist", "index.js")).href;
+	let pi;
+	try {
+		pi = await import(piEntry);
+	} catch {
+		rejectNearestInstall(install.pkgPath, "损坏（SDK 入口缺失）");
+	}
+	const agentDir = options.agentDir || pi.getAgentDir();
+	const runtime = await pi.ModelRuntime.create({
+		refreshOnCreate: false,
+		modelsPath: null,
+		credentials: {
+			async read() {
+				return undefined;
+			},
+			async list() {
+				return [];
+			},
+			async modify(_providerId, fn) {
+				return fn(undefined);
+			},
+			async delete() {},
+		},
+	});
+	if (extensionPaths.length > 0) {
+		const loader = new pi.DefaultResourceLoader({
+			cwd: options.cwd,
+			agentDir,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noContextFiles: true,
+			disabledBuiltinExtensions: CATALOG_CHECK_DISABLED_BUILTINS,
+			additionalExtensionPaths: extensionPaths,
+		});
+		try {
+			await loader.reload();
+		} catch {
+			throw new Error(`pi-runtime 扩展加载失败：${extensionPaths.join(", ")}`);
+		}
+		const errors = loader.getExtensions().errors ?? [];
+		if (errors.length > 0) {
+			throw new Error(`pi-runtime 扩展加载失败：${errors.map((error) => error.path).join(", ")}`);
+		}
+		const pending = loader.getExtensions().runtime?.pendingProviderRegistrations ?? [];
+		const names = pending.map((entry) => entry.name);
+		try {
+			for (const { name, config } of pending) runtime.registerProvider(name, config);
+		} catch {
+			throw new Error(`pi-runtime 扩展注册失败：${names.join(",") || "unknown"}`);
+		}
+		pending.length = 0;
+		await runtime.refresh({ allowNetwork: false });
+	}
+	const diagnostic = catalogRegistrationDiagnostic([...runtime.getRegisteredProviderIds()]);
+	if (diagnostic) throw new Error(diagnostic);
 }
 
 export function workerClosureArgs(extensionPaths) {

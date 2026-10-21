@@ -36,7 +36,7 @@
 
 启动器只做三件事：
 
-1. 从自己的 `import.meta.url` 做 `realpath` 后向上查找 `node_modules/@earendil-works/pi-coding-agent@1.3.0`。找不到就失败，不回落 global npm，也不接受祖先树上的其它版本。
+1. 从自己的 `import.meta.url` 做 `realpath` 后向上查找 `node_modules/@earendil-works/pi-coding-agent@1.3.0`。找不到就失败，不回落 global npm，也不接受其它版本。最近一层已经有这份包、但版本不对或 `package.json` / CLI 入口损坏时立即失败，不再继续向上找祖先里的 1.3.0。某一层根本没有这份安装时才继续向上，因此 Mission 根未安装时仍可用祖先集成的 1.3.0。
 2. 把 `PI_CLI_JS` 设为同目录的 `pi-cli-shim.mjs`（同样按 `import.meta.url`，所以 junction 别名启动时 server 拿到的也是别名路径）。
 3. 把 `PI_WORKER_DEFAULT_MODEL` / `PI_WORKER_FALLBACK_MODEL` 设为声明里的 worker 模型；声明省略时用上面的 Flash 默认/备用。
 
@@ -76,5 +76,8 @@ npm install --workspace adapters/pi @earendil-works/pi-coding-agent@1.3.0 --save
 1. 按模板写入 `~/.coagent/pi-runtime.json`，只填审核包的公开绝对路径和 worker 两行 Flash。不要复制 `auth.json`、`models.json`、`settings.json` 或账户池。
 2. 确认启动器 stderr 出现 `pi-runtime shim cli=... version=1.3.0`，且 `cli=` 不是 global npm。
 3. 部署一条入口：`node adapters/pi/bin/pi-worker-mcp.mjs --server <现有 pi-worker-mcp/server.mjs>`。
-4. 用同一个显式 CodeBuddy Flash（`codebuddy-intl/deepseek-v4.1-flash` 或当时声明的默认）各做一次真实调用：一次走平台 SDK（startRun / 平台资源池页所用的 models 命令），一次走独立 MCP `delegate_to_pi`。两次都不是本票已通过的证据。
+4. 真实验证必须同时看到真实 prompt 成功和独立 MCP 的实际响应，缺一不可。用同一个显式 CodeBuddy Flash（`codebuddy-intl/deepseek-v4.1-flash`，或当时声明里的默认模型）各做一次：
+   - 平台 SDK：`startRun` 发出真实 prompt，并得到模型的实际回复。资源池页的 `models` 命令只证明目录里有这个模型，是目录证据，不是真实验证，不能代替 prompt。
+   - 独立 MCP：经薄启动器调用 `delegate_to_pi`，并收到 MCP 的实际响应。
+   只跑了 models、只看到目录、或只拼了启动命令，都不能写成真实验证通过。未做这两次真实调用就不得说通过。这两次也不是本票已通过的证据。
 5. 若要停用：按上一节移走声明并停用薄启动器，不必改外部 server 源码。
