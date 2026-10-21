@@ -333,17 +333,64 @@ function missionCursors(progress, missionId) {
 let tempCounter = 0;
 
 /**
- * 原子写：同目录临时文件写完再 rename。
+ * 杀软 / 索引器会短暂占住刚写完的临时文件或目标，rname 抛这三个码。
+ * 只认这三个：别的错误（盘满、路径不对）重试也没用，早抛才不会把同步拖满两秒。
+ */
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+/** 最多 10 次（含首次）；退避总等待封顶 2s。同步进度不是常驻服务，但也不能为一次占文件无限睡。 */
+const RENAME_MAX_ATTEMPTS = 10;
+const RENAME_MAX_WAIT_MS = 2_000;
+
+/** 异步等待：进度写在 async 路径上，不能用 Atomics.wait 卡住事件循环。 */
+function sleepMs(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+/**
+ * 同一个临时文件重试原地 rename。耗尽或不可重试时抛出原错误，从不删目标。
+ *
+ * 为什么不能失败后 unlink 目标再 rename：那次窗口里第二次 rename 再失败，唯一的去重依据就没了。
+ * 下一轮要么停住，要么把整段历史再发一遍。
+ */
+async function renameReplacing(tmp, file, renameFile, retryWait) {
+  let wait = 5;
+  let waited = 0;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await renameFile(tmp, file);
+      return;
+    } catch (error) {
+      const code = typeof error?.code === 'string' ? error.code : '';
+      const transient = TRANSIENT_RENAME_CODES.has(code);
+      if (!transient || attempt >= RENAME_MAX_ATTEMPTS || waited + wait > RENAME_MAX_WAIT_MS) {
+        throw error;
+      }
+      await retryWait(wait);
+      waited += wait;
+      wait = Math.min(wait * 2, 200);
+    }
+  }
+}
+
+/**
+ * 原子写：同目录唯一临时文件写完再原地 rename。
  *
  * 为什么必须原子：进度文件是唯一的去重依据，写到一半崩掉会留下一个既不能读、也
  * 不能当空的半截 JSON；下一轮读它会判成 ok:false，同步就永久停在那里。
- * Windows 上 rename 到已存在的目标会失败，所以失败后先删目标再 rename 一次——
- * 那次窗口很短，比「直接写目标」的风险小得多。
+ * 替换失败只清本次临时文件：清不掉也不能盖住原错误，更不能顺手删掉旧目标。
+ *
+ * `io.renameFile` / `io.retryWait` 默认是真实的 fs.rename 与 setTimeout，只给测试注入。
+ * 不做 CLI 开关：开关会跟着进真实同步，而这里要挡的是替换约定本身。
  *
  * 返回写进去的字节数：调用方把它报出来，让「进度在变大」这件事看得见（捕获的
- * 历史事实不能随便删，所以只能靠观测提醒）。
+ * 历史事实不能随便删，所以只能靠观测提醒）。不做 fsync：这里不承诺断电级持久化。
  */
-async function writeProgress(file, progress, now) {
+async function writeProgress(file, progress, now, io) {
+  const renameFile = typeof io?.renameFile === 'function' ? io.renameFile : rename;
+  const retryWait = typeof io?.retryWait === 'function' ? io.retryWait : sleepMs;
   const dir = dirname(file);
   await mkdir(dir, { recursive: true });
   const stamp = typeof now === 'function' ? now() : Date.now();
@@ -352,23 +399,14 @@ async function writeProgress(file, progress, now) {
   const text = `${JSON.stringify(progress)}\n`;
   await writeFile(tmp, text, 'utf8');
   try {
-    await rename(tmp, file);
-  } catch {
+    await renameReplacing(tmp, file, renameFile, retryWait);
+  } catch (error) {
     try {
-      await unlink(file);
+      await unlink(tmp);
     } catch {
-      // 目标本来就不在：下面的 rename 才是真正的那一次。
+      // 清不掉本次临时文件不该盖住真正的写失败，也不去动旧目标。
     }
-    try {
-      await rename(tmp, file);
-    } catch (error) {
-      try {
-        await unlink(tmp);
-      } catch {
-        // 清不掉临时文件不该盖住真正的写失败。
-      }
-      throw error;
-    }
+    throw error;
   }
   return Buffer.byteLength(text, 'utf8');
 }
@@ -453,7 +491,7 @@ async function readReviewHistory({ missionId, workItemId, get, cursor }) {
  * 顺序是刻意的：读事实 -> 投影 -> 先把捕获写盘 -> 再发送 -> 最后写已确认。
  * 任何一步失败都停在原地，绝不把「没发出去」记成「发过了」。
  */
-async function syncMission({ missionId, get, progressPath, config, transport, now, signal }) {
+async function syncMission({ missionId, get, progressPath, config, transport, now, signal, io }) {
   const result = {
     ok: true,
     sent: 0,
@@ -599,7 +637,7 @@ async function syncMission({ missionId, get, progressPath, config, transport, no
 
   // 先落捕获：断连时这一步已经完成，下一轮还能从进度里投影出同样的记录。
   try {
-    result.progressBytes = await writeProgress(progressPath, snapshot(), now);
+    result.progressBytes = await writeProgress(progressPath, snapshot(), now, io);
   } catch {
     return { ...result, ok: false, progressWriteFailed: true };
   }
@@ -629,7 +667,7 @@ async function syncMission({ missionId, get, progressPath, config, transport, no
   for (const id of pending) acked.add(id);
   trimAcked();
   try {
-    result.progressBytes = await writeProgress(progressPath, snapshot(), now);
+    result.progressBytes = await writeProgress(progressPath, snapshot(), now, io);
   } catch {
     // 已经发出去了但记不下来：下一轮会重发同样的稳定 id，Langfuse 按 id 去重。
     // 比「假装记下来」诚实，也比丢掉已确认的事实安全。
@@ -655,7 +693,11 @@ export async function syncQualityOnce({
   transport,
   now,
   signal,
+  renameFile,
+  retryWait,
 } = {}) {
+  // 只往下传函数：缺省就让 writeProgress 用真实 rename / setTimeout，不在这里造假实现。
+  const io = { renameFile, retryWait };
   const summary = {
     ok: true,
     missions: [],
@@ -736,7 +778,7 @@ export async function syncQualityOnce({
 
   let advancedCount = 0;
   for (const id of missionIds) {
-    const result = await syncMission({ missionId: id, get, progressPath, config, transport: active, now, signal });
+    const result = await syncMission({ missionId: id, get, progressPath, config, transport: active, now, signal, io });
     summary.missions.push(id);
     summary.sent += result.sent;
     summary.skipped += result.skipped;
@@ -746,6 +788,7 @@ export async function syncQualityOnce({
     summary.capturedReviews += result.capturedReviews ?? 0;
     if (result.partial === true) summary.partial = true;
     if (result.ok !== true) summary.ok = false;
+    if (result.progressWriteFailed === true) summary.progressWriteFailed = true;
     // 轮转游标只按**连续成功前缀**推进：只有这一个 Mission 真正读全、发全、没有被中断时
     // 才把游标挪到它身上。任何失败、未确认、partial 或中断都立刻停住本批，游标留在
     // 最后一个成功的位置——否则失败那一批会被当成「已处理」跳过，下一轮直接从它后面
@@ -759,6 +802,7 @@ export async function syncQualityOnce({
         missionId: id,
         wrapped: rotation.wrapped,
         now,
+        io,
       });
       // 游标没写成也是失败：静默当成功会让下一轮从旧位置重头再读一遍。而且必须当场
       // 停住本批——继续同步后面的 Mission 只会让盘上的游标离实际读过的位置更远，
@@ -804,14 +848,14 @@ function rotationStart(sortedIds, lastMissionId) {
  * 用读-改-写的方式保留 acked/capturedReviews/reviewCursors。读不出来时**不写**：
  * 拿空进度覆盖会把已捕获的历史和已确认的 id 一起抹掉，那是不可恢复的。
  */
-async function advanceProjectCursor({ progressPath, projectId, missionId, wrapped, now }) {
+async function advanceProjectCursor({ progressPath, projectId, missionId, wrapped, now, io }) {
   const read = await readProgress(progressPath);
   if (!read.ok) return false;
   const cursor = projectCursor(read.progress, projectId);
   cursor.lastMissionId = missionId;
   if (wrapped === true) cursor.wrapped = true;
   try {
-    await writeProgress(progressPath, progressSnapshot(read.progress), now);
+    await writeProgress(progressPath, progressSnapshot(read.progress), now, io);
     return true;
   } catch {
     return false;
@@ -862,6 +906,8 @@ export async function runBounded({
   fetchImpl,
   transport,
   now,
+  renameFile,
+  retryWait,
 } = {}) {
   if (!Number.isInteger(iterations) || iterations < 1) throw new TypeError('iterations 必须是 >=1 的整数');
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new TypeError('intervalMs 必须是正数');
@@ -881,6 +927,8 @@ export async function runBounded({
         transport: active,
         now,
         signal,
+        renameFile,
+        retryWait,
       });
       results.push(result);
       // 关闭状态再跑一遍也是空转：没必要为一个永远不会发东西的循环等 interval。
