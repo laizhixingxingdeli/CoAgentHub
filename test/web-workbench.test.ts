@@ -129,5 +129,43 @@ test('模型顺序保存真实 HTTP CAS，保留配置事实与停用，旧版�
     assert.ok(view.includes('有未保存修改'));
     assert.match(view, /data-priority-save disabled/);
     assert.ok(view.includes('读取最新配置'));
+    // 候选行要说出「这到底是哪一条」：真实 provider/model、优先级、启停文字。
+    // 光看 profileId 分不出，而这一页正是人决定下一跳用谁的地方。
+    assert.match(view, /data-priority-state="disabled">停用/, 'b 是停用的，要写出「停用」两个字');
+    assert.match(view, /data-priority-state="enabled">启用/, view);
+    assert.match(view, /优先级 1/, view);
+    assert.match(view, /优先级 2/, view);
+    assert.match(view, /候选 a</, 'profileId 作为次级技术信息仍要在');
+    assert.match(view, /思考 high/, 'a 只有 reasoning fact，有就如实写出来');
+    assert.match(view, /模型未指定/, 'a 没写 model fact，不编也不留空格子');
+    // 缺的 facts 说「未指定」，不从名字猜、也不把空格子画成已配置。
+    const sparse = priorityHtml({ role: 'executor', saved: {}, drafts: { executor: [{ profileId: 'x', endpoint: 'local' }] }, busy: false });
+    assert.match(sparse, /模型未指定/, sparse);
+    assert.match(sparse, /渠道未指定/, sparse);
+    assert.match(sparse, /思考 未指定/, sparse);
+    assert.match(sparse, /data-priority-state="enabled">启用</, '未写 enabled 就是启用，不是未知');
+    // reasoning 有就写出来：它是适配层报的 fact，不是从模型名推的。
+    const withReasoning = priorityHtml({ role: 'executor', saved: {}, drafts: { executor: [{ profileId: 'r', endpoint: 'local', facts: [{ key: 'provider', value: 'codebuddy' }, { key: 'model', value: 'deepseek-v4.1-flash' }, { key: 'reasoning', value: 'high' }] }] }, busy: false });
+    assert.match(withReasoning, /思考 high/, withReasoning);
+    // 国内外两个渠道直接可区分；未知 provider 保留原值、不猜渠道。
+    const channels = priorityHtml({ role: 'executor', saved: {}, drafts: { executor: [
+      { profileId: 'cn', endpoint: 'local', facts: [{ key: 'provider', value: 'codebuddy' }, { key: 'model', value: 'm1' }] },
+      { profileId: 'intl', endpoint: 'local', facts: [{ key: 'provider', value: 'codebuddy-intl' }, { key: 'model', value: 'm1' }] },
+      { profileId: 'qcn', endpoint: 'local', facts: [{ key: 'provider', value: 'qoder-cn' }, { key: 'model', value: 'm2' }] },
+      { profileId: 'qgl', endpoint: 'local', facts: [{ key: 'provider', value: 'qoder' }, { key: 'model', value: 'm2' }] },
+      { profileId: 'unknown', endpoint: 'local', facts: [{ key: 'provider', value: 'some-new-runtime' }, { key: 'model', value: 'm3' }] },
+    ] }, busy: false });
+    assert.match(channels, /codebuddy · CodeBuddy 国内/, channels);
+    assert.match(channels, /codebuddy-intl · CodeBuddy 国际/, channels);
+    assert.match(channels, /qoder-cn · Qoder 国内/, channels);
+    assert.match(channels, /qoder · Qoder 国际/, channels);
+    assert.match(channels, /data-candidate-provider="some-new-runtime">some-new-runtime</, '认不出的 provider 原样回显、不补渠道');
+    assert.equal(/some-new-runtime · /.test(channels), false, '认不出的 provider 不该被编一个渠道');
+    // 名称仍是外部输入：facts 与 profileId 里带尖括号不能变成真标签。
+    const quoted = priorityHtml({ role: 'executor', saved: {}, drafts: { executor: [{ profileId: '<b>', endpoint: 'local', facts: [{ key: 'provider', value: '<img>' }, { key: 'model', value: '<script>' }] }] }, busy: false });
+    assert.ok(!quoted.includes('<img>'), quoted);
+    assert.ok(!quoted.includes('<script>'), quoted);
+    assert.match(quoted, /&lt;script&gt;/, quoted);
+
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
