@@ -21,6 +21,7 @@ import { installHttpDispatcher, proxySummary } from "./http.js";
 import { registerPendingProviderExtensions, resolveProviderExtensionPaths } from "./provider-extensions.js";
 import { auditProfiles, formatAuditReport } from "./profile-audit.js";
 import { knownProfileIds, resolveProfile } from "./profiles.js";
+import { DISABLED_BUILTIN_EXTENSIONS, EXCLUDED_EXPANSION_TOOLS } from "./roles.js";
 import {
 	reviewerClosedTools,
 	reviewerEnvFromConfig,
@@ -202,6 +203,7 @@ async function models() {
 				noSkills: true,
 				noPromptTemplates: true,
 				noContextFiles: true,
+				disabledBuiltinExtensions: [...DISABLED_BUILTIN_EXTENSIONS],
 				additionalExtensionPaths: paths,
 			});
 			await loader.reload();
@@ -403,10 +405,14 @@ export function prepareReviewerLaunch(
 	const args = [
 		piCli,
 		"--no-extensions",
+		// 1.3.0 的 --tools 闭集不以 mcp__ 开头时，内置 MCP 仍可调用。--no-mcp 才是 CLI 的关闭点。
+		"--no-mcp",
 		"-e",
 		extensionPath,
 		"--tools",
 		reviewerClosedTools().join(","),
+		"--exclude-tools",
+		EXCLUDED_EXPANSION_TOOLS.join(","),
 	];
 	if (model !== undefined) {
 		args.push("--model", model);

@@ -563,7 +563,7 @@ test("CLI 缺必填 / 身份非法 / runs-dir 落在 hub 下 / 没有 l3.ts 时�
 	fx.cleanup();
 });
 
-test("reviewer 启动器解析的 pi 包版本为 0.87.1，bin 指向该包 bundle", () => {
+test("reviewer 启动器解析的 pi 包版本为 1.3.0，bin 指向该包 bundle", () => {
 	// 走真实包目录：读 package.json，不 spawn、不起 pi。
 	const bundle = resolvePiCliBundle();
 	assert.ok(existsSync(bundle), "bundle 文件必须存在");
@@ -575,7 +575,7 @@ test("reviewer 启动器解析的 pi 包版本为 0.87.1，bin 指向该包 bund
 		bin?: string | Record<string, string>;
 	};
 	assert.equal(pkg.name, "@earendil-works/pi-coding-agent");
-	assert.equal(pkg.version, "0.87.1");
+	assert.equal(pkg.version, "1.3.0");
 	const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.pi;
 	assert.ok(bin, "package.json 必须有 bin.pi");
 	assert.equal(resolve(dirname(pkgPath), bin), resolve(bundle));
@@ -603,6 +603,10 @@ test("CLI 校验通过后 argv：node + pi bundle + --no-extensions -e 闭集 --
 	// 走真实包目录解析，不 mock；假 spawn 仍不启 pi。
 	assert.ok(existsSync(launch.args[0] ?? ""));
 	assert.ok(launch.args.includes("--no-extensions"));
+	assert.ok(launch.args.includes("--no-mcp"));
+	const excludedAt = launch.args.indexOf("--exclude-tools");
+	assert.ok(excludedAt >= 0);
+	assert.match(launch.args[excludedAt + 1] ?? "", /mcp__\*/);
 	const eAt = launch.args.indexOf("-e");
 	assert.ok(eAt >= 0);
 	assert.equal(launch.args[eAt + 1], reviewerExtensionEntryPath());
