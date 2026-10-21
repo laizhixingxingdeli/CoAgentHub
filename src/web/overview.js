@@ -1,5 +1,23 @@
 import { esc, stageChip, stateChip } from './projects.js';
 
+/**
+ * 活跃 Agent 数：只从已有 `GET /api/platform/status` 的 occupancy.activeLeases 读。
+ *
+ * 为什么不自己数「有多少条 Mission 在跑」：一个 Mission 可以有 0 个活动租约
+ * （在退避、在等人），也可以有一条协调者 + 一条执行者同时活。拿任务数顶上去
+ * 是两个数看着像、含义完全不同，而屏幕上分不出哪个是哪个。
+ *
+ * 读不到就是「未知」：0 是一个有意义的答案（真的没有 Agent 在跑），把「没读到」
+ * 画成 0 会让首屏在接口还没回来时就断言「没有 Agent」。而且这个数**不影响任务
+ * 状态**——Agent=0 不表示任务都做完了，任务完成与否只看 Mission 自己的阶段。
+ */
+export function activeAgentText(status) {
+  const occupancy = status && typeof status === 'object' ? status.occupancy : undefined;
+  if (!occupancy || typeof occupancy !== 'object' || occupancy.inapplicable === true) return '未知';
+  const n = Number(occupancy.activeLeases);
+  return Number.isFinite(n) && n >= 0 ? String(n) : '未知';
+}
+
 export function newestMissions(rows) {
   return [...rows].sort((a, b) => {
     const delta = (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
@@ -22,15 +40,21 @@ export function missionTableHtml(rows) {
 }
 
 export function overviewHtml(data) {
-  const running = data.missions.filter(row => row.status !== 'completed' && row.status !== 'blocked'
+  const rows = Array.isArray(data.missions) ? data.missions : [];
+  // 进行中任务：阶段未终且没停在等待/暂停上的那几条。这是「有多少条任务在走路」，
+  // 与「有多少个 Agent 在跑」是两个数，页面上必须分开写。
+  const running = rows.filter(row => row.status !== 'completed' && row.status !== 'blocked'
     && !row.paused && !row.waitReason && ['executing', 'investigating', 'planning'].includes(row.status));
   const pools = Object.values(data.pools || {}).filter(Array.isArray).flat();
   const unhealthy = pools.filter(row => row.health?.circuit?.state === 'open').length;
+  const errors = Array.isArray(data.errors) ? data.errors : [];
   return '<section class="screen"><h1 class="screen-title">首页</h1><div class="card platform-strip">'
     + '<strong>平台状态</strong><span>服务：' + (data.status ? '已连接' : '未读取') + '</span>'
-    + '<span>进行中任务：' + running.length + ' 项</span><span>模型熔断：' + (data.pools ? unhealthy : '未知') + '</span>'
+    + '<span>进行中任务：' + running.length + ' 项</span>'
+    + '<span data-active-agents="1">活跃 Agent：' + esc(activeAgentText(data.status)) + ' 个</span>'
+    + '<span>模型熔断：' + (data.pools ? unhealthy : '未知') + '</span>'
     + '<span>检视投递：未提供汇总</span></div>'
-    + (data.errors.length ? '<div class="note">部分数据未更新：' + esc(data.errors.join('；')) + '</div>' : '')
+    + (errors.length ? '<div class="note">部分数据未更新：' + esc(errors.join('；')) + '</div>' : '')
     + '<section class="card"><h2>进行中的任务</h2>' + missionTableHtml(running) + '</section></section>';
 }
 

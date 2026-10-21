@@ -129,6 +129,49 @@ export const ROLE_CN = {
 };
 
 /**
+ * 当前会话主控（direct 协作方式）的徽章。
+ *
+ * 它**不是**第四个角色：内部角色仍是协调者（尝试 ID 仍是 coord-N，业务门禁
+ * 仍按协调者校验），只是这一跳由外部会话代为推进、没有平台派发的模型。
+ * 画成「L2 协调」会让归因与值守判断把「这趟是主控做的」读成「协调者自己跑的」，
+ * 而平台既不知道主控的模型，也不知道它的用量。
+ */
+export const CONTROLLER_ROLE_LABEL = '主控';
+
+/** 主控 Attempt 在 attempt.started 里留下的发牌 profile（平台写死的那一份）。 */
+const CONTROLLER_PROFILE_ID = 'external-controller';
+const CONTROLLER_ENDPOINT = 'host';
+
+/** attempt.started.data.profile 是否是外置主控那一份。只看明确写下的两个字段。 */
+function isControllerProfile(profile) {
+  const p = profile && typeof profile === 'object' ? profile : {};
+  return text(p.profileId) === CONTROLLER_PROFILE_ID || text(p.endpoint) === CONTROLLER_ENDPOINT;
+}
+
+/**
+ * 这一组事件是不是「当前会话主控」代替协调者操作的那一跳。
+ *
+ * 只认本组自己写下的两种证据：
+ *   1. 组内有 direct.controller_action（主控经控制面推进一步，平台自己记的）；
+ *   2. 本组 attempt.started 的 profile 是外置主控（profileId=external-controller
+ *      或 endpoint=host）。
+ *
+ * **不看 MissionView.coordinationMode**：那是整条 Mission 的属性，一条 direct
+ * Mission 里也可能混着别的来源的事件；拿它给每一个 coord-* 组盖章，等于替历史
+ * 上真正跑过模型的协调者认领一个它没用过的身份。也不从当前候选池推断模型：
+ * 主控模型由宿主会话选择，平台没有记录（也不假装记录过）。
+ */
+export function isControllerAttempt(events) {
+  const rows = list(events);
+  for (const e of rows) {
+    if (!e) continue;
+    if (text(e.kind) === 'direct.controller_action') return true;
+    if (text(e.kind) === 'attempt.started' && isControllerProfile(e.data && e.data.profile)) return true;
+  }
+  return false;
+}
+
+/**
  * 没有 attemptId 的事件不全是 L3：投递、记忆落地、集成验证是平台自己动的手。
  * 组名留给 task.js 去切；这里只给人话标签，避免页面再写一份「平台」——两份一定会漂。
  */
@@ -313,13 +356,20 @@ export const STAGE_CN = {
  * 词**必须**和 STAGE_CN 不一样（完成品是「已完成」/「已中止」，这里只能是
  * 「已结束」/「已停止」）。用了同一个词，人就会以为是同一根轴，
  * 于是"卡住了"和"做完了"在两列里长得一模一样。
+ *
+ * **终态最先判**：平台不会清理历史 wait 字段——cancel 写 blocked 的同时留下
+ * waitReason=cancelled_by_user，机器收尾也会留下 waiting_l3 才进 completed。
+ * 先看 waitReason 就会把一条已经走完的 Mission 说成「等待中」，而「在等谁」
+ * 这句话对终态根本没有答案：屏幕上会让人一直等一件已经结束的事。
+ * 反过来，终态优先不会吃掉线索：真正停在哪由 nowDoing 那句结论与事件流说，
+ * 「在等谁」对已结束的票本来就不该出现（任务页页头会把它略掉）。
  */
 export function stateLabel(row) {
   const r = row || {};
-  if (r.paused) return '已暂停';
-  if (r.waitReason) return '等待中';
   if (r.status === 'completed') return '已结束';
   if (r.status === 'blocked') return '已停止';
+  if (r.paused) return '已暂停';
+  if (r.waitReason) return '等待中';
   return '进行中';
 }
 
@@ -550,6 +600,11 @@ const EVENT_TABLE = {
 
   'attempt.started': (event, ctx) => {
     if (attemptRole(event) === 'coordinator') {
+      // 外置主控代替协调者开工：写「主控」而不是「L2 协调」。这一跳没有平台
+      // 派发的模型，说成 L2 会把「主控做的」读成「协调者自己跑的」。
+      if (isControllerProfile(event && event.data && event.data.profile)) {
+        return { badge: CONTROLLER_ROLE_LABEL, action: '主控代替协调者开工', detail: formatAttemptId(event && event.attemptId).label };
+      }
       return { badge: 'L2', action: '协调者接手', detail: formatAttemptId(event && event.attemptId).label };
     }
     return {
@@ -1312,7 +1367,7 @@ const EVENT_TABLE = {
     const actor = or(data.actor, '（没有发起方）');
     // action 是调用方填的枚举；取不到就把原值端出来，那是排障唯一的线索。
     return {
-      badge: '主控',
+      badge: CONTROLLER_ROLE_LABEL,
       action: `主控操作：${action || '（没有动作）'}`,
       detail: `${actor}${data.attemptId ? ` · 协调者尝试 ${text(data.attemptId)}` : ' · 没有绑定的协调者尝试'}`,
     };
@@ -1431,17 +1486,22 @@ export function finalReviewSummary(finalReview) {
  * 任务页头部的一句话。
  *
  * 只回人话，不回阶段名（「executing」这种词在这一行没有任何用处——阶段另有
- * 一根 chip 在说）。判据顺序就是优先级：停下（暂停 / 等停机原因）压过阶段，
- * 因为"为什么不动"比"走到哪一步"更急。
+ * 一根 chip 在说）。判据顺序就是优先级：终态（已完成 / 已中止）压过一切，
+ * 其次是停下（暂停 / 等停机原因），最后才是阶段——“为什么不动”比“走到哪一步”更急，
+ * 但“已经结束了”压过“为什么不动”：前者是事实，后者已经失效。
  */
 export function nowDoing(view) {
   const v = view || {};
   const items = list(v.workItems);
+  const summary = text(v.result && v.result.summary);
+
+  // 终态先判，理由同 stateLabel：终态上遗留的 paused / waitReason 是历史字段，
+  // 不是「现在还在等」。先判等待会让一条已经交卷的 Mission 一直在等主控答复。
+  if (v.status === 'completed') return `结束了：${summary || '已完成'}`;
+  if (v.status === 'blocked') return `结束了（被中止）：${summary || reasonText(v) || '没有写中止原因'}`;
 
   if (v.paused) return '在等暂停结束';
   if (v.waitReason) return `在等：${reasonText(v) || '（没有写原因）'}`;
-
-  const summary = text(v.result && v.result.summary);
 
   switch (text(v.status)) {
     case 'investigating':

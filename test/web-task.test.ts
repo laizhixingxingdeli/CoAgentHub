@@ -882,6 +882,52 @@ describe('环节分组', () => {
     const order = [...html.matchAll(/data-attempt-id="([^"]*)"/g)].map((m) => m[1]);
     assert.deepEqual(order, ['coord-1', 'W-510.exec-1', 'coord-2', 'platform', '']);
   });
+
+  test('两层主控身份：只给有明确证据的协调者那一跳贴主控，其余语义不变', async () => {
+    const { stageListHtml, stageDetailHtml, groupActivity } = await loaded;
+    const t = (n: number) => `2026-03-04T07:${String(n).padStart(2, '0')}:00.000Z`;
+    // coord-1：平台写死的外置主控 profile（direct 模式每命令一张 host Attempt）。
+    // coord-2：只有 direct.controller_action 这一条明确证据（历史事件没带 profile）。
+    // coord-3：普通三层协调者，什么主控证据都没有。
+    // W-7.exec-1：执行者，不该被主控证据影响。
+    const rows = [
+      { at: t(1), kind: 'attempt.started', attemptId: 'coord-1', data: { kind: 'coordinator', profile: { profileId: 'external-controller', endpoint: 'host' } } },
+      { at: t(2), kind: 'plan.updated', attemptId: 'coord-1', data: { planRevision: 1 } },
+      { at: t(3), kind: 'attempt.ended', attemptId: 'coord-1', data: { endedBy: 'structured_submit' } },
+      { at: t(4), kind: 'attempt.started', attemptId: 'coord-2', data: { kind: 'coordinator' } },
+      { at: t(5), kind: 'direct.controller_action', attemptId: 'coord-2', data: { actor: 'host-session', action: 'dispatch' } },
+      { at: t(6), kind: 'attempt.started', attemptId: 'coord-3', data: { kind: 'coordinator', profile: REAL_COORD_PROFILE } },
+      { at: t(7), kind: 'work_item.dispatched', attemptId: 'coord-3', data: { ids: ['W-7'] } },
+      { at: t(8), kind: 'attempt.started', attemptId: 'W-7.exec-1', workItemId: 'W-7', data: { kind: 'executor', profile: REAL_EXEC_PROFILE } },
+    ];
+    const ctx = { workItems: [{ id: 'W-7', title: '主控那一栏' }] };
+    const html = stageListHtml(rows, null, null, ctx);
+    const stageOf = (key: string) =>
+      html.split('<details class="stage ').find((p) => p.includes(`data-attempt-id="${key}"`)) || '';
+
+    // 主控那一跳：徽章与模型栏都不冒充 L2。
+    for (const key of ['coord-1', 'coord-2']) {
+      assert.ok(stageOf(key).includes('<span class="chip queued">主控</span>'), stageOf(key));
+      assert.equal(stageOf(key).includes('L2 协调'), false, `${key} 被标成了 L2：${stageOf(key)}`);
+      assert.ok(stageOf(key).includes('当前会话主控'), stageOf(key));
+      // 不从当前池 / 历史候选回填一个模型上去。
+      assert.equal(stageOf(key).includes(REAL_COORD_PROFILE.facts[0].value as string), false, stageOf(key));
+      assert.equal(stageOf(key).includes('模型 · 未记录'), false, '主控要说清是谁在跑，不是「忘了记」');
+    }
+
+    // 普通三层协调者与执行者保持既有语义（徽章与模型都不变）。
+    assert.ok(stageOf('coord-3').includes('<span class="chip queued">L2 协调</span>'), stageOf('coord-3'));
+    assert.ok(stageOf('coord-3').includes('gpt-6.1-sol · 思考 medium'), stageOf('coord-3'));
+    assert.ok(stageOf('W-7.exec-1').includes('<span class="chip running">L1 执行</span>'), stageOf('W-7.exec-1'));
+
+    // 详情页与列表同一份判定：两边各写一份必然漂。
+    const groups = groupActivity(rows);
+    const detailOf = (key: string) => stageDetailHtml(groups.find((g) => g.attemptId === key), ctx);
+    assert.ok(detailOf('coord-1').includes('>主控<'), detailOf('coord-1'));
+    assert.ok(detailOf('coord-1').includes('当前会话主控'), detailOf('coord-1'));
+    assert.equal(detailOf('coord-1').includes('L2 协调'), false, detailOf('coord-1'));
+    assert.ok(detailOf('coord-3').includes('>L2 协调<'), detailOf('coord-3'));
+  });
 });
 
 describe('用量卡', () => {
@@ -1006,6 +1052,42 @@ describe('用量卡', () => {
     const empty = headerHtml({ status: 'investigating', contract: { intent: '' } }, [], '2026-03-04T05:00:00.000Z');
     assert.ok(empty.includes('（没有契约）') && empty.includes('调查中'));
     assert.equal(/NaN|undefined|null/.test(empty), false, `上屏了 NaN/undefined：${empty}`);
+  });
+
+  test('终态不展示遗留的停机原因与下一步；真实非终态等待仍完整', async () => {
+    const { headerHtml } = await loaded;
+    // PIU2 的真实形状：机器收尾写过 waiting_l3 才进 completed，waitReason / waitInfo
+    // 都还挂在视图上。页头再说「停机原因」「下一步」，人就会去等一件已经没有
+    // 下一步的事。历史等待本身不删：它仍在事件流里可查。
+    const legacyWait = {
+      owner: 'l3', autoResume: false, activeAgent: false, action: '看越界文件',
+      reason: 'waiting_l3',
+    };
+    const done = headerHtml({
+      status: 'completed', updatedAt: '2026-03-04T07:00:00.000Z',
+      waitReason: 'waiting_l3', waitDetail: '验收标准未逐条达成', waitInfo: legacyWait,
+      contract: { intent: 'x' }, usage: { total: 1 },
+      finalReview: { verdict: 'merge', mergedInto: 'abc1234' },
+    }, [{ at: '2026-03-04T05:00:00.000Z' }], '2026-12-31T23:59:00.000Z');
+    assert.ok(done.includes('已完成') && done.includes('已结束'), done);
+    assert.equal(done.includes('在等'), false, done);
+    assert.equal(done.includes('停机原因'), false, '终态不该再提示在等什么');
+    assert.equal(done.includes('data-wait-info'), false, '终态不该再给下一步');
+    assert.equal(done.includes('看越界文件'), false, done);
+    // 终态自己的信息仍要在：阶段、状态、结束按钮。
+    assert.ok(done.includes('任务已结束') && done.includes('data-task-cancel') === false);
+
+    // 非终态的真等待：原因、处理方、会不会自动恢复、下一步一个不少。
+    const waiting = headerHtml({
+      status: 'executing', waitReason: 'retry_backoff', waitDetail: '第 2 次退避',
+      waitInfo: { owner: 'platform', autoResume: true, nextRetryAt: '2026-03-04T05:20:00.000Z', activeAgent: false, action: '到点平台自动重试' },
+      contract: { intent: 'x' }, usage: {},
+    }, [], '2026-03-04T05:10:00.000Z');
+    assert.ok(waiting.includes('停机原因：第 2 次退避'), waiting);
+    assert.ok(waiting.includes('data-wait-info'), waiting);
+    assert.ok(waiting.includes('平台自动处理') && waiting.includes('会自动恢复'), waiting);
+    assert.ok(waiting.includes('下一步：到点平台自动重试'), waiting);
+    assert.ok(waiting.includes('等待中'), waiting);
   });
 });
 

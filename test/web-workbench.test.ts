@@ -41,6 +41,35 @@ test('首页服务和模型数据缺失显示未知，暂停任务不计入进�
   assert.ok(!html.includes('#/missions/paused'));
 });
 
+test('首页分清任务数与活跃 Agent 数，缺失不写成 0 也不改任务状态', () => {
+  const missions = [
+    { missionId: 'M-run', status: 'executing' },
+    { missionId: 'M-done', status: 'completed' },
+  ];
+  // 服务已连、占用已读到：1 条任务在走路，2 个 Agent 在跑（协调者 + 执行者可能同时在）。
+  const live = overviewHtml({ missions, status: { occupancy: { activeLeases: 2, global: 1 } }, pools: null, errors: [] });
+  assert.match(live, /进行中任务：1 项/, live);
+  assert.match(live, /data-active-agents="1">活跃 Agent：2 个/, live);
+  // 两个数分得开：不能拿任务数顶活跃数，也不能拿活跃数改任务状态。
+  assert.equal(/活跃 Agent：1 个/.test(live), false, live);
+  assert.ok(live.includes('#/missions/M-run'), 'Agent 数不影响任务列表');
+  assert.equal(live.includes('#/missions/M-done'), false, live);
+
+  // 占用读不到（参数已 returning 但接口没回来 / 装配不支持）：说未知，不说到 0。
+  for (const status of [null, { occupancy: null }, { occupancy: { inapplicable: true, reason: 'queued_hops_unavailable' } }, {}]) {
+    const out = overviewHtml({ missions, status, pools: null, errors: [] });
+    assert.match(out, /活跃 Agent：未知 个/, out);
+    assert.equal(/活跃 Agent：0 个/.test(out), false, out);
+  }
+
+  // 真的没有 Agent：如实写 0，且任务仍是「进行中任务：1 项」——
+  // Agent=0 不能把 Mission 当成做完了（在退避 / 等人的任务本来就没有活动租约）。
+  const idle = overviewHtml({ missions, status: { occupancy: { activeLeases: 0 } }, pools: null, errors: [] });
+  assert.match(idle, /活跃 Agent：0 个/, idle);
+  assert.match(idle, /进行中任务：1 项/, idle);
+  assert.ok(idle.includes('#/missions/M-run'), idle);
+});
+
 test('任务输出常驻独立区域，缺失用量不计作零，真实零值保留', () => {
   const html = skeletonHtml();
   assert.ok(!/data-task-panel="events"/.test(html));
