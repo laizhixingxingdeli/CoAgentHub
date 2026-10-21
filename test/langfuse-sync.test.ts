@@ -11,9 +11,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createTransport, loadConfig, stableIds } from '../scripts/langfuse-transport.mjs';
@@ -984,6 +984,283 @@ test('pages work-item review history onto the reviewed attempts, falls back only
   } finally {
     await platform.close();
     await langfuse.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/** 同步调用方看得见的失败：不连传输、不启平台。注入的是 rename/等待，不是 CLI 开关。 */
+const quietTransport = {
+  enqueueSpan: async () => false,
+  enqueueScore: async () => false,
+  flush: async () => true,
+};
+
+function syntheticErrno(code) {
+  const error = new Error(`synthetic rename ${code}`);
+  error.code = code;
+  return error;
+}
+
+function progressFetch(routes) {
+  return async (url) => {
+    const path = new URL(url).pathname;
+    const body = routes[path];
+    if (body === undefined) return { ok: false, status: 404 };
+    return { ok: true, status: 200, json: body };
+  };
+}
+
+/**
+ * 默认 retryWait 是这次同步必须等完的工作。注入的 retryWait 会把 timer.unref 藏住：
+ * 没有别的保活句柄时，未完成的顶层 await 以退出码 13 结束，第二次 rename 不会发生。
+ * 所以这里不建 HTTP 服务、不传 retryWait、不经 shell：只用 execFile 的 argv 启动 node。
+ */
+function runDefaultRetryChild(progressPath, missionId) {
+  const source = `
+import { readFile, rename } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+
+const progressPath = process.argv[1];
+const missionId = process.argv[2];
+const scriptPath = process.argv[3];
+let renames = 0;
+const { syncQualityOnce } = await import(pathToFileURL(scriptPath).href);
+const result = await syncQualityOnce({
+  config: {
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:9',
+    publicKey: 'pk-lf-0000-test',
+    secretKey: ${JSON.stringify(SECRET_KEY)},
+    captureContent: false,
+    requestTimeoutMs: 2000,
+  },
+  platformUrl: 'http://127.0.0.1:9',
+  missionId,
+  progressPath,
+  transport: {
+    enqueueSpan: async () => true,
+    enqueueScore: async () => true,
+    flush: async () => true,
+  },
+  fetchImpl: async (url) => {
+    const path = new URL(url).pathname;
+    if (path === '/api/missions/' + missionId) {
+      return { ok: true, status: 200, json: { missionId, workItems: [] } };
+    }
+    if (path === '/api/missions/' + missionId + '/activity') {
+      return { ok: true, status: 200, json: [] };
+    }
+    return { ok: false, status: 404 };
+  },
+  renameFile: async (from, to) => {
+    renames += 1;
+    if (renames === 1) {
+      const error = new Error('synthetic rename EBUSY');
+      error.code = 'EBUSY';
+      throw error;
+    }
+    await rename(from, to);
+  },
+});
+const text = await readFile(progressPath, 'utf8');
+process.stdout.write(JSON.stringify({ renames, completed: result.ok === true, text }));
+`;
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      ['--input-type=module', '-e', source, progressPath, missionId, SCRIPT],
+      { timeout: 4000, windowsHide: true },
+      (error, stdout, stderr) => {
+        resolve({ code: error ? error.code : 0, stdout, stderr });
+      },
+    );
+  });
+}
+
+/**
+ * 替换失败不得删旧目标：少量瞬态错误后走真实 rename，新内容落盘；
+ * 耗尽或不可重试时旧字节不变、首次创建不留伪进度，等待有上界。
+ * 为什么不把故障做成 CLI 开关：开关会跟着进真实同步，而这里要证的是库函数的替换约定。
+ */
+test('replaces progress after a few transient rename errors without deleting the previous file', { timeout: 8000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'langfuse-sync-'));
+  const progressPath = join(dir, 'progress.json');
+  const missionId = 'M-new';
+  const prior = {
+    version: 1,
+    acked: ['prior-acked-id'],
+    capturedReviews: [{ missionId: 'M-keep', marker: 'keep-me' }],
+    projects: { 'p-cursor': { lastMissionId: 'M-old', wrapped: false } },
+    reviewCursors: { 'M-keep': { 'W-keep': 3 } },
+    note: 'must-not-survive-successful-replace',
+  };
+  const priorText = `${JSON.stringify(prior)}\n`;
+  await writeFile(progressPath, priorText, 'utf8');
+  let failures = 0;
+  const waits = [];
+  try {
+    const result = await syncQualityOnce({
+      config: {
+        enabled: true,
+        baseUrl: 'http://127.0.0.1:9',
+        publicKey: 'pk-lf-0000-test',
+        secretKey: SECRET_KEY,
+        captureContent: false,
+        requestTimeoutMs: 2000,
+      },
+      platformUrl: 'http://127.0.0.1:9',
+      missionId,
+      progressPath,
+      transport: quietTransport,
+      fetchImpl: progressFetch({
+        [`/api/missions/${missionId}`]: { missionId, projectId: 'p-cursor', workItems: [] },
+        [`/api/missions/${missionId}/activity`]: [],
+      }),
+      renameFile: async (from, to) => {
+        assert.equal(dirname(from), dirname(to), '临时文件必须与目标同目录');
+        assert.notEqual(from, to);
+        if (failures < 2) {
+          failures += 1;
+          assert.equal(await readFile(to, 'utf8'), priorText, '瞬态失败期间不得删掉旧进度');
+          throw syntheticErrno(failures === 1 ? 'EPERM' : 'EBUSY');
+        }
+        await rename(from, to);
+      },
+      retryWait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    assert.equal(failures, 2, '必须真的遇到并走过瞬态 rename 失败');
+    assert.equal(result.ok, true);
+    assert.ok(waits.length >= 1 && waits.length <= 9, `等待次数必须有界：${waits.length}`);
+    assert.ok(waits.every((ms) => Number.isFinite(ms) && ms > 0));
+    assert.ok(waits.reduce((sum, ms) => sum + ms, 0) <= 2000);
+    const after = JSON.parse(await readFile(progressPath, 'utf8'));
+    assert.equal(after.version, 1);
+    assert.deepEqual(after.acked, ['prior-acked-id']);
+    assert.deepEqual(after.capturedReviews, [{ missionId: 'M-keep', marker: 'keep-me' }]);
+    assert.deepEqual(after.projects, { 'p-cursor': { lastMissionId: 'M-old', wrapped: false } });
+    assert.equal(after.reviewCursors['M-keep']['W-keep'], 3, '其它 Mission 的游标必须原样留在新快照里');
+    assert.equal(after.note, undefined, '成功替换必须写入新快照，而不是留着旧文件假装成功');
+    assert.deepEqual(
+      Object.keys(after),
+      ['version', 'acked', 'capturedReviews', 'projects', 'reviewCursors'],
+    );
+
+    // 独立子进程：默认等待必须自己把进程撑住。旧代码在第一次 EBUSY 后退出 13，证明这一支有鉴别力。
+    const childMissionId = 'M-child-retry';
+    const childPath = join(dir, 'child-progress.json');
+    const child = await runDefaultRetryChild(childPath, childMissionId);
+    assert.equal(
+      child.code,
+      0,
+      `默认等待必须撑住进程直到重试完成，退出码 ${String(child.code)} stderr=${child.stderr}`,
+    );
+    const reported = JSON.parse(child.stdout);
+    assert.ok(reported.renames >= 2, `默认等待下 rename 至少两次：${reported.renames}`);
+    assert.equal(reported.completed, true);
+    const expectedChild = `${JSON.stringify({
+      version: 1,
+      acked: [],
+      capturedReviews: [],
+      projects: {},
+      reviewCursors: { [childMissionId]: {} },
+    })}\n`;
+    assert.equal(reported.text, expectedChild);
+    assert.equal(await readFile(childPath, 'utf8'), expectedChild, '父进程读回的进度必须与子进程写出的一致');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('keeps old progress bytes when rename retries are exhausted or the error is not retryable', { timeout: 8000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'langfuse-sync-'));
+  const progressPath = join(dir, 'progress.json');
+  const missionId = 'M-new';
+  const projectId = 'p-fail';
+  const prior = {
+    version: 1,
+    acked: ['prior-acked-id'],
+    capturedReviews: [{ missionId: 'M-keep', marker: 'keep-me' }],
+    projects: { [projectId]: { lastMissionId: 'M-old', wrapped: false } },
+    reviewCursors: { 'M-keep': { 'W-keep': 3 } },
+  };
+  const priorText = `${JSON.stringify(prior)}\n`;
+  await writeFile(progressPath, priorText, 'utf8');
+  const config = {
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:9',
+    publicKey: 'pk-lf-0000-test',
+    secretKey: SECRET_KEY,
+    captureContent: false,
+    requestTimeoutMs: 2000,
+  };
+  const fetchImpl = progressFetch({
+    '/api/missions': [{ missionId, projectId }],
+    [`/api/missions/${missionId}`]: { missionId, projectId, workItems: [] },
+    [`/api/missions/${missionId}/activity`]: [],
+  });
+  let renameCalls = 0;
+  const waits = [];
+  try {
+    const started = Date.now();
+    const exhausted = await syncQualityOnce({
+      config,
+      platformUrl: 'http://127.0.0.1:9',
+      projectId,
+      progressPath,
+      transport: quietTransport,
+      fetchImpl,
+      renameFile: async () => {
+        renameCalls += 1;
+        throw syntheticErrno('EACCES');
+      },
+      retryWait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    const elapsed = Date.now() - started;
+    assert.equal(exhausted.ok, false, '耗尽必须向同步调用方体现为失败');
+    assert.equal(exhausted.progressWriteFailed, true);
+    assert.equal(exhausted.sent, 0, 'acked 不得在写盘失败后假推进');
+    assert.ok(renameCalls >= 2, '持续瞬态错误必须真的重试过');
+    assert.ok(waits.length >= 1 && waits.length <= 9, `等待次数必须有界：${waits.length}`);
+    assert.ok(waits.reduce((sum, ms) => sum + ms, 0) <= 2000);
+    assert.ok(elapsed < 1500, `注入的等待不得再叠一段真实长等待：${elapsed}ms`);
+    assert.equal(await readFile(progressPath, 'utf8'), priorText, '旧目标字节必须原样保留');
+    const kept = JSON.parse(priorText);
+    assert.deepEqual(kept.acked, ['prior-acked-id']);
+    assert.equal(kept.projects[projectId].lastMissionId, 'M-old', '游标不得假推进');
+    assert.deepEqual(kept.reviewCursors, prior.reviewCursors);
+    assert.equal((await readdir(dir)).some((name) => name.endsWith('.tmp')), false, '失败后只能清本次临时文件');
+
+    const freshPath = join(dir, 'fresh', 'progress.json');
+    let freshWaits = 0;
+    const fresh = await syncQualityOnce({
+      config,
+      platformUrl: 'http://127.0.0.1:9',
+      missionId,
+      progressPath: freshPath,
+      transport: quietTransport,
+      fetchImpl: progressFetch({
+        [`/api/missions/${missionId}`]: { missionId, projectId, workItems: [] },
+        [`/api/missions/${missionId}/activity`]: [],
+      }),
+      renameFile: async () => {
+        throw syntheticErrno('ENOSPC');
+      },
+      retryWait: async () => {
+        freshWaits += 1;
+      },
+    });
+    assert.equal(fresh.ok, false);
+    assert.equal(fresh.progressWriteFailed, true);
+    assert.equal(fresh.sent, 0);
+    assert.equal(freshWaits, 0, '不可重试错误不得进入等待');
+    await assert.rejects(readFile(freshPath, 'utf8'), { code: 'ENOENT' });
+    assert.equal((await readdir(dirname(freshPath))).some((name) => name.endsWith('.tmp')), false);
+    assert.equal(await readFile(progressPath, 'utf8'), priorText, '清临时文件时不得碰旧目标');
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
