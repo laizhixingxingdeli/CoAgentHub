@@ -85,8 +85,9 @@ body {
 /* ===== 项目页 ===== */
 .page { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px; align-items: start; }
 @media (max-width: 1000px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
-  .nav { height: auto; position: static; }
+  /* 单列断点里 shell / nav 的行高与定位由 ui.css 收口（那份后加载，同优先级下
+     它赢），这里只保留 ui.css 没接手的页面栅格，避免同一组属性写两遍、
+     其中一遍还是死的。 */
   .page { grid-template-columns: minmax(0, 1fr); }
   .task-cols { grid-template-columns: minmax(0, 1fr); }
   .evt-list { max-height: none; }
@@ -167,13 +168,22 @@ table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
   column-gap: 16px; row-gap: 10px;
 }
-.task-title { margin: 0; font-size: 16px; word-break: break-all; grid-column: 1; }
+/* 标题占满第 1 列（minmax(0,1fr)，即整行可用宽度）。不用 word-break:break-all：
+   标题现在够宽，break-all 只会在英文单词中间劈开，读起来更糟；长 ID 用
+   overflow-wrap:anywhere 兜底就够，溢出依旧是断行而不是撑破卡片。
+   字号不在这里写：宽窄屏各一档，都在 ui.css（与其它字号变更同一处）。 */
+.task-title { margin: 0; overflow-wrap: anywhere; grid-column: 1; }
 .task-chips { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 1; }
 /* 「现在在干什么」：一屏黑话里最缺的一句，所以给它正文色而不是 muted。 */
 .now-doing { grid-column: 1; color: var(--foreground); font-size: 13px; }
 /* 修订号：名词带版本号（「契约 r2 · 规划 r1」），不是一堆光秃的数字。 */
 .revision-line { grid-column: 1; font-size: 12px; color: var(--muted-foreground); }
 .wait-reason { grid-column: 1; color: var(--status-unconfirmed); font-size: 13px; }
+/* wait-info 必须显式占第 1 列。它排在几个 grid-column:1 的兄弟之后，若不给列，
+   自动放置会把光标留在第 2 列（那是停止按钮那一列，auto 宽），于是这句长文本
+   把第 2 列撑开、第 1 列被压到 min-content——标题只剩 85px 宽、324px 高。
+   它和「停机原因」「现在在干什么」是同一段正文，不该跑到右栏去。 */
+.wait-info { grid-column: 1; color: var(--muted-foreground); font-size: 12px; overflow-wrap: anywhere; }
 .task-stats {
   display: flex; gap: 22px; margin: 0; grid-column: 1;
   flex-wrap: wrap; align-items: end;

@@ -9,8 +9,12 @@ export function newestMissions(rows) {
 
 export function missionTableHtml(rows) {
   if (!rows.length) return '<div class="empty">暂无任务</div>';
+  // 标题只留两行预览（样式在 ui.css 的 .mission-title）：长标题一行占满会把首屏
+  // 之后的列表全推到看不见的地方。完整原文放在 title 上、也放在任务详情页的
+  // h1 里，所以裁剪不会藏掉信息；链接仍是真 <a href>，键盘与读屏都照旧能进。
   return '<div class="table-wrap"><table class="tasks"><thead><tr><th>任务</th><th>状态</th><th>最近活动</th></tr></thead><tbody>'
-    + newestMissions(rows).map(row => '<tr><td><a href="#/missions/' + encodeURIComponent(row.missionId) + '">'
+    + newestMissions(rows).map(row => '<tr><td><a class="mission-title" title="' + esc(row.intent || row.missionId)
+      + '" href="#/missions/' + encodeURIComponent(row.missionId) + '">'
       + esc(row.intent || row.missionId) + '</a><div class="row-sub">' + esc(row.missionId) + '</div></td>'
       + '<td>' + stageChip(row.status) + ' ' + stateChip(row) + '</td><td class="mono">'
       + esc(row.updatedAt ? new Date(row.updatedAt).toLocaleString('zh-CN') : '未知') + '</td></tr>').join('')

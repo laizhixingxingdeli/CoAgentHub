@@ -20,6 +20,20 @@ test('统一任务列表最新活动在上、所有任务可进入、输入转�
   assert.ok(!html.includes('最近完成'));
 });
 
+test('列表长标题只做两行预览，但完整标题与链接都还在', () => {
+  // 长标题在两行预览里被截掉（样式 .mission-title 在 ui.css），可读的只剩开头。
+  // 所以这两件事必须同时成立：完整原文要在 title 上，链接要是真 href——
+  // 只截不留，等于把任务名字从列表上弄丢了，而页面上看不出少了什么。
+  const long = '把观测面的事件表改成能读的人话并且顺带修掉窄屏下导航被拉伸的问题';
+  const html = missionTableHtml([{ missionId: 'M-long', status: 'executing', intent: long }]);
+  assert.ok(html.includes('class="mission-title"'), html);
+  assert.ok(html.includes('title="' + long + '"'), '完整标题要完整地留在 title 上');
+  assert.ok(html.includes('href="#/missions/M-long"'), '仍是真链接，键盘也能进');
+  // 引号会提前闭合属性：转义不能因为多了一个 title 就漏掉。
+  const quoted = missionTableHtml([{ missionId: 'M-q', status: 'executing', intent: 'a"b' }]);
+  assert.ok(quoted.includes('title="a&quot;b"'), quoted);
+});
+
 test('首页服务和模型数据缺失显示未知，暂停任务不计入进行中', () => {
   const html = overviewHtml({ missions: [{ missionId: 'paused', status: 'executing', paused: true }], status: null, pools: null, errors: [] });
   assert.ok(html.includes('未读取'));
