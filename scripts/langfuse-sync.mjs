@@ -333,7 +333,7 @@ function missionCursors(progress, missionId) {
 let tempCounter = 0;
 
 /**
- * 杀软 / 索引器会短暂占住刚写完的临时文件或目标，rname 抛这三个码。
+ * 杀软 / 索引器会短暂占住刚写完的临时文件或目标，rename 抛这三个码。
  * 只认这三个：别的错误（盘满、路径不对）重试也没用，早抛才不会把同步拖满两秒。
  */
 const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
@@ -341,11 +341,16 @@ const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 const RENAME_MAX_ATTEMPTS = 10;
 const RENAME_MAX_WAIT_MS = 2_000;
 
-/** 异步等待：进度写在 async 路径上，不能用 Atomics.wait 卡住事件循环。 */
+/**
+ * 异步等待：进度写在 async 路径上，不能用 Atomics.wait 卡住事件循环。
+ *
+ * 这次等待是同步必须做完的重试，不能 unref。没有别的保活句柄时（例如单次 CLI
+ * 或测试子进程只在等第二次 rename），unref 会让事件循环空掉，进程在第一次
+ * EBUSY 后就退出，替换永远完不成。次数与总等待上界仍在 renameReplacing 里。
+ */
 function sleepMs(ms) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    setTimeout(resolve, ms);
   });
 }
 

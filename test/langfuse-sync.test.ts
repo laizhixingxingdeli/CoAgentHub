@@ -1011,6 +1011,73 @@ function progressFetch(routes) {
 }
 
 /**
+ * 默认 retryWait 是这次同步必须等完的工作。注入的 retryWait 会把 timer.unref 藏住：
+ * 没有别的保活句柄时，未完成的顶层 await 以退出码 13 结束，第二次 rename 不会发生。
+ * 所以这里不建 HTTP 服务、不传 retryWait、不经 shell：只用 execFile 的 argv 启动 node。
+ */
+function runDefaultRetryChild(progressPath, missionId) {
+  const source = `
+import { readFile, rename } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+
+const progressPath = process.argv[1];
+const missionId = process.argv[2];
+const scriptPath = process.argv[3];
+let renames = 0;
+const { syncQualityOnce } = await import(pathToFileURL(scriptPath).href);
+const result = await syncQualityOnce({
+  config: {
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:9',
+    publicKey: 'pk-lf-0000-test',
+    secretKey: ${JSON.stringify(SECRET_KEY)},
+    captureContent: false,
+    requestTimeoutMs: 2000,
+  },
+  platformUrl: 'http://127.0.0.1:9',
+  missionId,
+  progressPath,
+  transport: {
+    enqueueSpan: async () => true,
+    enqueueScore: async () => true,
+    flush: async () => true,
+  },
+  fetchImpl: async (url) => {
+    const path = new URL(url).pathname;
+    if (path === '/api/missions/' + missionId) {
+      return { ok: true, status: 200, json: { missionId, workItems: [] } };
+    }
+    if (path === '/api/missions/' + missionId + '/activity') {
+      return { ok: true, status: 200, json: [] };
+    }
+    return { ok: false, status: 404 };
+  },
+  renameFile: async (from, to) => {
+    renames += 1;
+    if (renames === 1) {
+      const error = new Error('synthetic rename EBUSY');
+      error.code = 'EBUSY';
+      throw error;
+    }
+    await rename(from, to);
+  },
+});
+const text = await readFile(progressPath, 'utf8');
+process.stdout.write(JSON.stringify({ renames, completed: result.ok === true, text }));
+`;
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      ['--input-type=module', '-e', source, progressPath, missionId, SCRIPT],
+      { timeout: 4000, windowsHide: true },
+      (error, stdout, stderr) => {
+        resolve({ code: error ? error.code : 0, stdout, stderr });
+      },
+    );
+  });
+}
+
+/**
  * 替换失败不得删旧目标：少量瞬态错误后走真实 rename，新内容落盘；
  * 耗尽或不可重试时旧字节不变、首次创建不留伪进度，等待有上界。
  * 为什么不把故障做成 CLI 开关：开关会跟着进真实同步，而这里要证的是库函数的替换约定。
@@ -1079,6 +1146,28 @@ test('replaces progress after a few transient rename errors without deleting the
       Object.keys(after),
       ['version', 'acked', 'capturedReviews', 'projects', 'reviewCursors'],
     );
+
+    // 独立子进程：默认等待必须自己把进程撑住。旧代码在第一次 EBUSY 后退出 13，证明这一支有鉴别力。
+    const childMissionId = 'M-child-retry';
+    const childPath = join(dir, 'child-progress.json');
+    const child = await runDefaultRetryChild(childPath, childMissionId);
+    assert.equal(
+      child.code,
+      0,
+      `默认等待必须撑住进程直到重试完成，退出码 ${String(child.code)} stderr=${child.stderr}`,
+    );
+    const reported = JSON.parse(child.stdout);
+    assert.ok(reported.renames >= 2, `默认等待下 rename 至少两次：${reported.renames}`);
+    assert.equal(reported.completed, true);
+    const expectedChild = `${JSON.stringify({
+      version: 1,
+      acked: [],
+      capturedReviews: [],
+      projects: {},
+      reviewCursors: { [childMissionId]: {} },
+    })}\n`;
+    assert.equal(reported.text, expectedChild);
+    assert.equal(await readFile(childPath, 'utf8'), expectedChild, '父进程读回的进度必须与子进程写出的一致');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
