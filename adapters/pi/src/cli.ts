@@ -15,13 +15,13 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { installHttpDispatcher, proxySummary } from "./http.js";
-import { registerPendingProviderExtensions, resolveProviderExtensionPaths } from "./provider-extensions.js";
+import { registerReviewedExtensions, resolveCatalogExtensionPaths } from "./provider-extensions.js";
 import { auditProfiles, formatAuditReport } from "./profile-audit.js";
 import { knownProfileIds, resolveProfile } from "./profiles.js";
-import { DISABLED_BUILTIN_EXTENSIONS, EXCLUDED_EXPANSION_TOOLS } from "./roles.js";
+import { EXCLUDED_EXPANSION_TOOLS } from "./roles.js";
 import {
 	reviewerClosedTools,
 	reviewerEnvFromConfig,
@@ -191,28 +191,14 @@ async function models() {
 	installHttpDispatcher();
 	const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
 	const runtime = await ModelRuntime.create();
-	const baseline = await runtime.getAvailable();
-	let available = baseline;
-	const paths = resolveProviderExtensionPaths("codebuddy");
-	if (paths.length > 0) {
-		try {
-			const loader = new DefaultResourceLoader({
-				cwd: process.cwd(),
-				agentDir: getAgentDir(),
-				noExtensions: true,
-				noSkills: true,
-				noPromptTemplates: true,
-				noContextFiles: true,
-				disabledBuiltinExtensions: [...DISABLED_BUILTIN_EXTENSIONS],
-				additionalExtensionPaths: paths,
-			});
-			await loader.reload();
-			await registerPendingProviderExtensions(loader, runtime);
-			available = await runtime.getAvailable();
-		} catch {
-			// Keep the baseline list when the optional provider extension cannot load.
-		}
-	}
+	// 与 startRun 同一配置。显式非法配置必须失败，不能退回 baseline 伪装成成功目录。
+	await registerReviewedExtensions(runtime, {
+		cwd: process.cwd(),
+		agentDir: getAgentDir(),
+		extensionPaths: resolveCatalogExtensionPaths(),
+		expectCatalog: true,
+	});
+	const available = await runtime.getAvailable();
 	const rows = available.map((m: { provider: string; id: string }) => ({
 		provider: m.provider,
 		model: m.id,

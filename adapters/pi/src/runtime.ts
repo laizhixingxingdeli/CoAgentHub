@@ -37,7 +37,7 @@ import { observationsForOrigin, originOf, recordTransport } from "./transport-ev
 import { appendRateLimitSummary, startRateLimitProbe } from "./rate-limit-probe.js";
 import { queryUsage } from "./usage.js";
 import type { UsageRow } from "./usage.js";
-import { registerPendingProviderExtensions, resolveProviderExtensionPaths } from "./provider-extensions.js";
+import { registerPendingProviderExtensions, resolveProviderExtensionPaths, reviewedRegistrationError } from "./provider-extensions.js";
 import { createLangfuseObserver, createNoopLangfuseObserver } from "./langfuse-observer.ts";
 
 /**
@@ -739,22 +739,29 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	});
 	await resourceLoader.reload();
 	await registerPendingProviderExtensions(resourceLoader, modelRuntime);
+	const registrationError = reviewedRegistrationError(profile.provider, modelRuntime);
+	if (registrationError) {
+		throw withFailure(
+			new Error(registrationError),
+			classifyUpstreamFailure({
+				modelExists: false,
+				provider: profile.provider,
+				model: profile.model,
+				authConfigured: false,
+			}),
+		);
+	}
 
 	// 凭证是否配置：结构化事实，用来把「模型不存在」和「凭据缺失」分开。
 	const authConfigured = modelRuntime.hasConfiguredAuth(profile.provider);
 	const model = modelRuntime.getModel(profile.provider, profile.model);
 	if (!model) {
 		const available = (await modelRuntime.getAvailable()).map((m) => `${m.provider}/${m.id}`);
-		const missingCodeBuddyExtension = profile.provider === "codebuddy"
-			&& resolveProviderExtensionPaths(profile.provider).length === 0;
-		const installHint = missingCodeBuddyExtension
-			? "。请在 pi 安装 pi-codebuddy-oauth 并执行 /login codebuddy"
-			: "";
 		// 模型不存在（上游整段改名/下架）在派发前就能结构化判定，不必等一句文案。
 		// 分类挂在异常上带出去，agent-entry 收尾时写进 outcome。
 		throw withFailure(
 			new Error(
-				`模型不可用：${profile.provider}/${profile.model}。可用的有：${available.join(", ")}${installHint}`,
+				`模型不可用：${profile.provider}/${profile.model}。可用的有：${available.join(", ")}`,
 			),
 			classifyUpstreamFailure({
 				modelExists: false,
