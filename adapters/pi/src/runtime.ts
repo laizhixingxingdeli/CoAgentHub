@@ -15,10 +15,11 @@ import {
 	ModelRuntime,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { createCoagentExtension } from "./extension.js";
 import type { CoagentBriefInjected } from "./extension.js";
 import { installHttpDispatcher } from "./http.js";
-import { systemPrompt, toolAllowlist } from "./roles.js";
+import { DISABLED_BUILTIN_EXTENSIONS, EXCLUDED_EXPANSION_TOOLS, systemPrompt, toolAllowlist } from "./roles.js";
 import type { Role } from "./roles.js";
 import { PlatformClient } from "./platform-client.js";
 import { PROFILE_TABLE_REVISION, resolveProfile, resolvePromptChannel } from "./profiles.js";
@@ -640,6 +641,36 @@ export function createAttemptContextCollector(options?: { salt?: Buffer }): Atte
 	};
 }
 
+/**
+ * 托管会话的 loader。
+ *
+ * noExtensions 只跳过 settings 里的路径合并；1.3.0 的 builtin: 仍可以经 -e 或已注册的内置工厂进来。
+ * disabledBuiltinExtensions 即使 settings/-e 点名也不加载。不这么做，用户本地 MCP 会在白名单之外变成可调用工具。
+ */
+export function createControlledResourceLoader(options: {
+	cwd: string;
+	agentDir: string;
+	additionalExtensionPaths: string[];
+	extensionFactories: InlineExtension[];
+	systemPromptOverride?: (base: string | undefined) => string | undefined;
+}): DefaultResourceLoader {
+	return new DefaultResourceLoader({
+		cwd: options.cwd,
+		agentDir: options.agentDir,
+		// 托管 agent 必须行为可复现：不吃用户本地的扩展/技能/上下文文件。
+		noExtensions: true,
+		additionalExtensionPaths: options.additionalExtensionPaths,
+		noSkills: true,
+		noPromptTemplates: true,
+		noContextFiles: true,
+		disabledBuiltinExtensions: [...DISABLED_BUILTIN_EXTENSIONS],
+		extensionFactories: options.extensionFactories,
+		...(options.systemPromptOverride
+			? { systemPromptOverride: options.systemPromptOverride }
+			: {}),
+	});
+}
+
 export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	const sessionDir = spec.sessionDir ?? resolve(".coagent-runs/sessions");
 	mkdirSync(sessionDir, { recursive: true });
@@ -680,15 +711,10 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		? new PlatformClient(spec.endpoint.baseUrl, spec.endpoint.token)
 		: undefined;
 
-	const resourceLoader = new DefaultResourceLoader({
+	const resourceLoader = createControlledResourceLoader({
 		cwd: spec.cwd,
 		agentDir: getAgentDir(),
-		// 托管 agent 必须行为可复现：不吃用户本地的扩展/技能/上下文文件。
-		noExtensions: true,
 		additionalExtensionPaths: resolveProviderExtensionPaths(profile.provider),
-		noSkills: true,
-		noPromptTemplates: true,
-		noContextFiles: true,
 		extensionFactories: [
 			...(bindPlatform
 				? [
@@ -744,6 +770,7 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		: SessionManager.create(spec.cwd, sessionDir);
 
 	// query 的 tools 只来自 adapter 闭集（toolAllowlist('query')），不并入 Hub allowlist。
+	// excludeTools 不能省：1.3.0 普通名字白名单仍会把 MCP 工具留给 codemode/tool_search 调用。
 	const { session } = await createAgentSession({
 		cwd: spec.cwd,
 		model,
@@ -752,6 +779,7 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 		resourceLoader,
 		sessionManager,
 		tools: toolAllowlist(spec.role),
+		excludeTools: [...EXCLUDED_EXPANSION_TOOLS],
 	});
 
 	// 序号高水位要在 prompt 之前从会话里读回来：续跑时同一 Attempt 接着往后编，
