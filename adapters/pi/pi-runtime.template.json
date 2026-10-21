@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "extensions": {},
+  "worker": {
+    "defaultModel": "codebuddy-intl/deepseek-v4.1-flash",
+    "fallbackModel": "codebuddy/deepseek-v4.1-flash"
+  }
+}
