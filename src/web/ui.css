@@ -247,8 +247,22 @@ pre.term { max-height:280px; }
 .switch { display:inline-block; vertical-align:middle; opacity:.65; cursor:not-allowed; }
 /* 项目运行工作台：复用主题令牌，角色与状态均有文字标签。 */
 .platform-strip{display:flex;flex-wrap:wrap;gap:12px 24px;background:var(--accent-faint);align-items:center;margin-top:16px;font-size:13px}
-.priority-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
+.priority-row{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
 .priority-actions,.timeline-toolbar{display:flex;align-items:center;gap:10px;padding:12px 0}.priority-actions span{margin-right:auto}.timeline-toolbar h2{margin:0 auto 0 0}
+/* 候选行：名称区与操作区是两个各自收缩的盒子。名称区 flex-basis 给 260px、
+   操作区 0 0 auto——窄屏下先让操作区整体换到下一行，而不是被名称挤成一条竖字，
+   也不是让四个按钮压到名称上面。min-width:0 + overflow-wrap 是给长模型名用的：
+   没有空格的模型 id 会把整行撑出横向滚动条。 */
+.priority-row .priority-main{flex:1 1 260px;min-width:0;display:grid;gap:6px}
+.priority-row .priority-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+.priority-row .priority-rank{display:inline-grid;place-items:center;min-width:22px;height:22px;border-radius:6px;background:var(--accent-faint);color:var(--accent);font-size:12px;font-weight:700}
+.priority-row .priority-model{min-width:0;overflow-wrap:anywhere;font-size:14px}
+.priority-row .priority-state{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--muted);color:var(--muted-foreground)}
+.priority-row .priority-state[data-priority-state="enabled"]{background:color-mix(in oklch,var(--card) 80%,var(--status-done));color:var(--status-done)}
+.priority-row .priority-state[data-priority-state="disabled"]{background:color-mix(in oklch,var(--card) 80%,var(--status-cancelled))}
+.priority-row .priority-facts{display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--muted-foreground);font-size:12px;overflow-wrap:anywhere}
+.priority-row .priority-priority{color:var(--muted-foreground)}
+.priority-row .priority-buttons{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
 .mission-process .stage-list{display:flex;gap:10px;overflow-x:auto;max-height:360px;padding:8px 0 14px;align-items:flex-start}
 .mission-process .stage{flex:0 0 280px;min-width:0;background:color-mix(in oklch,var(--card) 92%,var(--role-coordinator));border-radius:var(--radius)}
 .mission-process .stage.role-executor{background:color-mix(in oklch,var(--card) 92%,var(--accent))}.mission-process .stage.role-reviewer{background:color-mix(in oklch,var(--card) 92%,var(--role-reviewer))}
@@ -261,7 +275,11 @@ pre.term { max-height:280px; }
 /* 窄屏只补 1000px 那一档没管到的：导航改成横排、内边距收到 12px 这类
    在下面 1000px 块里统一写，这里再写一遍就是同一组属性的两个副本——
    改了上面漏了下面，症状是某档宽度「跟别的档长得不一样」。 */
-@media(max-width:800px){.platform-strip{gap:8px 14px}.mission-process .stage{flex-basis:235px}}
+/* 窄屏：候选名与操作区必须能换成上下两行，否则四个按钮会把模型名挤成一条
+   竖字；底部操作条（未保存提示 + 保存 + 比较）同理，它们加起来超过一屏宽时
+   要换行，而不是让「保存」被推出屏幕——那会导致「改了却存不下去」，而页面上
+   只显示一半操作。 */
+@media(max-width:800px){.platform-strip{gap:8px 14px}.mission-process .stage{flex-basis:235px}.priority-row .priority-main{flex-basis:100%}.priority-row .priority-buttons{width:100%;justify-content:flex-start}.priority-actions{flex-wrap:wrap;gap:8px}.priority-actions span{flex:1 1 100%;margin-right:0}}
 
 .mission-process .stage-list{padding-left:0}.mission-process .stage-list::before,.mission-process .stage::before{display:none}.mission-process .stage[hidden]{display:none}.step-usage-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.step-usage-grid div{background:var(--accent-faint);padding:9px;border-radius:6px}.step-usage-grid dt{font-size:12px;color:var(--muted-foreground)}.step-usage-grid dd{margin:5px 0 0}.mission-process .stage-head,.mission-process .evt{background:var(--card)}
 :root[data-theme="dark"] .nav,:root[data-theme="dark"] .topbar{background:var(--card);color:var(--foreground)}:root[data-theme="dark"] .brand,:root[data-theme="dark"] .nav .item{color:var(--foreground)}

@@ -313,6 +313,52 @@ export function modelLabel(profile) {
   return { text: label, title };
 }
 
+/* ============================ 候选渠道 ============================ */
+
+/**
+ * provider → 渠道人话（国内 / 国际）。
+ *
+ * 为什么需要这一张表：`codebuddy` 与 `codebuddy-intl`、`qoder-cn` 与 `qoder`
+ * 在候选行里只看 provider 名几乎分不出是国内还是国际入口，而这两者背后是
+ * 不同的账号池与计费通道——选错的那一行跑起来一样能出字，只有账单和限流
+ * 会说话。所以把「这个 provider 属于哪个渠道」写成一次性对照，比让每个人
+ * 每次去查文档可靠。
+ *
+ * **只做映射，不从名字猜能力。** 表里没有的 provider 原样回显（见
+ * providerText）：猜一个「应该算国际」的结论，比什么都不说更糟——猜错的那
+ * 一行看起来和核对过的一样。同样，这张表不写费用、额度、可用性：那三样
+ * 都不是 provider 名字里能读出来的事实。
+ *
+ * provider 名是适配层登记的名字（adapters/pi/docs/specs/provider-extensions.md），
+ * 这里只抄对照关系，不复制它的加载逻辑。
+ */
+export const PROVIDER_CHANNEL = {
+  codebuddy: 'CodeBuddy 国内',
+  'codebuddy-intl': 'CodeBuddy 国际',
+  'codebuddy-cn': 'CodeBuddy 国内',
+  'qoder-cn': 'Qoder 国内',
+  qoder: 'Qoder 国际',
+};
+
+/**
+ * provider 原文 + 渠道人话。认不出来时只回原文，**不补渠道**。
+ *
+ * 认不出来的 provider 是新接进来的运行时（换一个运行时 facts 里放什么由它定），
+ * 替它编一个渠道，等于把「还没人核对过」显示成「核对过是国内/国际」。
+ *
+ * 查表**只认自有属性**（Object.hasOwn）而不是 `PROVIDER_CHANNEL[raw]`：
+ * provider 是外部输入，`constructor` / `toString` / `__proto__` 这类原型键在
+ * 原型链上确实「查得到」，取回来是函数或对象。它会被拼进 `${raw} · ${channel}`，
+ * 界面上就是「constructor · function Object() { [native code] }」，
+ * 而这条根本不是表里登记过的渠道——等于替一个没核对过的值宣称它有渠道。
+ */
+export function providerText(provider) {
+  const raw = text(provider);
+  if (!raw) return '';
+  const channel = Object.hasOwn(PROVIDER_CHANNEL, raw) ? PROVIDER_CHANNEL[raw] : '';
+  return channel ? `${raw} · ${channel}` : raw;
+}
+
 /* ============================ 用量卡文案 ============================ */
 
 /**
