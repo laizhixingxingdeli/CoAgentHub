@@ -88,20 +88,6 @@ import {
 import type { RunTokenIssuer } from './application/token-issuer.ts';
 import type { WorkspaceManager, WorktreeReconcileResult } from './application/workspace.ts';
 import { GitWorktreeManager } from './application/workspace.ts';
-import {
-  assertDecisionModeStartup,
-  parseDecisionHooks,
-  parseDecisionMode,
-} from './application/decision-mode.ts';
-import {
-  createDecisionProvider,
-  createPostExecutionEvaluator,
-} from './application/decision-provider-factory.ts';
-import type {
-  DecisionHook,
-  DecisionProvider,
-  PostExecutionEvaluator,
-} from './application/ports.ts';
 import { resumeMissionBody, runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { createHostedMissionGuard } from './application/hosted-mission-guard.ts';
 import { runHostedPlan } from './application/plan-runtime.ts';
@@ -152,17 +138,12 @@ export async function shutdownHostedPlan(input: {
 
 export function buildPlatform(
   workspace?: WorkspaceManager,
-  decisionProvider?: DecisionProvider,
   /**
    * 可选 query runtime。仅当 runtime **显式** `supportsQuery === true`
    * 时才暴露 `queryRunner` / `runQuery`；未传或不支持则保持 undefined
    * （fail-closed，不凭 kind 猜测）。
    */
   queryRuntime?: AgentRuntime,
-  /** 注入了 provider 时哪些钩子跑 shadow；缺省见 parseDecisionHooks。 */
-  decisionHooks?: ReadonlySet<DecisionHook>,
-  /** 可选 POST_EXECUTION shadow 评估器（J2）；跑不跑还要看 decisionHooks。 */
-  postExecutionEvaluator?: PostExecutionEvaluator,
 ) {
   const clock = new SystemClock();
   const projects = new InMemoryProjectRepository();
@@ -195,9 +176,6 @@ export function buildPlatform(
     activity,
     clock,
     ids,
-    ...(decisionProvider ? { decisionProvider } : {}),
-    ...(decisionHooks ? { decisionHooks } : {}),
-    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     ...(validation ? { validation } : {}),
   });
   const agentPool = new InMemoryAgentPoolRepository();
@@ -227,11 +205,6 @@ export function buildPlatform(
 
 export interface PersistentOptions {
   workspace?: WorkspaceManager;
-  decisionProvider?: DecisionProvider;
-  /** 注入了 provider 时哪些钩子跑 shadow；缺省见 parseDecisionHooks。 */
-  decisionHooks?: ReadonlySet<DecisionHook>;
-  /** 可选 POST_EXECUTION shadow 评估器（J2）；跑不跑还要看 decisionHooks。 */
-  postExecutionEvaluator?: PostExecutionEvaluator;
   /**
    * 是否要排他写锁。
    *
@@ -266,9 +239,6 @@ export async function buildPersistentPlatform(
       ? { workspace: workspaceOrOptions }
       : (workspaceOrOptions ?? {});
   const workspace = options.workspace ?? new GitWorktreeManager();
-  const decisionProvider = options.decisionProvider;
-  const decisionHooks = options.decisionHooks;
-  const postExecutionEvaluator = options.postExecutionEvaluator;
   const exclusiveIdentity =
     options.exclusive?.instanceId !== undefined && options.exclusive.apiVersion !== undefined
       ? { instanceId: options.exclusive.instanceId, apiVersion: options.exclusive.apiVersion }
@@ -314,9 +284,6 @@ export async function buildPersistentPlatform(
     activity,
     clock,
     ids,
-    ...(decisionProvider ? { decisionProvider } : {}),
-    ...(decisionHooks ? { decisionHooks } : {}),
-    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     validation,
     // 单事务命令（C2）：交卷与升级的状态、事件、投递一次写完。
     transaction: store,
@@ -422,9 +389,6 @@ export async function buildPgPlatform(options?: {
   connectionString?: string;
   workspace?: WorkspaceManager;
   artifactRoot?: string;
-  decisionProvider?: DecisionProvider;
-  decisionHooks?: ReadonlySet<DecisionHook>;
-  postExecutionEvaluator?: PostExecutionEvaluator;
   /**
    * 接手哪条 Mission —— 传了才做启动收敛，而且只收敛这一条。
    *
@@ -457,9 +421,6 @@ export async function buildPgPlatform(options?: {
   const artifacts = new FileArtifactStore(
     resolve(options?.artifactRoot ?? '.coagent-artifacts'),
   );
-  const decisionProvider = options?.decisionProvider;
-  const decisionHooks = options?.decisionHooks;
-  const postExecutionEvaluator = options?.postExecutionEvaluator;
   // Platform 与 ValidationEngine 必须共享同一个 WorkspaceManager 实例。
   const workspace = options?.workspace ?? new GitWorktreeManager();
   const commandRunner = new ExecFileCommandRunner();
@@ -483,9 +444,6 @@ export async function buildPgPlatform(options?: {
     activity,
     clock,
     ids,
-    ...(decisionProvider ? { decisionProvider } : {}),
-    ...(decisionHooks ? { decisionHooks } : {}),
-    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
     validation,
     // 单事务命令（C3）：交卷与升级的快照、事件、投递同一个数据库事务写下。
     transaction: store,
@@ -604,39 +562,6 @@ export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTok
     revoke(token) {
       tokens.revoke(token);
     },
-  };
-}
-
-/** 按 env 组装出来、原样交给各个构建器的决策依赖。off 模式下是空对象。 */
-export interface DecisionDeps {
-  decisionProvider?: DecisionProvider;
-  decisionHooks?: ReadonlySet<DecisionHook>;
-  postExecutionEvaluator?: PostExecutionEvaluator;
-}
-
-/**
- * 按 COAGENT_DECISION_MODE 组装决策依赖。startServer、run-mission、run-plan 共用这一个入口
- * ——原先只有 startServer 接了 provider，CLI 跑的任务永远不会触发 shadow（J2 发现）。
- *
- * 必须在打开状态 / 拿锁 / 监听之前调用：shadow 缺 key 在这里就失败，不留半截状态。
- * off：除了 COAGENT_DECISION_MODE 本身，不读任何 decision 相关 env（规格要求）。
- */
-export function buildDecisionDeps(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
-  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
-): DecisionDeps {
-  const mode = parseDecisionMode(env.COAGENT_DECISION_MODE);
-  if (mode !== 'shadow') {
-    assertDecisionModeStartup({ mode, providerAvailable: false });
-    return {};
-  }
-  const decisionProvider = createDecisionProvider({ mode, env, fetch: fetchImpl });
-  assertDecisionModeStartup({ mode, providerAvailable: Boolean(decisionProvider) });
-  const postExecutionEvaluator = createPostExecutionEvaluator({ mode, env, fetch: fetchImpl });
-  return {
-    ...(decisionProvider ? { decisionProvider } : {}),
-    decisionHooks: parseDecisionHooks(env.COAGENT_DECISION_HOOKS),
-    ...(postExecutionEvaluator ? { postExecutionEvaluator } : {}),
   };
 }
 
@@ -1060,8 +985,6 @@ export async function startServer(
   // 间隔非法要失败在任何持久化 / 锁 / listen 之前。
   const env = options?.env ?? process.env;
   const reconcileIntervalMs = parseReconcileIntervalMs(env.COAGENT_RECONCILE_INTERVAL_MS);
-  // Decision 模式：在任何持久化 / 锁 / listen 之前 factory + 启动门禁。
-  const decision = buildDecisionDeps(env, options?.fetch ?? globalThis.fetch);
 
   const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
@@ -1073,8 +996,8 @@ export async function startServer(
   let server: Server | undefined;
   try {
     const built = usePg
-      ? await buildPgPlatform({ ...decision, queryRuntime, workspace })
-      : await buildPersistentPlatform(statePath, { ...decision, queryRuntime, workspace, exclusive: {
+      ? await buildPgPlatform({ queryRuntime, workspace })
+      : await buildPersistentPlatform(statePath, { queryRuntime, workspace, exclusive: {
           what: '常驻服务',
           instanceId,
           apiVersion: API_VERSION,

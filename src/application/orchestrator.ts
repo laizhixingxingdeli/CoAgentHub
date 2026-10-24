@@ -926,9 +926,6 @@ export class Orchestrator {
               await this.#guards.settleValidationResidue(missionId, item, cwd);
             }
           }
-          // POST_EXECUTION shadow（J2）：交卷之后、协调者评审之前。非权威，出错只进事件；
-          // 没交卷（这一跳没 structured submit）时平台自己会跳过。
-          await this.#platform.runPostExecutionShadow(missionId, item.id);
           // GATE-POST after each successful hop (tokens/commands/wall accumulate here).
           const gate = await this.#enforceAuthoritativeBudget(missionId);
           if (gate.kind === 'stop') return gate.outcome;
@@ -1473,13 +1470,6 @@ export class Orchestrator {
           workItemId: item.id,
           cwd,
         }));
-      // 只有这一跳真的跑了命令（没有可恢复的旧报告）且过了才问：旧报告恢复时上一次
-      // 交卷那轮已经问过，再问一遍就是同一份产物两份 shadow。
-      if (!current && validated.passed) {
-        // POST_EXECUTION shadow（J2）：确定性验收过了才问（含因规模被扣下的）；硬失败不问——
-        // 设计 §9.1：Jev 无权推翻确定性结果，问了也不该用。
-        await this.#platform.runPostExecutionShadow(missionId, item.id);
-      }
       // 机器过了、改动也在轻量规模内 —— 验收结论归协调者（用户 09-30 定）：
       // 机器只判「命令绿不绿」，判不了「是不是工单要的东西」。交给标准候选池做 L2，
       // 打回就在这同一跳转 Standard，不另起一轮。

@@ -1149,24 +1149,6 @@ const EVENT_TABLE = {
     detail: or(event && event.data && event.data.deliveryId, '启动收敛补的投递'),
   }),
 
-  'decision.shadow': (event) => {
-    const data = (event && event.data) || {};
-    return {
-      badge: PLATFORM_ROLE_LABEL,
-      action: '影子决策审计',
-      detail: or(data.hook, or(data.quality, '只记不拦')),
-    };
-  },
-
-  'decision.post_execution': (event) => {
-    const data = (event && event.data) || {};
-    return {
-      badge: PLATFORM_ROLE_LABEL,
-      action: '交卷后影子评估',
-      detail: or(data.quality, '只记不改审查级别'),
-    };
-  },
-
   // 运行中变更的影响判断。**只是判断，不是应用**：文案里不许出现「已处理 /
   // 已应用 / 已重排」——那条判断落地是另一条链路，写成已完成会让人拿它当已处理。
   'change.impact_decided': (event) => {

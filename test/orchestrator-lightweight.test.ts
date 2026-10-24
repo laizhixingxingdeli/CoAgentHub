@@ -589,7 +589,7 @@ describe('Orchestrator Lightweight：验收没过 → 自动升级 Standard（§
 
 describe('Orchestrator Lightweight：submitted crash-recovery', () => {
   // W-442 之后机器验收不再 accept：崩之前留下的那份报告就是 current report，
-  // 恢复时不重跑命令、不再问 shadow，把它取出来直接交给 L2。
+  // 恢复时不重跑命令，把它取出来直接交给 L2。
   test('机器已验断定后恢复：不重跑命令，直接同一份报告走 L2 accept', async () => {
     const coordinator = new ScriptedRuntime(COORDINATOR_L2_ACCEPT);
     const h = await harness({ coordinator });
@@ -638,25 +638,14 @@ describe('Orchestrator Lightweight：submitted crash-recovery', () => {
       return realValidate(input);
     };
 
-    // POST_EXECUTION shadow 同理：崩之前那一轮已经问过，恢复时再问就是同一份产物
-    // 两份 shadow。它在真实 Platform 上被调（生产里由 current 分支挡掉），所以数的是
-    // 真实方法有没有被调用，不是替身有没有被问。
-    let shadowRuns = 0;
-    const realShadow = h.platform.runPostExecutionShadow.bind(h.platform);
-    h.platform.runPostExecutionShadow = async (m: string, w: string) => {
-      shadowRuns += 1;
-      return realShadow(m, w);
-    };
-
     const orch = h.makeOrchestrator();
     const result = await orch.runMission(missionId, { projectRoot: process.cwd() });
     assert.deepEqual(result, { kind: 'awaiting_l3_review' });
     const view = await h.platform.getMissionView(missionId);
     assert.equal(view.status, 'awaiting_review');
     assert.equal(view.result?.summary, '从 crash 恢复');
-    // 没重跑命令、没再问 shadow，交卷凭的还是崩之前那份报告。
+    // 没重跑命令，交卷凭的还是崩之前那份报告。
     assert.equal(engineRuns, 0);
-    assert.equal(shadowRuns, 0);
     assert.equal(view.workItems[0]!.validationReport?.reportId, validated.reportId);
     assert.deepEqual(view.result?.acceptanceEvidence, [
       `validation-report:${validated.reportId}`,

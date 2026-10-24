@@ -25,7 +25,6 @@ import {
   parseReconcileIntervalMs,
 } from './application/reconcile.ts';
 import {
-  buildDecisionDeps,
   buildPersistentPlatform,
   buildPgPlatform,
 } from './main.ts';
@@ -353,9 +352,6 @@ async function main() {
     await checkPlanOnly(planFile, maxRounds);
     return;
   }
-
-  // 正式跑：读 plan JSON 之前就 fail-closed。--check 已先行返回，不在这里做决策校验。
-  buildDecisionDeps(process.env);
 
   // 间隔非法要失败在开状态 / 拿锁 / listen / 建 worktree 之前。
   parseReconcileIntervalMs(process.env.COAGENT_RECONCILE_INTERVAL_MS);

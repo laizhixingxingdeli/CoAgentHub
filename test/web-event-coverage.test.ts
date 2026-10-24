@@ -22,8 +22,6 @@ const ACTIVITY_ENTRIES: ReadonlyArray<{ file: string; how: '#event' | 'append'; 
   { file: 'src/application/platform.ts', how: '#event', platformFiles: platformFilesFor('src/application/platform.ts') },
   { file: 'src/application/query-promotion.ts', how: 'append' },
   { file: 'src/application/reconcile.ts', how: 'append' },
-  { file: 'src/application/decision-shadow-runner.ts', how: 'append' },
-  { file: 'src/application/post-execution-shadow.ts', how: 'append' },
 ];
 
 /**
@@ -358,8 +356,6 @@ describe('活动写入入口：从源码抠 kind，未翻译即红', () => {
     assert.match(report, /platform\.ts via #event/);
     assert.match(report, /query-promotion\.ts via append/);
     assert.match(report, /reconcile\.ts via append/);
-    assert.match(report, /decision-shadow-runner\.ts via append/);
-    assert.match(report, /post-execution-shadow\.ts via append/);
   });
 
   test('未能解析的常量/动态表达式不得静默略过', () => {

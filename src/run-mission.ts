@@ -31,7 +31,7 @@ import {
 } from './runtime/spawn.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from './application/workspace.ts';
 import { listenLoopback } from './application/loopback-listen.ts';
-import { buildDecisionDeps, buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
 import type {
   ComplexityAssessment,
   MissionContract,
@@ -189,9 +189,6 @@ async function main() {
     return;
   }
 
-  // 读 mission JSON 之前就 fail-closed：shadow 缺 key 不得先 ENOENT。后面建平台复用这份 decision。
-  const decision = buildDecisionDeps(process.env);
-
   const spec = JSON.parse(readFileSync(resolve(missionFile), 'utf8')) as {
     projectId: string;
     missionId: string;
@@ -269,13 +266,11 @@ async function main() {
   try {
     built = usePg
       ? await buildPgPlatform({
-          ...decision,
           workspace: missionWorkspace,
           // 只收敛自己接手的这条：对别的 Mission 没有「没人在跑」这个认知。
           reconcileMissionId: spec.missionId,
         })
       : await buildPersistentPlatform(statePath, {
-          ...decision,
           workspace: missionWorkspace,
           exclusive: { what: `跑 Mission ${spec.missionId}` },
         });

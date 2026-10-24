@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Mission, Project, WorkItem, Attempt, AttemptKind } from '../../kernel/index.ts';
-import type { ProjectRepository, ActivityLog, IdGenerator, Clock, DecisionProvider, DecisionHook, PostExecutionEvaluator, CommandTransaction, FencedCommandTransaction } from '../ports.ts';
+import type { ProjectRepository, ActivityLog, IdGenerator, Clock, CommandTransaction, FencedCommandTransaction } from '../ports.ts';
 import type { DeliveryRepository } from '../delivery.ts';
 import type { WorkspaceManager } from '../workspace.ts';
 import { InlineArtifactStore, type ArtifactStore } from '../artifact-store.ts';
@@ -60,9 +60,6 @@ export class PlatformContext {
   workspace: WorkspaceManager | undefined;
   artifacts: ArtifactStore;
   clock: Clock;
-  decisionProvider: DecisionProvider | undefined;
-  decisionHooks: ReadonlySet<DecisionHook>;
-  postExecutionEvaluator: PostExecutionEvaluator | undefined;
   transaction: CommandTransaction | undefined;
   validation: PlatformValidationDeps | undefined;
   haAuthorityFile: string | undefined;
@@ -83,9 +80,6 @@ export class PlatformContext {
     this.workspace = deps.workspace;
     this.artifacts = deps.artifacts ?? new InlineArtifactStore();
     this.clock = deps.clock;
-    this.decisionProvider = deps.decisionProvider;
-    this.decisionHooks = deps.decisionHooks ?? new Set<DecisionHook>(['POST_EXECUTION']);
-    this.postExecutionEvaluator = deps.postExecutionEvaluator;
     this.transaction = deps.transaction;
     this.validation = deps.validation;
     this.haAuthorityFile = deps.haAuthorityFile;

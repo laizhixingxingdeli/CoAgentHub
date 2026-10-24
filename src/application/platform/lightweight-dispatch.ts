@@ -1,6 +1,5 @@
 import type { Mission, Project, WorkOrder } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
-import { runDecisionShadow } from '../decision-shadow-runner.ts';
 
 export async function createLightweightWorkItem(
   ctx: PlatformContext,
@@ -86,22 +85,6 @@ export async function dispatchLightweightWorkItem(
     // 与 Standard 相同顺序：mutation-slot → shadow → item.dispatch。
     await acquireMutationSlotForDispatch(mission, project);
 
-    // PRE_DISPATCH shadow：observational；provider/activity 失败不阻断 dispatch。
-    // attemptId 省略——绝不伪造 Coordinator attempt。
-    if (ctx.decisionProvider && ctx.decisionHooks.has('PRE_DISPATCH')) {
-      await runDecisionShadow({
-        provider: ctx.decisionProvider,
-        activity: ctx.activity,
-        clock: ctx.clock,
-        stateInput: {
-          hook: 'PRE_DISPATCH',
-          projectId: mission.projectId,
-          missionId: mission.id,
-          workItemId,
-        },
-        workItemIds: [workItemId],
-      });
-    }
 
     item.dispatch();
     await ctx.event(

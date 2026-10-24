@@ -30,7 +30,6 @@ import {
   rejectedQueryTools,
   runQuery,
 } from '../src/application/query-run.ts';
-import type { DecisionProvider, DecisionRequest } from '../src/application/ports.ts';
 import type { WorkspaceManager } from '../src/application/workspace.ts';
 import { buildPlatform } from '../src/main.ts';
 import { ScriptedRuntime } from '../src/runtime/scripted.ts';
@@ -101,20 +100,6 @@ function spyWorkspace(): WorkspaceManager & { prepareCalls: number } {
   };
 }
 
-function countingDecisionProvider(): DecisionProvider & { calls: number } {
-  let calls = 0;
-  return {
-    kind: 'counting-test',
-    get calls() {
-      return calls;
-    },
-    async decide(_request: DecisionRequest) {
-      calls += 1;
-      return { answers: { noop: { kind: 'noop' as const } } };
-    },
-  };
-}
-
 describe('query tools allowlist', () => {
   test('默认只读表通过', () => {
     assert.deepEqual(rejectedQueryTools(QUERY_READONLY_TOOLS), []);
@@ -169,7 +154,6 @@ describe('QueryRunner.runQuery', () => {
       },
     });
     const workspace = spyWorkspace();
-    const decision = countingDecisionProvider();
     const projects = new InMemoryProjectRepository();
     const platform = new Platform({
       projects,
@@ -178,7 +162,6 @@ describe('QueryRunner.runQuery', () => {
       activity: new InMemoryActivityLog(clock),
       clock,
       ids,
-      decisionProvider: decision,
     });
 
     const runner = new QueryRunner({ runtime, queryRuns, clock, ids });
@@ -213,10 +196,9 @@ describe('QueryRunner.runQuery', () => {
     assert.equal(runtime.specs[0]?.endpoint.token, '');
     assert.equal(runtime.specs[0]?.instruction, '这个仓库是干什么的？');
 
-    // 硬边界：不 prepare、不建 Mission、不调 Decision
+    // 硬边界：不 prepare、不建 Mission
     assert.equal(workspace.prepareCalls, 0);
     assert.equal((await projects.list()).length, 0);
-    assert.equal(decision.calls, 0);
     // platform 侧也无 Mission
     assert.deepEqual(await platform.listMissions(), []);
   });
@@ -454,7 +436,7 @@ describe('query runtime capability gate', () => {
     );
     assert.equal((await queryRuns.list()).length, 0);
 
-    const built = buildPlatform(undefined, undefined, spawn);
+    const built = buildPlatform(undefined, spawn);
     assert.equal(built.runQuery, undefined);
     assert.equal(built.queryRunner, undefined);
   });
@@ -631,7 +613,7 @@ describe('buildPlatform 注入 query', () => {
       },
     });
     assert.equal(runtime.supportsQuery, true);
-    const built = buildPlatform(undefined, undefined, runtime);
+    const built = buildPlatform(undefined, runtime);
     assert.ok(built.runQuery);
     assert.ok(built.queryRunner);
     await built.agentPool.add({ role: 'classifier', profileId: 'query-test', endpoint: 'local' });
@@ -659,7 +641,7 @@ describe('buildPlatform 注入 query', () => {
         throw new Error('不应暴露');
       },
     };
-    const built = buildPlatform(undefined, undefined, fake);
+    const built = buildPlatform(undefined, fake);
     assert.equal(built.runQuery, undefined);
     assert.equal(built.queryRunner, undefined);
   });

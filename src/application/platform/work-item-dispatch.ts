@@ -1,6 +1,5 @@
 import type { Mission, Project } from '../../kernel/index.ts';
 import { PlatformContext, PlatformRuleError } from './context.ts';
-import { runDecisionShadow } from '../decision-shadow-runner.ts';
 import { enforceMissionTicketGates } from './ticket-budget.ts';
 import { checkWorkOrderScope, notDispatchableHint } from './work-order-helpers.ts';
 import { PLATFORM_BLOCKED_EVENT_KIND } from './stalled-work-item.ts';
@@ -116,24 +115,6 @@ export async function dispatchWorkItems(
     // 再 PRE_DISPATCH shadow，再 item.dispatch。
     await acquireMutationSlotForDispatch(mission, project);
 
-    // PRE_DISPATCH shadow：确认硬规则全部通过之后、真实 dispatch 之前。
-    // 信号 / provider 失败 / shadow append 失败都不改变后续 item.dispatch。
-    if (ctx.decisionProvider && ctx.decisionHooks.has('PRE_DISPATCH')) {
-      const soleWorkItemId = workItemIds.length === 1 ? workItemIds[0] : undefined;
-      await runDecisionShadow({
-        provider: ctx.decisionProvider,
-        activity: ctx.activity,
-        clock: ctx.clock,
-        stateInput: {
-          hook: 'PRE_DISPATCH',
-          projectId: mission.projectId,
-          missionId: mission.id,
-          attemptId,
-          ...(soleWorkItemId !== undefined ? { workItemId: soleWorkItemId } : {}),
-        },
-        workItemIds: [...workItemIds],
-      });
-    }
 
     for (const item of items) item.dispatch();
     await ctx.event(mission, 'work_item.dispatched', { ids: [...workItemIds] }, undefined, attemptId);

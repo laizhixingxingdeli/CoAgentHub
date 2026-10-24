@@ -14,7 +14,6 @@ import * as integrationVerification from './platform/integration-verification.ts
 import * as conflictDispatch from './platform/conflict-dispatch.ts';
 import * as haValidation from './platform/ha-validation.ts';
 import * as promotion from './platform/promotion.ts';
-import * as postExecution from './platform/post-execution.ts';
 import * as commandTracking from './platform/command-tracking.ts';
 import * as toolActivity from './platform/tool-activity.ts';
 import * as hopEvents from './platform/hop-events.ts';
@@ -148,19 +147,11 @@ import type {
   Clock,
   CommandTransaction,
   ContextMetricsV1,
-  DecisionHook,
-  DecisionProvider,
   FencedCommandTransaction,
   IdGenerator,
-  PostExecutionEvaluator,
   ProjectRepository,
 } from './ports.ts';
 import type { ClaimFence } from './durable-scheduler.ts';
-import {
-  POST_EXECUTION_SHADOW_EVENT_KIND,
-  postExecutionInputFrom,
-  recordPostExecutionShadow,
-} from './post-execution-shadow.ts';
 import type { DeliveryRepository } from './delivery.ts';
 import { escalationDeliveryKey, resultDeliveryKey } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
@@ -185,7 +176,6 @@ import {
   readProjectMemory,
   writeVibe,
 } from './project-memory.ts';
-import { runDecisionShadow } from './decision-shadow-runner.ts';
 import {
   assertNoCallerRouteOverride,
   ClassifiedMissionInputError,
@@ -261,9 +251,6 @@ export class Platform {
   get #workspace(): WorkspaceManager | undefined { return this.#context.workspace; }
   get #artifacts(): ArtifactStore { return this.#context.artifacts; }
   get #clock(): Clock { return this.#context.clock; }
-  get #decisionProvider(): DecisionProvider | undefined { return this.#context.decisionProvider; }
-  get #decisionHooks(): ReadonlySet<DecisionHook> { return this.#context.decisionHooks; }
-  get #postExecutionEvaluator(): PostExecutionEvaluator | undefined { return this.#context.postExecutionEvaluator; }
   get #transaction(): CommandTransaction | undefined { return this.#context.transaction; }
   get #validation(): PlatformValidationDeps | undefined { return this.#context.validation; }
   get #haAuthorityFile(): string | undefined { return this.#context.haAuthorityFile; }
@@ -2483,24 +2470,6 @@ export class Platform {
     fn: () => Promise<T>,
   ): Promise<T> {
     return this.#context.attemptWrite(missionId, attemptId, claim, fn);
-  }
-
-  /**
-   * POST_EXECUTION shadow（Jev 设计 §9，J2）：编排器在「执行者交卷 + 确定性验收」之后调用。
-   *
-   * 非权威、从不抛：评估器没注入、钩子没开、工作项不在交卷状态，都直接返回；取数或调用出任何错也只进事件。
-   * 输入只取平台自己存的：工单、当前那次提交、那个 attempt 的证据，改动清单优先用平台算的 diff。
-   */
-  async runPostExecutionShadow(missionId: string, workItemId: string): Promise<void> {
-    return postExecution.runPostExecutionShadow(this.#context, missionId, workItemId);
-  }
-
-  /**
-   * 平台自己算的改动清单。只在真有隔离工作区时可信：原地模式的 diff 永远是空的，
-   * 分不清「没改」和「没隔离」，这时返回 undefined，让调用方照实退回执行者自报。
-   */
-  async #trustedChangedFiles(mission: Mission): Promise<readonly string[] | undefined> {
-    return postExecution.trustedChangedFiles(this.#context, mission);
   }
 
   /**

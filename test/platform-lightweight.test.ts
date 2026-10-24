@@ -3,7 +3,7 @@
  *
  * 守住：
  *   - zero coordinator / Plan：恰好一个 frozen WorkItem
- *   - mutation slot 与 Standard 同规则；PRE_DISPATCH shadow observational（无 attemptId）
+ *   - mutation slot 与 Standard 同规则（派发事件无 attemptId）
  *   - validation.commands 可缺省/空（只跑 changed-paths）
  *   - 复用 startExecutorAttempt / submitEvidence / submitExecutionResult / finishAttempt
  *   - persist ValidationReport **before** accept；failed 保持 submitted
@@ -37,12 +37,6 @@ import type {
   CommandRunner,
   DiffFactReader,
 } from '../src/application/validation/ports.ts';
-import type {
-  DecisionAnswerSet,
-  DecisionHook,
-  DecisionProvider,
-  DecisionRequest,
-} from '../src/application/ports.ts';
 import type {
   MissionContract,
   ValidationReport,
@@ -154,9 +148,6 @@ function harness(opts?: {
     engine: Pick<ValidationEngine, 'validate'>;
     reports: ValidationReportRepository;
   };
-  decisionProvider?: DecisionProvider;
-  /** 注入 provider 时跑哪些钩子。这组测的就是 PRE shadow，缺省显式开 PRE（J1 之后平台缺省不开）。 */
-  decisionHooks?: ReadonlySet<DecisionHook>;
   runner?: CommandRunner;
   paths?: ChangedPathReader;
   diffFacts?: DiffFactReader;
@@ -189,12 +180,6 @@ function harness(opts?: {
     activity,
     clock,
     ids,
-    ...(opts?.decisionProvider
-      ? {
-          decisionProvider: opts.decisionProvider,
-          decisionHooks: opts.decisionHooks ?? new Set<DecisionHook>(['PRE_DISPATCH']),
-        }
-      : {}),
     ...(validation ? { validation } : {}),
   });
 
@@ -441,17 +426,8 @@ describe('Platform.createLightweightWorkItem', () => {
 });
 
 describe('Platform.dispatchLightweightWorkItem', () => {
-  test('占 Project mutation slot；coordinatorAttempts 仍 0；PRE_DISPATCH shadow 无 attemptId 且不阻断', async () => {
-    const sink: { calls: number; requests: DecisionRequest[] } = { calls: 0, requests: [] };
-    const provider: DecisionProvider = {
-      kind: 'capture',
-      async decide(request: DecisionRequest): Promise<DecisionAnswerSet> {
-        sink.calls += 1;
-        sink.requests.push(request);
-        return { answers: {} };
-      },
-    };
-    const h = harness({ decisionProvider: provider, withRealValidation: false });
+  test('占 Project mutation slot；coordinatorAttempts 仍 0，派发事件无 attemptId', async () => {
+    const h = harness({ withRealValidation: false });
     const { missionId, projectId } = await createLightweightMission(h.projects);
     const { workItemId } = await h.platform.createLightweightWorkItem(missionId, {
       order: ORDER_WITH_VALIDATION,
@@ -465,75 +441,10 @@ describe('Platform.dispatchLightweightWorkItem', () => {
     assert.equal(mission.isMutating, true);
     assert.equal(mission.coordinatorAttempts.length, 0);
     assert.equal(item.status, 'dispatched');
-    assert.equal(sink.calls, 1, 'Lightweight 应 observational 调用一次 PRE_DISPATCH decide');
-    assert.equal(sink.requests[0]?.attemptId, undefined, '不得伪造 Coordinator attemptId');
-    assert.equal(sink.requests[0]?.workItemId, workItemId);
-    assert.equal(sink.requests[0]?.hook, 'PRE_DISPATCH');
-    assert.equal(sink.requests[0]?.missionId, missionId);
-
     const events = await h.activity.list(missionId);
-    const shadows = events.filter((e) => e.kind === 'decision.shadow');
-    assert.equal(shadows.length, 1);
-    assert.equal(shadows[0]?.attemptId, undefined);
-    const shadowIds = (shadows[0]?.data as {
-      ids?: { attemptId?: string; workItemId?: string; workItemIds?: string[] };
-    }).ids;
-    assert.equal(shadowIds?.attemptId, undefined);
-    assert.equal(shadowIds?.workItemId, workItemId);
-    assert.deepEqual(shadowIds?.workItemIds, [workItemId]);
     const dispatched = events.filter((e) => e.kind === 'work_item.dispatched');
     assert.equal(dispatched.length, 1);
     assert.equal(dispatched[0]?.attemptId, undefined);
-  });
-
-  test('PRE 没开（J1 缺省）：Lightweight 派发照常，0 次 decide、0 条 decision.shadow', async () => {
-    const sink = { calls: 0 };
-    const provider: DecisionProvider = {
-      kind: 'count',
-      async decide(): Promise<DecisionAnswerSet> {
-        sink.calls += 1;
-        return { answers: {} };
-      },
-    };
-    const h = harness({
-      decisionProvider: provider,
-      decisionHooks: new Set<DecisionHook>(['POST_EXECUTION']),
-      withRealValidation: false,
-    });
-    const { missionId } = await createLightweightMission(h.projects);
-    const { workItemId } = await h.platform.createLightweightWorkItem(missionId, { order: ORDER_WITH_VALIDATION });
-    assert.deepEqual(await h.platform.dispatchLightweightWorkItem(missionId, workItemId), { dispatched: workItemId });
-    assert.equal(sink.calls, 0);
-    assert.equal((await h.activity.list(missionId)).filter((e) => e.kind === 'decision.shadow').length, 0);
-  });
-
-  test('provider 失败仍 dispatch；不创建 Coordinator Attempt', async () => {
-    const provider: DecisionProvider = {
-      kind: 'boom',
-      async decide(): Promise<DecisionAnswerSet> {
-        throw new Error('shadow provider boom');
-      },
-    };
-    const h = harness({ decisionProvider: provider, withRealValidation: false });
-    const { missionId, projectId } = await createLightweightMission(h.projects, {
-      missionId: 'M-shadow-fail',
-    });
-    const { workItemId } = await h.platform.createLightweightWorkItem(missionId, {
-      order: ORDER_WITH_VALIDATION,
-    });
-
-    const result = await h.platform.dispatchLightweightWorkItem(missionId, workItemId);
-    assert.deepEqual(result, { dispatched: workItemId });
-
-    const { mission, item } = await liveItem(h.projects, projectId, missionId, workItemId);
-    assert.equal(item.status, 'dispatched');
-    assert.equal(mission.coordinatorAttempts.length, 0);
-    assert.equal(mission.status, 'executing');
-
-    const events = await h.activity.list(missionId);
-    const shadows = events.filter((e) => e.kind === 'decision.shadow');
-    assert.equal(shadows.length, 1);
-    assert.equal((shadows[0]?.data as { quality?: string }).quality, 'provider_error');
   });
 
   test('同 Project 另一 mutating Mission 时 PROJECT_BUSY', async () => {
@@ -1306,27 +1217,6 @@ describe('Standard 回归：Lightweight 不放宽', () => {
     assert.equal(last.authority, undefined);
   });
 
-  test('Standard PRE_DISPATCH 仍会调用 decisionProvider', async () => {
-    const sink = { calls: 0 };
-    const provider: DecisionProvider = {
-      kind: 'cap',
-      async decide(): Promise<DecisionAnswerSet> {
-        sink.calls += 1;
-        return { answers: {} };
-      },
-    };
-    const h = harness({ decisionProvider: provider, withRealValidation: false });
-    await h.platform.createMission({ projectId: 'P', missionId: 'M1', contract: CONTRACT });
-    const { attemptId: coord } = await h.platform.startCoordinatorAttempt('M1');
-    await h.platform.updatePlan('M1', coord, PLAN);
-    const { workItemId } = await h.platform.createWorkItem('M1', coord, {
-      title: 'W',
-      order: ORDER_BASE,
-    });
-    await h.platform.submitContractCheck('M1', coord, { verdict: 'ok', summary: '测试契约已核对' });
-    await h.platform.dispatchWorkItems('M1', coord, [workItemId]);
-    assert.equal(sink.calls, 1);
-  });
 });
 
 describe('Platform.promoteLightweightAfterValidation（§4.3 接线）', () => {

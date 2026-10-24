@@ -57,10 +57,8 @@ import type {
   ContextMetricsToolKind,
   ContextMetricsV1,
   DecisionHook,
-  DecisionProvider,
   FencedCommandTransaction,
   IdGenerator,
-  PostExecutionEvaluator,
   ProjectRepository,
 } from '../ports.ts';
 import type { ClaimFence } from '../durable-scheduler.ts';
@@ -178,21 +176,6 @@ export interface PlatformDeps {
   activity: ActivityLog;
   clock: Clock;
   ids: IdGenerator;
-  /**
-   * 可选 DecisionProvider。仅用于 shadow 审计（跑哪些钩子见 decisionHooks）：
-   * 不注入则完全跳过；注入后信号/失败也不影响真实 dispatch。
-   */
-  decisionProvider?: DecisionProvider;
-  /**
-   * 注入了 provider 时哪些钩子跑 shadow。缺省只有 POST_EXECUTION（见 parseDecisionHooks）：
-   * PRE_DISPATCH 只给 ID 时答案是常数，要显式开。
-   */
-  decisionHooks?: ReadonlySet<DecisionHook>;
-  /**
-   * POST_EXECUTION 评估器（J2）。注入且钩子含 POST_EXECUTION 时，编排器在交卷 + 确定性验收之后
-   * 调 runPostExecutionShadow；不注入则完全跳过。
-   */
-  postExecutionEvaluator?: PostExecutionEvaluator;
   /**
    * 命令事务（C2）。注入了，交卷与升级这几条命令的状态改动、事件、投递一起提交，或者一个都不落；
    * 缺省（内存版、PG 暂未接）直接跑，行为与之前相同。

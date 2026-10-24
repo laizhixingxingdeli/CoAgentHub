@@ -7,7 +7,6 @@
  */
 
 import type { Project } from '../kernel/index.ts';
-import type { PostExecutionRemoteState } from './post-execution-remote-input.ts';
 import type { AttemptEndReason, TokenUsage } from '../kernel/index.ts';
 import type { CapacityClaimResult, ClaimAvailableHopInput, ClaimFence, QueuedHop, ReportHopFailureInput } from './durable-scheduler.ts';
 import type { CandidateCircuit, ClaimCandidateProbeInput, OpenCandidateCircuitInput, ResolveCandidateProbeInput } from './candidate-circuit.ts';
@@ -323,65 +322,6 @@ export interface RuntimeOutcome {
    * 缺省时不产生该字段（不补空对象）。
    */
   readonly runtimeDiagnostics?: unknown;
-}
-
-/* ------------------------------ 决策信号端口 ------------------------------ */
-
-/**
- * DecisionProvider —— 与 AgentRuntime **并列**的 Application 侧横向信号能力。
- *
- * 只产 Choice / Score / No-op 信号；不写 kernel 状态、不降审查、不替代
- * Orchestrator / Harness 的执行权。钩子语义见 adr-0002；本端口本轮只钉形状，
- * 不接生产 dispatch / review。
- */
-export type DecisionHook = 'PRE_DISPATCH' | 'POST_EXECUTION';
-
-export interface DecisionRequest {
-  readonly hook: DecisionHook;
-  readonly projectId: string;
-  readonly missionId: string;
-  readonly workItemId?: string;
-  readonly attemptId?: string;
-  /** 不透明事实键值；本层不解释 key/value 语义。 */
-  readonly facts?: readonly { readonly key: string; readonly value: string }[];
-}
-
-export type DecisionSignal =
-  | { readonly kind: 'choice'; readonly option: string }
-  | { readonly kind: 'score'; readonly value: number; readonly scale?: string }
-  | { readonly kind: 'noop'; readonly reason?: string };
-
-/** Provider 报告的 token 用量（与 kernel TokenUsage 解耦，仅决策侧）。 */
-export interface DecisionUsage {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-}
-
-/** decide 成功时可选的 provider-neutral 元数据（不含 confidence/probabilities）。 */
-export interface DecisionAnswerMeta {
-  readonly resolvedModel?: string;
-  readonly usage?: DecisionUsage;
-}
-
-/** 一次 decide 返回的命名 answers 包；key 为 question id，value 仍是 DecisionSignal。 */
-export interface DecisionAnswerSet {
-  readonly answers: Readonly<Record<string, DecisionSignal>>;
-  readonly meta?: DecisionAnswerMeta;
-}
-
-export interface DecisionProvider {
-  readonly kind: string;
-  decide(request: DecisionRequest): Promise<DecisionAnswerSet>;
-}
-
-/**
- * POST_EXECUTION 评估（Jev 设计 §9）。与 DecisionProvider 分开：PRE 只拿 ID 与 facts（远端默认拒绝），
- * POST 拿的是按预算投影过的执行摘要——两者放出去的数据不同，端口也分开，免得一个口子上两套放行规则。
- * 同样只产信号、不具执行权威（ADR-0002）。
- */
-export interface PostExecutionEvaluator {
-  readonly kind: string;
-  evaluate(state: PostExecutionRemoteState): Promise<DecisionAnswerSet>;
 }
 
 /**
