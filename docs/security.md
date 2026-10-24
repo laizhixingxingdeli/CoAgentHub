@@ -41,7 +41,7 @@ CoAgentHub 把模型放到你的机器上、你的仓库里、用你的权限干
 
 ## 遥测与外联
 
-平台本体缺省不向外发任何请求，也没有遥测。（有一个可选的 Decision / Jev 信号功能，由 `COAGENT_DECISION_MODE` 控制，缺省 `off`；只有你显式打开 `shadow`，它才会请求你配置的端点，且只做审计、不具备执行权威。）会发网络请求的是：你配置的模型提供商；pi（版本检查、模型目录刷新、安装 / 更新遥测，可用 `PI_OFFLINE=1`、`PI_SKIP_VERSION_CHECK=1`、`PI_TELEMETRY=0` 关闭，并用 `--passthrough` 把这些变量交给适配层）；`setup` 时的 `npm ci`。
+平台本体缺省不向外发任何请求，也没有遥测。会发网络请求的是：你配置的模型提供商；pi（版本检查、模型目录刷新、安装 / 更新遥测，可用 `PI_OFFLINE=1`、`PI_SKIP_VERSION_CHECK=1`、`PI_TELEMETRY=0` 关闭，并用 `--passthrough` 把这些变量交给适配层）；`setup` 时的 `npm ci`。
 
 ## 已知限制
 

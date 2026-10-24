@@ -49,3 +49,7 @@
   - 必须写理由（`DECISION_REASON_REQUIRED`）；
   - 截止**含本身**之后不再收（`ESCALATION_DEADLINE_PASSED`）；已了结的单子不再收（`ESCALATION_ALREADY_RESOLVED`）；方案停了什么都不收（`PLAN_RUN_STOPPED`）。
 - **四个动作的效果**：`skip` → 当前功能 ⊘；`rescope` → 当前功能 ⊘，并删掉点名的**还没轮到**的功能（⊘，写明依赖谁）——只能删，不能加或改写工作，名单为空、重复、点到非待跑的功能都拒绝；只有 `rescope` 能带名单，别的动作夹带名单被拒而不是悄悄忽略（`RESCOPE_TARGET_INVALID`）；`stop` → 方案停在 `reviewer_stop`，当前功能 ⏸；`rerun_isolated` → 当前功能退回待跑，下一个该跑的还是它。每功能首次 Mission 不计重跑；已接受 `maxRerunsPerFeature` 次 `rerun_isolated` 后再选该动作 → `RERUN_LIMIT_REACHED`（消息含功能 id、已用数、上限，并提示改选 skip / rescope / stop），记录不变。这条检查在截止、检视者身份、动作合法、理由之后。同一张升级单仍可在截止前改选 skip / rescope / stop，不自动替检视者改选。
+
+## 历史说明
+
+> 2026-10-24：`run-plan` 入口与方案的解析、路由、驱动、预检（`plan-spec` / `plan-routing` / `plan-driver` / `plan-preflight` / `plan-runtime`）已移除，`POST /api/control/run-plan` 返回 410。下文凡涉及“开跑 / 驱动 / 托管运行”的描述只作历史记录；`PlanRun` 记录的读取、决定与前端历史视图仍在。

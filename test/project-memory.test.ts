@@ -64,7 +64,6 @@ const REQUIRED_SPECS = [
   'validation-review-authority',
   'execution-budget-gates',
   'lightweight-standard-promotion',
-  'decision-jev-off-shadow',
   'run-token-lifecycle',
   'fast-lane-ab-metrics',
   'startup-reconciliation',

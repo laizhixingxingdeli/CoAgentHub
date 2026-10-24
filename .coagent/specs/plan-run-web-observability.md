@@ -26,3 +26,7 @@ runId 确定后，常驻服务在原 CLI NDJSON stdout/stderr 输出之外，按
 - `src/web/narrate.js` 集中状态、停止、票状态、费用等文案；HTML 渲染保持纯函数、DOM 更新留在页面装配部分；颜色沿用 tokens.css 令牌，静态文件仍是一层扁平小写名。
 
 实现：`src/application/plan-run-store.ts`、`src/application/live.ts`、`src/application/plan-runtime.ts`、`src/application/platform.ts`、`src/api/server.ts`、`src/main.ts`、`src/run-plan.ts`、`src/web/plan-run.js`、`src/web/projects.js`、`src/web/task.js`、`src/web/narrate.js`。
+
+## 历史说明
+
+> 2026-10-24：`run-plan` 入口与方案的解析、路由、驱动、预检（`plan-spec` / `plan-routing` / `plan-driver` / `plan-preflight` / `plan-runtime`）已移除，`POST /api/control/run-plan` 返回 410。下文凡涉及“开跑 / 驱动 / 托管运行”的描述只作历史记录；`PlanRun` 记录的读取、决定与前端历史视图仍在。

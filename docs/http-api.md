@@ -1601,34 +1601,6 @@ curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type:
 }
 ```
 
-### POST /api/agent/coagent_record_acceptance_disposition
-
-鉴权：普通 coordinator run token（L2 在验收时写明这一条口径这次怎么处置），**不是** impact 牌。参数：body 只接受 dispositionId / index / decision / workItemIds / basis；missionId / attemptId / role / claim / at / contractRevision 一律不受理——多一个就 400（错误里带那个键名），身份全由牌补齐。executor / independent_reviewer 牌与 impact 牌一律 403 `ACTION_DENIED`，**且在读 body 之前就拒**（body 是非法 JSON 也是 403，不是 400）；index 落在当前契约验收口径范围之外、决策取值不对等一并在这里汇总为 409 `ACCEPTANCE_DISPOSITION_REJECTED`。返回写下的那条 AcceptanceDispositionRecord；以 Platform 领域类型为准。
-
-**这是 L2 的一条判断，不等于验收已通过，也不等于已验证**：它记录的是「这条口径这次复用 / 复验 / 新要求」，平台核对的是处置凭据本身（原文有没有变、报告是不是按当前工单这套命令与范围跑出来的），核对通过也不代表这条口径已经通过验收、也不代表结论已经验证过。
-
-请求示例及本机curl：
-
-```bash
-curl.exe -sS --noproxy '*' -X POST -H 'x-coagent-run: <token>' -H 'Content-Type: application/json' --data '{"dispositionId":"D-1","index":1,"decision":"revalidate","workItemIds":["W-1"],"basis":{"note":"复验"}}' 'http://127.0.0.1:3101/api/agent/coagent_record_acceptance_disposition'
-```
-
-响应结构摘录：
-
-```json
-{
-  "dispositionId": "D-1",
-  "missionId": "M-example",
-  "contractRevision": 1,
-  "index": 1,
-  "decision": "revalidate",
-  "workItemIds": ["W-1"],
-  "basis": { "note": "复验" },
-  "coordinatorAttemptId": "M-example.coord-1",
-  "at": "2026-10-07T00:00:00.000Z"
-}
-```
-
 ## 控制面
 
 ### POST /api/missions/:missionId/coordinator-attempts
@@ -1706,7 +1678,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ### POST /api/control/run-mission
 
-鉴权：控制面（可选resolver）。参数：cwd、adapter、env、maxRounds等；Mission带spec；Plan请求以run-plan CLI转发形状为准。真实派发入口，会执行agent。推荐使用run-mission/run-plan CLI构造请求。响应是NDJSON，不是单个JSON；断线不取消已接收job；501表示未装配，503表示drain。
+鉴权：控制面（可选resolver）。参数：cwd、adapter、env、maxRounds等；Mission带spec。真实派发入口，会执行agent。推荐使用run-mission CLI构造请求。响应是NDJSON，不是单个JSON；断线不取消已接收job；501表示未装配，503表示drain。
 
 请求示例及本机curl：
 
@@ -1723,7 +1695,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 
 ### POST /api/control/run-plan
 
-生产服务返回 HTTP 410 与 {"error":"PLAN_RUN_RETIRED","message":"方案运行已退役…"}，不会创建 PlanRun 或派发 agent。历史 PlanRun 查询及恢复裁决继续保留；测试专用历史装配不代表生产入口可运行。
+生产服务返回 HTTP 410 与 {"error":"PLAN_RUN_RETIRED","message":"方案运行已退役…"}，不会创建 PlanRun 或派发 agent。历史 PlanRun 查询及恢复裁决继续保留。
 
 ### GET /api/projects/:projectId/mission-queue
 

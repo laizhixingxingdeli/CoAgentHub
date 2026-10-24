@@ -7,3 +7,7 @@
 开跑前若 paused executing Mission 被同一方案/项目历史的多条 `reviewer_stop` 运行记录认领，仅取最近一条同 Mission 记录判断认领；较早记录不再计为冲突。历史损坏、单次多功能认领、本次 selection 非唯一、状态不符及其它占位仍拒绝续跑。
 
 源：`src/application/plan-driver.ts`、`src/application/plan-runtime.ts`、`src/application/plan-preflight.ts`、`src/application/orchestrator.ts`、`src/application/mission-runner.ts`、`src/run-plan.ts`。验证：`test/plan-driver.test.ts`、`test/plan-resume-runtime.test.ts`、`test/plan-preflight.test.ts`、`test/run-plan-wiring.test.ts`。
+
+## 历史说明
+
+> 2026-10-24：`run-plan` 入口与方案的解析、路由、驱动、预检（`plan-spec` / `plan-routing` / `plan-driver` / `plan-preflight` / `plan-runtime`）已移除，`POST /api/control/run-plan` 返回 410。下文凡涉及“开跑 / 驱动 / 托管运行”的描述只作历史记录；`PlanRun` 记录的读取、决定与前端历史视图仍在。

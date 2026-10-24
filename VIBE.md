@@ -58,7 +58,6 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - `VIBE.md` 是生成物，不是手写 Source of Truth。
 - QueryRun 不是 Mission；只读靠工具 allowlist，不靠 prompt。
 - 权威执行预算：hard 可停 / 内部晋升，soft 只告警；caller 不得手填 `budget_exceeded`（ADR-0005；按票累计的费用硬停已定，实现前由检视者人工执行）。
-- Decision/Jev 在 OFF/SHADOW 下不具执行权威；SHADOW 仅审计（ADR-0002）。
 - 活动事件的 `at` 一律是平台落盘时钟，调用方不能回填：`ActivityLog.append` 不收 `at`，三种存储都用 `clock.now()`。需要比落盘更精确的发生时刻时放进事件 `data`（如 `hop.claimed` 的 `claimedAt`），记录时刻与发生时刻分开（COM5 契约 r2，2026-10-07）。
 
 ## Web 约定
@@ -135,8 +134,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 
 ## Capability 索引
 
-- **acceptance-evidence** — 验收证据处置
-  平台按契约修订留下验收原文。协调者对受影响条目显式写下 reuse、revalidate 或 new_requirement。交卷门禁默认关闭，只在显式开启后约束受影响条目。不做语义推断，不做跨环境测试缓存。
+- **acceptance-evidence** — 契约原文留档
+  平台按契约修订留下验收原文。验收处置（reuse / revalidate / new_requirement）与交卷门禁已于 2026-10-24 移除：它们默认关闭、生产从未开启，协调者侧也没有注册工具。
 - **auto-resume** — 服务自动续跑
   常驻服务的 RetryWakeScheduler 扫描 Mission.waitResumeAt 已到、且 isAutoResumable 为真的等待，复用 mission.run_requested 里的托管启动参数续跑。入过 Missi
 - **candidate-circuit** — 候选熔断持久状态
@@ -157,8 +156,6 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   `featureContract` 生成某条方案功能点的 Mission 契约时，保留原有非目标，只将直接上游依赖、直接下游依赖或 `allowedScope` 路径相同/目录祖先重叠的其他条目加入「方案其他条目」，逐条一行 `id：标题`
 - **credential-redaction** — 凭据脱敏（credential-redaction）
   agent 产出、要落盘或给人看的文本，进门先过一遍脱敏（优化方案 §7 P0.3 末条、Phase 1 第 4 条）。起因：agent 一句 `env` 或 `cat .env`，本机的 key 就进了证据、失败原文、实时输出，落盘后在 
-- **decision-jev-off-shadow** — Decision / Jev：OFF 与 SHADOW
-  Decision 是 Application 侧横向信号，不是第四层。当前只有 `off` / `shadow`；SHADOW 只记录建议，永远不改变实际 dispatch。
 - **delivery-inbox** — 投递收件箱（delivery-inbox）
   Mission 的结果与升级要回到发起方：发起的会话可能已经关了，所以投递**留在收件箱里等**，Host 恢复后自己来取（`pending`）、取完确认（`acknowledge`）。只写进平台状态不算数——「进收件箱才叫升级」。
 - **durable-scheduler** — Durable Scheduler

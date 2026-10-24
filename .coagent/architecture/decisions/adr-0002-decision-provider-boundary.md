@@ -1,5 +1,7 @@
 # Decision Engine 是横向信号能力，不是第四层
 
+> 状态（2026-10-24）：Decision / Jev 的实现（provider、传输、影子评估、`COAGENT_DECISION_MODE`）已整体移除，未来若重新接入仍按本 ADR 的边界：只产信号，不具执行权威。
+
 ## 取舍
 
 Decision Engine（`DecisionProvider` port 及其实现）是
