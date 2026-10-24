@@ -204,12 +204,9 @@ describe('direct coordinationMode：planning 无 pending', () => {
       },
     };
     const tokens = new RunTokenRegistry();
-    // 显式打开自动影响判断监督：direct 必须整体把它停掉。
-    // 不打开的话下面「监督一次都没启动」是白断言——配置关着本来就不启动。
     const runner = new Orchestrator({ platform, tokens: makeIssuer(platform, tokens), baseUrl: 'http://127.0.0.1:1', workspace,
       coordinator: { runtime: neverStart(starts), candidates: [{ endpoint: 'local', profileId: 'c' }] },
       executor: { runtime: executor, candidates: [{ endpoint: 'local', profileId: 'e' }] },
-      impactSupervision: { enabled: true, pollIntervalMs: 20, maxChecks: 100 },
     });
     const outcome = await runner.runMission('m-positive', { projectRoot: process.cwd() });
     assert.equal(outcome.kind, 'waiting');
@@ -273,16 +270,6 @@ describe('direct coordinationMode：planning 无 pending', () => {
     assert.equal(events3.length, reportedBeforeThird);
     assert.equal((events3[events3.length - 1]!.data as { reportId: string }).reportId, report2.id);
 
-    // ---- 自动影响判断监督在 direct 下整体不启动 ----
-    // 这个 runner 显式配了 impactSupervision.enabled；三条 start 跑完都没有任何观察记录。
-    // 注意断的是**空表**而不是仅 "started" 为零：能力不足时 beginImpactSupervision
-    // 还会写一条 unsupported，而这条路径在 direct 下根本不该被进入（它后面就是
-    // #dispatchImpactHop → #runHop(role:'coordinator')，两层模式里多出的第三个模型）。
-    assert.deepEqual(
-      runner.impactObservations,
-      [],
-      'direct 下自动监督连进都不该进（进了至少会留下一条 unsupported）',
-    );
     assert.ok(!starts.some((entry) => entry.startsWith('coordinator:')));
 
     // ---- 人工主控请求 accept 也不行：红报告不能被忽略 ----
