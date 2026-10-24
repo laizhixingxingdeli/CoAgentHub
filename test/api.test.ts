@@ -2719,14 +2719,9 @@ describe('hosted run 流与排空门禁', () => {
       emit('stderr', 'running-err');
       return 7;
     };
-    const runPlan: HostedRunHandler = async (_body, emit) => {
-      emit('stdout', 'plan-out');
-      return 0;
-    };
     const { server, base } = await openApi({
       identity: RUN_IDENTITY,
       runMission,
-      runPlan,
     });
     try {
       const port = (server.address() as AddressInfo).port;
@@ -2765,15 +2760,6 @@ describe('hosted run 流与排空门禁', () => {
         { channel: 'stderr', line: 'running-err' },
       ]);
 
-      const planCode = await loopbackRunRequest(
-        writerTarget(port),
-        { path: '/api/control/run-plan', body: {} },
-        (channel, line) => {
-          assert.equal(channel, 'stdout');
-          assert.equal(line, 'plan-out');
-        },
-      );
-      assert.equal(planCode, 0);
     } finally {
       await closeServer(server);
     }
@@ -3071,13 +3057,13 @@ describe('hosted run 流与排空门禁', () => {
 
   test('hosted run 空闲心跳可被探测且不进进度；等待期间健康检查仍可回应', async () => {
     let releaseJob: (code: number) => void = () => {};
-    const runPlan: HostedRunHandler = async (_body, emit) => {
+    const runMission: HostedRunHandler = async (_body, emit) => {
       emit('stdout', 'waiting');
       return await new Promise<number>((resolve) => {
         releaseJob = resolve;
       });
     };
-    const { server, base } = await openApi({ identity: RUN_IDENTITY, runPlan });
+    const { server, base } = await openApi({ identity: RUN_IDENTITY, runMission });
     try {
       const port = (server.address() as AddressInfo).port;
       const frames: Array<Record<string, unknown>> = [];
@@ -3087,7 +3073,7 @@ describe('hosted run 流与排空门禁', () => {
             host: '127.0.0.1',
             family: 4,
             port,
-            path: '/api/control/run-plan',
+            path: '/api/control/run-mission',
             method: 'POST',
             headers: { 'content-type': 'application/json', 'content-length': 2 },
           },

@@ -45,7 +45,7 @@ import { DEFAULT_TEST_AGENT_POOL } from './helpers/agent-pool.ts';
 
 /** 有假 agent 的运行测试显式配置模型；生产启动入口保持只读。 */
 async function startServer(...args: Parameters<typeof startServerUnconfigured>) {
-  const built = await startServerUnconfigured(args[0], args[1], { ...args[2], legacyPlanRunsForTests: !!args[2]?.runtime });
+  const built = await startServerUnconfigured(args[0], args[1], args[2]);
   if (args[2]?.runtime) {
     const pool = await built.agentPool.list();
     if (pool.coordinator.length === 0 && pool.executor.length === 0) {
@@ -1224,40 +1224,6 @@ function hostedMissionBody(dir: string, adapter: string, statePath: string, miss
   };
 }
 
-function hostedPlanBody(dir: string, adapter: string, statePath: string, runDir: string) {
-  return {
-    plan: {
-      planId: 'PLAN-hosted',
-      projectId: 'P-hosted',
-      intent: '修 foo',
-      integrationBranch: 'auto/hosted',
-      reviewer: 'claude',
-      stopConditions: {
-        unresolvedEscalations: 1,
-        wallClockMs: 60_000,
-        escalationTimeoutMs: 60_000,
-      },
-      integrationVerification: [{ argv: ['node', '--test'], timeoutMs: 60_000 }],
-      features: [
-        {
-          id: 'F1',
-          title: '修 foo',
-          why: 'w',
-          allowedScope: ['a.txt'],
-          acceptance: ['x'],
-          status: 'pending',
-        },
-      ],
-    },
-    cwd: dir,
-    adapter,
-    state: statePath,
-    store: 'file',
-    runDir,
-    env: { COAGENT_AGENT_ENV_PASSTHROUGH: '-' },
-  };
-}
-
 async function liveTarget(statePath: string) {
   const probed = await probeLocalWriter(statePath);
   assert.equal(probed.status, 'live');
@@ -1338,36 +1304,6 @@ describe('startServer hosted 接线与排空',
       assert.throws(() => createSigintHandler(() => { failureClosed += 1; }, () => {}, () => { throw new Error('snapshot failure'); })());
       assert.equal(failureClosed, 1);
     });
-    test('源码：两种 hosted 回调交给同一 createApi；close 先 drain 再停 tick/persist',
-      () => {
-        const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
-        const startServerSrc = main.slice(main.indexOf('export async function startServer'));
-        assert.equal([...startServerSrc.matchAll(/createApi\(/g)].length, 1);
-        assert.equal([...startServerSrc.matchAll(/listenLoopback\(/g)].length, 1);
-        assert.match(startServerSrc, /runMission:/);
-        assert.match(startServerSrc, /runPlan:/);
-        assert.match(startServerSrc, /runHostedMission\(/);
-        assert.match(startServerSrc, /runHostedPlan\(/);
-        assert.match(startServerSrc, /planRunDirs:/);
-        assert.match(startServerSrc, /planLive/);
-        assert.match(startServerSrc, /registerPlanRunDir/);
-        assert.match(startServerSrc, /\.coagent-plans/);
-        assert.match(startServerSrc, /heldState/);
-        assert.match(startServerSrc, /hostedHeldState\(/);
-        assert.match(main, /kind: 'unsupported'/);
-        assert.match(main, /stateIdFor\(heldPath\)/);
-        assert.doesNotMatch(startServerSrc, /statePath: body\.state/);
-        assert.match(startServerSrc, /drainApi\(/);
-        assert.match(startServerSrc, /periodic\?\.stop\(\)/);
-        assert.match(startServerSrc, /built\.persist\(\)/);
-        assert.match(startServerSrc, /baseUrl: loopback\.baseUrl/);
-        assert.match(main, /process\.on\('SIGINT'/);
-        assert.match(main, /process\.once\('SIGTERM'/);
-        assert.match(main, /formatHostedRunSnapshots\(built\.hostedRunSnapshots\(\)\)/);
-        assert.match(main, /无法读取在途 PlanRun\/Mission 清单/);
-      },
-    );
-
     test('runHostedMission：仅在 Mission 预检创建后通知真实解析 id', async () => {
       const statePath = tempState();
       const cwd = dirname(statePath);
@@ -1683,7 +1619,7 @@ describe('startServer hosted 接线与排空',
     );
 
     test(
-      '另一 statePath 或缺 state 的 hosted Mission/Plan 在写入前拒绝；同身份仍可跑',
+      '另一 statePath 或缺 state 的 hosted Mission 在写入前拒绝；同身份仍可跑',
       { timeout: 30_000 },
       async () => {
         const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-state-'));
@@ -1695,7 +1631,6 @@ describe('startServer hosted 接线与排空',
         dirs.push(otherDir);
         const otherState = join(otherDir, 'state.json');
         writeFileSync(otherState, '{}');
-        const runDir = join(dir, 'plans');
         const built = await startServer(0, statePath, {
           env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
           workspace: new InPlaceWorkspaceManager(),
@@ -1709,7 +1644,7 @@ describe('startServer hosted 接线与排空',
         const addr = built.server.address() as AddressInfo;
 
         const rejectAndAssertClean = async (
-          path: '/api/control/run-mission' | '/api/control/run-plan',
+          path: '/api/control/run-mission',
           body: Record<string, unknown>,
           errorPat: RegExp,
         ) => {
@@ -1725,7 +1660,6 @@ describe('startServer hosted 接线与排空',
           const listed = await fetch(`http://${addr.address}:${addr.port}/api/missions`);
           assert.equal(listed.status, 200);
           assert.deepEqual(await listed.json(), []);
-          assert.equal(existsSync(runDir), false);
         };
 
         await rejectAndAssertClean(
@@ -1736,15 +1670,6 @@ describe('startServer hosted 接线与排空',
         const missingMission = hostedMissionBody(dir, adapter, statePath, 'M-missing');
         delete missingMission.state;
         await rejectAndAssertClean('/api/control/run-mission', missingMission, /缺少 state/);
-
-        await rejectAndAssertClean(
-          '/api/control/run-plan',
-          hostedPlanBody(dir, adapter, otherState, runDir),
-          /同一文件|持锁/,
-        );
-        const missingPlan = hostedPlanBody(dir, adapter, statePath, runDir);
-        delete missingPlan.state;
-        await rejectAndAssertClean('/api/control/run-plan', missingPlan, /缺少 state/);
 
         const sameAlias = join(dir, '.', 'state.json');
         const happyLines: string[] = [];
@@ -2075,147 +2000,6 @@ describe('startServer 方案记录目录与托管 live', () => {
     }
   });
 
-  test('真实 hosted PlanRun 双次 SIGINT 安全停靠并释放主锁（动态状态目录）', { timeout: 20_000 }, async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-double-signal-'));
-    dirs.push(dir);
-    const statePath = join(dir, 'state.json');
-    const adapter = join(dir, 'adapter.ts');
-    writeFileSync(adapter, '// hosted adapter\\n');
-    const runDir = join(dir, 'runs');
-    const repo = cleanPlanRepo('auto/hosted');
-    const gated = gatedRuntime();
-    const built = await startServer(0, statePath, {
-      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
-      workspace: new InPlaceWorkspaceManager(),
-      runtime: gated.runtime,
-    });
-    servers.push(built.server);
-    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
-    let running: Promise<number> | undefined;
-    let exitCode = 0;
-    try {
-      const target = await liveTarget(statePath);
-      const body = hostedPlanBody(repo, adapter, statePath, runDir);
-      body.plan.stopConditions.wallClockMs = 5_000;
-      body.plan.stopConditions.escalationTimeoutMs = 5_000;
-      running = loopbackRunRequest(target, { path: '/api/control/run-plan', body }, () => {});
-      const deadline = Date.now() + 3_000;
-      let snapshots = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
-      while (snapshots.length === 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        snapshots = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
-      }
-      assert.equal(snapshots.length, 1, 'hosted PlanRun 未在有界时间内登记');
-      const plan = snapshots[0]!;
-      assert.ok(plan.runPath?.startsWith(runDir));
-      const store = new FilePlanRunStore(plan.runPath!);
-      const storeDeadline = Date.now() + 1_000;
-      let stored = store.read();
-      while (!stored && Date.now() < storeDeadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        stored = store.read();
-      }
-      assert.ok(stored, 'hosted PlanRun store 未在有界时间内创建');
-      assert.equal(stored.stopped, undefined, '注入信号前 PlanRun 不应已结束');
-      assert.throws(() => acquireLock(statePath), LockBusyError);
-      let closeDone = false;
-      const handler = createSigintHandler(
-        () => built.server.close(() => { closeDone = true; }),
-        () => { exitCode = 1; void built.requestSafeShutdown(); },
-        () => { built.hostedRunSnapshots(); },
-      );
-      handler();
-      assert.equal(built.server.listening, true, '首次信号排空期间 HTTP listener 应保持开启');
-      assert.equal(closeDone, false, '首次 close 应等待真实 PlanRun 请求排空');
-      assert.throws(() => acquireLock(statePath), LockBusyError);
-      let rejectTimer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          assert.rejects(
-            loopbackRunRequest(target, { path: '/api/control/run-plan', body }, () => {}),
-            (error: unknown) =>
-              error instanceof LoopbackHttpError &&
-              error.status === 503 &&
-              error.code === 'SERVICE_DRAINING',
-          ),
-          new Promise<never>((_, reject) => {
-            rejectTimer = setTimeout(() => reject(new Error('新 hosted start 未在有界时间内被拒绝')), 1_000);
-          }),
-        ]);
-      } finally {
-        if (rejectTimer) clearTimeout(rejectTimer);
-      }
-      assert.equal(built.server.listening, true);
-      assert.equal(closeDone, false);
-      assert.throws(() => acquireLock(statePath), LockBusyError);
-      handler();
-      const closeDeadline = Date.now() + 4_000;
-      while (!closeDone && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
-      assert.equal(closeDone, true, 'HTTP close callback 未完成');
-      assert.equal(exitCode, 1);
-      const stopped = store.read()?.stopped;
-      assert.equal(stopped?.reason, 'service_shutdown');
-      assert.ok(stopped?.detail, 'service_shutdown detail 必须明确');
-      assert.equal(built.server.listening, false);
-      const releaseReacquired = acquireLock(statePath);
-      releaseReacquired();
-    } finally {
-      gated.release();
-      if (running) await running;
-      if (built.server.listening) await new Promise<void>((resolve) => built.server.close(() => resolve()));
-    }
-  });
-
-  test('真实 hosted PlanRun 只登记预检后的身份并在结束时清理', { timeout: 20_000 }, async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'coagent-hosted-plan-identity-'));
-    dirs.push(dir);
-    const statePath = join(dir, 'state.json');
-    const adapter = join(dir, 'adapter.ts');
-    writeFileSync(adapter, '// identity adapter\\n');
-    const runDir = join(dir, 'runs');
-    const repo = cleanPlanRepo('auto/hosted');
-    const gated = gatedRuntime();
-    const built = await startServer(0, statePath, {
-      env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
-      workspace: new InPlaceWorkspaceManager(),
-      runtime: gated.runtime,
-    });
-    servers.push(built.server);
-    if ('releaseLock' in built && typeof built.releaseLock === 'function') releaseFns.push(built.releaseLock);
-    const target = await liveTarget(statePath);
-    const base = hostedPlanBody(repo, adapter, statePath, runDir);
-    base.plan.stopConditions.wallClockMs = 500;
-    base.plan.stopConditions.escalationTimeoutMs = 500;
-    let running: Promise<number> | undefined;
-    try {
-      running = loopbackRunRequest(target, { path: '/api/control/run-plan', body: base }, () => {});
-      const deadline = Date.now() + 3_000;
-      let plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
-      while (plans.length === 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        plans = built.hostedRunSnapshots().filter((row) => row.kind === 'plan');
-      }
-      assert.equal(plans.length, 1, '真实 run-plan 在有界等待内未登记 hosted plan 快照');
-      const plan = plans[0]!;
-      assert.match(plan.id, /^PLAN-hosted-/);
-      assert.notEqual(plan.id, base.plan.planId);
-      assert.ok(plan.runPath?.startsWith(runDir));
-      assert.equal(plan.reviewer, 'claude');
-
-      const invalid = { ...base, state: join(dir, 'wrong-state.json') };
-      assert.equal(await loopbackRunRequest(target, { path: '/api/control/run-plan', body: invalid }, () => {}), 1);
-      assert.deepEqual(built.hostedRunSnapshots(), [plan]);
-
-      gated.release();
-      assert.equal(await running, 0);
-      running = undefined;
-      assert.deepEqual(built.hostedRunSnapshots(), []);
-    } finally {
-      gated.release();
-      if (running) await running;
-      await new Promise<void>((resolve, reject) => built.server.close((error) => error ? reject(error) : resolve()));
-    }
-  });
   test('缺省目录在 statePath 同级 .coagent-plans；圈外 CLI 目录读不到；未托管有 reason', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagent-plan-dirs-'));
     dirs.push(dir);
@@ -2278,103 +2062,6 @@ describe('startServer 方案记录目录与托管 live', () => {
       built.server.close((err) => (err ? fail(err) : done()));
     });
   });
-
-  test(
-    '托管自定义 runDir 进列表/详情；CLI 行按 runId 可读且不丢不重',
-    { timeout: 30_000 },
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), 'coagent-plan-live-'));
-      dirs.push(home);
-      const statePath = join(home, 'state.json');
-      const adapter = join(home, 'adapter.ts');
-      writeFileSync(adapter, '// plan live adapter\n');
-      const runDir = join(home, 'custom-plans');
-      const repo = cleanPlanRepo('auto/hosted');
-      const built = await startServer(0, statePath, {
-        env: { COAGENT_STORE: 'file', COAGENT_RECONCILE_INTERVAL_MS: '0' },
-        workspace: new InPlaceWorkspaceManager(),
-        runtime: new ScriptedRuntime({}),
-      });
-      servers.push(built.server);
-      if ('releaseLock' in built && typeof built.releaseLock === 'function') {
-        releaseFns.push(built.releaseLock);
-      }
-      const target = await liveTarget(statePath);
-      const ndjson: { channel: string; line: string }[] = [];
-      const baseBody = hostedPlanBody(repo, adapter, statePath, runDir);
-      // 墙钟/升级截止压到极短：本单只核接线，不能在默认 15s poll 上空等升级。
-      const body = {
-        ...baseBody,
-        plan: {
-          ...baseBody.plan,
-          stopConditions: {
-            unresolvedEscalations: 1,
-            wallClockMs: 30,
-            escalationTimeoutMs: 30,
-          },
-        },
-      };
-      const code = await loopbackRunRequest(
-        target,
-        {
-          path: '/api/control/run-plan',
-          body,
-        },
-        (channel, line) => {
-          ndjson.push({ channel, line });
-        },
-      );
-      assert.equal(code, 0, ndjson.map((row) => row.line).join('\n'));
-      const cliLines = ndjson.filter((row) => row.channel === 'stdout' || row.channel === 'stderr');
-      assert.ok(
-        cliLines.some((row) => /开跑：/.test(row.line)),
-        cliLines.map((row) => row.line).join('\n'),
-      );
-
-      const addr = built.server.address() as AddressInfo;
-      const listed = await fetch(`http://${addr.address}:${addr.port}/api/plan-runs`);
-      assert.equal(listed.status, 200);
-      const rows = (await listed.json()) as Array<{ id?: string }>;
-      const hosted = rows.find((row) => typeof row.id === 'string' && row.id.startsWith('PLAN-hosted-'));
-      assert.ok(hosted?.id, JSON.stringify(rows));
-      const detail = await fetch(`http://${addr.address}:${addr.port}/api/plan-runs/${hosted.id}`);
-      assert.equal(detail.status, 200);
-
-      const liveRes = await fetch(
-        `http://${addr.address}:${addr.port}/api/plan-runs/${hosted.id}/live?cursor=0`,
-      );
-      assert.equal(liveRes.status, 200);
-      const live = (await liveRes.json()) as {
-        cursor: number;
-        chunks: { seq: number; channel: string; line: string }[];
-        reason?: string;
-      };
-      assert.equal(live.reason, undefined);
-      assert.equal(live.chunks.length, cliLines.length);
-      assert.deepEqual(
-        live.chunks.map((c) => ({ channel: c.channel, line: c.line })),
-        cliLines,
-      );
-
-      const caughtUp = (await (
-        await fetch(
-          `http://${addr.address}:${addr.port}/api/plan-runs/${hosted.id}/live?cursor=${live.cursor}`,
-        )
-      ).json()) as { cursor: number; chunks: unknown[] };
-      assert.deepEqual(caughtUp.chunks, []);
-      assert.equal(caughtUp.cursor, live.cursor);
-
-      const mixed = (await (
-        await fetch(`http://${addr.address}:${addr.port}/api/plan-runs/R-planted/live`)
-      ).json()) as { chunks: unknown[]; reason?: string };
-      assert.deepEqual(mixed.chunks, []);
-      assert.equal(mixed.reason, PLAN_LIVE_EMPTY_REASON);
-
-      await new Promise<void>((done, fail) => {
-        built.server.close((err) => (err ? fail(err) : done()));
-      });
-    },
-  );
 });
 
 describe('生产装配把 live 注入 Platform',

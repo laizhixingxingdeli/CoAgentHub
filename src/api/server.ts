@@ -208,8 +208,6 @@ export interface ApiDeps {
    * 否则调用方会把「没人接」当成已经开跑。
    */
   runMission?: HostedRunHandler;
-  /** 同上，对应 POST /api/control/run-plan。 */
-  runPlan?: HostedRunHandler;
   /**
    * 读运行时模型清单。缺省走适配层真实命令。
    *
@@ -2835,8 +2833,7 @@ export function createApi(deps: ApiDeps): Server {
     }
     if (method === 'POST' && path === '/api/control/run-plan') {
       await requireControl(req, POLICY_ACTION.missionCreate);
-      if (!deps.runPlan) throw new HttpError(410, 'PLAN_RUN_RETIRED', '方案运行已退役，请确认 Mission 列表后提交项目 mission-queue。');
-      return startHostedRun(req, res, deps.runPlan, 'run-plan');
+      throw new HttpError(410, 'PLAN_RUN_RETIRED', '方案运行已退役，请确认 Mission 列表后提交项目 mission-queue。');
     }
 
     throw new HttpError(404, 'NOT_FOUND', `${method} ${path}`);

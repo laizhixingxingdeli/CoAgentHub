@@ -322,12 +322,10 @@ describe('文件版 buildPersistentPlatform 接通 live',
         );
         assert.match(pgPlat, /\blive,/);
 
-        const runPlan = readFileSync(fileURLToPath(new URL('../src/run-plan.ts', import.meta.url)), 'utf8');
         const runMission = readFileSync(
           fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
           'utf8',
         );
-        assert.match(runPlan, /PLAN_RUN_RETIRED/);
         assert.match(runMission, /const live = 'live' in built \? built\.live : undefined/);
       },
     );

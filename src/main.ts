@@ -90,7 +90,6 @@ import type { WorkspaceManager, WorktreeReconcileResult } from './application/wo
 import { GitWorktreeManager } from './application/workspace.ts';
 import { resumeMissionBody, runHostedMission, type HostedHeldState } from './application/mission-runner.ts';
 import { createHostedMissionGuard } from './application/hosted-mission-guard.ts';
-import { runHostedPlan } from './application/plan-runtime.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
 import { createPiQueryRuntime } from './runtime/pi-query.ts';
 import {
@@ -877,8 +876,6 @@ export interface StartServerOptions {
    * 生产不传——按请求 body.adapter 构造 SpawnRuntime。
    */
   runtime?: AgentRuntime;
-  /** 只供历史 PlanRun 隔离回归使用；生产默认不挂方案运行入口。 */
-  legacyPlanRunsForTests?: boolean;
   /**
    * 测试用：替换工作区。生产不传则 GitWorktreeManager。
    * 必须与装配 Platform 校验器共用同一份，否则 hosted 入口会改错树。
@@ -1114,37 +1111,6 @@ export async function startServer(
         : {}),
       planLive,
       runMission,
-      runPlan: options?.legacyPlanRunsForTests && options?.runtime ? async (body, emit) => {
-        rememberHostedAdapter(body);
-        const token = randomUUID();
-        try {
-          return await runHostedPlan(
-            body,
-            {
-              built: hostedBuilt,
-              baseUrl: loopback.baseUrl,
-              workspace,
-              env,
-              ...hostedRuntime,
-              ...(options?.runtime ? {} : queryRuntime ? { queryRuntime } : {}),
-              heldState,
-              planLive,
-              registerPlanRunDir: (runDir) => {
-                knownPlanRunDirs.add(resolve(runDir));
-              },
-              onStarted: ({ runId, runPath, reviewer }) => {
-                hostedRuns.register(token, {
-                  kind: 'plan', id: runId, runPath, reviewer,
-                  status: '运行中/状态暂不可读',
-                });
-              },
-            },
-            emit,
-          );
-        } finally {
-          hostedRuns.finish(token);
-        }
-      } : undefined,
       ...(options?.resolveControlPrincipal
         ? { resolveControlPrincipal: options.resolveControlPrincipal }
         : {}),
