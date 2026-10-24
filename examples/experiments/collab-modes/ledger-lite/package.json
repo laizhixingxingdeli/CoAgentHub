@@ -1,0 +1,13 @@
+{
+  "name": "ledger-lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "一个零依赖的命令行记账小工具（CoAgentHub 协作方式对照实验的练习仓库）",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

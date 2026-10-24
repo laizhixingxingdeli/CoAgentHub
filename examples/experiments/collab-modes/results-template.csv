@@ -1,0 +1,3 @@
+mode,missionId,round,start,end,wall_minutes,controller_tokens,controller_cost_usd,platform_cost_usd,total_cost_usd,model_sessions,work_items,questions_asked,reworks,hidden_pass_of_14,agent_tests_pass,l3_final_verdict,notes
+hierarchical,EXP-MC-H1,1,,,,,,,,,,,,,,,
+direct,EXP-MC-D1,1,,,,,,,,,,,,,,,

@@ -1,0 +1,31 @@
+{
+  "projectId": "ledger-lite-d",
+  "missionId": "EXP-MC-D1",
+  "coordinationMode": "direct",
+  "contract": {
+    "intent": "让 ledger-lite 支持多币种：CSV 可带币种列，新增 rates 子命令管理按日期生效的汇率，report 把所有金额换算成基准币种后汇总；已有数据和只用基准币种的用户行为不变。",
+    "acceptance": [
+      "CSV 可带可选的 currency 列（ISO 4217 三位字母代码）；没有这一列或该格为空时按基准币种（config.json 的 baseCurrency）处理",
+      "新增 `rates add <币种> <汇率> <生效日期YYYY-MM-DD>`：表示从生效日起 1 单位该币种 = <汇率> 单位基准币种；汇率为正数，最多 6 位小数，非法输入报错且不保存",
+      "新增 `rates list`：每行一条 `<币种> <汇率> <生效日期>`（单个空格分隔），按币种、生效日期升序；汇率去掉多余的尾随零（7.10 输出 7.1，7.000 输出 7）；没有汇率时输出 `没有汇率`",
+      "`report` 把所有金额换算成基准币种后汇总，输出格式不变；换算使用交易日当天适用的汇率；基准币种的交易不需要汇率",
+      "已有数据（旧的 ledger.json）和只用基准币种的用户，import 与 report 的行为和输出保持不变",
+      "新行为有测试覆盖，`node --test` 全部通过"
+    ],
+    "constraints": [
+      "遵守 docs/CONVENTIONS.md 的全部约定",
+      "只改 src/ 与 test/ 下的文件（可以新增文件）",
+      "已有测试不改不删，新行为用新测试覆盖",
+      "src/cli.js 的 main(argv, io) 签名与退出码约定不变"
+    ],
+    "nonGoals": [
+      "不做汇率自动下载",
+      "不做报表按原币种分列",
+      "不改 report 的输出格式",
+      "不加任何依赖"
+    ],
+    "guardrails": [
+      "不修改 package.json、config.json、docs/ 与 .coagent/"
+    ]
+  }
+}
