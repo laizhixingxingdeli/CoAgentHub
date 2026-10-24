@@ -12,7 +12,6 @@ import type { ChangeReceiptRepository } from '../change-receipt.ts';
 import type { ChangeCoverageRepository } from '../change-coverage.ts';
 import type { ChangeRequestRepository } from '../change-request.ts';
 import type { ContractHistoryRepository } from '../contract-history.ts';
-import type { AcceptanceDispositionRepository } from '../acceptance-disposition.ts';
 import type { QueueClaimIdentity, PlatformDeps, PlatformValidationDeps } from '../platform.ts';
 
 export class PlatformRuleError extends Error {
@@ -73,8 +72,6 @@ export class PlatformContext {
   changeReceipts: ChangeReceiptRepository | undefined;
   changeCoverages: ChangeCoverageRepository | undefined;
   contractHistories: ContractHistoryRepository | undefined;
-  acceptanceDispositions: AcceptanceDispositionRepository | undefined;
-  readonly acceptanceEvidenceGate: boolean;
   queuedHops: QueuedHopRepository | undefined;
   onProjectIdle: ((projectId: string) => Promise<unknown>) | undefined;
 
@@ -98,8 +95,6 @@ export class PlatformContext {
     this.changeReceipts = deps.changeReceipts;
     this.changeCoverages = deps.changeCoverages;
     this.contractHistories = deps.contractHistories;
-    this.acceptanceDispositions = deps.acceptanceDispositions;
-    this.acceptanceEvidenceGate = deps.acceptanceEvidenceGate === true;
     this.queuedHops = deps.queuedHops;
   }
 
