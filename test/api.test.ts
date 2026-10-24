@@ -53,15 +53,6 @@ import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
 import type { ControlPrincipal, ControlPrincipalResolver } from '../src/api/control-auth.ts';
 import type { ClaimFence } from '../src/application/durable-scheduler.ts';
 import type { ValidationReport } from '../src/kernel/index.ts';
-import {
-  PgActivityLog,
-  PgDeliveryRepository,
-  PgIds,
-  PgProjectRepository,
-  PgQueuedHopRepository,
-  PgStateStore,
-} from '../src/application/pg-store.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT = {
   intent: '把 X 修好',
@@ -788,9 +779,9 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 async function snapshotMission(
-  projects: FileProjectRepository | PgProjectRepository,
-  activity: FileActivityLog | PgActivityLog,
-  deliveries: FileDeliveryRepository | PgDeliveryRepository,
+  projects: FileProjectRepository,
+  activity: FileActivityLog,
+  deliveries: FileDeliveryRepository,
 ) {
   return {
     project: JSON.stringify((await projects.get('P'))?.toSnapshot()),
@@ -800,7 +791,7 @@ async function snapshotMission(
 }
 
 async function enqueueAndClaim(
-  hops: FileQueuedHopRepository | PgQueuedHopRepository,
+  hops: FileQueuedHopRepository,
   id = 'h1',
 ): Promise<QueueClaimIdentity> {
   await hops.enqueue({
@@ -1133,90 +1124,6 @@ describe('HTTP 队列 Attempt 身份', () => {
     } finally {
       await closeServer(server);
       rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('Postgres 可用时真实 HTTP 解析后接管竞态在事务内拒绝', async (t) => {
-    const connectionString = await ensureTestDatabase('http_queue_fence');
-    if (!connectionString) {
-      t.skip('Postgres unavailable; PG HTTP claim-fence race not verified');
-      return;
-    }
-    const store = await PgStateStore.open({ connectionString });
-    await store.pool.query('TRUNCATE queued_hops, projects, activity, deliveries, id_counters');
-    await store.refresh();
-    const clock = new FixedClock(QUEUE_NOW);
-    const ids = new PgIds(store);
-    await ids.reserve(['D', 'W', 'M', 'E']);
-    const projects = new PgProjectRepository(store);
-    const activity = new PgActivityLog(store, clock);
-    const deliveries = new PgDeliveryRepository(store, clock, ids);
-    const hops = new PgQueuedHopRepository(store);
-    const platform = new Platform({
-      projects,
-      deliveries,
-      activity,
-      clock,
-      ids,
-      transaction: store,
-    });
-    const tokens = new RunTokenRegistry();
-    const server = createApi({ platform, tokens, deliveries });
-    try {
-      await listenLoopback(server, 0);
-      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-      await hops.enqueue({
-        id: 'h1',
-        projectId: 'P',
-        missionId: 'M',
-        workItemId: 'w',
-        role: 'coordinator',
-        priority: 1,
-        availableAt: QUEUE_NOW,
-        attemptCount: 0,
-        maxAttempts: 2,
-        idempotencyKey: 'http-pg-fence',
-        status: 'queued',
-        createdAt: QUEUE_NOW,
-        updatedAt: QUEUE_NOW,
-      });
-      assert.equal((await hops.claim('h1', 'owner', QUEUE_NOW, QUEUE_LEASE))?.claimGeneration, 1);
-      const live: QueueClaimIdentity = { id: 'h1', owner: 'owner', claimGeneration: 1 };
-      await platform.createMission({
-        projectId: 'P',
-        missionId: 'M',
-        contract: CONTRACT,
-        origin: QUEUE_ORIGIN,
-      });
-      const { attemptId } = await platform.startCoordinatorAttempt('M', undefined, live);
-      const run = tokens.issue({ missionId: 'M', attemptId, role: 'coordinator', claim: live });
-      await platform.updateFindings('M', attemptId, 'pg-before', undefined, live);
-
-      const orig = store.runFenced.bind(store);
-      let hijacked = false;
-      store.runFenced = ((fence: ClaimFence, fn: () => Promise<unknown>) => {
-        hijacked = true;
-        return hops.claim('h1', 'next', QUEUE_LEASE, QUEUE_LATER).then((taken) => {
-          assert.equal(taken?.claimGeneration, 2);
-          return orig(fence, fn);
-        });
-      }) as typeof store.runFenced;
-
-      const before = await snapshotMission(projects, activity, deliveries);
-      const res = await postJson(
-        base,
-        '/api/agent/coagent_update_findings',
-        { findings: 'pg-stale', owner: 'next', claimGeneration: 2 },
-        run.token,
-      );
-      assert.equal(hijacked, true);
-      assert.notEqual(res.status, 200);
-      assert.equal(res.json.error, 'CLAIM_FENCE_REJECTED');
-      assert.deepEqual(await snapshotMission(projects, activity, deliveries), before);
-      assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'pg-before');
-    } finally {
-      await closeServer(server);
-      await store.close();
     }
   });
 });
@@ -3680,18 +3587,18 @@ describe('只读平台状态与候选健康',
       },
     );
 
-    test('PG 装配字段不虚构文件锁身份',
+    test('内存装配字段不虚构文件锁身份',
       async () => {
         const { server, base } = await openApi({
-          platformStatus: { store: 'pg', startedAt: T0, defaultAdapter: 'pi' },
+          platformStatus: { store: 'memory', startedAt: T0, defaultAdapter: 'pi' },
         });
         try {
           const status = await request(base, '/api/platform/status');
           assert.equal(status.status, 200);
-          assert.equal(status.json.store, 'pg');
-          assert.equal((status.json.instanceId as { reason: string }).reason, 'pg_has_no_file_instance_lock');
-          assert.equal((status.json.statePath as { reason: string }).reason, 'pg_has_no_state_file');
-          assert.equal((status.json.holdsMainLock as { reason: string }).reason, 'pg_has_no_file_main_lock');
+          assert.equal(status.json.store, 'memory');
+          assert.equal((status.json.instanceId as { reason: string }).reason, 'memory_has_no_file_instance_lock');
+          assert.equal((status.json.statePath as { reason: string }).reason, 'memory_has_no_state_file');
+          assert.equal((status.json.holdsMainLock as { reason: string }).reason, 'memory_has_no_file_main_lock');
           assert.equal(status.json.defaultAdapter, 'pi');
         } finally {
           await closeServer(server);

@@ -10,15 +10,14 @@ node --test                       # 平台全量测试，不需要装任何依�
 node --test test/<名字>.test.ts   # 定向跑一个
 ```
 
-- 平台本体没有构建步骤、没有第三方依赖（`pg` 只出现在 `src/application/pg-store.ts`，并且是按需加载）。
+- 平台本体没有构建步骤、没有第三方依赖。状态存储只有文件版（Postgres 存储已于 2026-10-24 移除）。
 - 适配层和 MCP 服务器的依赖由根 `package.json` 的 npm workspaces 一次装进根 `node_modules`（`npm ci`），测试各自跑：`npm test -w adapters/pi`、`npm test -w integrations/codex/mcp-server`。它们的测试文件叫 `*.spec.ts`，是为了不被根目录的 `node --test`（会发现任何位置的 `*.test.ts`）捡走。
-- 需要 Postgres 的测试在连不上数据库时会**跳过**，跳过不算通过。
 
 ## 代码约定
 
 细则在 [.coagent/project.md](.coagent/project.md) 的“执行者红线”和 [.coagent/architecture/engineering-standards.md](.coagent/architecture/engineering-standards.md)，要点：
 
-- **分层**：`src/kernel/` 不 import 任何东西（连 `node:` 都不），也不出现 provider / model / session / http / sql 这类词；第三方依赖只允许在 `src/application/pg-store.ts`；规则写在用例层，**能用工具层挡住的就不要指望提示词**。
+- **分层**：`src/kernel/` 不 import 任何东西（连 `node:` 都不），也不出现 provider / model / session / http / sql 这类词；`src/` 不引入第三方依赖；规则写在用例层，**能用工具层挡住的就不要指望提示词**。
 - **写法**：相对 import 必须带 `.ts` 后缀（Node 原生类型剥离）；不用 `enum`，不用构造函数参数属性；前端不引入构建步骤和框架。
 - **注释写“为什么”**，尤其是“不这么做会怎样”。
 - **测试尽量少**，只加在关键地方，每条验收一两条；不要为每个分支各写一条。

@@ -20,16 +20,6 @@ import {
 } from '../src/application/file-store.ts';
 import { SystemClock } from '../src/application/in-memory.ts';
 import {
-  PgActivityLog,
-  PgDeliveryRepository,
-  PgIds,
-  PgProjectRepository,
-  PgStateStore,
-  PERIODIC_RECONCILE_LOCK_KEY1,
-  PERIODIC_RECONCILE_LOCK_KEY2,
-  tryPgAdvisoryLock,
-} from '../src/application/pg-store.ts';
-import {
   cleanupAfterSignal,
   formatErrorForLog,
   parseReconcileIntervalMs,
@@ -41,11 +31,9 @@ import {
   buildFileDeliveryRepairDeps,
   runFileObserverDeliveryRepairTick,
   runHeldFileDeliveryRepair,
-  runPgDeliveryRepairTick,
   startPeriodicDeliveryRepair,
   startServer,
 } from '../src/main.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
 import type { MissionContract } from '../src/kernel/index.ts';
 
 const CONTRACT: MissionContract = {
@@ -693,189 +681,6 @@ describe('文件版 tick', () => {
       );
     } finally {
       FileDeliveryRepository.prototype.create = original;
-    }
-  });
-});
-
-describe('PG tick', () => {
-  let dsn = '';
-  let available = false;
-
-  before(async () => {
-    const target = await ensureTestDatabase('c5bper');
-    if (!target) return;
-    dsn = target;
-    const boot = await PgStateStore.open({ connectionString: dsn });
-    await boot.close();
-    available = true;
-  });
-
-  function skipIfNoPg(t: { skip: (reason?: string) => void }): boolean {
-    if (!available) {
-      t.skip('没有可用的 Postgres —— 文件版仍是默认存储，这组跳过');
-      return true;
-    }
-    return false;
-  }
-
-  async function reset(): Promise<void> {
-    const store = await PgStateStore.open({ connectionString: dsn });
-    try {
-      await store.pool.query(
-        'TRUNCATE projects, activity, deliveries, id_counters, query_runs, validation_reports',
-      );
-    } finally {
-      await store.close();
-    }
-  }
-
-  async function seedPgGap(missionId = 'M-gap'): Promise<void> {
-    const store = await PgStateStore.open({ connectionString: dsn });
-    try {
-      const clock = new SystemClock();
-      const projects = new PgProjectRepository(store);
-      const activity = new PgActivityLog(store, clock);
-      const project = await projects.ensure('P');
-      const mission = project.createMission({
-        id: missionId,
-        contract: CONTRACT,
-        origin: { clientType: 'test' },
-      });
-      const attempt = mission.startCoordinatorAttempt();
-      mission.recordResult(RESULT);
-      mission.submitForReview();
-      await projects.persist();
-      await activity.append({
-        projectId: 'P',
-        missionId,
-        attemptId: attempt.id,
-        kind: 'mission_result.submitted',
-        data: { outcome: 'delivered' },
-      });
-    } finally {
-      await store.close();
-    }
-  }
-
-  async function pgDeliveries(missionId: string) {
-    const store = await PgStateStore.open({ connectionString: dsn });
-    try {
-      return await new PgDeliveryRepository(store, new SystemClock(), new PgIds(store)).listForMission(
-        missionId,
-      );
-    } finally {
-      await store.close();
-    }
-  }
-
-  test('能看见别的进程先前提交的缺口并补建', async (t) => {
-    if (skipIfNoPg(t)) return;
-    await reset();
-    await seedPgGap();
-    assert.equal((await pgDeliveries('M-gap')).length, 0);
-    await runPgDeliveryRepairTick({ connectionString: dsn, warn: () => {} });
-    assert.equal((await pgDeliveries('M-gap')).length, 1);
-  });
-
-  test('两个实例竞争时至多一个执行；锁持有者会让另一轮跳过', async (t) => {
-    if (skipIfNoPg(t)) return;
-    await reset();
-    await seedPgGap();
-    const holder = await PgStateStore.open({ connectionString: dsn });
-    try {
-      const lock = await tryPgAdvisoryLock(
-        holder.pool,
-        PERIODIC_RECONCILE_LOCK_KEY1,
-        PERIODIC_RECONCILE_LOCK_KEY2,
-      );
-      assert.equal(lock.held, true);
-      const warns: string[] = [];
-      await Promise.all([
-        runPgDeliveryRepairTick({
-          connectionString: dsn,
-          warn: (message) => warns.push(message),
-        }),
-        runPgDeliveryRepairTick({
-          connectionString: dsn,
-          warn: (message) => warns.push(message),
-        }),
-      ]);
-      assert.equal(warns.filter((row) => row.includes('互斥')).length, 2);
-      assert.equal((await pgDeliveries('M-gap')).length, 0);
-      await lock.release();
-    } finally {
-      await holder.close();
-    }
-    await runPgDeliveryRepairTick({ connectionString: dsn, warn: () => {} });
-    assert.equal((await pgDeliveries('M-gap')).length, 1);
-  });
-
-  test('不把别人正在跑的 Attempt 判死；tick 后锁与连接释放', async (t) => {
-    if (skipIfNoPg(t)) return;
-    await reset();
-    const live = await PgStateStore.open({ connectionString: dsn });
-    try {
-      const projects = new PgProjectRepository(live);
-      const project = await projects.ensure('P-live');
-      const mission = project.createMission({ id: 'M-live', contract: CONTRACT });
-      const attempt = mission.startCoordinatorAttempt();
-      await projects.persist();
-      assert.equal(attempt.status, 'in_progress');
-
-      await seedPgGap('M-other');
-      await runPgDeliveryRepairTick({ connectionString: dsn, warn: () => {} });
-
-      await live.refresh();
-      const still = live.projectsMap().get('P-live')?.missions.find((row) => row.id === 'M-live');
-      assert.equal(still?.coordinatorAttempts[0]?.status, 'in_progress');
-
-      const leftover = await live.pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM pg_locks
-          WHERE locktype = 'advisory' AND classid = $1 AND objid = $2`,
-        [PERIODIC_RECONCILE_LOCK_KEY1, PERIODIC_RECONCILE_LOCK_KEY2],
-      );
-      assert.equal(leftover.rows[0]?.n, 0);
-    } finally {
-      await live.close();
-    }
-  });
-
-  test('补建单项失败记 warning，不阻断下一轮恢复', async (t) => {
-    if (skipIfNoPg(t)) return;
-    await reset();
-    await seedPgGap();
-    const original = PgDeliveryRepository.prototype.create;
-    let failOnce = true;
-    PgDeliveryRepository.prototype.create = async function (input) {
-      if (failOnce) {
-        failOnce = false;
-        throw new Error('模拟投递写入失败');
-      }
-      return original.call(this, input);
-    };
-    const warns: string[] = [];
-    try {
-      await runPgDeliveryRepairTick({
-        connectionString: dsn,
-        warn: (message) => warns.push(message),
-      });
-      assert.ok(
-        warns.some((row) => row.includes('M-gap') && row.includes('模拟投递写入失败')),
-        `应告警 Mission 与原因，实际 ${warns.join(' | ')}`,
-      );
-      assert.equal((await pgDeliveries('M-gap')).length, 0);
-      await runPgDeliveryRepairTick({
-        connectionString: dsn,
-        warn: (message) => warns.push(message),
-      });
-      assert.equal((await pgDeliveries('M-gap')).length, 1);
-      assert.equal(
-        warns.filter((row) => row.includes('补建失败')).length,
-        1,
-        '第二轮成功不应再刷故障 warning',
-      );
-    } finally {
-      PgDeliveryRepository.prototype.create = original;
     }
   });
 });

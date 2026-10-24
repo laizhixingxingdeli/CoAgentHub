@@ -85,7 +85,6 @@ test('启动续跑：对不同的 interrupted missionId 各请求一次，暂停
       counting,
       [{ missionId: 'M-live' }, { missionId: 'M-live' }],
       {},
-      false,
       () => assert.fail('不应有警告'),
     );
     assert.equal(calls, 1, '同一 missionId 出现两次必须去重，只请求一次');
@@ -104,7 +103,6 @@ test('启动续跑：对不同的 interrupted missionId 各请求一次，暂停
       platform,
       [{ missionId: 'M-paused' }],
       {},
-      false,
       () => assert.fail('不应有警告'),
     );
     assert.equal(await interruptionRequests(activity, 'M-paused'), 0, '暂停的 Mission 不得留下续跑请求');
@@ -113,10 +111,9 @@ test('启动续跑：对不同的 interrupted missionId 各请求一次，暂停
   // ---- 三个关闭条件：都不调用 platform。 ----
   {
     const { platform } = world();
-    const cases: Array<{ name: string; env: Record<string, string>; usePg: boolean }> = [
-      { name: 'COAGENT_RESUME_INTERRUPTED=0', env: { COAGENT_RESUME_INTERRUPTED: '0' }, usePg: false },
-      { name: 'COAGENT_AUTO_RESUME=0', env: { COAGENT_AUTO_RESUME: '0' }, usePg: false },
-      { name: 'PG 部署', env: {}, usePg: true },
+    const cases: Array<{ name: string; env: Record<string, string> }> = [
+      { name: 'COAGENT_RESUME_INTERRUPTED=0', env: { COAGENT_RESUME_INTERRUPTED: '0' } },
+      { name: 'COAGENT_AUTO_RESUME=0', env: { COAGENT_AUTO_RESUME: '0' } },
     ];
     for (const item of cases) {
       let calls = 0;
@@ -129,7 +126,6 @@ test('启动续跑：对不同的 interrupted missionId 各请求一次，暂停
         },
         [{ missionId: 'M-off' }],
         item.env,
-        item.usePg,
         () => assert.fail('不应有警告'),
       );
       assert.equal(calls, 0, `${item.name} 时不得请求续跑`);

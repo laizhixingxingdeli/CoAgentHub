@@ -14,7 +14,7 @@
  * 为什么没有 verified 层：回执只记「我收到了」，验收通过是另一件事。让 ACK 能写成
  * verified，就等于让「有回执」当「已通过验收」用。
  *
- * 零第三方依赖：第三方只允许出现在 src/application/pg-store.ts。
+ * 零第三方依赖。
  */
 
 import type { ChangeImpact } from '../change-impact.ts';

@@ -14,7 +14,7 @@
 
 ## 后果
 
-- Work Truth 上 QueryRun 与 Mission 分仓储（内存 / file / PG 实现可并行）。
+- Work Truth 上 QueryRun 与 Mission 分仓储（内存 / file 实现）。
 - Classified 路由到 query 时 **拒绝建 Mission**（`QUERY_ROUTE_REQUIRED`），引导 Query 路径。
 - 观测面/API 若暴露 query，不得假冒 Mission 生命周期事件。
 

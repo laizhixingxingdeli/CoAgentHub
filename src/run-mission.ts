@@ -31,7 +31,7 @@ import {
 } from './runtime/spawn.ts';
 import { GitWorktreeManager, InPlaceWorkspaceManager } from './application/workspace.ts';
 import { listenLoopback } from './application/loopback-listen.ts';
-import { buildPersistentPlatform, buildPgPlatform, makeIssuer } from './main.ts';
+import { buildPersistentPlatform, makeIssuer } from './main.ts';
 import type {
   ComplexityAssessment,
   MissionContract,
@@ -57,8 +57,6 @@ function occupiedMessage(reason: string): string {
 }
 
 const INDEPENDENT_RUN_MODE = '无常驻服务，独立运行（本进程持主锁）';
-// PG 不探测、不转发、不持文件主锁；再用文件独立句会虚报持锁。
-const PG_INDEPENDENT_RUN_MODE = 'PG 存储：独立运行（不经常驻服务转发，不持文件主锁）';
 
 function hostedRunModeLine(instanceId: string, port: number): string {
   return `由常驻服务托管：实例 ${instanceId.slice(0, 8)}、端口 ${port}`;
@@ -178,7 +176,7 @@ async function main() {
   if (!missionFile) {
     console.log(
       '用法：node src/run-mission.ts <mission.json> --cwd <worktree> [--adapter <agent-entry.ts>] [--max-rounds <1-100>]\n' +
-        '     [--store pg] [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]\n' +
+        '     [--in-place] [--accept-stale-base：已知分叉基线过期，照跑]\n' +
         '     [--coordinator <profileId,...>] [--executor <profileId,...>] [--independent-reviewer <profileId,...>]\n' +
         '\n' +
         'mission.json：projectId / missionId / contract 必填。\n' +
@@ -216,11 +214,9 @@ async function main() {
 
   // 持久化：进程退了结果还得在收件箱里等人来取。
   //
-  // 存 Postgres 时**不取文件锁**：单写者锁是文件版的补偿手段，数据库那边
-  // 由版本号挡并发写，再加一把进程锁只会挡住合法的并行 Mission。
   const statePath = resolve(arg('--state') ?? '.coagent-state.json');
-  const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
-  const storeFlag = arg('--store') ?? (usePg ? 'pg' : 'file');
+  const storeFlag = arg('--store') ?? 'file';
+  if (storeFlag !== 'file') throw new Error(`不支持 --store ${storeFlag}：现在只有文件存储`);
   const inPlace = process.argv.includes('--in-place');
   const acceptStaleBase = process.argv.includes('--accept-stale-base');
   const forwardBody = hostedRunBody({
@@ -240,17 +236,14 @@ async function main() {
     envPassthroughRaw,
   });
 
-  // 文件版：parse/预检之后探测本机写者。live 回环转发，不得因连接不明落回本地。
-  // PG 不走文件锁探测，保持旧单实例边界。
-  if (!usePg) {
-    const probe = await probeLocalWriter(statePath);
-    if (probe.status === 'live') {
-      const code = await forwardLiveRun(probe.holder, forwardBody);
-      process.exit(code);
-    }
-    if (probe.status === 'occupied') {
-      throw new Error(occupiedMessage(probe.reason));
-    }
+  // parse/预检之后探测本机写者。live 回环转发，不得因连接不明落回本地。
+  const probe = await probeLocalWriter(statePath);
+  if (probe.status === 'live') {
+    const code = await forwardLiveRun(probe.holder, forwardBody);
+    process.exit(code);
+  }
+  if (probe.status === 'occupied') {
+    throw new Error(occupiedMessage(probe.reason));
   }
 
   // 本进程的用量查询要问本次 --adapter 所在仓库：只有走到这里才是独立本地写者，
@@ -264,18 +257,12 @@ async function main() {
     : new GitWorktreeManager(arg('--worktrees'));
   let built;
   try {
-    built = usePg
-      ? await buildPgPlatform({
-          workspace: missionWorkspace,
-          // 只收敛自己接手的这条：对别的 Mission 没有「没人在跑」这个认知。
-          reconcileMissionId: spec.missionId,
-        })
-      : await buildPersistentPlatform(statePath, {
-          workspace: missionWorkspace,
-          exclusive: { what: `跑 Mission ${spec.missionId}` },
-        });
+    built = await buildPersistentPlatform(statePath, {
+      workspace: missionWorkspace,
+      exclusive: { what: `跑 Mission ${spec.missionId}` },
+    });
   } catch (error) {
-    if (!usePg && error instanceof LockBusyError) {
+    if (error instanceof LockBusyError) {
       const again = await probeLocalWriter(statePath);
       if (again.status === 'live') {
         const code = await forwardLiveRun(again.holder, forwardBody);
@@ -335,7 +322,7 @@ async function main() {
   console.log(`状态文件: ${statePath}`);
   console.log(`worktree: ${cwd}`);
   console.log(`适配器  : ${adapter}\n`);
-  console.log(usePg ? PG_INDEPENDENT_RUN_MODE : INDEPENDENT_RUN_MODE);
+  console.log(INDEPENDENT_RUN_MODE);
 
   // 静默超时：不再产出任何东西才判卡住，然后连同子孙进程一起杀。
   const runtime = new SpawnRuntime({

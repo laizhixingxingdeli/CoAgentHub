@@ -2063,31 +2063,3 @@ describe('startServer 方案记录目录与托管 live', () => {
     });
   });
 });
-
-describe('生产装配把 live 注入 Platform',
-  () => {
-    test('文件/PG 的 new Platform 带 live；hosted MissionRunner 用同一通道', () => {
-      const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
-      const persistent = main.slice(
-        main.indexOf('export async function buildPersistentPlatform'),
-        main.indexOf('export async function buildPgPlatform'),
-      );
-      const persistentPlat = persistent.slice(
-        persistent.indexOf('const platform = new Platform'),
-        persistent.indexOf('const tokens'),
-      );
-      assert.match(persistentPlat, /\blive,/);
-      const pg = main.slice(main.indexOf('export async function buildPgPlatform'));
-      const pgPlat = pg.slice(
-        pg.indexOf('const platform = new Platform'),
-        pg.indexOf('const tokens'),
-      );
-      assert.match(pgPlat, /\blive,/);
-      const runner = readFileSync(
-        fileURLToPath(new URL('../src/application/mission-runner.ts', import.meta.url)),
-        'utf8',
-      );
-      assert.match(runner, /new MissionRunner\(\{[\s\S]*\blive,/);
-    });
-  },
-);

@@ -11,7 +11,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 - **Project → Mission → WorkItem → Attempt**：项目承载长期真相；Mission 是一次有边界的变更；WorkItem 是可派发的执行单元；Attempt 是某次角色会话。
 - **QueryRun**：与 Mission **并列**的只读问答记录；不进入 Mission 状态机（见 `specs/query-run.md`、ADR-0003）。
-- **Work Truth**：Mission / Attempt / Evidence / Event / QueryRun 记在文件或 Postgres 仓储里，描述「现在在干什么、证据是什么」。
+- **Work Truth**：Mission / Attempt / Evidence / Event / QueryRun 记在文件仓储里，描述「现在在干什么、证据是什么」。
 - **Project Truth**：稳定认知在 Git 的 `.coagent/` 里，跟代码同版本。
 
 ## Roles and Flow
@@ -54,7 +54,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 - 未经 L3 不得 completed。
 - contract / plan 的修订绑定后续执行，不能 silently 忽略。
-- Project Truth 在 Git `.coagent/`；Work Truth 在 file / Postgres repository。
+- Project Truth 在 Git `.coagent/`；Work Truth 在文件仓储。
 - `VIBE.md` 是生成物，不是手写 Source of Truth。
 - QueryRun 不是 Mission；只读靠工具 allowlist，不靠 prompt。
 - 权威执行预算：hard 可停 / 内部晋升，soft 只告警；caller 不得手填 `budget_exceeded`（ADR-0005；按票累计的费用硬停已定，实现前由检视者人工执行）。
@@ -81,7 +81,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 ### 分层
 
 - `src/kernel/` 不 import 任何东西（连 `node:` 都不），也不出现 provider / model / session / http / fetch / sql / database 这些词。理由：接第二个 agent 时不用改内核。
-- 第三方依赖**只允许**出现在 `src/application/pg-store.ts`。别处一律零依赖——文件版存储守着「clone 下来什么都不装就能跑通全部测试」。
+- `src/` 零第三方依赖——「clone 下来什么都不装就能跑通全部测试」。Postgres 存储已于 2026-10-24 移除。
 - 规则写在用例层，不写在 prompt 里。**能用工具层挡住的，就不要指望模型记得住。**
 
 ### 前端
@@ -100,7 +100,6 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 
 - 测试用 `node --test`：定向跑 `node --test test/<名字>.test.ts`，全量跑 `node --test`。不用 npm / npx。
 - 测试尽量少，只加在关键地方：只写验收点名的关键场景，每条验收一到两条；不为每个分支、每种写法、每种错误各写一条（用户 2026-09-30）。
-- 要改表结构或 TRUNCATE 的 PG 测试，用 `test/helpers/pg.ts` 的 `ensureTestDatabase('<独立名字>')` 另建隔离库；PG 不可用时这类测试跳过，跳过不算验证通过。否则测试之间互相踩数据，或者把「没跑」当成「通过」。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
 - `adapters/pi`（pi 适配层）和 `integrations/codex/mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器先构建再测：`["node","node_modules/typescript/bin/tsc","-p","integrations/codex/mcp-server/tsconfig.json"]`，然后 `["node","node_modules/vitest/vitest.mjs","run","--root","integrations/codex/mcp-server"]`。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
 

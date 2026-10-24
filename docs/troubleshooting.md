@@ -14,7 +14,7 @@
 同一个状态文件同一时间只允许一个平台进程写它。先看是不是已经启动过一个（`GET http://127.0.0.1:3101/api/health`）。进程被杀后重启，平台会等锁的心跳过期（约 120 秒）、确认端口空闲后自动接管残锁并写审计；不要手工删锁目录，更不要编辑状态文件。
 
 **全新克隆里 `node --test` 一片红，报 `Cannot find package 'pg'`**
-平台本体应该零依赖，只有 Postgres 存储需要 `pg`。如果你看到这个错，说明用的是旧版本；更新到最新，或临时 `npm ci`。
+平台本体零依赖，`pg` 已随 Postgres 存储一起移除。如果你看到这个错，说明用的是旧版本；更新到最新。
 
 **`setup` 里 `npm ci` 很慢或超时**
 锁文件里的下载地址是官方 npm 源（registry.npmjs.org）；npm 会按你配置的 registry 替换主机。网络访问官方源慢的话，先配镜像再 `setup`，例如 `npm config set registry https://registry.npmmirror.com`。

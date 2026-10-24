@@ -12,7 +12,7 @@
  *
  * 时钟纪律：只信 ctx.clock。body 或外部预取的 clock 会让过期租约能把时间拨回去继续写。
  *
- * 零第三方依赖：第三方只允许出现在 src/application/pg-store.ts。
+ * 零第三方依赖。
  */
 
 import { InvariantViolationError } from '../../kernel/index.ts';

@@ -25,14 +25,6 @@ import {
   FileValidationReportRepository,
   PersistentIds,
 } from '../src/application/file-store.ts';
-import {
-  PgActivityLog,
-  PgDeliveryRepository,
-  PgIds,
-  PgProjectRepository,
-  PgStateStore,
-  PgValidationReportRepository,
-} from '../src/application/pg-store.ts';
 import type { ActivityLog, CommandTransaction, IdGenerator, ProjectRepository } from '../src/application/ports.ts';
 import type { DeliveryRepository } from '../src/application/delivery.ts';
 import type { ValidationReportRepository } from '../src/application/validation/report-repository.ts';
@@ -41,7 +33,6 @@ import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ValidationEngine } from '../src/application/validation/engine.ts';
 import type { BudgetEvaluation } from '../src/application/budget-usage.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { connectPgClient, ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -533,133 +524,6 @@ describe('崩溃注入 · 文件版：第 k 次记事件时崩，重开后恰好
       covered.add(SCRIPT[crashedAt!]!.name);
     }
     assertCrashCoverage(covered, eventSteps, '文件版');
-  });
-});
-
-/* ============================ PG 版（真库、独立库） ============================ */
-
-describe('崩溃注入 · PG：第 k 次记事件时崩，新开 store 读库恰好等于上一条命令结束时', () => {
-  let dsn: string | undefined;
-  const stores: PgStateStore[] = [];
-  before(async () => {
-    dsn = await ensureTestDatabase('command_checkpoints');
-    if (!dsn) return;
-    // 新库还没有表：开一次 store 让它建表。
-    const store = await PgStateStore.open({ connectionString: dsn });
-    await store.close();
-  });
-  after(async () => {
-    for (const store of stores) await store.close().catch(() => undefined);
-  });
-
-  async function sql<T extends Record<string, unknown>>(text: string): Promise<T[]> {
-    const client = await connectPgClient(dsn!);
-    await client.connect();
-    try {
-      return (await client.query<T>(text)).rows;
-    } finally {
-      await client.end();
-    }
-  }
-
-  async function reset(): Promise<void> {
-    await sql('TRUNCATE projects, activity, deliveries, id_counters, query_runs, validation_reports');
-  }
-
-  async function pgParts(crashAt?: number, crashWhen: 'before' | 'after' = 'before') {
-    const store = await PgStateStore.open({ connectionString: dsn! });
-    stores.push(store);
-    const clock = new FixedClock('2026-09-24T00:00:00.000Z');
-    const ids = new PgIds(store);
-    await ids.reserve(['M', 'W', 'D', 'E', 'VR', 'promo']);
-    const projects = new PgProjectRepository(store);
-    const assembled = assemble({
-      store,
-      projects,
-      activity: new PgActivityLog(store, clock),
-      deliveries: new PgDeliveryRepository(store, clock, ids),
-      reports: new PgValidationReportRepository(store),
-      ids,
-      clock,
-      crashWhen,
-      ...(crashAt !== undefined ? { crashAt } : {}),
-    });
-    return { ...assembled, projects, store };
-  }
-
-  /**
-   * 每次新开一个 PG store 读库：快照、事件（去掉 messageId）、投递、验收报告。
-   * 参考运行与崩溃运行必须走同一套读法，否则比不齐。
-   */
-  async function pgSnapshot(): Promise<string> {
-    const store = await PgStateStore.open({ connectionString: dsn! });
-    try {
-      const projects = [...store.projectsMap().values()]
-        .map((project) => ({ project_id: project.id, snapshot: project.toSnapshot() }))
-        .sort((a, b) => a.project_id.localeCompare(b.project_id));
-      const activity = (await new PgActivityLog(store, new FixedClock('2026-09-24T00:00:00.000Z')).all()).map(
-        (event) => {
-          const { messageId: _messageId, ...rest } = event;
-          return rest;
-        },
-      );
-      const deliveries = (
-        await store.pool.query(
-          `SELECT delivery_id, mission_id, project_id, outcome, idempotency_key, recipient, summary,
-                  payload, status, created_at, acknowledged_at
-             FROM deliveries ORDER BY delivery_id`,
-        )
-      ).rows;
-      const reports = (
-        await store.pool.query('SELECT report_id, report FROM validation_reports ORDER BY report_id')
-      ).rows;
-      return JSON.stringify({ projects, activity, deliveries, reports }, (key, value) =>
-        key === 'answeredAt' ? 'T' : value,
-      );
-    } finally {
-      await store.close();
-    }
-  }
-
-  test('脚本里的每一次记事件', async (t) => {
-    if (!dsn) {
-      t.skip('没有可用的 Postgres');
-      return;
-    }
-    await reset();
-    const reference = await pgParts();
-    const checkpoints: string[] = [];
-    const eventSteps = new Set<string>();
-    let lastAppends = 0;
-    // 参考运行里不额外 persist：检查点只能是命令自己提交下去的东西，否则没包事务的命令会被它掩盖。
-    await runScript(reference.platform, reference.projects, async (index) => {
-      const now = reference.appends();
-      if (now > lastAppends) eventSteps.add(SCRIPT[index]!.name);
-      lastAppends = now;
-      checkpoints.push(await pgSnapshot());
-    });
-    const totalAppends = reference.appends();
-    await reference.store.close();
-    stores.splice(stores.indexOf(reference.store), 1);
-    const empty = JSON.stringify({ projects: [], activity: [], deliveries: [], reports: [] });
-
-    const covered = new Set<string>();
-    for (let k = 1; k <= totalAppends; k += 1) for (const when of ['before', 'after'] as const) {
-      await reset();
-      const run = await pgParts(k, when);
-      const crashedAt = await runScript(run.platform, run.projects);
-      assert.notEqual(crashedAt, undefined, `k=${k}（${when}）应当崩在某一步`);
-      await run.store.close();
-      stores.splice(stores.indexOf(run.store), 1);
-      const expected = crashedAt === 0 ? empty : checkpoints[crashedAt! - 1];
-      assert.equal(
-        await pgSnapshot(),
-        expected,
-        `k=${k}（${when}）崩在第 ${crashedAt} 步（${SCRIPT[crashedAt!]!.name}）：库里应等于上一步结束时`,
-      );
-      covered.add(SCRIPT[crashedAt!]!.name);
-    }
-    assertCrashCoverage(covered, eventSteps, 'PG 版');
   });
 });
 

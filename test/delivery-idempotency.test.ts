@@ -33,13 +33,11 @@ import {
   FileStateStore,
   PersistentIds,
 } from '../src/application/file-store.ts';
-import { PgDeliveryRepository, PgIds, PgStateStore } from '../src/application/pg-store.ts';
 import { Platform } from '../src/application/platform.ts';
 import { InPlaceWorkspaceManager } from '../src/application/workspace.ts';
 import { ValidationEngine } from '../src/application/validation/engine.ts';
 import { InMemoryValidationReportRepository } from '../src/application/validation/report-repository.ts';
 import type { MissionContract, WorkOrder } from '../src/kernel/index.ts';
-import { connectPgClient, ensureTestDatabase } from './helpers/pg.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -294,83 +292,5 @@ describe('文件版旧数据：读入补键，去重接得上', () => {
     assert.equal((await again.create(input('M-old', 'escalated:1'))).id, 'D-3');
     assert.equal((await again.create(input('M-old', 'escalated:0'))).id, 'D-1');
     assert.equal((await again.pending('me')).filter((d) => d.missionId === 'M-old').length, 2);
-  });
-});
-
-/* ------------------------------ 真 PG：迁移（独立库） ------------------------------ */
-
-describe('PG：迁移回填、换唯一约束、可重复执行（独立库，不碰并行跑的 pg-store 测试）', () => {
-  let dsn: string | undefined;
-
-  before(async () => {
-    dsn = await ensureTestDatabase('delivery_key');
-  });
-
-  async function legacySchema(connectionString: string): Promise<void> {
-    const client = await connectPgClient(connectionString);
-    await client.connect();
-    try {
-      // 回到加键之前的形状：没有 idempotency_key 列，唯一约束是 (mission_id, outcome)。
-      await client.query('DROP TABLE IF EXISTS deliveries');
-      await client.query(`CREATE TABLE deliveries (
-        delivery_id text PRIMARY KEY, mission_id text NOT NULL, project_id text NOT NULL,
-        outcome text NOT NULL, recipient text, summary text NOT NULL, payload jsonb,
-        status text NOT NULL, created_at timestamptz NOT NULL, acknowledged_at timestamptz)`);
-      await client.query('CREATE UNIQUE INDEX deliveries_mission_outcome_idx ON deliveries (mission_id, outcome)');
-      await client.query(`INSERT INTO deliveries (delivery_id, mission_id, project_id, outcome, recipient, summary, status, created_at)
-        VALUES ('D-OLD-1','M-old','P','escalated','me','旧升级','acknowledged',now()),
-               ('D-OLD-2','M-old','P','delivered','me','旧交卷','pending',now())`);
-    } finally {
-      await client.end();
-    }
-  }
-
-  async function indexes(store: PgStateStore): Promise<string[]> {
-    const { rows } = await store.pool.query<{ indexname: string }>(
-      "SELECT indexname FROM pg_indexes WHERE tablename = 'deliveries' ORDER BY indexname",
-    );
-    return rows.map((r) => r.indexname);
-  }
-
-  test('旧库打开即迁移：旧行补键、只剩新约束；第一次升级重建拿回旧行，第二次升级新建；再开一次不出错不改数', async (t) => {
-    if (!dsn) {
-      t.skip('没有可用的 Postgres');
-      return;
-    }
-    await legacySchema(dsn);
-
-    let store = await PgStateStore.open({ connectionString: dsn });
-    try {
-      const { rows } = await store.pool.query<{ delivery_id: string; idempotency_key: string }>(
-        'SELECT delivery_id, idempotency_key FROM deliveries ORDER BY delivery_id',
-      );
-      assert.deepEqual(
-        rows.map((r) => `${r.delivery_id}=${r.idempotency_key}`),
-        ['D-OLD-1=escalated:0', 'D-OLD-2=result:legacy:delivered'],
-      );
-      assert.deepEqual(await indexes(store), ['deliveries_mission_key_idx', 'deliveries_pkey']);
-
-      const ids = new PgIds(store);
-      await ids.reserve(['D']);
-      const repo = new PgDeliveryRepository(store, new FixedClock(), ids);
-      assert.equal((await repo.create(input('M-old', 'escalated:0'))).id, 'D-OLD-1');
-      const second = await repo.create(input('M-old', 'escalated:1'));
-      assert.notEqual(second.id, 'D-OLD-1', '第二次升级在旧约束下会被吞掉，新约束下要新建');
-      await assertKeySemantics(repo, `sem-${Date.now()}`);
-    } finally {
-      await store.close();
-    }
-
-    // 迁移可重复执行：再开一次，不报错、不改已有键。
-    store = await PgStateStore.open({ connectionString: dsn });
-    try {
-      const { rows } = await store.pool.query<{ n: string }>(
-        "SELECT count(*) AS n FROM deliveries WHERE mission_id = 'M-old'",
-      );
-      assert.equal(Number(rows[0]!.n), 3);
-      assert.deepEqual(await indexes(store), ['deliveries_mission_key_idx', 'deliveries_pkey']);
-    } finally {
-      await store.close();
-    }
   });
 });

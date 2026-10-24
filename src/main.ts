@@ -53,22 +53,6 @@ import {
   FileValidationReportRepository,
   PersistentIds,
 } from './application/file-store.ts';
-import {
-  PgActivityLog,
-  PgAgentPoolRepository,
-  PgCandidateCircuitRepository,
-  PgDeliveryRepository,
-  PgIds,
-  PgLiveOutput,
-  PgProjectRepository,
-  PgQueryRunRepository,
-  PgQueuedHopRepository,
-  PgStateStore,
-  PgValidationReportRepository,
-  PERIODIC_RECONCILE_LOCK_KEY1,
-  PERIODIC_RECONCILE_LOCK_KEY2,
-  tryPgAdvisoryLock,
-} from './application/pg-store.ts';
 import { acquireLock, acquireRecoverableLock, LockBusyError, publishLockPort, stateIdFor } from './application/lock.ts';
 import {
   collectHeartbeatContinuationIds,
@@ -378,120 +362,6 @@ export async function buildPersistentPlatform(
   }
 }
 
-/**
- * Postgres 装法。
- *
- * 与文件版**并存**：文件版负责"没装数据库也能跑"，这一版负责多进程并发。
- * 领域层与用例层两边都不用改一个字——这正是端口存在的意义。
- */
-export async function buildPgPlatform(options?: {
-  connectionString?: string;
-  workspace?: WorkspaceManager;
-  artifactRoot?: string;
-  /**
-   * 接手哪条 Mission —— 传了才做启动收敛，而且只收敛这一条。
-   *
-   * **只读进程不要传。** 共用一份状态时，「刚起来所以没人在跑」这个前提
-   * 不再成立：实测重启一次观测面就把正在跑的 attempt 判死写回库了。
-   */
-  reconcileMissionId?: string;
-  /**
-   * 可选 query runtime。仅 `supportsQuery === true` 时暴露 queryRunner/runQuery；
-   * 未传或不支持则 undefined（fail-closed）。
-   */
-  queryRuntime?: AgentRuntime;
-}) {
-  const clock = new SystemClock();
-  const store = await PgStateStore.open(
-    options?.connectionString ? { connectionString: options.connectionString } : undefined,
-  );
-  await PgLiveOutput.ensureSchema(store);
-  const candidateCircuits = new PgCandidateCircuitRepository(store);
-  const queuedHops = new PgQueuedHopRepository(store);
-  const projects = new PgProjectRepository(store);
-  const activity = new PgActivityLog(store, clock);
-  const live = new PgLiveOutput(store);
-  const ids = new PgIds(store);
-  // 预热号段：不预热的话第一次 next() 会撞上"号段用尽"，
-  // 而那对调用方来说只是一次莫名其妙的失败。含 Q / VR。
-  await ids.reserve();
-  const deliveries = new PgDeliveryRepository(store, clock, ids);
-  const queryRuns = new PgQueryRunRepository(store);
-  const artifacts = new FileArtifactStore(
-    resolve(options?.artifactRoot ?? '.coagent-artifacts'),
-  );
-  // Platform 与 ValidationEngine 必须共享同一个 WorkspaceManager 实例。
-  const workspace = options?.workspace ?? new GitWorktreeManager();
-  const commandRunner = new ExecFileCommandRunner();
-  const validation = {
-    engine: new ValidationEngine({
-      clock,
-      ids,
-      commandRunner,
-      changedPathReader: new WorkspaceChangedPathReader(workspace),
-      diffFactReader: new WorkspaceDiffFactReader(workspace),
-    }),
-    reports: new PgValidationReportRepository(store),
-    // 机器 L3 用；见 buildPlatform 里同一处。
-    commandRunner,
-  };
-  const platform = new Platform({
-    projects,
-    deliveries,
-    artifacts,
-    workspace,
-    activity,
-    clock,
-    ids,
-    validation,
-    // 单事务命令（C3）：交卷与升级的快照、事件、投递同一个数据库事务写下。
-    transaction: store,
-    live,
-  });
-  const agentPool = new PgAgentPoolRepository(store);
-  const tokens = new RunTokenRegistry();
-  const queryRuntime = options?.queryRuntime;
-  const queryRunner =
-    queryRuntime?.supportsQuery === true
-      ? new QueryRunner({ runtime: queryRuntime, queryRuns, clock, ids, candidateCircuits, loadCandidates: () => loadRoleProfiles(agentPool, 'classifier') })
-      : undefined;
-
-  // 传 live：收敛判死的那些跳正是**没跑到 Orchestrator finally** 的那些，
-  // 它们的实时输出至今没被裁过。只在限定 missionId 的写路径上做——只读观测面
-  // 根本不调这里。
-  const reconciled = options?.reconcileMissionId
-    ? await reconcileInterruptedAttempts(await projects.list(), activity, {
-        missionId: options.reconcileMissionId,
-        live,
-      })
-    : { interrupted: [], alive: [], liveTrimmed: [], liveTrimFailed: [] };
-  if (reconciled.interrupted.length > 0) await store.flush();
-
-  return {
-    platform,
-    activity,
-    projects,
-    deliveries,
-    queryRuns,
-    queryRunner,
-    runQuery: queryRunner
-      ? (input: Parameters<QueryRunner['runQuery']>[0]) => queryRunner.runQuery(input)
-      : undefined,
-    store,
-    candidateCircuits,
-    queuedHops,
-    live,
-    reconciled,
-    tokens,
-    agentPool,
-    issuer: makeIssuer(platform, tokens),
-    persist: () => projects.persist(),
-    // 读请求前刷新：别的进程写过的东西，这个进程要看得见。
-    refresh: () => store.refresh(),
-    close: () => store.close(),
-  };
-}
-
 /** 把「开 attempt」和「发 token」这两件事粘起来，交给调度器用。 */
 export function makeIssuer(platform: Platform, tokens: RunTokenRegistry): RunTokenIssuer {
   return {
@@ -631,58 +501,13 @@ export async function runHeldFileDeliveryRepair(
   warnDeliveryRepairErrors(result, warn);
 }
 
-export interface PgDeliveryRepairTickInput {
-  readonly connectionString?: string;
-  readonly warn: DeliveryRepairWarn;
-}
-
-/**
- * PG 周期修复：每轮新开独立 store，不 refresh / 不改写 Runner 正在用的那份。
- * 跨进程 advisory lock 拿不到就跳过。
- */
-export async function runPgDeliveryRepairTick(input: PgDeliveryRepairTickInput): Promise<void> {
-  const store = await PgStateStore.open(
-    input.connectionString ? { connectionString: input.connectionString } : undefined,
-  );
-  try {
-    const lock = await tryPgAdvisoryLock(
-      store.pool,
-      PERIODIC_RECONCILE_LOCK_KEY1,
-      PERIODIC_RECONCILE_LOCK_KEY2,
-    );
-    try {
-      if (!lock.held) {
-        input.warn('周期投递修复：未能取得跨进程互斥，本轮跳过');
-        return;
-      }
-      await store.refresh();
-      const clock = new SystemClock();
-      const ids = new PgIds(store);
-      await ids.reserve(['D']);
-      const result = await repairMissingDeliveries({
-        projects: new PgProjectRepository(store),
-        activity: new PgActivityLog(store, clock),
-        deliveries: new PgDeliveryRepository(store, clock, ids),
-        transaction: store,
-        clock,
-      });
-      warnDeliveryRepairErrors(result, input.warn);
-    } finally {
-      await lock.release();
-    }
-  } finally {
-    await store.close();
-  }
-}
-
 /**
  * 周期投递修复的写者策略。两入口共用装配时按这个选 tick，
- * 而不是各自 if (usePg) —— 分叉一次就会再出现两套锁/store 接线。
+ * 而不是各自选择 —— 分叉一次就会再出现两套锁/store 接线。
  */
 export type PeriodicDeliveryRepairMode =
   | { readonly kind: 'file-observer'; readonly statePath: string }
-  | { readonly kind: 'file-held'; readonly store: FileStateStore }
-  | { readonly kind: 'pg'; readonly connectionString?: string };
+  | { readonly kind: 'file-held'; readonly store: FileStateStore };
 
 export interface StartPeriodicDeliveryRepairInput {
   readonly intervalMs: number;
@@ -699,13 +524,6 @@ function tickForPeriodicDeliveryRepair(
   mode: PeriodicDeliveryRepairMode,
   warn: DeliveryRepairWarn,
 ): () => Promise<void> {
-  if (mode.kind === 'pg') {
-    return () =>
-      runPgDeliveryRepairTick({
-        connectionString: mode.connectionString,
-        warn,
-      });
-  }
   if (mode.kind === 'file-held') {
     return () => runHeldFileDeliveryRepair(mode.store, warn);
   }
@@ -852,9 +670,6 @@ export function bindServerCloseToPeriodicStop(
 /**
  * 起常驻 API / 观测面。文件版从可写装配前一直握主锁，直到 HTTP 完全关闭。
  *
- * 存储选哪个由 COAGENT_STORE 决定（pg / file）。缺省仍是文件版——
- * 没装 Postgres 的人 clone 下来就能跑，这条性质不能因为多了一个选项就丢掉。
- * PG 不套文件锁，也不宣称跨主机 fencing。
  */
 export interface StartServerOptions {
   /** 可注入 fetch（测试用 fake；生产默认 globalThis.fetch）。 */
@@ -907,13 +722,10 @@ async function abortStartedServer(
 }
 
 /**
- * hosted 入口只认服务启动时握着的那份状态。PG 没有跨主机唯一写者，不能假装成文件锁。
+ * hosted 入口只认服务启动时握着的那份状态。
  * identityEquals 关在 heldPath 上，避免回调把请求 body 当成权威路径。
  */
-function hostedHeldState(usePg: boolean, statePath: string): HostedHeldState {
-  if (usePg) {
-    return { kind: 'unsupported' };
-  }
+function hostedHeldState(statePath: string): HostedHeldState {
   const heldPath = statePath;
   return {
     kind: 'file',
@@ -944,17 +756,13 @@ function rememberHostedAdapter(body: Record<string, unknown>): void {
  * 否则同一拍里会有多条唤醒挤进来。单条请求失败只警告——一条 Mission 卡住不该拦下整次启动，
  * 也不该让后面的 Mission 不再被请求。
  *
- * PG 部署不请求：托管运行本来就不在 PG 上装配（见 startServer 里 retryWake 的注释），
- * 请求了也没有组件会去接。
  */
 export async function requestInterruptedContinuations(
   platform: { requestHostedContinuation(missionId: string, cause: string): Promise<void> },
   interrupted: readonly { missionId: string }[],
   env: { COAGENT_RESUME_INTERRUPTED?: string; COAGENT_AUTO_RESUME?: string },
-  usePg: boolean,
   warn: (message: string) => void,
 ): Promise<void> {
-  if (usePg) return;
   if (env.COAGENT_RESUME_INTERRUPTED === '0') return;
   if (env.COAGENT_AUTO_RESUME === '0') return;
 
@@ -983,7 +791,6 @@ export async function startServer(
   const env = options?.env ?? process.env;
   const reconcileIntervalMs = parseReconcileIntervalMs(env.COAGENT_RECONCILE_INTERVAL_MS);
 
-  const usePg = (env.COAGENT_STORE ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   // Query runtime：只看已解析的 env（options.env 优先），双键 opt-in + 路径存在。
   // 未启用时 queryRuntime 为 undefined，builder 保持 runQuery 关闭。
   const queryRuntime = createPiQueryRuntime(env);
@@ -992,19 +799,15 @@ export async function startServer(
   let releaseMainLock = () => {};
   let server: Server | undefined;
   try {
-    const built = usePg
-      ? await buildPgPlatform({ queryRuntime, workspace })
-      : await buildPersistentPlatform(statePath, { queryRuntime, workspace, exclusive: {
-          what: '常驻服务',
-          instanceId,
-          apiVersion: API_VERSION,
-        } });
+    const built = await buildPersistentPlatform(statePath, { queryRuntime, workspace, exclusive: {
+      what: '常驻服务',
+      instanceId,
+      apiVersion: API_VERSION,
+    } });
     if ('releaseLock' in built && typeof built.releaseLock === 'function') {
       releaseMainLock = built.releaseLock;
     }
-    const fileIdentity = usePg
-      ? undefined
-      : { instanceId, stateId: stateIdFor(statePath) };
+    const fileIdentity = { instanceId, stateId: stateIdFor(statePath) };
     const loopback = { baseUrl: '' };
     const hostedBuilt = {
       platform: built.platform,
@@ -1023,7 +826,7 @@ export async function startServer(
     // 自动恢复调度在 createApi 之后才装配（它要用 runMission），状态探针先拿到一个可后补的引用。
     let retryWake: RetryWakeScheduler | undefined;
     const autoResumeEnabled = env.COAGENT_AUTO_RESUME !== '0';
-    const heldState = hostedHeldState(usePg, statePath);
+    const heldState = hostedHeldState(statePath);
     // 只认本服务状态文件旁的缺省目录，加上本次成功托管登记的 runDir。
     // 不能扫任意 CLI 目录：独立进程写到别处的记录不在这把锁的观测范围。
     const knownPlanRunDirs = new Set<string>([resolve(dirname(statePath), '.coagent-plans')]);
@@ -1079,14 +882,14 @@ export async function startServer(
       runnerState: {
         isRunning: (missionId) => hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
         running: () => hostedRuns.snapshot().filter((run) => run.kind === 'mission').map((run) => run.id),
-        ...(usePg
-          ? {}
-          : { autoResume: { enabled: () => autoResumeEnabled && retryWake !== undefined, active: () => retryWake?.active ?? [] } }),
+        autoResume: { enabled: () => autoResumeEnabled && retryWake !== undefined, active: () => retryWake?.active ?? [] },
       },
       platformStatus: {
-        store: usePg ? 'pg' : 'file',
+        store: 'file',
         startedAt,
-        ...(usePg ? {} : { instanceId, statePath, holdsMainLock: true }),
+        instanceId,
+        statePath,
+        holdsMainLock: true,
         agentEnv: {
           passthroughDeclared: passthrough !== undefined,
           baselineFiltered: passthrough !== undefined,
@@ -1099,16 +902,11 @@ export async function startServer(
       planRunDirs: () => [...knownPlanRunDirs],
       // 文件模式由本进程持有状态文件锁，是确定性状态文件写者：读取时把本进程
       // 托管的 kind=plan 运行投影成 running，其余无 stopped 的记录判 interrupted。
-      // PG 不注入，避免臆断文件写者资格——PG 的运行态维持既有 unknown 判定。
-      ...(!usePg
-        ? {
-            planRunRuntime: {
-              activeRunIds: () =>
-                hostedRuns.snapshot().filter((r) => r.kind === 'plan').map((r) => r.id),
-              isStateFileWriter: true,
-            },
-          }
-        : {}),
+      planRunRuntime: {
+        activeRunIds: () =>
+          hostedRuns.snapshot().filter((r) => r.kind === 'plan').map((r) => r.id),
+        isStateFileWriter: true,
+      },
       planLive,
       runMission,
       ...(options?.resolveControlPrincipal
@@ -1126,15 +924,9 @@ export async function startServer(
     await listenLoopback(server, port);
     const addr = server.address() as AddressInfo;
     loopback.baseUrl = `http://${addr.address}:${addr.port}`;
-    if (!usePg) {
-      publishLockPort(statePath, instanceId, addr.port);
-    }
+    publishLockPort(statePath, instanceId, addr.port);
     console.log(`CoAgentHub v5 平台已启动：http://${addr.address}:${addr.port}`);
-    console.log(
-      usePg
-        ? '存储：PostgreSQL'
-        : `存储：文件 ${'store' in built && 'path' in built.store ? built.store.path : statePath}`,
-    );
+    console.log(`存储：文件 ${'store' in built && 'path' in built.store ? built.store.path : statePath}`);
     if (built.reconciled.interrupted.length > 0) {
       console.log(
         `启动收敛：${built.reconciled.interrupted.length} 个上次残留的 attempt 被判为 interrupted`,
@@ -1153,7 +945,7 @@ export async function startServer(
     // 并上 (b) 路：本进程是接管旧锁上来的话，旧服务死前还在动、且收敛判不出残留 attempt 的
     // 那些 Mission 也一起请求。它们和 (a) 路共用这一次调用，按 missionId 去重。
     let continuationCandidates: { missionId: string }[] = [...built.reconciled.interrupted];
-    if (!usePg && env.COAGENT_RESUME_INTERRUPTED !== '0' && env.COAGENT_AUTO_RESUME !== '0') {
+    if (env.COAGENT_RESUME_INTERRUPTED !== '0' && env.COAGENT_AUTO_RESUME !== '0') {
       try {
         const stoppedAt = readPreviousServiceHeartbeatAt(statePath, process.pid, warnPeriodicRepair);
         if (stoppedAt !== undefined) {
@@ -1174,7 +966,6 @@ export async function startServer(
       built.platform,
       continuationCandidates,
       env,
-      usePg,
       warnPeriodicRepair,
     );
     const missionQueueWorker = new MissionQueueWorker({
@@ -1183,7 +974,7 @@ export async function startServer(
         const config = await built.platform.recordQueuedMissionStart(entry.missionId);
         if (await workspace.currentBranch?.(config.projectRoot) !== config.integrationBranch) throw new Error('项目仓当前分支与执行配置不一致');
         await runMission({ spec: { projectId, missionId: entry.missionId, contract: entry.contract },
-          cwd: config.projectRoot, adapter: config.adapter, state: statePath, store: usePg ? 'pg' : 'file',
+          cwd: config.projectRoot, adapter: config.adapter, state: statePath, store: 'file',
           env: { [SPAWN_ENV_PASSTHROUGH_VAR]: config.envPassthrough } }, () => {});
         const view = await built.platform.getMissionView(entry.missionId);
         if (view.status === 'awaiting_review' && view.executionMode === 'lightweight') {
@@ -1204,49 +995,45 @@ export async function startServer(
     // 就多一份生命周期（关闭时要记得清掉，漏了会让进程停不下来），而 tick 本来就在跑。
     // 代价是 COAGENT_AUTO_RESUME=0 时回收也跟着不跑——那表示运维整体关掉了自动恢复，
     // 不该还由本进程悄悄动仓储。
-    const probeReclaim = usePg
-      ? undefined
-      : new ProbeReclaim({
-          // 快照按 role 分组只是仓储的组织方式；回收看的是候选本身，
-          // 同一 profile 出现在多个 role 下也只观察一次，否则会重复读同一行熔断。
-          listProfiles: async () => {
-            const snapshot = await built.agentPool.list();
-            return [
-              ...new Set(
-                [
-                  ...snapshot.classifier,
-                  ...snapshot.coordinator,
-                  ...snapshot.executor,
-                  ...snapshot.independent_reviewer,
-                ].map((candidate) => candidate.profileId),
-              ),
-            ];
-          },
-          getCircuit: (profileId) => built.candidateCircuits.get(profileId),
-          listHops: () => built.queuedHops.list(),
-          reset: (input) => built.candidateCircuits.reset(input),
-          warn: (error) => warnPeriodicRepair(error instanceof Error ? error.message : String(error)),
-        });
-    retryWake = usePg
-      ? undefined
-      : new RetryWakeScheduler({
-          ...(probeReclaim ? { onTick: (nowMs: number) => probeReclaim.tick(nowMs) } : {}),
-          listDue: (nowIso) => built.platform.listAutoResumeDue(nowIso),
-          runDriver: (missionId) => built.platform.getRunDriver(missionId),
-          isRunning: (missionId) =>
-            hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
-          record: (missionId, data) => built.platform.recordAutoResume(missionId, data),
-          prepare: (missionId) => built.platform.prepareAutoResume(missionId),
-          start: async (missionId, request) => {
-            const view = await built.platform.getMissionView(missionId);
-            if (!view.contract) return;
-            await runMission(
-              resumeMissionBody({ projectId: view.projectId, missionId, contract: view.contract, request, state: statePath }),
-              () => {},
-            );
-          },
-          warn: warnPeriodicRepair,
-        });
+    const probeReclaim = new ProbeReclaim({
+      // 快照按 role 分组只是仓储的组织方式；回收看的是候选本身，
+      // 同一 profile 出现在多个 role 下也只观察一次，否则会重复读同一行熔断。
+      listProfiles: async () => {
+        const snapshot = await built.agentPool.list();
+        return [
+          ...new Set(
+            [
+              ...snapshot.classifier,
+              ...snapshot.coordinator,
+              ...snapshot.executor,
+              ...snapshot.independent_reviewer,
+            ].map((candidate) => candidate.profileId),
+          ),
+        ];
+      },
+      getCircuit: (profileId) => built.candidateCircuits.get(profileId),
+      listHops: () => built.queuedHops.list(),
+      reset: (input) => built.candidateCircuits.reset(input),
+      warn: (error) => warnPeriodicRepair(error instanceof Error ? error.message : String(error)),
+    });
+    retryWake = new RetryWakeScheduler({
+      onTick: (nowMs: number) => probeReclaim.tick(nowMs),
+      listDue: (nowIso) => built.platform.listAutoResumeDue(nowIso),
+      runDriver: (missionId) => built.platform.getRunDriver(missionId),
+      isRunning: (missionId) =>
+        hostedRuns.snapshot().some((run) => run.kind === 'mission' && run.id === missionId),
+      record: (missionId, data) => built.platform.recordAutoResume(missionId, data),
+      prepare: (missionId) => built.platform.prepareAutoResume(missionId),
+      start: async (missionId, request) => {
+        const view = await built.platform.getMissionView(missionId);
+        if (!view.contract) return;
+        await runMission(
+          resumeMissionBody({ projectId: view.projectId, missionId, contract: view.contract, request, state: statePath }),
+          () => {},
+        );
+      },
+      warn: warnPeriodicRepair,
+    });
     if (autoResumeEnabled) retryWake?.start();
     // 文件版周期在 server 主锁下用已持锁 store，不再短借自己的锁。PG 独立 store。只补投递。
     // 调度装配必须走 startPeriodicDeliveryRepair，不得在这里再写一套 tick 选择。
@@ -1254,9 +1041,7 @@ export async function startServer(
       intervalMs: reconcileIntervalMs,
       warn: warnPeriodicRepair,
       ...(options?.periodicTick ? { tick: options.periodicTick } : {}),
-      mode: usePg
-        ? { kind: 'pg', connectionString: env.COAGENT_PG }
-        : { kind: 'file-held', store: built.store as FileStateStore },
+      mode: { kind: 'file-held', store: built.store as FileStateStore },
     });
     // close：先 drain（拒新开跑、等在途 Plan/Mission 与 HTTP 写），再停周期 tick、
     // await persist，然后原生 HTTP close，最后释放主锁。不能在 HTTP 未停时早放锁。
@@ -1272,7 +1057,7 @@ export async function startServer(
         await (periodic?.stop() ?? Promise.resolve());
         await built.persist();
       },
-      usePg ? undefined : () => releaseMainLock(),
+      () => releaseMainLock(),
       {
         failClosedOnStopError: () => safeShutdown !== undefined,
         beforeHttpClose: async () => {

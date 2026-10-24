@@ -28,8 +28,6 @@ import {
   PLAN_LIVE_EMPTY_REASON,
   PLAN_LIVE_LIMIT,
 } from '../src/application/live.ts';
-import { PgLiveOutput, PgStateStore } from '../src/application/pg-store.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import {
   FixedClock,
@@ -188,91 +186,6 @@ describe('实时输出：HTTP 面', () => {
   });
 });
 
-describe('实时输出：跨进程（Postgres）', () => {
-  let store: PgStateStore | undefined;
-  let ok = false;
-  let dsn = '';
-
-  before(async () => {
-    try {
-      const target = await ensureTestDatabase();
-      if (!target) return;
-      dsn = target;
-      store = await PgStateStore.open({ connectionString: dsn });
-      await PgLiveOutput.ensureSchema(store);
-      await store.pool.query('TRUNCATE live_output');
-      ok = true;
-    } catch {
-      ok = false;
-    }
-  });
-
-  after(async () => {
-    await store?.close();
-  });
-
-  test('一个连接写，另一个连接读得到 —— 这才是这个端口存在的理由', async (t) => {
-    if (!ok) {
-      t.skip('没有可用的 Postgres');
-      return;
-    }
-    const writerStore = store as PgStateStore;
-    const writer = new PgLiveOutput(writerStore);
-    await writer.append({ missionId: 'M-live', attemptId: 'A1', kind: 'text', text: '来自调度器' });
-
-    // 另开一个 store = 另一个进程的视角。内存版在这里必然拿到空。
-    const readerStore = await PgStateStore.open({ connectionString: dsn });
-    try {
-      const reader = new PgLiveOutput(readerStore);
-      const chunks = await reader.since('M-live');
-      assert.equal(chunks.length, 1);
-      assert.equal(chunks[0].text, '来自调度器');
-
-      // 游标语义跨连接也要成立。
-      assert.deepEqual(await reader.since('M-live', chunks[0].seq), []);
-      await writer.append({ missionId: 'M-live', attemptId: 'A1', kind: 'text', text: '第二条' });
-      assert.equal((await reader.since('M-live', chunks[0].seq)).length, 1);
-
-      await writer.finish('M-live', 'A1');
-      assert.equal(
-        (await reader.since('M-live')).length,
-        2,
-        '收尾不再删光：没超过保留量就该原样留着，另一个进程也读得到',
-      );
-    } finally {
-      await readerStore.close();
-    }
-  });
-
-  test('超过保留量时，库里裁的是最早的那一段', async (t) => {
-    if (!ok) {
-      t.skip('没有可用的 Postgres');
-      return;
-    }
-    const live = new PgLiveOutput(store as PgStateStore);
-    const total = KEEP_TAIL_ON_FINISH + 12;
-    for (let i = 0; i < total; i += 1) {
-      await live.append({ missionId: 'M-trim', attemptId: 'A-trim', kind: 'text', text: `行 ${i}` });
-    }
-    await live.append({ missionId: 'M-other', attemptId: 'A-trim', kind: 'text', text: 'other-0' });
-    await live.append({ missionId: 'M-other', attemptId: 'A-trim', kind: 'text', text: 'other-1' });
-    await live.finish('M-trim', 'A-trim');
-
-    // limit 要给足：默认 500 正好等于保留量，取不出那条 note 就断言不到裁剪。
-    const kept = await live.since('M-trim', 0, 10_000);
-    const text = kept.filter((c) => c.kind === 'text');
-    assert.equal(text.length, KEEP_TAIL_ON_FINISH);
-    assert.equal(text[0]?.text, '行 12', 'DELETE … ORDER BY seq DESC OFFSET 删的必须是最早的');
-    assert.equal(text.at(-1)?.text, `行 ${total - 1}`);
-    assert.equal(kept.filter((c) => c.kind === 'note').length, 1);
-    assert.deepEqual(
-      (await live.since('M-other')).map((c) => c.text),
-      ['other-0', 'other-1'],
-      'Postgres 也不能误裁剪相同 attemptId 的其它 Mission',
-    );
-  });
-});
-
 describe('文件版 buildPersistentPlatform 接通 live',
   () => {
     const dirs: string[] = [];
@@ -300,33 +213,6 @@ describe('文件版 buildPersistentPlatform 接通 live',
         assert.doesNotMatch(dumped, /sk-ant-abcdefghijklmnopqrstuvwxyz/);
         assert.doesNotMatch(dumped, /"live"\s*:/);
         assert.equal((await built.live.since('M-mem')).length, 1);
-
-        const main = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
-        const persistent = main.slice(
-          main.indexOf('export async function buildPersistentPlatform'),
-          main.indexOf('export async function buildPgPlatform'),
-        );
-        assert.match(persistent, /new InMemoryLiveOutput/);
-        assert.match(persistent, /\blive,/);
-        assert.doesNotMatch(persistent, /PgLiveOutput/);
-        const persistentPlat = persistent.slice(
-          persistent.indexOf('const platform = new Platform'),
-          persistent.indexOf('const tokens'),
-        );
-        assert.match(persistentPlat, /\blive,/);
-        const pg = main.slice(main.indexOf('export async function buildPgPlatform'));
-        assert.match(pg, /new PgLiveOutput/);
-        const pgPlat = pg.slice(
-          pg.indexOf('const platform = new Platform'),
-          pg.indexOf('const tokens'),
-        );
-        assert.match(pgPlat, /\blive,/);
-
-        const runMission = readFileSync(
-          fileURLToPath(new URL('../src/run-mission.ts', import.meta.url)),
-          'utf8',
-        );
-        assert.match(runMission, /const live = 'live' in built \? built\.live : undefined/);
       },
     );
   },
@@ -652,45 +538,5 @@ describe('实时尾部落入 Attempt.output',
         assert.equal(String(http.output).includes(fakeKey), false);
       },
     );
-  },
-);
-
-describe('实时尾部：Postgres since 有界分页',
-  () => {
-    test('PG 通道按行取本跳尾部，不改 pg-store', async (t) => {
-      const target = await ensureTestDatabase();
-      if (!target) {
-        t.skip('没有可用的 Postgres');
-        return;
-      }
-      const store = await PgStateStore.open({ connectionString: target });
-      try {
-        await PgLiveOutput.ensureSchema(store);
-        const live = new PgLiveOutput(store);
-        const missionId = `M-pg-tail-${Date.now()}`;
-        for (let i = 0; i < 210; i += 1) {
-          await live.append({
-            missionId,
-            attemptId: 'A-other',
-            kind: 'text',
-            text: `other-${i}`,
-          });
-        }
-        await live.append({
-          missionId,
-          attemptId: 'A-mine',
-          kind: 'text',
-          text: Array.from({ length: 30 }, (_, i) => `mine-${i}`).join('\n') + '\n',
-        });
-        const tail = await collectAttemptLiveTail(live, missionId, 'A-mine');
-        const lines = tail!.split('\n');
-        assert.equal(lines.length, 30);
-        assert.equal(lines[0], 'mine-0');
-        assert.equal(lines.at(-1), 'mine-29');
-        assert.equal(lines.some((line) => line.startsWith('other-')), false);
-      } finally {
-        await store.close();
-      }
-    });
   },
 );

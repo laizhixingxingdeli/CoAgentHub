@@ -184,7 +184,7 @@ export interface ApiDeps {
    * 常驻装配给出的身份与只读 env 观测。不注入则文件锁/路径/env 标不适用，不虚构。
    */
   platformStatus?: {
-    readonly store: 'file' | 'pg' | 'memory';
+    readonly store: 'file' | 'memory';
     readonly startedAt: string;
     readonly instanceId?: string;
     readonly statePath?: string;
@@ -1944,21 +1944,15 @@ export function createApi(deps: ApiDeps): Server {
           startedAt: assembledOrInapplicable(assembled?.startedAt, 'started_at_not_assembled'),
           listen,
           store: assembledOrInapplicable(assembled?.store, 'store_not_assembled'),
-          instanceId: assembledOrInapplicable(assembled?.instanceId, assembled?.store === 'pg'
-            ? 'pg_has_no_file_instance_lock'
-            : assembled?.store === 'memory'
-              ? 'memory_has_no_file_instance_lock'
-              : 'instance_id_not_assembled'),
-          statePath: assembledOrInapplicable(assembled?.statePath, assembled?.store === 'pg'
-            ? 'pg_has_no_state_file'
-            : assembled?.store === 'memory'
-              ? 'memory_has_no_state_file'
-              : 'state_path_not_assembled'),
-          holdsMainLock: assembledOrInapplicable(assembled?.holdsMainLock, assembled?.store === 'pg'
-            ? 'pg_has_no_file_main_lock'
-            : assembled?.store === 'memory'
-              ? 'memory_has_no_file_main_lock'
-              : 'main_lock_not_assembled'),
+          instanceId: assembledOrInapplicable(assembled?.instanceId, assembled?.store === 'memory'
+            ? 'memory_has_no_file_instance_lock'
+            : 'instance_id_not_assembled'),
+          statePath: assembledOrInapplicable(assembled?.statePath, assembled?.store === 'memory'
+            ? 'memory_has_no_state_file'
+            : 'state_path_not_assembled'),
+          holdsMainLock: assembledOrInapplicable(assembled?.holdsMainLock, assembled?.store === 'memory'
+            ? 'memory_has_no_file_main_lock'
+            : 'main_lock_not_assembled'),
           queue,
           occupancy,
           runner: deps.runnerState

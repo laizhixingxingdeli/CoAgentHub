@@ -17,7 +17,7 @@
  * 应用也不是已验证。平台不拿当前工单内容去比，就等于「记下了覆盖」这件事由调用
  * 方一句话决定，追溯时无从校验。
  *
- * 零第三方依赖：第三方只允许出现在 src/application/pg-store.ts。
+ * 零第三方依赖。
  */
 
 import type { ChangeImpact } from '../change-impact.ts';

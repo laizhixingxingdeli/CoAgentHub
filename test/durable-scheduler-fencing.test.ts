@@ -23,16 +23,6 @@ import {
 import { InMemoryDeliveryRepository } from '../src/application/delivery.ts';
 import { Platform, PlatformRuleError, type QueueClaimIdentity } from '../src/application/platform.ts';
 import type { CommandTransaction, FencedCommandTransaction } from '../src/application/ports.ts';
-import {
-  PgActivityLog,
-  PgDeliveryRepository,
-  PgIds,
-  PgProjectRepository,
-  PgQueuedHopRepository,
-  PgStateStore,
-} from '../src/application/pg-store.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
-
 const NOW = '2025-01-01T00:00:00Z';
 const LEASE = '2025-01-01T00:00:10Z';
 const LATER = '2025-01-01T00:00:20Z';
@@ -587,90 +577,5 @@ test('file platform routes every listed queue write through runFenced', async ()
     }
   } finally {
     rmSync(ctx.dir, { recursive: true, force: true });
-  }
-});
-
-async function openPlatformPgFence(): Promise<{ connectionString: string; store: PgStateStore } | undefined> {
-  const connectionString = await ensureTestDatabase('platform_claim_fence');
-  if (!connectionString) return undefined;
-  const store = await PgStateStore.open({ connectionString });
-  await store.pool.query(
-    'TRUNCATE queued_hops, projects, activity, deliveries, id_counters',
-  );
-  // open 会先 hydrate 上一轮留下的行；先清库再 refresh，否则活对象里还有旧 Mission。
-  await store.refresh();
-  return { connectionString, store };
-}
-
-test('Postgres platform fenced writes reject stale or expired claims after takeover; live generation commits', async (t) => {
-  const opened = await openPlatformPgFence();
-  if (!opened) {
-    t.skip('Postgres unavailable; PG platform claim fencing not verified');
-    return;
-  }
-  const { connectionString, store } = opened;
-  try {
-    const clock = new FixedClock(NOW);
-    const ids = new PgIds(store);
-    await ids.reserve(['D', 'W', 'M', 'E']);
-    const projects = new PgProjectRepository(store);
-    const activity = new PgActivityLog(store, clock);
-    const deliveries = new PgDeliveryRepository(store, clock, ids);
-    const hops = new PgQueuedHopRepository(store);
-    const platform = new Platform({
-      projects,
-      deliveries,
-      activity,
-      clock,
-      ids,
-      transaction: store,
-    });
-    await hops.enqueue(queuedHop({ id: 'h1', projectId: 'P', missionId: 'M', idempotencyKey: 'plat-pg-fence' }));
-    assert.equal((await hops.claim('h1', 'owner', NOW, LEASE))?.claimGeneration, 1);
-    const live: QueueClaimIdentity = { id: 'h1', owner: 'owner', claimGeneration: 1 };
-    await platform.createMission({ projectId: 'P', missionId: 'M', contract: CONTRACT, origin });
-    const { attemptId } = await platform.startCoordinatorAttempt('M');
-    await platform.updateFindings('M', attemptId, 'pg-live', undefined, live);
-    assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'pg-live');
-
-    const taken = await hops.claim('h1', 'next', LEASE, LATER);
-    assert.equal(taken?.claimGeneration, 2);
-    const before = await snapshotOf(projects, activity, deliveries);
-    await assert.rejects(
-      () => platform.updateFindings('M', attemptId, 'pg-stale', undefined, live),
-      (e: unknown) => e instanceof PlatformRuleError && e.code === 'CLAIM_FENCE_REJECTED',
-    );
-    assert.deepEqual(await snapshotOf(projects, activity, deliveries), before);
-    assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'pg-live');
-    assert.equal((await hops.get('h1'))?.claimGeneration, 2);
-
-    clock.advance(Date.parse(LATER) - Date.parse(NOW));
-    const expired: QueueClaimIdentity = { id: 'h1', owner: 'next', claimGeneration: 2 };
-    const beforeExpired = await snapshotOf(projects, activity, deliveries);
-    await assert.rejects(
-      () => platform.escalateToL3('M', attemptId, { question: 'q', why: 'w', optionsConsidered: ['a'] }, expired),
-      (e: unknown) => e instanceof PlatformRuleError && e.code === 'CLAIM_FENCE_REJECTED',
-    );
-    assert.deepEqual(await snapshotOf(projects, activity, deliveries), beforeExpired);
-
-    const reclaimed = await hops.claim('h1', 'third', LATER, '2025-01-01T00:00:30Z');
-    assert.equal(reclaimed?.claimGeneration, 3);
-    const current: QueueClaimIdentity = { id: 'h1', owner: 'third', claimGeneration: 3 };
-    await platform.escalateToL3('M', attemptId, { question: '要不要拆？', why: '两种设计', optionsConsidered: ['拆'] }, current);
-    assert.equal((await deliveries.listForMission('M')).length, beforeExpired.deliveries + 1);
-    await platform.finishAttempt('M', attemptId, { endedBy: 'structured_submit' }, current);
-    assert.notEqual((await projects.get('P'))!.missions[0]!.coordinatorAttempts[0]!.status, 'in_progress');
-  } finally {
-    await store.close();
-  }
-  const reopened = await PgStateStore.open({ connectionString });
-  try {
-    const projects = new PgProjectRepository(reopened);
-    const hops = new PgQueuedHopRepository(reopened);
-    assert.equal((await projects.get('P'))!.missions[0]!.plan?.findings, 'pg-live');
-    assert.equal((await hops.get('h1'))?.claimGeneration, 3);
-    assert.equal((await hops.get('h1'))?.owner, 'third');
-  } finally {
-    await reopened.close();
   }
 });

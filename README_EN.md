@@ -39,13 +39,11 @@ node scripts/coagent.mjs start     # open http://127.0.0.1:3101
 
 Then: log a model account in with `npx pi` (`/login`) and add candidates on the pool page; give your reviewer agent the MCP server and the operating manual; run your first Mission on the bundled playground project. Step by step: [docs/getting-started.md](docs/getting-started.md) (Chinese).
 
-The platform has no build step and no third-party dependency (Postgres storage is optional and the only thing that needs `pg`):
+The platform has no build step and no third-party dependency:
 
 ```bash
 node --test          # full test suite, nothing to install first
 ```
-
-On a machine without Postgres, about 90 database tests show up as skipped (skipped is neither pass nor fail).
 
 ## Layout
 

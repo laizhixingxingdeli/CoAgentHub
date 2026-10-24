@@ -1,7 +1,7 @@
 /**
  * L3 的命令行入口：取件、检视、放行/打回/放弃、票级费用增额。完整用法见文件末尾那一屏。
  * 文件模式主状态写命令先探测本机写者：活着的同状态服务持锁时回环转发给唯一写者，无锁时沿用独占装配；
- * 其他锁状态 fail-closed，不离线再写一份。PG 不走文件锁探测，plan 只写方案运行记录。
+ * 其他锁状态 fail-closed，不离线再写一份。plan 只写方案运行记录。
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -15,7 +15,7 @@ import {
 import { renderPlanHandoff, type HandoffCosts } from './application/plan-handoff.ts';
 import type { PlanRun } from './application/plan-run.ts';
 import { FilePlanRunStore } from './application/plan-run-store.ts';
-import { buildPersistentPlatform, buildPgPlatform } from './main.ts';
+import { buildPersistentPlatform } from './main.ts';
 
 const MAIN_STATE_WRITES = new Set([
   'merge',
@@ -429,7 +429,6 @@ async function main() {
   // 只读命令不抢锁：一边跑 Mission 一边 inbox/show/runs 是常态；plan 只写方案运行记录那份独立文件。
   const isMainStateWrite = MAIN_STATE_WRITES.has(command ?? '');
   const readOnly = !isMainStateWrite;
-  const usePg = (arg('--store') ?? process.env.COAGENT_STORE ?? 'file') === 'pg';
   // 终审签名与 budget raise 的 --by 都要在构建平台（拿排他锁、跑启动收敛，可能改状态文件）之前校验。
   const reviewerSignature =
     command === 'merge' || command === 'send-back' || command === 'abandon'
@@ -437,7 +436,7 @@ async function main() {
       : undefined;
   if (isMainStateWrite) assertWriteArgs(command!, target);
 
-  if (!usePg && isMainStateWrite) {
+  if (isMainStateWrite) {
     const probe = await probeLocalWriter(statePath);
     if (probe.status === 'live') {
       await forwardWriteCommand(probe.holder, command!, target!);
@@ -450,15 +449,13 @@ async function main() {
 
   let built;
   try {
-    built = usePg
-      ? // L3 只放行/打回、从不接手在途 attempt：只看结果的命令没有立场判定别的进程死了。
-        await buildPgPlatform()
-      : await buildPersistentPlatform(statePath, {
-          exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
-          reconcile: !readOnly,
-        });
+    // L3 只放行/打回、从不接手在途 attempt：只看结果的命令没有立场判定别的进程死了。
+    built = await buildPersistentPlatform(statePath, {
+      exclusive: readOnly ? undefined : { what: `l3 ${command} ${target ?? ''}` },
+      reconcile: !readOnly,
+    });
   } catch (error) {
-    if (!usePg && isMainStateWrite && error instanceof LockBusyError) {
+    if (isMainStateWrite && error instanceof LockBusyError) {
       const again = await probeLocalWriter(statePath);
       if (again.status === 'live') {
         await forwardWriteCommand(again.holder, command!, target!);

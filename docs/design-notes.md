@@ -1,6 +1,6 @@
 # 设计笔记（存储、租约、归因链）
 
-> 这是 v5 早期 README 里的设计记录，面向维护者：为什么文件版与 Postgres 并存、租约怎么防多进程互相回收、一跳的归因怎么冻在 Attempt 上。
+> 这是 v5 早期 README 里的设计记录，面向维护者：为什么只留文件版存储、租约怎么防多进程互相回收、一跳的归因怎么冻在 Attempt 上。
 > 使用说明请看仓库根目录的 [README.md](../README.md) 与 [docs/getting-started.md](getting-started.md)。
 
 
@@ -17,47 +17,21 @@ node --test
 
 ## 存储
 
-两个实现并存，由 `COAGENT_STORE` 选（缺省 `file`）。
-
-| | 文件 | Postgres |
-|---|---|---|
-| 依赖 | 无 | `pg` + 一个跑着的 Postgres |
-| 并发写 | 靠进程锁，同时只有一个写者 | 版本号挡冲突，多进程可并行 |
-| 活动日志 | 每记一条重写整份状态 | 一条 INSERT |
-| 发号 | 读-加一-写，跨进程有竞态 | 原子自增，按号段预取 |
-| 实时输出 | 持久 Activity 与 cursor Live 轮询 | 有 |
-
-```bash
-COAGENT_STORE=pg node src/main.ts
-```
-
-连接串走 `COAGENT_PG`，缺省 `postgresql://postgres:postgres@localhost:5432/coagenthub_v5`；
-表在启动时自动建。
+只有文件存储（缺省路径 `.coagent-state.json`，整份状态写临时文件后 rename）。Postgres 实现曾与它并存，
+2026-10-24 移除：单机、单用户、状态文件只有一百多 KB，用不上；需要时从 git 历史取回（`pg-store.ts`）。
 
 周期投递修复由 `COAGENT_RECONCILE_INTERVAL_MS` 控制（缺省 60000 毫秒；`0` 关闭）。
 只补可核实的缺失投递，不把启动时的 Attempt / worktree 收敛改成周期任务。
 `server.close` 与 `run-plan` 退出会先停周期任务再释锁；stop 或关 HTTP 失败不会丢掉另一个错误，告警回调抛错也不会让调度停住。
 
-**文件版不会被删掉。** 它守着一条性质：clone 下来什么都不装就能跑通全部测试。
-第三方依赖只允许出现在 `src/application/pg-store.ts`，`test/source-constraints.test.ts`
-盯着这条——`pg` 一旦漏进用例层，"换存储不改用例层"就失效了，而那种泄漏是悄无声息的。
+**零依赖是硬约束。** clone 下来什么都不装就能跑通全部测试；`test/source-constraints.test.ts` 盯着这条。
 
-### 换存储踩到的坑（都已修，留作记录）
+### 多写者场景留下的教训
 
-四个，前三个是同一类错误：**某条不变式的前提悄悄依赖了"只有一个写者"**。
+下面这些来自 Postgres 并存时期，租约与收敛的设计至今有效：**某条不变式的前提悄悄依赖了"只有一个写者"**，换成多进程就会出事。
 
-- **启动收敛。** 它假设"我刚起来，所以没有任何 attempt 还活着"——只在单写者下成立。
-  共用数据库之后，重启一次只读的观测面，就把正在跑的 attempt 判死并写回库，
-  当场搞坏一条 Mission。现在两道防线：收敛要显式开启且按 missionId 限定范围，
-  并且 attempt 带**租约**（见下）。
-- **flush 重叠会自己跟自己撞。** 两个并发 flush 捏着同一个期望版本去写，后到的
-  命中 0 行，报出一个纯属自制的"并发冲突"（真实并发根本没发生）。现在 flush 串行化。
-- **一次写回全部 Project 会互相毒化。** 一个不相干的过期 Project 能把后续每一次写
-  都顶成冲突。现在按内容判定，只写真的变了的那些。
-- **测试 TRUNCATE 的是开发库。** 于是常驻服务器、正在跑的 Mission 和测试互相踩，
-  症状是整套并行跑时零星红在**毫不相干的**测试上（git worktree、调度器主链），
-  隔离复跑又全绿。测试现在用独立库 `coagenthub_v5_test`（`test/helpers/pg.ts`），
-  不存在就建。
+- **启动收敛。** 它假设"我刚起来，所以没有任何 attempt 还活着"——只在单写者下成立。收敛要显式开启且按 missionId 限定范围，并且 attempt 带**租约**（见下）。
+- **flush 重叠会自己跟自己撞。** 两个并发 flush 捏着同一个期望版本去写，会报出纯属自制的"并发冲突"。flush 串行化。
 
 ### 租约（多进程下"谁还活着"）
 
@@ -122,7 +96,7 @@ Provider 路由、跨机器迁移、完整 Shell Sandbox、改 pi agent-core）�
 
 ## 部署与恢复
 
-文件模式保持一个真实状态写者；备份状态与 `.coagent/`、Git 版本，并保留运行日志。Postgres 模式设置 `COAGENT_STORE=pg` 与 `COAGENT_PG`，不要将开发库和测试库混用。控制面可注入授权解析器，部署前按 [HTTP 文档](http-api.md) 核实读写权限；示例请求头不代表内置认证配置。
+文件模式保持一个真实状态写者；备份状态与 `.coagent/`、Git 版本，并保留运行日志。控制面可注入授权解析器，部署前按 [HTTP 文档](http-api.md) 核实读写权限；示例请求头不代表内置认证配置。
 
 进程已死、端口空闲、锁心跳超过 120 秒时由平台自动接管残锁并写审计；不编辑状态文件恢复任务。具体的停服、检查点批准和 runaway 处置见 [reviewer-runbook](../.coagent/architecture/reviewer-runbook.md)。
 

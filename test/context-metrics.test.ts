@@ -26,14 +26,6 @@ import {
   FileStateStore,
   PersistentIds,
 } from '../src/application/file-store.ts';
-import {
-  PgActivityLog,
-  PgDeliveryRepository,
-  PgIds,
-  PgProjectRepository,
-  PgStateStore,
-} from '../src/application/pg-store.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
 import type { MissionContract } from '../src/kernel/index.ts';
 
 const CONTRACT: MissionContract = {
@@ -353,93 +345,5 @@ describe('文件仓储重读与写入失败回滚', () => {
     assert.equal(ended(await reopened.list('M-fail'), attemptId).length, 0);
     const dumped = JSON.stringify(await reopened.list('M-fail'));
     assert.equal(dumped.includes('contextMetrics'), false);
-  });
-});
-
-describe('Postgres 隔离库重读与写入失败回滚', () => {
-  test('可用时重开重读合法摘要；不可用则 skip', async (t) => {
-    const connectionString = await ensureTestDatabase('context_metrics');
-    if (!connectionString) {
-      t.skip('Postgres unavailable; isolated PG context_metrics reread not verified');
-      return;
-    }
-    const store = await PgStateStore.open({ connectionString });
-    try {
-      await store.pool.query('TRUNCATE projects, activity, deliveries, id_counters');
-      await store.refresh();
-      const clock = new FixedClock();
-      const ids = new PgIds(store);
-      const platform = new Platform({
-        projects: new PgProjectRepository(store),
-        deliveries: new PgDeliveryRepository(store, clock, ids),
-        activity: new PgActivityLog(store, clock),
-        clock,
-        ids,
-        transaction: store,
-      });
-      const attemptId = await startCoord(platform, 'M-pg');
-      await platform.finishAttempt('M-pg', attemptId, {
-        endedBy: 'structured_submit',
-        contextMetrics: VALID_COMPLETE,
-      });
-    } finally {
-      await store.close();
-    }
-
-    const other = await PgStateStore.open({ connectionString });
-    try {
-      const events = ended(await new PgActivityLog(other, new FixedClock()).list('M-pg'));
-      assert.equal(events.length, 1);
-      assert.deepEqual(metricsOf(events[0]!), VALID_COMPLETE);
-      assert.equal(events[0]!.missionId, 'M-pg');
-      assert.ok(events[0]!.attemptId);
-    } finally {
-      await other.close();
-    }
-  });
-
-  test('可用时注入写失败回滚；不可用则 skip', async (t) => {
-    const connectionString = await ensureTestDatabase('context_metrics');
-    if (!connectionString) {
-      t.skip('Postgres unavailable; isolated PG context_metrics rollback not verified');
-      return;
-    }
-    const store = await PgStateStore.open({ connectionString });
-    try {
-      await store.pool.query('TRUNCATE projects, activity, deliveries, id_counters');
-      await store.refresh();
-      const clock = new FixedClock();
-      const ids = new PgIds(store);
-      const inner = new PgActivityLog(store, clock);
-      const activity: ActivityLog = {
-        append: async (event) => {
-          if (event.kind === 'attempt.ended') throw new Error('injected write failure');
-          return inner.append(event);
-        },
-        list: (missionId) => inner.list(missionId),
-      };
-      const projects = new PgProjectRepository(store);
-      const platform = new Platform({
-        projects,
-        deliveries: new PgDeliveryRepository(store, clock, ids),
-        activity,
-        clock,
-        ids,
-        transaction: store,
-      });
-      const attemptId = await startCoord(platform, 'M-pg-fail');
-      await assert.rejects(
-        () =>
-          platform.finishAttempt('M-pg-fail', attemptId, {
-            endedBy: 'structured_submit',
-            contextMetrics: VALID_COMPLETE,
-          }),
-        (error: unknown) => error instanceof Error && error.message === 'injected write failure',
-      );
-      assert.equal(ended(await inner.list('M-pg-fail'), attemptId).length, 0);
-      assert.equal((await projects.get('P'))?.missions[0]?.attempt(attemptId)?.status, 'in_progress');
-    } finally {
-      await store.close();
-    }
   });
 });

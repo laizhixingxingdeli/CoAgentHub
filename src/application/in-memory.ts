@@ -93,9 +93,9 @@ export class SequentialIds implements IdGenerator {
 /**
  * QueryRun 内存仓储。
  *
- * 进程内记忆，跨进程不持久化。Durable 路径用 File / PG 实现；
- * buildPlatform（全内存）继续挂本类，buildPersistentPlatform / buildPgPlatform
- * 挂对应 durable adapter。
+ * 进程内记忆，跨进程不持久化。Durable 路径用 File 实现；
+ * buildPlatform（全内存）继续挂本类，buildPersistentPlatform
+ * 挂文件 adapter。
  */
 export class InMemoryQueryRunRepository implements QueryRunRepository {
   #runs = new Map<string, QueryRunRecord>();

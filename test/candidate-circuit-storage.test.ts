@@ -4,14 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileStateStore, FileCandidateCircuitRepository } from '../src/application/file-store.ts';
-import { PgStateStore, PgCandidateCircuitRepository } from '../src/application/pg-store.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
 
 const deadline = '2030-01-01T00:00:00.000Z';
 const now = '2030-01-01T00:00:00.000Z';
 const replacement = '2030-01-02T00:00:00.000Z';
 
-async function exercise(repo: FileCandidateCircuitRepository | PgCandidateCircuitRepository, suffix: string) {
+async function exercise(repo: FileCandidateCircuitRepository, suffix: string) {
   assert.deepEqual(await repo.get(`missing-${suffix}`), { profileId: `missing-${suffix}`, state: 'closed' });
   await repo.open({ profileId: `probe-${suffix}`, failureClass: 'timeout', openUntil: deadline });
   await repo.open({ profileId: `other-${suffix}`, failureClass: 'quota', openUntil: deadline });
@@ -80,53 +78,4 @@ test('file candidate circuits persist, isolate profiles, claim once, and rollbac
     writeFileSync(path, JSON.stringify({ version: 1, projects: [], deliveries: [], events: [], idCounters: {} }));
     assert.deepEqual(await new FileCandidateCircuitRepository(new FileStateStore(path)).get('legacy'), { profileId: 'legacy', state: 'closed' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('Postgres candidate circuits persist and arbitrate claims across connections', async (t) => {
-  const connectionString = await ensureTestDatabase('candidate_circuit_storage');
-  if (!connectionString) { t.skip('Postgres unavailable; candidate circuit PG integration not verified'); return; }
-  const first = await PgStateStore.open({ connectionString });
-  const second = await PgStateStore.open({ connectionString });
-  try {
-    await first.pool.query('TRUNCATE candidate_circuits');
-    await first.pool.query(`INSERT INTO candidate_circuits (profile_id, state, failure_class, open_until, probe_claimed)
-      VALUES ('legacy-iso-pg', 'open', 'timeout', $1::timestamptz, false)`, [deadline]);
-    const repo = new PgCandidateCircuitRepository(first);
-    const otherConnection = new PgCandidateCircuitRepository(second);
-    await first.pool.query('TRUNCATE candidate_circuit_reset_events');
-    await exercise(repo, 'pg');
-    assert.deepEqual(await repo.get('legacy-iso-pg'), { profileId: 'legacy-iso-pg', state: 'open', failureClass: 'timeout', openUntil: deadline });
-    await repo.open({ profileId: 'quota-null-pg', failureClass: 'quota', openUntil: null });
-    assert.deepEqual(await repo.get('quota-null-pg'), { profileId: 'quota-null-pg', state: 'open', failureClass: 'quota', openUntil: null });
-    assert.equal(await repo.tryClaimProbe({ profileId: 'quota-null-pg', now: '9999-01-01T00:00:00.000Z' }), false);
-    await repo.reset({ profileId: 'quota-null-pg', actor: 'operator', at: now, reason: 'recharged' });
-    await repo.open({ profileId: 'reset-open-pg', failureClass: 'quota', openUntil: null });
-    await repo.open({ profileId: 'reset-half-pg', failureClass: 'timeout', openUntil: deadline });
-    assert.equal(await repo.tryClaimProbe({ profileId: 'reset-half-pg', now }), true);
-    const pgResetRace = await Promise.allSettled([
-      repo.reset({ profileId: 'reset-open-pg', actor: 'one', at: now, reason: 'manual' }),
-      otherConnection.reset({ profileId: 'reset-open-pg', actor: 'two', at: now, reason: 'manual' }),
-    ]);
-    assert.equal(pgResetRace.filter((result) => result.status === 'fulfilled').length, 1);
-    assert.equal(pgResetRace.filter((result) => result.status === 'rejected').length, 1);
-    await repo.reset({ profileId: 'reset-half-pg', actor: 'operator', at: now, reason: 'verified' });
-    const eventCountBefore = (await repo.listResetEvents()).length;
-    const circuitBefore = await repo.get('persist-pg');
-    await PgStateStore.open({ connectionString }).then(async (restarted) => {
-      try {
-        assert.deepEqual(await new PgCandidateCircuitRepository(restarted).get('persist-pg'), circuitBefore);
-        assert.equal((await new PgCandidateCircuitRepository(restarted).listResetEvents()).length, eventCountBefore);
-      } finally { await restarted.close(); }
-    });
-    await assert.rejects(otherConnection.reset({ profileId: 'quota-null-pg', actor: 'second', at: now, reason: 'race' }));
-    assert.equal((await new PgCandidateCircuitRepository(second).listResetEvents('quota-null-pg')).length, 1);
-    await repo.open({ profileId: 'persist-pg', failureClass: 'timeout', openUntil: deadline });
-    await repo.open({ profileId: 'race-pg', failureClass: 'timeout', openUntil: deadline });
-    assert.deepEqual(await Promise.all([repo.tryClaimProbe({ profileId: 'race-pg', now }), otherConnection.tryClaimProbe({ profileId: 'race-pg', now })]), [true, false]);
-    assert.equal(await otherConnection.tryClaimProbe({ profileId: 'race-pg', now }), false);
-    const reopened = new PgCandidateCircuitRepository(second);
-    assert.deepEqual(await reopened.get('persist-pg'), { profileId: 'persist-pg', state: 'open', failureClass: 'timeout', openUntil: deadline });
-    assert.deepEqual(await reopened.get('other-pg'), { profileId: 'other-pg', state: 'open', failureClass: 'quota', openUntil: deadline });
-    assert.deepEqual(await reopened.get('race-pg'), { profileId: 'race-pg', state: 'half_open', failureClass: 'timeout', openUntil: deadline, probeClaimed: true });
-  } finally { await first.close(); await second.close(); }
 });

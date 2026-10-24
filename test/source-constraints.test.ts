@@ -67,26 +67,12 @@ describe('src/ 全树符合 Node 原生类型剥离的限制', () => {
     }
   });
 
-  test('第三方依赖只许出现在存储适配器里', () => {
-    // 原先这条是「零依赖」。接 Postgres 之后它必须换个判据，但**不能直接删**——
-    // 真正要守住的从来不是依赖数为零，是这两条：
-    //   1. 没装 Postgres 也能跑完整平台和全部测试（文件版仍然在）；
-    //   2. 用例层与领域层不认识任何具体存储。
-    // 所以 pg 只许从存储适配器进来。它一旦漏进 platform.ts 或 orchestrator.ts，
-    // 上面两条就同时没了，而那种泄漏是悄无声息的。
-    const ALLOWED: Record<string, readonly string[]> = {
-      'application/pg-store.ts': ['pg'],
-    };
+  test('src 零第三方依赖', () => {
     for (const { path, source } of sources()) {
-      const allowed = ALLOWED[path.replaceAll('\\', '/')] ?? [];
       const specifiers = [...source.matchAll(/\bfrom\s+'([^']+)'/g)].map((m) => m[1]);
       for (const specifier of specifiers) {
         if (specifier.startsWith('.') || specifier.startsWith('node:')) continue;
-        if (allowed.includes(specifier)) continue;
-        assert.fail(
-          `${path}: 出现第三方依赖 "${specifier}"。` +
-            '只有存储适配器可以依赖驱动，其余部分不认识具体存储。',
-        );
+        assert.fail(`${path}: 出现第三方依赖 "${specifier}"。平台本体零依赖。`);
       }
     }
   });

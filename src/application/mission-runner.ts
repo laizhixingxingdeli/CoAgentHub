@@ -144,16 +144,14 @@ export type HostedMissionEmit = (channel: 'stdout' | 'stderr', line: string) => 
 
 /**
  * 服务真正持锁的状态。权威在这边，不在请求 body。
- * 单测直调可以省略（不假装握着文件锁）；PG 必须是 unsupported，不能冒充 file。
+ * 单测直调可以省略（不假装握着文件锁）。
  */
-export type HostedHeldState =
-  | {
-      readonly kind: 'file';
-      readonly statePath: string;
-      /** 口径由持锁方注入，与 stateIdFor（含 Windows 大小写）一致。 */
-      readonly identityEquals: (submittedStatePath: string) => boolean;
-    }
-  | { readonly kind: 'unsupported' };
+export type HostedHeldState = {
+  readonly kind: 'file';
+  readonly statePath: string;
+  /** 口径由持锁方注入，与 stateIdFor（含 Windows 大小写）一致。 */
+  readonly identityEquals: (submittedStatePath: string) => boolean;
+};
 
 /**
  * 回环 body.state 必须对上持锁文件。失败发生在任何 create / seed / PlanRun 之前。
@@ -165,11 +163,6 @@ export function assertHostedHeldState(
   what: string,
 ): void {
   if (held === undefined) return;
-  if (held.kind !== 'file') {
-    throw new Error(
-      `hosted ${what} 不支持当前服务存储：PG 不宣称跨主机唯一写者，拒绝冒充文件锁。未写入。`,
-    );
-  }
   if (typeof bodyState !== 'string' || bodyState.length === 0) {
     throw new Error(`hosted ${what} 缺少 state：必须指向服务持锁的同一状态文件。未写入。`);
   }
@@ -401,8 +394,8 @@ export function parseHostedMissionBody(
   }
 
   const store = optionalString(body.store);
-  if (store === 'pg') {
-    throw new Error('hosted Mission 不接受 --store pg：PG 保持单实例 CLI 路径。未写入。');
+  if (store !== undefined && store !== 'file') {
+    throw new Error(`hosted Mission 不接受 --store ${store}：现在只有文件存储。未写入。`);
   }
 
   const worktrees = optionalString(body.worktrees);

@@ -30,7 +30,6 @@ const ACTIVITY_ENTRIES: ReadonlyArray<{ file: string; how: '#event' | 'append'; 
  */
 const RECORDED_NON_ACTIVITY: ReadonlyArray<{ file: string; why: string; platformFiles?: string[] }> = [
   { file: 'src/application/live.ts', why: 'LiveOutput 实时输出（note/text），不是 ActivityLog' },
-  { file: 'src/application/pg-store.ts', why: 'LiveOutput.finish 补裁剪 note' },
   { file: 'src/application/orchestrator.ts', why: '#live.append 实时输出' },
   { file: 'src/application/platform.ts', why: '#activity.append 是 #event 写入器本身', platformFiles: platformFilesFor('src/application/platform.ts') },
 ];

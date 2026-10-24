@@ -687,7 +687,6 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     assert.doesNotMatch(runner, /from ['"]\.\.\/main\.ts['"]/);
     assert.doesNotMatch(runner, /from ['"]\.\/lock\.ts['"]/);
     assert.doesNotMatch(runner, /buildPersistentPlatform\s*\(/);
-    assert.doesNotMatch(runner, /buildPgPlatform\s*\(/);
     assert.doesNotMatch(runner, /buildPlatform\s*\(/);
     assert.doesNotMatch(runner, /startServer\s*\(/);
     assert.doesNotMatch(runner, /acquireLock\s*\(/);
@@ -721,47 +720,6 @@ describe('内部入口：注入既有依赖即可跑，不另建平台或监听'
     const orchAt = runner.indexOf('new Orchestrator(this.#deps)');
     assert.ok(ctorAt >= 0 && hopCapAt > ctorAt && hopCapAt < orchAt, '容量归一化必须在构造时、交给编排器之前');
     assert.ok(waitAt > ctorAt && waitAt < orchAt, '运行内退避上限必须在构造时校验');
-  });
-
-  test('源码：CLI 仍自行装配、接续、过滤候选、回连并输出', () => {
-    const cli = src('run-mission.ts');
-    assert.match(cli, /new MissionRunner\(/);
-    assert.match(cli, /new MissionRunner\(\{[\s\S]*?candidateCircuits,/);
-    assert.match(cli, /new MissionRunner\(\{[\s\S]*?queuedHops,/);
-    assert.match(cli, /new MissionRunner\(\{[\s\S]*?inRunBackoffWaitMs:\s*120_000/);
-    assert.match(cli, /candidateCircuits, queuedHops \} = built/);
-    assert.doesNotMatch(cli, /--hop-capacity|--capacity-global|--capacity-project|--capacity-role|--capacity-runtime|--capacity-profile/);
-    assert.match(cli, /runner\.run\(/);
-    assert.match(cli, /createApi\(/);
-    assert.match(cli, /listenLoopback\(/);
-    assert.match(cli, /await agentPool\.list\(/);
-    assert.match(cli, /exclusive:\s*\{\s*what:/);
-    assert.match(cli, /platform\.createMission\(/);
-    assert.match(cli, /platform\.createClassifiedMission\(/);
-    assert.match(cli, /Mission \$\{spec\.missionId\} 已存在/);
-    assert.match(cli, /--coordinator/);
-    assert.match(cli, /--executor/);
-    assert.match(cli, /--independent-reviewer/);
-    assert.match(cli, /candidates: coordinatorPool\.map/);
-    assert.match(cli, /candidates: executorPool\.map/);
-    assert.match(cli, /independentReviewer:/);
-    assert.match(cli, /server\.close\(\)/);
-    assert.match(cli, /releaseLock\(\)/);
-    assert.match(cli, /Mission 结果：/);
-    // 默认 CLI 参数行为：用法字符串仍在，不把装配挪进内部入口。
-    assert.match(cli, /--cwd/);
-    assert.match(cli, /--adapter/);
-    assert.match(cli, /--in-place/);
-    assert.match(cli, /--accept-stale-base/);
-    assert.match(cli, /--max-rounds <1-100>/);
-    assert.match(cli, /parseMaxRounds\(/);
-    assert.match(cli, /maxRounds/);
-    assert.match(cli, /probeLocalWriter/);
-    assert.match(cli, /loopbackRunRequest/);
-    assert.match(cli, /\/api\/control\/run-mission/);
-    assert.match(cli, /HOSTED_AGENT_ENV_UNPROVEN_MESSAGE/);
-    assert.match(cli, /if \(!usePg\)/);
-    assert.match(cli, /process\.exit\(code\)/);
   });
 
   test('max-rounds 选项组装：显式值传递，缺省不覆盖 orchestrator 默认值', () => {

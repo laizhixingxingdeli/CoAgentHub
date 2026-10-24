@@ -7,7 +7,7 @@
  * 理所当然。
  *
  * PG 那组没有可用的库时整组 skip，不报红：文件版仍是默认存储，
- * 「装了数据库才能跑测试」会让这个仓库变难上手（同 test/pg-store.test.ts）。
+ * 「装了数据库才能跑测试」会让这个仓库变难上手。
  */
 
 import { after, before, describe, test } from 'node:test';
@@ -41,8 +41,6 @@ import {
   FileStateStore,
 } from '../src/application/file-store.ts';
 import type { RuntimeUsage, UsageRow } from '../src/application/runtime-catalog.ts';
-import { PgAgentPoolRepository, PgStateStore } from '../src/application/pg-store.ts';
-import { ensureTestDatabase } from './helpers/pg.ts';
 import { createApi } from '../src/api/server.ts';
 import { buildPlatform } from '../src/main.ts';
 import { listenLoopback } from '../src/application/loopback-listen.ts';
@@ -385,146 +383,6 @@ describe('FileAgentPoolRepository', () => {
 
 
 });
-
-/* ------------------------------ Postgres 实现 ------------------------------ */
-
-let pgStore: PgStateStore | undefined;
-let pgAvailable = false;
-let pgDsn = '';
-
-before(async () => {
-  try {
-    // 这组要 TRUNCATE agent_pool，必须另建隔离库（见 helpers/pg.ts）：缺省库是
-    // 所有并行测试进程共用的，两个进程同时跑这组时互相清表，会零星红在别人的
-    // 用例上，而单独复跑又全绿 —— 症状看起来像偶发，实际是抢同一张表。
-    const target = await ensureTestDatabase('agent_pool');
-    if (!target) return;
-    pgDsn = target;
-    pgStore = await PgStateStore.open({ connectionString: pgDsn });
-    // 只清自己这张表。别的表是本仓库其它 PG 用例的，碰不得（见 helpers/pg.ts）。
-    await pgStore.pool.query('TRUNCATE agent_pool');
-    pgAvailable = true;
-  } catch {
-    pgAvailable = false;
-  }
-});
-
-after(async () => {
-  // 测完清场：常驻的观测面与别人手工建的候选不该被测试留在库里。
-  if (pgAvailable && pgStore) {
-    await pgStore.pool.query('TRUNCATE agent_pool').catch(() => undefined);
-  }
-  await pgStore?.close();
-});
-
-function skipIfNoPg(t: T): boolean {
-  if (!pgAvailable) {
-    t.skip('没有可用的 Postgres —— 文件版仍是默认存储，这组跳过');
-    return true;
-  }
-  return false;
-}
-
-describe('PgAgentPoolRepository', () => {
-  /**
-   * 共用一个 store 连接池、每个用例前清表。
-   *
-   * 不每个用例 open 一个新 store：那会漏掉一堆连接池，测试跑完进程退不干净。
-   * 跨进程那几个用例自己 open 第二个 store 并在 finally 里 close。
-   */
-  const repoForCase = async (): Promise<AgentPoolRepository> => {
-    const store = pgStore as PgStateStore;
-    await store.pool.query('TRUNCATE agent_pool');
-    return new PgAgentPoolRepository(store);
-  };
-
-  behavesLikeThePort(repoForCase, skipIfNoPg);
-
-  test('跨进程可见：两个 store 实例对同一个库互相看得见', async (t) => {
-    if (skipIfNoPg(t)) return;
-    const store = pgStore as PgStateStore;
-    await store.pool.query('TRUNCATE agent_pool');
-    const a = new PgAgentPoolRepository(store);
-    const other = await PgStateStore.open({ connectionString: pgDsn });
-    try {
-      const b = new PgAgentPoolRepository(other);
-      await a.add({ role: 'coordinator', profileId: 'pg-from-a', endpoint: 'local' });
-      const seen = await b.list();
-      assert.deepEqual(seen.coordinator.map((row) => row.profileId), ['pg-from-a']);
-      await expectPoolError(
-        () => b.add({ role: 'coordinator', profileId: 'pg-from-a', endpoint: 'local' }),
-        'DUPLICATE_PROFILE',
-        ['pg-from-a'],
-      );
-      // 反向也要成立：B 写的 A 看得见，而且 order 接着走，不是各算各的。
-      await b.add({ role: 'coordinator', profileId: 'pg-from-b', endpoint: 'local' });
-      assert.deepEqual((await a.list()).coordinator.map((row) => row.order), [0, 1]);
-    } finally {
-      await other.close();
-    }
-  });
-
-  test('list 每次都真查库，不走 projects 那套内存缓存', async (t) => {
-    if (skipIfNoPg(t)) return;
-    const store = pgStore as PgStateStore;
-    await store.pool.query('TRUNCATE agent_pool');
-    const repo = new PgAgentPoolRepository(store);
-    assert.equal((await repo.list()).executor.length, 0);
-
-    const other = await PgStateStore.open({ connectionString: pgDsn });
-    try {
-      await new PgAgentPoolRepository(other).add({
-        role: 'executor',
-        profileId: 'written-elsewhere',
-        endpoint: 'local',
-      });
-      const after = await repo.list();
-      assert.deepEqual(after.executor.map((row) => row.profileId), ['written-elsewhere']);
-    } finally {
-      await other.close();
-    }
-  });
-
-  test('facts 落 jsonb 再读回来，一字不改', async (t) => {
-    if (skipIfNoPg(t)) return;
-    const repo = await repoForCase();
-    const facts = [{ key: 'opaque-key', value: '值 with 空格' }];
-    await repo.add({ role: 'executor', profileId: 'facts-row', endpoint: 'local', facts });
-    const [row] = (await repo.list()).executor;
-    assert.deepEqual(row.facts, facts);
-  });
-
-  test('主键是最后一道防线：绕过校验的双写不会存出两行', async (t) => {
-    if (skipIfNoPg(t)) return;
-    const store = pgStore as PgStateStore;
-    await store.pool.query('TRUNCATE agent_pool');
-    const insert = () =>
-      store.pool.query(
-        `INSERT INTO agent_pool (role, profile_id, endpoint, runtime, ord)
-         VALUES ('executor', 'race', 'local', 'pi', 0)`,
-      );
-    await insert();
-    // 两个进程同时算出 order=0 并同时 INSERT：第二条必须被主键挡下。
-    await assert.rejects(
-      () => insert(),
-      (error: unknown) => (error as { code?: string }).code === '23505',
-    );
-    const rows = await store.pool.query(
-      "SELECT ord FROM agent_pool WHERE role = 'executor' AND profile_id = 'race'",
-    );
-    assert.equal(rows.rowCount, 1);
-    // 经仓储再走一次，拿到的是可懂的 409 语义而不是数据库错误码。
-    await expectPoolError(
-      () => new PgAgentPoolRepository(store).add({ role: 'executor', profileId: 'race', endpoint: 'local' }),
-      'DUPLICATE_PROFILE',
-      ['race'],
-    );
-  });
-});
-
-/* --------------------------------- 播种 --------------------------------- */
-
-/* -------------------------- run-mission 不再硬编码 -------------------------- */
 
 describe('run-mission.ts 改用候选池', () => {
   const repoRoot = fileURLToPath(new URL('../', import.meta.url));
