@@ -71,6 +71,25 @@ test("CodeBuddy allowlisted extension registers fake provider model", async () =
 	}
 });
 
+test("pi 1.4.0：settings.json packages 声明的插件按 provider 前缀解析（含 -intl 变体）", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "pi14-agent-"));
+	const pkg = join(agentDir, "plugins", "pi-codebuddy-oauth");
+	mkdirSync(join(pkg, "src"), { recursive: true });
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ pi: { extensions: ["./src/index.js"] } }));
+	writeFileSync(join(pkg, "src/index.js"), "export default function () {}");
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-proxy-router", join("plugins", "pi-codebuddy-oauth").replaceAll("\\", "/")] }));
+	try {
+		const main = resolveProviderExtensionPaths("codebuddy", undefined, agentDir);
+		assert.equal(main.length, 1);
+		assert.ok(main[0].replaceAll("\\", "/").endsWith("pi-codebuddy-oauth/src/index.js"));
+		const intl = resolveProviderExtensionPaths("codebuddy-intl", undefined, agentDir);
+		assert.deepEqual(intl, main);
+		assert.deepEqual(resolveProviderExtensionPaths("qoder-cn", undefined, agentDir), []);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
 test("non-CodeBuddy provider does not load any disk extension", async () => {
 	const packageDir = createFakeProviderPackage();
 	const cwd = mkdtempSync(join(tmpdir(), "pi-provider-cwd-"));
