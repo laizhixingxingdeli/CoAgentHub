@@ -29,12 +29,14 @@ import {
   contextMetricLegendLine,
   contextMetricsMissingText,
   contextMetricsTitle,
+  CONTROLLER_ROLE_LABEL,
   diffSummaryLabel,
   evidenceKindLabel,
   fieldLabel,
   finalReviewSummary,
   formatAttemptId,
   formatUsage,
+  isControllerAttempt,
   isRuntimeCommand,
   modelLabel,
   narrateEvent,
@@ -162,7 +164,15 @@ export function headerHtml(view, activity, nowIso) {
   const doing = nowDoing(v);
   // 停机原因是第二根轴上的具体情形。等待时它必须看得见——只写「等待中」
   // 等于把「在等什么」留给人自己去猜（或者去翻事件流）。
-  const waiting = Boolean(v.paused || v.waitReason || v.waitDetail);
+  //
+  // **终态不显示**：平台不清理历史 wait 字段（机器收尾写到 waiting_l3、cancel 同刻
+  // 写 blocked + cancelled_by_user），一条已经结束的任务会一直在页头说「停机原因：
+  // 等你处理」和「下一步：……」，于是人就去等一件已经没有下一步的事。
+  // 历史事件本身不删：上面那条等待仍在事件流里，要查还能查到。
+  const waiting = !isTerminal(v.status) && Boolean(v.paused || v.waitReason || v.waitDetail);
+  // waitInfo 同理：终态上的 owner/autoResume/下一步是停机那一刻的旧值。
+  // 非终态时它仍要完整显示——处理方、会不会自动恢复、下次重试就在这一行。
+  const waitInfo = !isTerminal(v.status) && v.waitInfo;
   return '<div class="task-eyebrow"><span class="mono">#' + esc(v.missionId || '') + '</span>'
     + '<span>' + esc(v.projectId || '') + '</span></div>'
     + '<h1 class="task-title">' + esc(intent) + '</h1>'
@@ -176,8 +186,8 @@ export function headerHtml(view, activity, nowIso) {
       ? '<div class="wait-reason">停机原因：' + esc(reasonText(v) || '（没有写原因）') + '</div>'
       : '')
     // 谁处理 / 会不会自动恢复 / 下次重试 / 有没有活动 Agent / runner 在不在跑：和停机原因一起看才分得清。
-    + (v.waitInfo
-      ? '<div class="wait-info" data-wait-info>' + esc(waitInfoText(v.waitInfo, v.runner, formatTime)) + '</div>'
+    + (waitInfo
+      ? '<div class="wait-info" data-wait-info>' + esc(waitInfoText(waitInfo, v.runner, formatTime)) + '</div>'
       : '')
     + '<dl class="task-stats">'
     +   '<div class="stat"><dt>运行时长</dt><dd class="mono">'
@@ -255,9 +265,13 @@ function orphanRole(event) {
   if (told && told.untranslated) return 'other';
   const badge = told && told.badge ? String(told.badge) : '';
   if (badge === PLATFORM_ROLE_LABEL) return 'platform';
+  // 主控内部仍是协调者（业务门禁、attempt 形状都没变），只是这一跳由外部会话
+  // 代为推进。归到协调者组，而不是新开一个「主控」组：一个人分成两段显示比
+  // 少一段更误导。
   if (badge === 'L3' || badge.startsWith('L3')) return 'reviewer';
   if (badge === 'L1' || badge.startsWith('L1')) return 'executor';
   if (badge === 'L2' || badge.startsWith('L2')) return 'coordinator';
+  if (badge === CONTROLLER_ROLE_LABEL) return 'coordinator';
   return 'other';
 }
 
@@ -276,11 +290,20 @@ function stageKey(group) {
 /**
  * 呈现用角色。平台有自己的徽章，色条跟 L3 同一档（都不是 L1/L2 那一跳）。
  * 详情和列表必须走同一份：两份表一定会把平台画成检视者。
+ *
+ * 当前会话主控也是同一份道理：coord-* 的形状说明内部角色是协调者，但这一组
+ * 事件里有 direct.controller_action，或 attempt.started 的 profile 就是外置
+ * 主控——那么这一跳是主控代替协调者做的，像「L2 协调」会让人以为平台另起了
+ * 一个 L2 模型在跑（实际没有，也不存在那个模型的记录）。色条仍用协调者那一档：
+ * 色条回答的是「这一跳在流水线的哪个位置」，位置没变。
  */
 function presentRole(group) {
   const role = (group && group.role) || roleOfAttempt(group && group.attemptId);
   if (role === 'platform') {
     return { role, tone: roleTone('reviewer'), badge: PLATFORM_ROLE_LABEL };
+  }
+  if (isControllerAttempt(group && group.events)) {
+    return { role: role || 'coordinator', tone: roleTone(role || 'coordinator'), badge: CONTROLLER_ROLE_LABEL };
   }
   const toneRole = !role || role === 'other' ? 'coordinator' : role;
   return { role, tone: roleTone(toneRole), badge: roleBadge(toneRole) };
@@ -309,6 +332,18 @@ function stageModel(group) {
   if (!group || !group.attemptId) return { eligible: false, text: '', title: '', profileId: '', provider: '' };
   if (role !== 'coordinator' && role !== 'executor') return { eligible: false, text: '', title: '', profileId: '', provider: '' };
 
+  // 主控那一跳没有「本跳用的模型」这回事：模型由宿主会话选，平台既没有记录，
+  // 也不能拿当前候选池顶一个上去。写「未记录」没错但不够——人会把空位当成
+  // 平台忘了记；这里直接说清是谁在跑。
+  if (isControllerAttempt(group.events)) {
+    return {
+      eligible: true,
+      text: '当前会话主控（平台不记录模型）',
+      title: '主控模型由宿主会话选择，平台没有记录，也不从候选池推断',
+      profileId: '',
+      provider: '',
+    };
+  }
   const started = (group.events || []).find((e) => e && e.kind === 'attempt.started');
   const profile = started && started.data && started.data.profile;
   const label = modelLabel(profile);

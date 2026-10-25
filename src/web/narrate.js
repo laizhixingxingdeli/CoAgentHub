@@ -129,6 +129,71 @@ export const ROLE_CN = {
 };
 
 /**
+ * 当前会话主控（direct 协作方式）的徽章。
+ *
+ * 它**不是**第四个角色：内部角色仍是协调者（尝试 ID 仍是 coord-N，业务门禁
+ * 仍按协调者校验），只是这一跳由外部会话代为推进、没有平台派发的模型。
+ * 画成「L2 协调」会让归因与值守判断把「这趟是主控做的」读成「协调者自己跑的」，
+ * 而平台既不知道主控的模型，也不知道它的用量。
+ */
+export const CONTROLLER_ROLE_LABEL = '主控';
+
+/** 主控 Attempt 在 attempt.started 里留下的发牌 profile（平台写死的那一份，见 direct-control 的 HOST_PROFILE）。 */
+const CONTROLLER_PROFILE_ID = 'external-controller';
+
+/**
+ * attempt.started.data.profile 是不是外置主控那一份。
+ *
+ * **只认 profileId**。endpoint='host' 不算证据：那只说明「接入点在本机会话」这个
+ * 传输事实，普通候选完全可能用同一个 endpoint 名。把它当身份，一条真跑过模型的
+ * 协调者就会被画成「主控操作」，而屏幕上没有任何东西能戳穿它——模型栏也会跟着
+ * 变成「当前会话主控（平台不记录模型）」，等于替它认领了一个它没用过的身份。
+ */
+function isControllerProfile(profile) {
+  const p = profile && typeof profile === 'object' ? profile : {};
+  return text(p.profileId) === CONTROLLER_PROFILE_ID;
+}
+
+/**
+ * 这一组事件是不是「当前会话主控」代替协调者操作的那一跳。
+ *
+ * 只认本组自己写下的两种证据：
+ *   1. 本组 attempt.started 的 profile 是外置主控（profileId=external-controller）；
+ *   2. 组内有**绑在本组这个 attemptId 上**的 direct.controller_action
+ *      （主控经控制面推进一步，平台自己记的）。
+ *
+ * 第 2 条要求同 attempt：一条没带 attemptId 的动作只能证明「有人主控过」，
+ * 不能证明「这一跳是主控做的」。拿它给整组盖章，等于替一条真跑过模型的协调者
+ * 认领身份——正文、模型栏会一起歪，而看的人没有任何办法发现。
+ *
+ * **不看 MissionView.coordinationMode**：那是整条 Mission 的属性，一条 direct
+ * Mission 里也可能混着别的来源的事件；拿它给每一个 coord-* 组盖章，等于替历史
+ * 上真正跑过模型的协调者认领一个它没用过的身份。也不从当前候选池推断模型：
+ * 主控模型由宿主会话选择，平台没有记录（也不假装记录过）。
+ */
+export function isControllerAttempt(events) {
+  const rows = list(events);
+  const ids = new Set();
+  for (const e of rows) {
+    const id = text(e && e.attemptId);
+    if (id) ids.add(id);
+  }
+  // 组按 attemptId 切，正常只有一个；混进多个说明调用方喂了搅在一起的事件，
+  // 这时宁可不认，也不挑一个去给整组盖章。
+  const attemptId = ids.size === 1 ? [...ids][0] : '';
+  for (const e of rows) {
+    if (!e) continue;
+    const kind = text(e.kind);
+    if (kind === 'attempt.started' && isControllerProfile(e.data && e.data.profile)) return true;
+    if (kind !== 'direct.controller_action') continue;
+    // 动作自己带的 attemptId 必须和本组那个 attempt 是同一个；整组都没有
+    // attemptId 时（历史事件）也只能靠这条动作自证，那就认它。
+    if (attemptId ? text(e.attemptId) === attemptId : text(e.attemptId) === '') return true;
+  }
+  return false;
+}
+
+/**
  * 没有 attemptId 的事件不全是 L3：投递、记忆落地、集成验证是平台自己动的手。
  * 组名留给 task.js 去切；这里只给人话标签，避免页面再写一份「平台」——两份一定会漂。
  */
@@ -248,6 +313,52 @@ export function modelLabel(profile) {
   return { text: label, title };
 }
 
+/* ============================ 候选渠道 ============================ */
+
+/**
+ * provider → 渠道人话（国内 / 国际）。
+ *
+ * 为什么需要这一张表：`codebuddy` 与 `codebuddy-intl`、`qoder-cn` 与 `qoder`
+ * 在候选行里只看 provider 名几乎分不出是国内还是国际入口，而这两者背后是
+ * 不同的账号池与计费通道——选错的那一行跑起来一样能出字，只有账单和限流
+ * 会说话。所以把「这个 provider 属于哪个渠道」写成一次性对照，比让每个人
+ * 每次去查文档可靠。
+ *
+ * **只做映射，不从名字猜能力。** 表里没有的 provider 原样回显（见
+ * providerText）：猜一个「应该算国际」的结论，比什么都不说更糟——猜错的那
+ * 一行看起来和核对过的一样。同样，这张表不写费用、额度、可用性：那三样
+ * 都不是 provider 名字里能读出来的事实。
+ *
+ * provider 名是适配层登记的名字（adapters/pi/docs/specs/provider-extensions.md），
+ * 这里只抄对照关系，不复制它的加载逻辑。
+ */
+export const PROVIDER_CHANNEL = {
+  codebuddy: 'CodeBuddy 国内',
+  'codebuddy-intl': 'CodeBuddy 国际',
+  'codebuddy-cn': 'CodeBuddy 国内',
+  'qoder-cn': 'Qoder 国内',
+  qoder: 'Qoder 国际',
+};
+
+/**
+ * provider 原文 + 渠道人话。认不出来时只回原文，**不补渠道**。
+ *
+ * 认不出来的 provider 是新接进来的运行时（换一个运行时 facts 里放什么由它定），
+ * 替它编一个渠道，等于把「还没人核对过」显示成「核对过是国内/国际」。
+ *
+ * 查表**只认自有属性**（Object.hasOwn）而不是 `PROVIDER_CHANNEL[raw]`：
+ * provider 是外部输入，`constructor` / `toString` / `__proto__` 这类原型键在
+ * 原型链上确实「查得到」，取回来是函数或对象。它会被拼进 `${raw} · ${channel}`，
+ * 界面上就是「constructor · function Object() { [native code] }」，
+ * 而这条根本不是表里登记过的渠道——等于替一个没核对过的值宣称它有渠道。
+ */
+export function providerText(provider) {
+  const raw = text(provider);
+  if (!raw) return '';
+  const channel = Object.hasOwn(PROVIDER_CHANNEL, raw) ? PROVIDER_CHANNEL[raw] : '';
+  return channel ? `${raw} · ${channel}` : raw;
+}
+
 /* ============================ 用量卡文案 ============================ */
 
 /**
@@ -313,13 +424,20 @@ export const STAGE_CN = {
  * 词**必须**和 STAGE_CN 不一样（完成品是「已完成」/「已中止」，这里只能是
  * 「已结束」/「已停止」）。用了同一个词，人就会以为是同一根轴，
  * 于是"卡住了"和"做完了"在两列里长得一模一样。
+ *
+ * **终态最先判**：平台不会清理历史 wait 字段——cancel 写 blocked 的同时留下
+ * waitReason=cancelled_by_user，机器收尾也会留下 waiting_l3 才进 completed。
+ * 先看 waitReason 就会把一条已经走完的 Mission 说成「等待中」，而「在等谁」
+ * 这句话对终态根本没有答案：屏幕上会让人一直等一件已经结束的事。
+ * 反过来，终态优先不会吃掉线索：真正停在哪由 nowDoing 那句结论与事件流说，
+ * 「在等谁」对已结束的票本来就不该出现（任务页页头会把它略掉）。
  */
 export function stateLabel(row) {
   const r = row || {};
-  if (r.paused) return '已暂停';
-  if (r.waitReason) return '等待中';
   if (r.status === 'completed') return '已结束';
   if (r.status === 'blocked') return '已停止';
+  if (r.paused) return '已暂停';
+  if (r.waitReason) return '等待中';
   return '进行中';
 }
 
@@ -541,6 +659,11 @@ const EVENT_TABLE = {
 
   'attempt.started': (event, ctx) => {
     if (attemptRole(event) === 'coordinator') {
+      // 外置主控代替协调者开工：写「主控」而不是「L2 协调」。这一跳没有平台
+      // 派发的模型，说成 L2 会把「主控做的」读成「协调者自己跑的」。
+      if (isControllerProfile(event && event.data && event.data.profile)) {
+        return { badge: CONTROLLER_ROLE_LABEL, action: '主控代替协调者开工', detail: formatAttemptId(event && event.attemptId).label };
+      }
       return { badge: 'L2', action: '协调者接手', detail: formatAttemptId(event && event.attemptId).label };
     }
     return {
@@ -1271,7 +1394,7 @@ const EVENT_TABLE = {
     const actor = or(data.actor, '（没有发起方）');
     // action 是调用方填的枚举；取不到就把原值端出来，那是排障唯一的线索。
     return {
-      badge: '主控',
+      badge: CONTROLLER_ROLE_LABEL,
       action: `主控操作：${action || '（没有动作）'}`,
       detail: `${actor}${data.attemptId ? ` · 协调者尝试 ${text(data.attemptId)}` : ' · 没有绑定的协调者尝试'}`,
     };
@@ -1390,17 +1513,22 @@ export function finalReviewSummary(finalReview) {
  * 任务页头部的一句话。
  *
  * 只回人话，不回阶段名（「executing」这种词在这一行没有任何用处——阶段另有
- * 一根 chip 在说）。判据顺序就是优先级：停下（暂停 / 等停机原因）压过阶段，
- * 因为"为什么不动"比"走到哪一步"更急。
+ * 一根 chip 在说）。判据顺序就是优先级：终态（已完成 / 已中止）压过一切，
+ * 其次是停下（暂停 / 等停机原因），最后才是阶段——“为什么不动”比“走到哪一步”更急，
+ * 但“已经结束了”压过“为什么不动”：前者是事实，后者已经失效。
  */
 export function nowDoing(view) {
   const v = view || {};
   const items = list(v.workItems);
+  const summary = text(v.result && v.result.summary);
+
+  // 终态先判，理由同 stateLabel：终态上遗留的 paused / waitReason 是历史字段，
+  // 不是「现在还在等」。先判等待会让一条已经交卷的 Mission 一直在等主控答复。
+  if (v.status === 'completed') return `结束了：${summary || '已完成'}`;
+  if (v.status === 'blocked') return `结束了（被中止）：${summary || reasonText(v) || '没有写中止原因'}`;
 
   if (v.paused) return '在等暂停结束';
   if (v.waitReason) return `在等：${reasonText(v) || '（没有写原因）'}`;
-
-  const summary = text(v.result && v.result.summary);
 
   switch (text(v.status)) {
     case 'investigating':

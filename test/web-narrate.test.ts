@@ -859,12 +859,19 @@ describe('阶段与状态是两根轴', () => {
     });
   });
 
-  test('stateLabel 的四个分支', () => {
+  test('stateLabel 的四个分支，终态压过遗留的暂停 / 等待字段', () => {
     assert.equal(stateLabel({ paused: true, status: 'executing' }), '已暂停');
     assert.equal(stateLabel({ waitReason: 'project_busy', status: 'executing' }), '等待中');
     assert.equal(stateLabel({ status: 'completed' }), '已结束');
     assert.equal(stateLabel({ status: 'blocked' }), '已停止');
     assert.equal(stateLabel({ status: 'executing' }), '进行中');
+    // 平台不清理历史字段：机器收尾写 waiting_l3 才进 completed，cancel 在写
+    // blocked 的同一刻留下 cancelled_by_user。先看 waitReason 就会把一条已经
+    // 走完的 Mission 说成「等待中」，而它并没有在等任何人。
+    assert.equal(stateLabel({ status: 'completed', waitReason: 'waiting_l3' }), '已结束');
+    assert.equal(stateLabel({ status: 'completed', paused: true }), '已结束');
+    assert.equal(stateLabel({ status: 'blocked', waitReason: 'cancelled_by_user' }), '已停止');
+    assert.equal(stateLabel({ status: 'blocked', paused: true, waitReason: 'waiting_l3' }), '已停止');
   });
 
   test('状态词与阶段词一个都不撞', () => {
@@ -954,13 +961,31 @@ describe('nowDoing 说人话，不说机器状态名', () => {
     assert.ok(line.includes('执行者'), line);
   });
 
-  test('等待：暂停与停机原因各有说法', () => {
+  test('等待：暂停与停机原因各有说法；终态压过遗留等待', () => {
     assert.equal(nowDoing({ status: 'executing', paused: true, workItems: [] }), '在等暂停结束');
     const waiting = nowDoing({ status: 'executing', waitReason: 'project_busy', workItems: [] });
     assert.ok(waiting.includes('在等'), waiting);
     assert.ok(waiting.includes(WAIT_REASON.project_busy), waiting);
     const waitingDetail = nowDoing({ status: 'executing', waitReason: 'no_available_agent', waitDetail: '卡在 exec-a' });
     assert.ok(waitingDetail.includes('卡在 exec-a'), waitingDetail);
+
+    // 一个 completed 但 waitReason 还是 waiting_l3 的真实形状（机器收尾写下的）。
+    // 先说「在等：等你处理」会让人一直等一件已经结束的事。
+    const done = nowDoing({
+      status: 'completed',
+      waitReason: 'waiting_l3',
+      result: { summary: '都改好了' },
+    });
+    assert.ok(done.includes('都改好了'), done);
+    assert.ok(done.includes('结束'), done);
+    assert.equal(done.includes('在等'), false, done);
+
+    const blocked = nowDoing({ status: 'blocked', paused: true, waitReason: 'cancelled_by_user' });
+    assert.ok(blocked.includes('中止'), blocked);
+    assert.equal(blocked.includes('在等暂停结束'), false, blocked);
+
+    // 历史等待不删：那条原因仍能单独问出来（事件流与提示语都在用同一张表）。
+    assert.equal(reasonText({ waitReason: 'waiting_l3' }), WAIT_REASON.waiting_l3);
   });
 
   test('终态：说结果，不说"已完成"就完事', () => {
