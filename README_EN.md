@@ -50,7 +50,7 @@ node --test          # full test suite, nothing to install first
 ```
 src/            the platform: kernel (pure domain) / application / runtime / api / web (plain ES modules)
 adapters/pi/    the L2/L1 adapter built on pi; the platform talks to it over stdin/stdout, imports no agent SDK
-l3-mcp-server/  Host-neutral L3 MCP server: 36 coagenthub_* tools, usable by any MCP-capable agent
+l3-mcp-server/  Host-neutral L3 MCP server: 35 coagenthub_* tools, usable by any MCP-capable agent
 skills/         Single source of L3 skills (coagent-l3 reviewer, coagent-l2 direct controller); agents copy them on install
 agents/         Per-agent hookups: Codex plugin (hooks + manifest), Claude Code MCP config example
 scripts/        the launcher (coagent.mjs) and read-only MCP / watch helpers

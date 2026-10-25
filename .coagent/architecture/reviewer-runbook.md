@@ -167,3 +167,4 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 - **已实现**（重启服务后生效）：①spawn 静默超时对命令执行中让路（`commandGraceMs` 默认 20 分钟，挂死的兜底交给 runaway 墙钟）；②PI-END1 结束提醒扩到协调者（`noSubmitReminder`，按角色给收尾动作）；③`release` 失败不再吞、两步清理失败都记 `workspace.branch_cleanup_failed`（`data.step` 区分），排他装配时重试已合入 mission 分支的删除；④常驻服务启动时按当前池清掉孤儿熔断记录（`pruneAbsent`，复位审计保留；l3 单命令装配不清——它承诺被拒不改状态字节）。
 - **快车道利用率低的结论**（未改代码）：214 个 Mission 只有 36 个走过分类入口、6 个 lightweight（中位 6 分钟 / $0.36，对比 Standard 48 分钟 / $2.65），29 个完成的 Standard 完全符合轻量特征。瓶颈在 L3 工作流不走分类入口——插件没有分类建单工具，直接走 HTTP 又违反「平台操作只经插件」。要不要给插件加该工具由用户决定（涉及插件升级部署），分类阈值本身不动。
 - **状态文件瘦身**（100 MB、58% 事件字节是两条遥测、flush 约 0.5 秒同步阻塞）已立 ADR-0009（提案状态，`adr-0009-state-slimming-telemetry-sidecar-and-archive.md`），实施另立票；本轮不动存储。
+- **改 v5 目录结构时必须连带检查 `C:\program1\coagent-l3-kit`**（维护者本机的 L3 工具包，仓库外）：插件薄壳与已装插件缓存里有指向 v5 构建产物的绝对路径，`~/.claude/skills` 与 personal 插件市场用目录联接指向它。本日重构 mcp-server 时漏查，三处路径静默断掉（钩子绑定、薄壳 .mcp.json、hooks.json），靠用户报障才发现。
