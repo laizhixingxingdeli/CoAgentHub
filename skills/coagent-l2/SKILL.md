@@ -23,7 +23,7 @@ Mission 建成 `coordinationMode: "direct"` 且本会话是主控时。**direct 
 1. 全部工单验收后，以主控身份 `coagenthub_direct_control` 的 `submit` 交卷——提交不等于合入；
 2. Mission 进入 `awaiting_review` 后，换回 [coagent-l3](../coagent-l3/SKILL.md) 走终审签字。终审的核查清单是签字的前置，不是停下来的理由。
 
-平台不会替你自动做任何一步。
+平台不会替你自动做任何一步。**若本会话只当主控**（终审由另一个检视者会话负责），`submit` 之后就是本会话的收尾：报告交卷完成、把终审留给检视者会话，不要再动终审。
 
 ## 边界
 
