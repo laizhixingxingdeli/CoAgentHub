@@ -9,7 +9,7 @@
   },
   "workspaces": [
     "adapters/pi",
-    "integrations/codex/mcp-server"
+    "l3-mcp-server"
   ],
   "scripts": {
     "test": "node --test",

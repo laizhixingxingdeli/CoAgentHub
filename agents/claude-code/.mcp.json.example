@@ -2,7 +2,7 @@
   "mcpServers": {
     "coagenthub": {
       "command": "node",
-      "args": ["/绝对路径/CoAgentHub/integrations/codex/mcp-server/dist/index.js"],
+      "args": ["/绝对路径/CoAgentHub/l3-mcp-server/dist/index.js"],
       "env": {
         "COAGENTHUB_API_BASE": "http://127.0.0.1:3101/api",
         "COAGENTHUB_REVIEWER_ID": "claude-code-l3",

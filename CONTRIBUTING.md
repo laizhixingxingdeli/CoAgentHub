@@ -11,7 +11,7 @@ node --test test/<名字>.test.ts   # 定向跑一个
 ```
 
 - 平台本体没有构建步骤、没有第三方依赖。状态存储只有文件版（Postgres 存储已于 2026-10-24 移除）。
-- 适配层和 MCP 服务器的依赖由根 `package.json` 的 npm workspaces 一次装进根 `node_modules`（`npm ci`），测试各自跑：`npm test -w adapters/pi`、`npm test -w integrations/codex/mcp-server`。它们的测试文件叫 `*.spec.ts`，是为了不被根目录的 `node --test`（会发现任何位置的 `*.test.ts`）捡走。
+- 适配层和 MCP 服务器的依赖由根 `package.json` 的 npm workspaces 一次装进根 `node_modules`（`npm ci`），测试各自跑：`npm test -w adapters/pi`、`npm test -w l3-mcp-server`。它们的测试文件叫 `*.spec.ts`，是为了不被根目录的 `node --test`（会发现任何位置的 `*.test.ts`）捡走。
 
 ## 代码约定
 
