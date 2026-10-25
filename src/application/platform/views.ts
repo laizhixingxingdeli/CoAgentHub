@@ -543,6 +543,9 @@ function viewOf(
     waitDetail: mission.waitDetail,
     ...(mission.waitResumeAt !== undefined ? { waitResumeAt: mission.waitResumeAt } : {}),
     ...withWaitInfo(mission),
+    // 只有内核记了上限才写这一格。`?? 10` 会把「旧快照没存过上限」画成一个
+    // 从没生效过的 $10 门禁，读的人据此判断还要不要增额就错了。
+    ...(mission.costCap !== undefined ? { costCap: mission.costCap } : {}),
     updatedAt: mission.updatedAt,
     paused: mission.isPaused,
     isMutating: mission.isMutating,
