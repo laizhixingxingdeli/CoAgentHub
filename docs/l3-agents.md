@@ -54,7 +54,9 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
 3. **唤醒**：Claude Code 的会话不会被外部推送，所以用拉的办法。开跑之后让它在后台跑
    `node scripts/coagent.mjs watch <missionId>`（Bash 工具的后台模式），命令一退出 Claude 就被唤醒、去读 Mission。
 
-4. **大返回体**：单个 Mission 的详情可能有几十到上百 KB，活动日志更大，且没有裁剪参数。Claude Code 对单次 MCP 返回有 token 上限（环境变量 `MAX_MCP_OUTPUT_TOKENS` 可调）。真遇到截断，就改用 HTTP 只取需要的字段：
+4. **工具**：[agents/claude-code/tools/](../agents/claude-code/tools/) 提供命令行驱动与终审辅助（`mcp.mjs` 全工具调用＋`--out` 落盘、`review-brief.mjs` 终审简报、`vr-summary.mjs`、`models-of.mjs`、`hop-reads.mjs`），任何有 node 的会话可用，不限 Claude。
+
+5. **大返回体**：单个 Mission 的详情可能有几十到上百 KB，活动日志更大，且没有裁剪参数。Claude Code 对单次 MCP 返回有 token 上限（环境变量 `MAX_MCP_OUTPUT_TOKENS` 可调）。真遇到截断，就改用 HTTP 只取需要的字段：
 
    ```bash
    curl -s --noproxy '*' http://127.0.0.1:3101/api/missions/<id> | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=JSON.parse(s);console.log(m.status,m.workItems.map(w=>w.id+":"+w.status).join(" "))})'
