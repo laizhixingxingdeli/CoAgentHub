@@ -72,6 +72,7 @@
 3. 合入：`node src/l3.ts merge <missionId> --as "检视者（<模型名>）" --confirmed-by "用户常设授权：集成分支合入由检视者签，仅合入 master 需用户签名（2026-09-28）" --reason "…"`。
 4. 方案源里把该票标 done，并记下合入提交、用时、花费。
 5. 平台合不进去时（集成分支在交卷后被推进、或工作区不干净，平台没有换基线再合的通路）：先查两边改动的文件有没有重叠、Mission 有没有规格改动要落地，再请用户批准手动合入——`git merge --no-ff <Mission 分支>`，对合并结果跑全量 `node --test`；绿了再 `l3 merge` 留签名（预期被基线校验拒、Mission 转 blocked，同时释放改动名额），方案源标 done 并写明手动合入的提交（AC1 25903aa、REF1 25eea70）。
+6. 合入之后删除该 Mission 的 worktree：`git worktree remove .coagent-worktrees/<目录>`；嵌套的（Mission worktree 建在集成 worktree 里面）先删内层再删外层。只删「分支已合入 master 且工作区干净」的，未合入的留着；删之前用 `git merge-base --is-ancestor <HEAD> master` 核实。用户 2026-10-25：`.coagent-worktrees/` 合入之后要删除，不长期堆积（当天一次清掉 19 个已合入的）。
 
 ## 6. 合入 master（用户签）
 
@@ -82,7 +83,7 @@
    `git -C <临时目录> merge --no-ff auto/harness-remaining -m "合并 auto/harness-remaining → master：<n> 张票（<m> 个提交）——用户 <日期> 签字合入 …"`，
    核对与集成分支内容一致（`git diff auto/harness-remaining HEAD` 为空），再 `git worktree remove <临时目录>`。
    主工作区本身检出的就是 master 时（同一分支不能在两个 worktree 检出），直接在主工作区 `git merge --no-ff <集成分支>`，同样核对 diff 为空、工作区干净。前置验证要绑定集成分支当前 HEAD：之后哪怕只有文档提交，也要重跑平台全量（有测试读 `.coagent/project.md`）；用零代码验证 Mission 跑，它没有改动，收尾不产生新提交（2026-10-07 的 MASTER-PRECHECK）。没有 Mission 在跑、机器空闲时，也可以由检视者直接在集成 worktree 的该 HEAD 上跑一次全量 `node --test`（2026-10-08 合 da4ab5d 就是这样：145 秒、一次绿；偶发红整轮复跑），把结果行写进简报和合并提交说明。
-   合完在没有在跑的 agent 时重启服务加载新代码：核实持锁 pid 与 3101 监听者一致后 `taskkill /F /T /PID`，等心跳超过 120 秒，再用隐藏启动脚本起服务，平台自动接管并写审计；起来后用一个已有 Mission 的 HTTP 视图确认新行为生效。
+   合完在没有在跑的 agent 时重启服务加载新代码：核实持锁 pid 与 3101 监听者一致后 `taskkill /F /T /PID`，等心跳超过 120 秒，再用隐藏启动脚本起服务，平台自动接管并写审计；起来后用一个已有 Mission 的 HTTP 视图确认新行为生效。集成分支的内容全部进 master 之后，它在 `.coagent-worktrees/` 下的 worktree 也删除（同第 5 节第 6 条：合入之后要删除）。
 4. 推送到远端（GitHub）是对外操作，必须用户明确说「推」，合入 master 与推送是两件事。合入记录：fb14039（09-30）、83d5877（10-02）、80d098b（10-07，COM1–COM5，用户「先合主干」）、630656d（10-07 夜，COM6–COM11 与 PERF1，用户「合」）、da4ab5d（10-08，COM9 / COM10 / COM12，用户「按现在的执行池，合master」）、f6cddd2（10-09，REL1 / REL2 与发布整理，用户「合并 master 并推送」；这是**首次公开发布**：`git push --force-with-lease=main:<远端旧 tip> origin master:main`，用 v5 整个替换了 GitHub 上 v4 的 main，旧 tip cb511326 不再可达）。
    推送后看 CI：Actions 页面匿名看不到日志（「Sign in to view logs」），用已登录的 `gh` 只读下载：`gh api repos/<owner>/<repo>/actions/jobs/<jobId>/logs`（jobId 来自 `gh api repos/<owner>/<repo>/actions/runs/<runId>/jobs`）。首轮 CI（ci #1）三平台全红，原因是运行机的临时目录是别名路径，修复见 REL3（合入集成分支 c93dafb）；本机复现方法见 §1 路径别名那条。Windows 是必过项，Linux / macOS 在 `ci.yml` 里标 `continue-on-error`。
 5. 〔历史，2026-10-09 之前〕coagent-pi 曾是独立仓库，它的 master 合入流程与本节相同；并入 `adapters/pi` 之后没有这一步。
