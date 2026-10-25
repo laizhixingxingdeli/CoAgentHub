@@ -294,6 +294,56 @@ const RESULT_REPAIR_STATUSES: ReadonlySet<MissionStatus> = new Set([
   'blocked',
 ]);
 
+/* ------------------------------ 已合入 Mission 归档（ADR-0009） ------------------------------ */
+
+export interface ArchiveSweepStore {
+  archiveMission(projectId: string, missionId: string): void;
+  hasArchivedMission(missionId: string): boolean;
+}
+
+export interface ArchiveSweepResult {
+  readonly archived: readonly { projectId: string; missionId: string }[];
+  readonly kept: readonly { projectId: string; missionId: string; reason: string }[];
+}
+
+/**
+ * 启动清扫：把「completed 且已合入、超过时限」的 Mission 移进 `.coagent-archive/`
+ * 旁路包（ADR-0009 的归档启用——机制与读侧早已存在，缺的只是触发）。
+ *
+ * 只动 completed：blocked / parked / 进行中一律不碰。age 以 mergedAt（缺则
+ * updatedAt）计。单条失败（未处理文档、暂停、进行中 Attempt 等守卫）记 reason
+ * 跳过，不挡启动、不影响其他 Mission。归档是搬家不是删除：详情、事件、投递
+ * 全部在包里，读侧按需取。
+ */
+export async function archiveEligibleMissions(
+  projects: readonly Project[],
+  store: ArchiveSweepStore,
+  options: { now: Date; maxAgeMs: number },
+): Promise<ArchiveSweepResult> {
+  const archived: ArchiveSweepResult['archived'][number][] = [];
+  const kept: ArchiveSweepResult['kept'][number][] = [];
+  for (const project of projects) {
+    for (const mission of project.missions) {
+      if (mission.status !== 'completed' || !mission.finalReview?.mergedInto) continue;
+      if (store.hasArchivedMission(mission.id)) continue;
+      const stamped = mission.finalReview.mergedAt ?? mission.updatedAt;
+      const age = options.now.getTime() - Date.parse(stamped);
+      if (!Number.isFinite(age) || age <= options.maxAgeMs) continue;
+      try {
+        store.archiveMission(project.id, mission.id);
+        archived.push({ projectId: project.id, missionId: mission.id });
+      } catch (error) {
+        kept.push({
+          projectId: project.id,
+          missionId: mission.id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return { archived, kept };
+}
+
 export interface RepairMissingDeliveriesDeps {
   readonly projects: ProjectRepository;
   readonly activity: ActivityLog;

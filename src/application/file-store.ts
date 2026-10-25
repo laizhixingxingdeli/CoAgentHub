@@ -15,11 +15,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -162,6 +164,31 @@ function archivedMissionPath(statePath: string, projectId: string, missionId: st
   const file = resolve(root, projectId, `${missionId}.json`);
   const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
   if (!file.startsWith(prefix)) throw new Error(`状态损坏：archive 路径越界：${projectId}/${missionId}`);
+  return file;
+}
+
+/**
+ * 两条纯遥测事件（ADR-0009）：高频、体积大（生产 81k 条事件里占 56k 条、字节占
+ * 58%）、只服务时间归因与观测回放。进边车 NDJSON（append-only，逐行追加不触发
+ * 全量落盘），不进主状态——否则每次工具调用都以一次整份序列化结束，97MB 状态
+ * 上实测每次 flush 阻塞事件循环约 0.75s。
+ */
+export const TELEMETRY_EVENT_KINDS: ReadonlySet<string> = new Set([
+  'runtime.command.started',
+  'runtime.tool.completed',
+]);
+
+function isTelemetryEventKind(kind: string): boolean {
+  return TELEMETRY_EVENT_KINDS.has(kind);
+}
+
+/** `dirname(state)/.coagent-events/<missionId>.ndjson` + containment。 */
+function telemetrySidecarPath(statePath: string, missionId: string): string {
+  if (!ARCHIVE_ID_RE.test(missionId)) throw new Error(`状态损坏：telemetry mission id 非法：${missionId}`);
+  const root = resolve(dirname(statePath), '.coagent-events');
+  const file = resolve(root, `${missionId}.ndjson`);
+  const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (!file.startsWith(prefix)) throw new Error(`状态损坏：telemetry 路径越界：${missionId}`);
   return file;
 }
 
@@ -751,6 +778,90 @@ export class FileStateStore implements CommandTransaction, FencedCommandTransact
     return undefined;
   }
 
+  /* -------- 遥测边车（ADR-0009）：append-only NDJSON，不进主状态 -------- */
+
+  #telemetryCache = new Map<string, { mtimeMs: number; size: number; events: ActivityEvent[] }>();
+
+  /** 读一条 Mission 的遥测边车；残行（崩溃截断的半行）跳过——遥测缺失可容忍，list() 卡住不可容忍。 */
+  telemetryEvents(missionId: string): ActivityEvent[] {
+    let path: string;
+    try {
+      path = telemetrySidecarPath(this.#path, missionId);
+    } catch {
+      return [];
+    }
+    if (!existsSync(path)) return [];
+    const stat = statSync(path);
+    const cached = this.#telemetryCache.get(missionId);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.events;
+    const events: ActivityEvent[] = [];
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        events.push(JSON.parse(line) as ActivityEvent);
+      } catch {
+        /* 残行跳过 */
+      }
+    }
+    this.#telemetryCache.set(missionId, { mtimeMs: stat.mtimeMs, size: stat.size, events });
+    return events;
+  }
+
+  /** 追加一条遥测事件到边车。append-only，不触发主状态的全量落盘。 */
+  appendTelemetryEvent(event: ActivityEvent): void {
+    const path = telemetrySidecarPath(this.#path, event.missionId);
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${JSON.stringify(event)}\n`, 'utf8');
+    this.#telemetryCache.delete(event.missionId);
+  }
+
+  /** 有边车文件的 missionId 清单（all() 拼接用）。 */
+  telemetryMissionIds(): string[] {
+    const root = resolve(dirname(this.#path), '.coagent-events');
+    if (!existsSync(root)) return [];
+    try {
+      return readdirSync(root)
+        .filter((name) => name.endsWith('.ndjson'))
+        .map((name) => name.slice(0, -'.ndjson'.length));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 一次性把主状态里既有的遥测事件搬进边车（排他启动时调用；幂等——搬完即空，
+   * 再次启动零写入）。missionId 非法的事件原样留在主状态：宁可多留一条，不静默丢。
+   */
+  migrateTelemetryEventsToSidecars(): { moved: number; missions: number } {
+    const events = this.#state.events;
+    if (!Array.isArray(events) || events.length === 0) return { moved: 0, missions: 0 };
+    const byMission = new Map<string, ActivityEvent[]>();
+    const kept: ActivityEvent[] = [];
+    for (const event of events) {
+      if (!isTelemetryEventKind(event.kind)) {
+        kept.push(event);
+        continue;
+      }
+      if (!ARCHIVE_ID_RE.test(event.missionId)) {
+        kept.push(event);
+        continue;
+      }
+      const bucket = byMission.get(event.missionId) ?? [];
+      bucket.push(event);
+      byMission.set(event.missionId, bucket);
+    }
+    if (byMission.size === 0) return { moved: 0, missions: 0 };
+    for (const [missionId, bucket] of byMission) {
+      const path = telemetrySidecarPath(this.#path, missionId);
+      mkdirSync(dirname(path), { recursive: true });
+      appendFileSync(path, `${bucket.map((event) => JSON.stringify(event)).join('\n')}\n`, 'utf8');
+      this.#telemetryCache.delete(missionId);
+    }
+    this.#state.events = kept;
+    this.flush();
+    return { moved: events.length - kept.length, missions: byMission.size };
+  }
+
   /**
    * 显式归档单条终态 Mission：package 旁路落盘后从 main working set 裁掉。
    * 不自动触发；重复调用幂等。
@@ -1056,25 +1167,46 @@ export class FileActivityLog implements ActivityLog {
 
   async append(event: Omit<ActivityEvent, 'at'>): Promise<void> {
     await this.#store.settle();
+    const full: ActivityEvent = { ...event, at: this.#clock.now().toISOString() };
     if (this.#store.hasArchivedMission(event.missionId)) {
       throw new Error(`已归档 Mission 不可追加事件：${event.missionId}`);
     }
-    this.#store.raw().events.push({ ...event, at: this.#clock.now().toISOString() });
+    // 遥测走边车：最高频的两类不再每次拖一次整份状态的同步落盘（ADR-0009）。
+    if (isTelemetryEventKind(event.kind)) {
+      this.#store.appendTelemetryEvent(full);
+      return;
+    }
+    this.#store.raw().events.push(full);
     this.#store.flush();
   }
 
   async list(missionId: string): Promise<readonly ActivityEvent[]> {
     this.#store.refreshIfChanged();
+    // 主状态与边车各自按 at 有序（append 顺序），归并排序拼回真实时间线；
+    // sort 稳定，同毫秒事件保持「主状态在前、边车在后」的固定次序。
+    const sidecar = this.#store.telemetryEvents(missionId);
     if (this.#store.hasArchivedMission(missionId)) {
-      return this.#store.archivedEvents(missionId);
+      return [...this.#store.archivedEvents(missionId), ...sidecar].sort(byAt);
     }
-    return this.#store.raw().events.filter((event) => event.missionId === missionId);
+    const main = this.#store.raw().events.filter((event) => event.missionId === missionId);
+    if (sidecar.length === 0) return main;
+    return [...main, ...sidecar].sort(byAt);
   }
 
   async all(): Promise<readonly ActivityEvent[]> {
     this.#store.refreshIfChanged();
-    return this.#store.allEventsMerged();
+    const merged = this.#store.allEventsMerged();
+    const sidecar: ActivityEvent[] = [];
+    for (const missionId of this.#store.telemetryMissionIds()) {
+      sidecar.push(...this.#store.telemetryEvents(missionId));
+    }
+    if (sidecar.length === 0) return merged;
+    return [...merged, ...sidecar].sort(byAt);
   }
+}
+
+function byAt(a: ActivityEvent, b: ActivityEvent): number {
+  return a.at < b.at ? -1 : a.at > b.at ? 1 : 0;
 }
 
 /**

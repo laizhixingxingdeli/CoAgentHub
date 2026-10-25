@@ -37,6 +37,10 @@ node scripts/benchmark-file-store.ts --sizes 1 --samples 2
 - 但**不能**从合成测试推断真实任务吞吐：真实状态里事件体量、字符串重复度、字段结构、磁盘缓存与杀软行为都不同；合成事件是高度可压缩的同构数据，`stringify` 成本偏乐观，而文件大小与实际业务事件未必对得上。
 - 因此本文只支持一个结论：**在几十 MB 量级上，单次落盘已经是几百毫秒级的同步阻塞**，值得关注；不支持的结论是「生产环境每秒能写几次」「UI 会卡多久」。
 
+## 2026-10-26 已实施（ADR-0009）
+
+实测坐实了本文的担忧：97MB 状态下每次 flush 阻塞事件循环约 0.75 秒，服务延迟呈 10ms↔785ms 双峰。两类遥测事件（占字节 58%）已外置 `.coagent-events/` 边车，已合入超 30 天的 Mission 启动时归档进 `.coagent-archive/`。见 [ADR-0009](../.coagent/architecture/decisions/adr-0009-state-slimming-telemetry-sidecar-and-archive.md)。
+
 ## 现在不迁数据库
 
 - 现有机制已经把这部分压力挡掉一层：mission 完成后进 archive，主状态文件只留 working 集；大输出走 artifact 而不是塞进状态。优先用这两条把状态文件压在可接受体积。
