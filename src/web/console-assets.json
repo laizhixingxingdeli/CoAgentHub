@@ -1,0 +1,91 @@
+{
+  "note": "Figma 下载的原 SVG 与页面语义文件名的对应。本文件只是实施参考，静态服务不读它（src/api/static.ts 的 SAFE_NAME 不认 json），页面也不 fetch 它——图标直接用同名 svg 文件引用。记录在这里是为了下次重新导出画板时能对上哪一个图是哪一份，不至于凭形状猜。",
+  "readonlySource": ".impeccable/assets/figma/manifest.json",
+  "sourceFrames": ["2:47", "2:140", "2:214"],
+  "icons": [
+    {
+      "symbol": "imgIcon",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/36ecc.svg",
+      "output": "src/web/console-icon-dot.svg",
+      "size": "16x16",
+      "meaning": "默认/进行中的墨色圆点（ConsoleStatus 的「调查中」）"
+    },
+    {
+      "symbol": "imgIcon1",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/a4d41.svg",
+      "output": "src/web/console-icon-running.svg",
+      "size": "16x16",
+      "meaning": "running 蓝圆点，只给实际执行中"
+    },
+    {
+      "symbol": "imgIcon2",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/1130f.svg",
+      "output": "src/web/console-icon-chevron.svg",
+      "size": "16x16",
+      "meaning": "下拉箭头（ConsoleField 的 Dropdown 形态）"
+    },
+    {
+      "symbol": "imgIcon3",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/d48d2.svg",
+      "output": "src/web/console-icon-search.svg",
+      "size": "16x16",
+      "meaning": "搜索放大镜（ConsoleField 的 Search 形态）"
+    },
+    {
+      "symbol": "imgTrack",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/1ea34.svg",
+      "output": "src/web/console-icon-switch.svg",
+      "size": "34x20",
+      "meaning": "关闭态开关轨道（line 底、白钮居左）"
+    },
+    {
+      "symbol": "imgIcon4",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/43f6b.svg",
+      "output": "src/web/console-icon-review.svg",
+      "size": "16x16",
+      "meaning": "amber 圆点，等你检视（执行中但等待人工处理）"
+    },
+    {
+      "symbol": "imgIcon5",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/e10cf.svg",
+      "output": "src/web/console-icon-clock.svg",
+      "size": "16x16",
+      "meaning": "时钟，自动恢复等待中"
+    },
+    {
+      "symbol": "imgIcon6",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/b8b86.svg",
+      "output": "src/web/console-icon-complete.svg",
+      "size": "16x16",
+      "meaning": "green 圆点，已完成"
+    },
+    {
+      "symbol": "imgIcon7",
+      "frame": "2:47",
+      "source": ".impeccable/assets/figma/24045.svg",
+      "output": "src/web/console-icon-aborted.svg",
+      "size": "16x16",
+      "meaning": "red 圆点，已中止/失败"
+    }
+  ],
+  "sameFileElsewhere": {
+    "a4d41.svg": ["2:140 imgIcon"],
+    "1130f.svg": ["2:140 imgIcon1", "2:214 imgIcon"]
+  },
+  "knownGaps": [
+    "2:47 的 imgTrack 是 1ea34.svg（关闭态）。打开态在别的画板（43:630 / 43:712 / 43:794 / 43:871 / 48:3834 / 48:3923 / 49:4094 的 imgTrack = 6121f.svg，accent 底、白钮居右），不在本单授权的文件名里，所以没有复制；接开关外观的画板需要它时再补一个语义文件名。",
+    "manifest.json 里没有 2:47 之外的载荷映射以外的图标；未出现在任何 frame 里的图形一律没复制，避免把设计稿外的东西当运行资源。"
+  ],
+  "constraints": [
+    "SVG 与 woff2 都是原样字节复制，没有重绘、没有改根 width/height、没有改 stroke/fill 色值。",
+    "manifest.json 里的 URL 是 Figma 导出时的临时地址，已过期且需要鉴权：不能当运行资源，运行只引用 src/web/ 下的本地文件。"
+  ]
+}
