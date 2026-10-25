@@ -1,0 +1,830 @@
+[
+  {
+    "role": "完整编号标题",
+    "text": "Vehicle-Resource-Validation-FinalReview-20261023",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 528.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "Vehicle-Resource-Validation-Fin…ew-20261023",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 301.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 0.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "检视者 · 不会自动恢复",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 137.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "核对最终交卷",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 78.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "≈$3.42",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 42.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "14:32",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "Android-Audio-Route-Escalation-20261024",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 429.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "Android-Audio-Route-Escalation-20261024",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 273.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "已升级（问题）",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 91.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "检视者 · 不会自动恢复",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 137.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "答复冻结范围冲突",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 104.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "未知",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 14.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "14:29",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "SmartCar-SceneMode-Policy-Recovery-20261018",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 473.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "SmartCar-SceneMode-Policy-Recovery-20261018",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 301.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "已暂停 · 直接主控",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 102.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "用户 · 不会自动恢复",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 123.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "补充设备侧输入",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 91.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "$1.06 + 主控未计",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 84.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "14:28",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "MiRing-Notification-Correlation-Recovery-20261014",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 539.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "MiRing-Notification-Correlation…ry-20261014",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 301.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "补修",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 26.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "平台 · 执行者运行中",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 123.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "等第 13 次执行交回",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 115.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "≈$2.11",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 42.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "14:26",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "VoiceBridge-Network-Recovery-20261024",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 407.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "VoiceBridge-Network-Recovery-20261024",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 259.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 0.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "平台 · 14:36 自动重试",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 134.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "退避第 2/5 次",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 82.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "≈$0.87",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 42.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "14:21",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "Vehicle-Feature-Policy-Audit-20261022",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 407.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "Vehicle-Feature-Policy-Audit-20261022",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 259.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 0.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "协调者 · 调查中",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 95.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "整理已有事实与测试接缝",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 143.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "≈$0.38",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 42.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "13:54",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "MiRing-Content-Index-Recovery-20261021",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 418.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "MiRing-Content-Index-Recovery-20261021",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 266.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "已合入集成 · master 未合入",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 161.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "已合入集成分支",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 98.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "master 等待用户签名",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 124.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "$4.67",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "10-24 18:02",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 77.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "完整编号标题",
+    "text": "Android-Device-Audio-Recovery-20261020",
+    "font": "Consolas",
+    "sizePx": 20,
+    "widthPx": 418.0,
+    "availablePx": 1176,
+    "fits": true
+  },
+  {
+    "role": "列表编号",
+    "text": "Android-Device-Audio-Recovery-20261020",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 266.0,
+    "availablePx": 400,
+    "fits": true
+  },
+  {
+    "role": "附加标记",
+    "text": "",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 0.0,
+    "availablePx": 194,
+    "fits": true
+  },
+  {
+    "role": "处理人",
+    "text": "用户叫停",
+    "font": "Microsoft YaHei",
+    "sizePx": 14,
+    "widthPx": 56.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "下一步",
+    "text": "已有证据与输出已保留",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 130.0,
+    "availablePx": 290,
+    "fits": true
+  },
+  {
+    "role": "费用",
+    "text": "$0.91",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 35.0,
+    "availablePx": 144,
+    "fits": true
+  },
+  {
+    "role": "更新时间",
+    "text": "10-24 15:16",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 77.0,
+    "availablePx": 100,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-antigra…-6-thinking",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-antigravity-claude-opus-4-6-thinking",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 336.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-antigravity-claude-opus-4-6-thinking · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 383.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-openrou…epseek-v3-2",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-openrouter-deepseek-v3-2",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 252.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-openrouter-deepseek-v3-2 · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 319.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-openrou…qwen3-coder",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-openrouter-qwen3-coder",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 238.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-openrouter-qwen3-coder · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 309.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-zai-glm-4-6",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 161.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-zai-glm-4-6",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 161.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-zai-glm-4-6 · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 225.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-anthrop…-sonnet-4-6",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-anthropic-claude-sonnet-4-6",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 273.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-anthropic-claude-sonnet-4-6 · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 333.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-openai-gpt-5-4",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 182.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-openai-gpt-5-4",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 182.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-openai-gpt-5-4 · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 248.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-google-…ini-2-5-pro",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-google-gemini-2-5-pro",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 231.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-google-gemini-2-5-pro · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 296.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "coordinator-local-q…3-coder-30b",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "coordinator-local-qwen3-coder-30b",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 231.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · coordinator-local-qwen3-coder-30b · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 298.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "executor-openrouter-qwen3-coder",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "executor-openrouter-qwen3-coder",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 217.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · executor-openrouter-qwen3-coder · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 291.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "executor-zai-glm-4-6",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 140.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "executor-zai-glm-4-6",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 140.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · executor-zai-glm-4-6 · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 207.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "executor-openai-gpt-5-4-mini",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 196.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "executor-openai-gpt-5-4-mini",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 196.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · executor-openai-gpt-5-4-mini · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 262.0,
+    "availablePx": 624,
+    "fits": true
+  },
+  {
+    "role": "候选列表中间省略",
+    "text": "executor-local-qwen3-coder-30b",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 210.0,
+    "availablePx": 248,
+    "fits": true
+  },
+  {
+    "role": "候选抽屉完整编号",
+    "text": "executor-local-qwen3-coder-30b",
+    "font": "Consolas",
+    "sizePx": 13,
+    "widthPx": 210.0,
+    "availablePx": 344,
+    "fits": true
+  },
+  {
+    "role": "历史完整候选与角色",
+    "text": "协调者 · executor-local-qwen3-coder-30b · 高",
+    "font": "Microsoft YaHei",
+    "sizePx": 13,
+    "widthPx": 280.0,
+    "availablePx": 624,
+    "fits": true
+  }
+]

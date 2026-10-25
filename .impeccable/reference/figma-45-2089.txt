@@ -1,0 +1,34 @@
+export default function Endpoints() {
+  return (
+    <div className="bg-[var(--color\/paper,#f5f3ed)] border border-[var(--color\/line,#d6d5ce)] border-solid overflow-clip relative rounded-[12px] size-full" data-node-id="45:2089" data-name="endpoints">
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] left-[23px] text-[18px] text-[color:var(--color\/ink,#222b35)] top-[23px] w-[852px]" data-node-id="45:2090">
+        适配层端点清单
+      </p>
+      <div className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[79px] w-[852px]" data-node-id="45:2091">
+        <p className="leading-[22px] mb-0">local · pi 本机适配层</p>
+        <p className="leading-[22px]">provider / model / prompt_channel</p>
+      </div>
+      <a className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex h-[36px] items-center justify-center left-[23px] rounded-[5px] top-[459px] w-[120px]" data-node-id="45:2092" data-name="Console/SecondaryButton">
+        <div className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[0] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-left whitespace-nowrap" data-node-id="I45:2092;39:305">
+          <p className="leading-[22px]">返回</p>
+        </div>
+      </a>
+    </div>
+  );
+}
+SUPER CRITICAL: The generated React+Tailwind code MUST be converted to match the target project's technology stack and styling system.
+1. Analyze the target codebase to identify: technology stack, styling approach, component patterns, and design tokens
+2. Convert React syntax to the target framework/library
+3. Transform all Tailwind classes to the target styling system while preserving exact visual design
+4. Follow the project's existing patterns and conventions
+DO NOT install any Tailwind as a dependency unless the user instructs you to do so.
+
+Node ids have been added to the code as data attributes, e.g. `data-node-id="1:2"`.
+These styles are contained in the design: Console/Section: Font(family: "Noto Sans SC", style: Medium, size: 18, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Body: Font(family: "Noto Sans SC", style: Regular, size: 14, weight: 400, lineHeight: 22, letterSpacing: 0).
+Component descriptions: The following components have usage descriptions or documentation links defined in Figma. These descriptions provide important context about the intended usage, best practices, and any constraints for each component. Follow these guidelines when implementing or using these components.
+
+## Console/SecondaryButton
+**Node ID:** 39:308
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+The generated code contains image and SVG URL constants, e.g. const image = `${assetPathPrefix}/<asset file name>`, where assetPathPrefix is declared once at the top of the code and every asset URL interpolates it. These URLs are temporary download sources and expire after 7 days. Download each asset into the project with curl -L, then replace its URL in the generated code with a reference to the downloaded asset. Never use the temporary URLs as runtime image sources.

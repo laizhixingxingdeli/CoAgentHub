@@ -1,0 +1,946 @@
+{
+  "tasks": [
+    {
+      "key": "review",
+      "id": "Vehicle-Resource-Validation-FinalReview-20261023",
+      "state": "等你检视",
+      "marks": "",
+      "owner": "检视者 · 不会自动恢复",
+      "next": "核对最终交卷",
+      "cost": "≈$3.42",
+      "date": "14:32",
+      "group": "需要你处理",
+      "intent": "核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，检查本次受评提交的改动范围与契约一致，并记录尚未完成的设备侧限制。",
+      "ended": true,
+      "project": "Vehicle"
+    },
+    {
+      "key": "upgrade",
+      "id": "Android-Audio-Route-Escalation-20261024",
+      "state": "执行中",
+      "marks": "已升级（问题）",
+      "owner": "检视者 · 不会自动恢复",
+      "next": "答复冻结范围冲突",
+      "cost": "未知",
+      "date": "14:29",
+      "group": "需要你处理",
+      "intent": "排查音频路由恢复中的边界冲突，执行者已发现冻结范围未覆盖关联调用点；当前保留失败证据与未提交改动，需检视者先判断范围是否修订，不能继续扩大修改。",
+      "ended": true,
+      "project": "Android"
+    },
+    {
+      "key": "direct",
+      "id": "SmartCar-SceneMode-Policy-Recovery-20261018",
+      "state": "执行中",
+      "marks": "已暂停 · 直接主控",
+      "owner": "用户 · 不会自动恢复",
+      "next": "补充设备侧输入",
+      "cost": "$1.06 + 主控未计",
+      "date": "14:28",
+      "group": "需要你处理",
+      "direct": true,
+      "intent": "核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条验收与交卷，执行者只处理允许范围内的修复。本次暂停等待设备侧输入，平台无法获知主控会话的模型与费用。",
+      "ended": true,
+      "project": "SmartCar"
+    },
+    {
+      "key": "active",
+      "id": "MiRing-Notification-Correlation-Recovery-20261014",
+      "state": "执行中",
+      "marks": "补修",
+      "owner": "平台 · 执行者运行中",
+      "next": "等第 13 次执行交回",
+      "cost": "≈$2.11",
+      "date": "14:26",
+      "group": "进行中",
+      "intent": "调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢复路径，保留原始会话身份以及已有验证证据；必须验证重连后不会重复分发或错误地归因给另一会话，并明确仍未覆盖的设备条件。",
+      "active": true,
+      "project": "MiRing"
+    },
+    {
+      "key": "retry",
+      "id": "VoiceBridge-Network-Recovery-20261024",
+      "state": "执行中",
+      "marks": "",
+      "owner": "平台 · 14:36 自动重试",
+      "next": "退避第 2/5 次",
+      "cost": "≈$0.87",
+      "date": "14:21",
+      "group": "进行中",
+      "intent": "排查网络切换后桥接连接的恢复问题，复用已有中断与超时证据；当前候选发生上游暂时失败，平台已记录退避次数与下次重试时刻，在到期前不重复派发。",
+      "retry": true,
+      "ended": true,
+      "project": "VoiceBridge"
+    },
+    {
+      "key": "investigate",
+      "id": "Vehicle-Feature-Policy-Audit-20261022",
+      "state": "调查中",
+      "marks": "",
+      "owner": "协调者 · 调查中",
+      "next": "整理已有事实与测试接缝",
+      "cost": "≈$0.38",
+      "date": "13:54",
+      "group": "进行中",
+      "intent": "梳理车辆功能策略与用户配置之间的依赖，核对现有实现、调用方与既有测试约束，先给出可验证的调查结论，再决定是否形成实施工单，不在调查阶段扩大产品承诺。",
+      "active": true,
+      "project": "Vehicle"
+    },
+    {
+      "key": "complete",
+      "id": "MiRing-Content-Index-Recovery-20261021",
+      "state": "已完成",
+      "marks": "已合入集成 · master 未合入",
+      "owner": "已合入集成分支",
+      "next": "master 等待用户签名",
+      "cost": "$4.67",
+      "date": "10-24 18:02",
+      "group": "最近结束",
+      "intent": "修复内容索引恢复中的重复记录，完成重启后的幂等性验证；可信验证与检视结论已记录，改动已落到集成分支。本次完成不代表已经合入 master，仍需维护者另行授权。",
+      "ended": true,
+      "project": "MiRing"
+    },
+    {
+      "key": "aborted",
+      "id": "Android-Device-Audio-Recovery-20261020",
+      "state": "已中止",
+      "marks": "",
+      "owner": "用户叫停",
+      "next": "已有证据与输出已保留",
+      "cost": "$0.91",
+      "date": "10-24 15:16",
+      "group": "最近结束",
+      "intent": "调查设备音频恢复中的偶发回归并验证设备条件；本次运行因用户叫停而中止，已保留执行输出、失败证据与现有改动记录。中止不表示成果已经验收或合入。",
+      "ended": true,
+      "project": "Android"
+    }
+  ],
+  "taskDetails": {
+    "active": {
+      "work": "W-684",
+      "previous": "W-683",
+      "revision": 3,
+      "created": "10-25 09:00",
+      "duration": "运行 5 小时 32 分",
+      "purpose": "通知关联恢复",
+      "scope": [
+        "src/application/notification-recovery.ts",
+        "test/notification-recovery.test.ts"
+      ],
+      "log": "09:00:00 [平台] 创建通知关联恢复任务\n14:20:00 [协调者] 修订 W-684，冻结关联恢复范围\n14:24:00 [执行者] 第 11 次：去重边界未通过\n14:27:00 [平台] 上游失败，按候选顺序自动改派\n14:27:01 [平台] executor-openrouter-qwen3-coder →\n14:27:01 [平台] executor-zai-glm-4-6\n14:30:00 [执行者] 第 13 次核对冻结工单与原始会话身份\n14:31:02 [工具] node --test test/notification-recovery.test.ts\n14:32:06 [执行者] 继续修复通知恢复中的重复分发",
+      "acceptance": [
+        "恢复后不重复分发通知",
+        "关联结果保留原始会话来源",
+        "修改仅涉及冻结范围并提交定向验证"
+      ],
+      "constraints": [
+        "不改变既有通知接口的数据形状",
+        "复用已记录的失败证据"
+      ],
+      "nonGoals": [
+        "不扩展通知功能或新增设置",
+        "本票不执行 master 合入"
+      ],
+      "guardrails": [
+        "不读取或输出凭据",
+        "不扩大 allowedScope",
+        "机器通过不代替角色验收"
+      ],
+      "events": [
+        {
+          "title": "协调者冻结工单",
+          "role": "协调者",
+          "candidate": "coordinator-antigravity-claude-opus-4-6-thinking",
+          "thought": "高",
+          "at": "10-25 09:02",
+          "result": "已记录",
+          "kind": "coordinator"
+        },
+        {
+          "title": "执行第 1 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 09:04",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 2 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 09:16",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 3 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 09:38",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 4 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:02",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 5 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:20",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 6 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:31",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 7 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:45",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 8 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 11:00",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 9 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 11:23",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 10 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 11:40",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "协调者修订工单",
+          "role": "协调者",
+          "candidate": "coordinator-antigravity-claude-opus-4-6-thinking",
+          "thought": "高",
+          "at": "10-25 14:20",
+          "result": "已记录",
+          "kind": "coordinator"
+        },
+        {
+          "title": "执行第 11 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 14:24",
+          "result": "被打回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 12 次",
+          "role": "执行者",
+          "candidate": "executor-zai-glm-4-6",
+          "thought": "中",
+          "at": "10-25 14:27",
+          "result": "改派 Qwen → GLM",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 13 次",
+          "role": "执行者",
+          "candidate": "executor-zai-glm-4-6",
+          "thought": "中",
+          "at": "10-25 14:30",
+          "result": "进行中",
+          "kind": "executor"
+        }
+      ]
+    },
+    "direct": {
+      "work": "W-712",
+      "previous": "W-711",
+      "revision": 2,
+      "created": "10-25 10:00",
+      "duration": "运行 4 小时 28 分",
+      "purpose": "场景策略恢复",
+      "scope": [
+        "src/scene/policy-recovery.ts",
+        "test/scene-policy-recovery.test.ts"
+      ],
+      "log": "10:00:00 [平台] 创建场景策略恢复任务\n10:02:00 [平台] 外部主控冻结 W-712 修订 2\n14:18:00 [执行者] 读取场景切换后的配置恢复条件\n14:24:00 [工具] node --test test/scene-policy-recovery.test.ts\n14:26:00 [执行者] 持久化策略恢复断言未通过\n14:27:00 [平台] 上游失败，按候选顺序自动改派\n14:27:10 [执行者] 保留设备配置与恢复现场\n14:28:00 [平台] 用户暂停，等待设备侧配置输入",
+      "acceptance": [
+        "异常恢复不覆盖用户配置",
+        "场景切换后的策略优先级保持一致",
+        "提交可复核的设备侧输入与验证结果"
+      ],
+      "constraints": [
+        "主控模型与费用对平台不可见",
+        "等待设备输入期间不继续派发"
+      ],
+      "nonGoals": [
+        "不引入平台协调者会话",
+        "不改用户已有配置"
+      ],
+      "guardrails": [
+        "只在主控冻结的工单范围内实施",
+        "不得将主控未知费用填为零",
+        "保存设备原始证据"
+      ],
+      "events": [
+        {
+          "title": "主控冻结工单",
+          "role": "外部主控",
+          "candidate": null,
+          "thought": null,
+          "at": "10-25 10:02",
+          "result": "已记录",
+          "kind": "controller"
+        },
+        {
+          "title": "执行第 1 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:10",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 2 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:20",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 3 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:35",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 4 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 10:50",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 5 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 11:05",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 6 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 11:20",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 7 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 11:50",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 8 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 12:10",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 9 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 12:30",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 10 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 13:10",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 11 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 14:18",
+          "result": "被打回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 12 次",
+          "role": "执行者",
+          "candidate": "executor-zai-glm-4-6",
+          "thought": "中",
+          "at": "10-25 14:27",
+          "result": "改派 Qwen → GLM",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 13 次",
+          "role": "执行者",
+          "candidate": "executor-zai-glm-4-6",
+          "thought": "中",
+          "at": "10-25 14:27:10",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "主控核对设备输入",
+          "role": "外部主控",
+          "candidate": null,
+          "thought": null,
+          "at": "10-25 14:28",
+          "result": "等待用户",
+          "kind": "controller"
+        }
+      ]
+    },
+    "review": {
+      "work": "W-1102",
+      "previous": "W-1101",
+      "revision": 4,
+      "created": "10-24 16:10",
+      "duration": "累计 22 小时 21 分",
+      "purpose": "车辆资源目录校验",
+      "scope": [
+        "src/catalog/resource-index.ts",
+        "test/resource-index-recovery.test.ts"
+      ],
+      "log": "10-24 16:10:00 [平台] 创建车辆资源目录校验任务\n10-25 13:46:00 [协调者] 核对 W-1102 验收条件\n10-25 14:18:00 [执行者] 提交资源索引恢复改动\n10-25 14:20:00 [工具] node --test\n10-25 14:24:00 [平台] VR-1182：412 项，0 失败，提交 7c1e9a2\n10-25 14:30:00 [执行者] 交回 2 个文件，+34 / −8 行\n10-25 14:31:00 [协调者] 逐条验收通过 3/3\n10-25 14:32:00 [平台] 等待检视者终审，未合入",
+      "acceptance": [
+        "资源索引恢复后不丢失条目",
+        "更新中断后不产生重复索引",
+        "提交范围与契约一致并通过可信验证"
+      ],
+      "constraints": [
+        "保留既有资源目录接口",
+        "可信报告必须绑定受评提交"
+      ],
+      "nonGoals": [
+        "本票不改资源授权策略",
+        "终审前不执行合入"
+      ],
+      "guardrails": [
+        "角色验收与检视者终审分别记录",
+        "未合入 master 不标为 master 已完成",
+        "保留全部失败与补修历史"
+      ],
+      "events": [
+        {
+          "title": "协调者冻结工单",
+          "role": "协调者",
+          "candidate": "coordinator-antigravity-claude-opus-4-6-thinking",
+          "thought": "高",
+          "at": "10-24 16:12",
+          "result": "已记录",
+          "kind": "coordinator"
+        },
+        {
+          "title": "执行第 1 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 16:20",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 2 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 16:35",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 3 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 17:10",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 4 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 17:28",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 5 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 17:50",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 6 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 18:05",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 7 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 18:19",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 8 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 18:32",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 9 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 19:00",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 10 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-24 19:20",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 11 次",
+          "role": "执行者",
+          "candidate": "executor-openrouter-qwen3-coder",
+          "thought": "高",
+          "at": "10-25 13:48",
+          "result": "被打回",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 12 次",
+          "role": "执行者",
+          "candidate": "executor-zai-glm-4-6",
+          "thought": "中",
+          "at": "10-25 14:00",
+          "result": "改派 Qwen → GLM",
+          "kind": "executor"
+        },
+        {
+          "title": "执行第 13 次",
+          "role": "执行者",
+          "candidate": "executor-zai-glm-4-6",
+          "thought": "中",
+          "at": "10-25 14:18",
+          "result": "已交回",
+          "kind": "executor"
+        },
+        {
+          "title": "协调者验收与交卷",
+          "role": "协调者",
+          "candidate": "coordinator-antigravity-claude-opus-4-6-thinking",
+          "thought": "高",
+          "at": "10-25 14:31",
+          "result": "通过 3/3",
+          "kind": "coordinator"
+        }
+      ]
+    }
+  },
+  "candidates": [
+    {
+      "old": "coordinator-01",
+      "role": "coordinator",
+      "rank": 1,
+      "id": "coordinator-antigravity-claude-opus-4-6-thinking",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "正常",
+      "attempts": 19,
+      "successes": 17,
+      "cost": "$1.43",
+      "quota": "剩 8% · 11-01 重置",
+      "runtime": "空闲",
+      "failure": "",
+      "lastFailure": "无失败记录",
+      "quotaReason": "",
+      "provider": "antigravity",
+      "model": "claude-opus-4-6-thinking"
+    },
+    {
+      "old": "coordinator-02",
+      "role": "coordinator",
+      "rank": 2,
+      "id": "coordinator-openrouter-deepseek-v3-2",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "熔断",
+      "attempts": 86,
+      "successes": 34,
+      "cost": "$8.72",
+      "quota": "已耗尽 · 需充值",
+      "runtime": "空闲",
+      "failure": "额度耗尽",
+      "lastFailure": "10-25 13:58 · quota",
+      "quotaReason": "额度已用完，适配层没有给出重置时间——不会自动恢复，要等充值后人工复位。",
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2"
+    },
+    {
+      "old": "coordinator-03",
+      "role": "coordinator",
+      "rank": 3,
+      "id": "coordinator-openrouter-qwen3-coder",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "试探中",
+      "attempts": 3,
+      "successes": 1,
+      "cost": "费用未上报",
+      "quota": "剩 73% · 11-04 重置",
+      "runtime": "运行中 · hop-c8ad19",
+      "failure": "网络暂时失败",
+      "lastFailure": "10-25 14:12 · upstream_network",
+      "quotaReason": "",
+      "provider": "openrouter",
+      "model": "qwen/qwen3-coder"
+    },
+    {
+      "old": "coordinator-04",
+      "role": "coordinator",
+      "rank": 4,
+      "id": "coordinator-zai-glm-4-6",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "未知",
+      "attempts": null,
+      "successes": null,
+      "cost": "费用未上报",
+      "quota": "",
+      "runtime": "未知",
+      "failure": "健康未返回",
+      "lastFailure": "未知",
+      "quotaReason": "",
+      "provider": "zai",
+      "model": "glm-4.6"
+    },
+    {
+      "old": "coordinator-05",
+      "role": "coordinator",
+      "rank": 5,
+      "id": "coordinator-anthropic-claude-sonnet-4-6",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "正常",
+      "attempts": 132,
+      "successes": 128,
+      "cost": "$26.91",
+      "quota": "剩 42% · 10-29 重置",
+      "runtime": "空闲",
+      "failure": "",
+      "lastFailure": "10-22 08:51 · timeout（已恢复）",
+      "quotaReason": "",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "old": "coordinator-06",
+      "role": "coordinator",
+      "rank": 6,
+      "id": "coordinator-openai-gpt-5-4",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "熔断",
+      "attempts": 7,
+      "successes": 5,
+      "cost": "$0.31",
+      "quota": "已耗尽 · 16:05 重置",
+      "runtime": "空闲",
+      "failure": "额度耗尽",
+      "lastFailure": "10-25 14:05 · quota",
+      "quotaReason": "额度已用完，10-25 16:05 重置后再派活。",
+      "provider": "openai",
+      "model": "gpt-5.4"
+    },
+    {
+      "old": "coordinator-07",
+      "role": "coordinator",
+      "rank": 7,
+      "id": "coordinator-google-gemini-2-5-pro",
+      "endpoint": "local",
+      "enabled": false,
+      "circuit": "正常",
+      "attempts": 2,
+      "successes": 2,
+      "cost": "$0.04",
+      "quota": "",
+      "runtime": "空闲",
+      "failure": "",
+      "lastFailure": "无失败记录",
+      "quotaReason": "",
+      "provider": "google",
+      "model": "gemini-2.5-pro"
+    },
+    {
+      "old": "coordinator-08",
+      "role": "coordinator",
+      "rank": 8,
+      "id": "coordinator-local-qwen3-coder-30b",
+      "endpoint": "local",
+      "enabled": false,
+      "circuit": "正常",
+      "attempts": 0,
+      "successes": 0,
+      "cost": "$0.00（已上报）",
+      "quota": "",
+      "runtime": "空闲",
+      "failure": "",
+      "lastFailure": "无失败记录",
+      "quotaReason": "",
+      "provider": "local",
+      "model": "qwen3-coder-30b"
+    },
+    {
+      "old": "executor-01",
+      "role": "executor",
+      "rank": 1,
+      "id": "executor-openrouter-qwen3-coder",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "正常",
+      "attempts": 61,
+      "successes": 53,
+      "cost": "$2.18",
+      "quota": "剩 12% · 11-01 重置",
+      "runtime": "空闲",
+      "failure": "",
+      "lastFailure": "10-25 14:26 · upstream_network（已恢复）",
+      "quotaReason": "",
+      "provider": "openrouter",
+      "model": "qwen/qwen3-coder"
+    },
+    {
+      "old": "executor-02",
+      "role": "executor",
+      "rank": 2,
+      "id": "executor-zai-glm-4-6",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "正常",
+      "attempts": 11,
+      "successes": 8,
+      "cost": "费用未上报",
+      "quota": "剩 34% · 22:00 重置",
+      "runtime": "运行中 · hop-684-e13",
+      "failure": "",
+      "lastFailure": "无失败记录",
+      "quotaReason": "",
+      "provider": "zai",
+      "model": "glm-4.6"
+    },
+    {
+      "old": "executor-03",
+      "role": "executor",
+      "rank": 3,
+      "id": "executor-openai-gpt-5-4-mini",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "试探中",
+      "attempts": 4,
+      "successes": 1,
+      "cost": "$0.13",
+      "quota": "",
+      "runtime": "运行中 · hop-a6033f",
+      "failure": "限流",
+      "lastFailure": "10-25 13:10 · rate_limit",
+      "quotaReason": "",
+      "provider": "openai",
+      "model": "gpt-5.4-mini"
+    },
+    {
+      "old": "executor-04",
+      "role": "executor",
+      "rank": 4,
+      "id": "executor-local-qwen3-coder-30b",
+      "endpoint": "local",
+      "enabled": true,
+      "circuit": "未知",
+      "attempts": 1,
+      "successes": 0,
+      "cost": "费用未上报",
+      "quota": "",
+      "runtime": "空闲",
+      "failure": "健康未返回",
+      "lastFailure": "未知",
+      "quotaReason": "",
+      "provider": "local",
+      "model": "qwen3-coder-30b"
+    }
+  ],
+  "frames": {
+    "overview": "2:47",
+    "detail": "2:140",
+    "direct": "41:488",
+    "review": "41:574",
+    "resource": "2:214",
+    "resource-executor": "43:492",
+    "edit": "43:630",
+    "edit-open": "43:712",
+    "add-candidate": "43:794",
+    "conflict": "43:871",
+    "evidence-review": "44:1322",
+    "evidence-active": "44:1440",
+    "evidence-direct": "44:1558",
+    "intent-active": "44:1676",
+    "intent-direct": "44:1750",
+    "intent-review": "44:1824",
+    "history-active": "45:1388",
+    "files-active": "45:1510",
+    "cost-active": "45:1588",
+    "history-direct": "45:1593",
+    "files-direct": "45:1715",
+    "cost-direct": "45:1793",
+    "history-review": "45:1798",
+    "files-review": "45:1920",
+    "cost-review": "45:1998",
+    "record-upgrade": "45:2003",
+    "record-retry": "45:2008",
+    "record-investigate": "45:2013",
+    "record-complete": "45:2018",
+    "record-aborted": "45:2023",
+    "tooltip-review": "45:2028",
+    "tooltip-upgrade": "45:2031",
+    "tooltip-direct": "45:2034",
+    "tooltip-active": "45:2037",
+    "tooltip-retry": "45:2040",
+    "tooltip-investigate": "45:2043",
+    "tooltip-complete": "45:2046",
+    "tooltip-aborted": "45:2049",
+    "data-states": "45:2052",
+    "projects": "45:2084",
+    "endpoints": "45:2089",
+    "copied": "45:2094",
+    "saved": "45:2099",
+    "reloaded": "49:4094",
+    "disabled-candidate": "45:2109",
+    "reordered": "45:2114",
+    "filter0": "2:47",
+    "filter1": "48:1646",
+    "filter2": "48:1861",
+    "filter3": "48:2078",
+    "filter4": "48:2293",
+    "filter5": "48:2508",
+    "filter6": "48:2723",
+    "paused": "48:2938",
+    "search": "48:3162",
+    "resource-independent_reviewer": "48:3380",
+    "resource-classifier": "48:3607",
+    "edit-coordinator-03": "48:3834",
+    "edit-coordinator-04": "48:3923",
+    "edit-coordinator-05": "48:4012",
+    "edit-coordinator-06": "48:4101",
+    "edit-coordinator-07": "48:4190",
+    "edit-coordinator-08": "48:4282",
+    "edit-executor-01": "48:4374",
+    "edit-executor-02": "48:4463",
+    "edit-executor-03": "48:4552",
+    "edit-executor-04": "48:4641",
+    "selected-history": "49:3990",
+    "workitems-active": "49:4082",
+    "workitems-direct": "49:4086",
+    "workitems-review": "49:4090",
+    "resource-coordinator": "2:214"
+  },
+  "projectScope": "全部项目",
+  "roleDrafts": {
+    "coordinator": {
+      "revision": "2f3bb069",
+      "dirtyFields": [
+        "顺序",
+        "启用"
+      ],
+      "saveScope": "whole_role"
+    },
+    "executor": {
+      "revision": "b891c450",
+      "dirtyFields": [
+        "适配层参数"
+      ],
+      "saveScope": "whole_role"
+    }
+  }
+}

@@ -1,0 +1,765 @@
+const assetPathPrefix = "https://www.figma.com/api/mcp/asset/fea052cb-9d9f-4751-97a0-7c77a7e00a21";
+const imgTrack = `${assetPathPrefix}/6121f.svg`;
+const imgIcon = `${assetPathPrefix}/1130f.svg`;
+
+type ConsoleSwitchProps = {
+  className?: string;
+  state?: "On";
+};
+
+function ConsoleSwitch({ className, state = "On" }: ConsoleSwitchProps) {
+  return (
+    <div className={className || "content-stretch flex gap-[8px] h-[32px] items-center relative w-[180px]"} data-node-id="39:321">
+      <div className="h-[20px] relative shrink-0 w-[34px]" data-node-id="39:322" data-name="track">
+        <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgTrack} />
+      </div>
+      <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] whitespace-nowrap" data-node-id="39:324">
+        已启用
+      </p>
+    </div>
+  );
+}
+
+type ConsoleNavItemProps = {
+  className?: string;
+  state?: "Default";
+};
+
+function ConsoleNavItem({ className, state = "Default" }: ConsoleNavItemProps) {
+  return (
+    <div className={className || "content-stretch flex h-[40px] items-center pl-[16px] pr-[12px] relative w-[152px]"} data-node-id="39:240">
+      <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/white,white)] whitespace-nowrap" data-node-id="39:241">
+        任务
+      </p>
+    </div>
+  );
+}
+
+export default function Component03C() {
+  return (
+    <div className="bg-[var(--color\/paper,#f5f3ed)] relative size-full" data-node-id="43:794" data-name="03C 添加候选">
+      <div className="absolute bg-[var(--color\/ink,#222b35)] content-stretch flex flex-col gap-[10px] h-[1120px] items-start left-0 overflow-clip p-[16px] top-0 w-[184px]" data-node-id="43:795" data-name="一级导航">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] relative shrink-0 text-[18px] text-[color:var(--color\/white,white)] whitespace-nowrap" data-node-id="43:796">
+          CoAgentHub
+        </p>
+        <div className="h-[42px] relative shrink-0 w-px" data-node-id="43:797" data-name="导航间距" />
+        <ConsoleNavItem className="content-stretch cursor-pointer flex h-[40px] items-center pl-[16px] pr-[12px] relative shrink-0 w-[152px]" />
+        <a className="bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid content-stretch cursor-pointer flex h-[40px] items-center pl-[16px] pr-[12px] relative shrink-0 w-[152px]" data-node-id="43:799" data-name="Console/NavItem">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/accent,#275d74)] text-left whitespace-nowrap" data-node-id="I43:799;39:243">
+            资源
+          </p>
+        </a>
+      </div>
+      <div className="absolute content-stretch flex gap-[16px] h-[42px] items-center left-[224px] overflow-clip top-[18px] w-[1176px]" data-node-id="43:800" data-name="项目与同步状态">
+        <a className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex gap-[8px] h-[42px] items-center px-[12px] relative rounded-[5px] shrink-0 w-[256px]" data-node-id="43:801" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)] text-left" data-node-id="I43:801;39:312">
+            项目：全部项目
+          </p>
+          <div className="relative shrink-0 size-[16px]" data-node-id="I43:801;39:313" data-name="icon">
+            <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon} />
+          </div>
+        </a>
+        <div className="flex-[1_0_0] h-px min-w-px relative" data-node-id="43:802" data-name="空白" />
+        <a className="[word-break:break-word] block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] relative shrink-0 text-[13px] text-[color:var(--color\/green,#35654b)] whitespace-nowrap" data-node-id="43:803">
+          <p className="leading-[20px]">最近同步 14:32:08 · 服务正常</p>
+        </a>
+      </div>
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[68px] w-[1176px]" data-node-id="43:805" data-name="分隔线" />
+      <div className="absolute content-stretch flex flex-col gap-[16px] h-[996px] items-start left-[224px] overflow-clip top-[96px] w-[1176px]" data-node-id="43:806" data-name="资源页 / 自动布局">
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[626px] left-0 rounded-[8px] top-[108px] w-[1176px]" data-node-id="82:4116" data-name="候选数据区域 / 白色底板" />
+        <p className="[word-break:break-word] font-['Noto_Serif_SC:Medium'] font-medium leading-[44px] relative shrink-0 text-[32px] text-[color:var(--color\/ink,#222b35)] w-[1176px]" data-node-id="43:807">
+          模型资源
+        </p>
+        <div className="bg-[var(--color\/nav,#eceae2)] content-stretch cursor-pointer flex gap-[12px] h-[40px] items-start overflow-clip relative shrink-0 w-[1176px]" data-node-id="43:808" data-name="角色页签">
+          <a className="border-[var(--color\/accent,#275d74)] border-b-2 border-solid content-stretch flex h-[40px] items-center justify-center relative shrink-0 w-[180px]" data-node-id="43:809" data-name="Console/Tab">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/accent,#275d74)] text-left whitespace-nowrap" data-node-id="I43:809;39:248">
+              协调者 8
+            </p>
+          </a>
+          <a className="content-stretch flex h-[40px] items-center justify-center relative shrink-0 w-[180px]" data-node-id="43:810" data-name="Console/Tab">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I43:810;39:246">
+              执行者 4
+            </p>
+          </a>
+          <a className="content-stretch flex h-[40px] items-center justify-center relative shrink-0 w-[180px]" data-node-id="43:811" data-name="Console/Tab">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I43:811;39:246">
+              独立复核 0
+            </p>
+          </a>
+          <a className="content-stretch flex h-[40px] items-center justify-center relative shrink-0 w-[180px]" data-node-id="43:812" data-name="Console/Tab">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I43:812;39:246">
+              分类 0
+            </p>
+          </a>
+        </div>
+        <div className="content-stretch flex gap-[16px] h-[36px] items-start overflow-clip relative shrink-0 w-[1176px]" data-node-id="43:814" data-name="候选管理">
+          <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[36px] items-center justify-center relative rounded-[5px] shrink-0 w-[128px]" data-node-id="43:815" data-name="Console/SecondaryButton">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] whitespace-nowrap" data-node-id="I43:815;39:305">
+              添加候选
+            </p>
+          </div>
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="43:816">
+            配置修订 2f3bb069 · 角色草稿未保存
+          </p>
+        </div>
+        <div className="bg-[var(--color\/nav,#eceae2)] content-stretch flex gap-[4px] h-[30px] items-start overflow-clip px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:817" data-name="资源列头">
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[32px]" data-node-id="46:1702" data-name="表头 / 顺序">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[32px]" data-node-id="46:1703">
+              顺序
+            </p>
+          </div>
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[248px]" data-node-id="46:1704" data-name="表头 / 候选 / endpoint">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[248px]" data-node-id="46:1705">
+              候选 / endpoint
+            </p>
+          </div>
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[64px]" data-node-id="46:1706" data-name="表头 / 启用">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[64px]" data-node-id="46:1707">
+              启用
+            </p>
+          </div>
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[128px]" data-node-id="46:1708" data-name="表头 / 熔断">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[128px]" data-node-id="46:1709">
+              熔断
+            </p>
+          </div>
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[232px]" data-node-id="46:1710" data-name="表头 / 近 7 天">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[232px]" data-node-id="46:1711">
+              近 7 天
+            </p>
+          </div>
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[184px]" data-node-id="46:1712" data-name="表头 / 额度">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[184px]" data-node-id="46:1713">
+              额度
+            </p>
+          </div>
+          <div className="h-[26px] overflow-clip relative shrink-0 w-[232px]" data-node-id="46:1714" data-name="表头 / 占用">
+            <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-0 text-[13px] text-[color:var(--color\/muted,#58616a)] top-0 w-[232px]" data-node-id="46:1715">
+              占用
+            </p>
+          </div>
+        </div>
+        <div className="[word-break:break-word] content-stretch cursor-pointer flex flex-col h-[512px] items-start overflow-clip relative shrink-0 text-left w-[1176px] whitespace-nowrap" data-node-id="43:825" data-name="候选列表">
+          <a className="bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:826" data-name="资源行 / coordinator-01">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:826;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:826;39:375">
+                1
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:826;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:826;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:826;39:378">
+                coordinator-antigra…-6-thinking
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:826;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[64px]" data-node-id="I43:826;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:826;39:381">
+                启用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:826;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:826;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/green,#35654b)] text-ellipsis w-full" data-node-id="I43:826;39:384">
+                正常
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:826;39:385">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:826;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:826;39:387">
+                尝试 19 · 成功 17
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:826;39:388">
+                $1.43
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:826;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:826;39:390">
+                剩 8% · 11-01 重置
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:826;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:826;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:826;39:393">
+                空闲
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:826;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:827" data-name="资源行 / coordinator-02">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:827;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:827;39:375">
+                2
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:827;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:827;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:827;39:378">
+                coordinator-openrou…epseek-v3-2
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:827;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[64px]" data-node-id="I43:827;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:827;39:381">
+                启用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:827;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:827;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/red,#a24138)] text-ellipsis w-full" data-node-id="I43:827;39:384">
+                熔断
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:827;39:385">
+                额度耗尽
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:827;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:827;39:387">
+                尝试 86 · 成功 34
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:827;39:388">
+                $8.72
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:827;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:827;39:390">
+                已耗尽 · 需充值
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:827;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:827;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:827;39:393">
+                空闲
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:827;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:828" data-name="资源行 / coordinator-03">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:828;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:828;39:375">
+                3
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:828;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:828;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:828;39:378">
+                coordinator-openrou…qwen3-coder
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:828;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[64px]" data-node-id="I43:828;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:828;39:381">
+                启用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:828;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:828;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/amber,#8b5429)] text-ellipsis w-full" data-node-id="I43:828;39:384">
+                试探中
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:828;39:385">
+                网络暂时失败
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:828;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:828;39:387">
+                尝试 3 · 成功 1
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:828;39:388">
+                费用未上报
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:828;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:828;39:390">
+                剩 73% · 11-04 重置
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:828;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[232px]" data-node-id="I43:828;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/green,#35654b)] text-ellipsis w-full" data-node-id="I43:828;39:393">
+                运行中 · hop-c8ad19
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:828;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:829" data-name="资源行 / coordinator-04">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:829;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:829;39:375">
+                4
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:829;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:829;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:829;39:378">
+                coordinator-zai-glm-4-6
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:829;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[64px]" data-node-id="I43:829;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:829;39:381">
+                启用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:829;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 text-[color:var(--color\/muted,#58616a)] w-[128px]" data-node-id="I43:829;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-ellipsis w-full" data-node-id="I43:829;39:384">
+                未知
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-ellipsis w-full" data-node-id="I43:829;39:385">
+                健康未返回
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:829;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:829;39:387">
+                尝试 未知 · 成功 未知
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:829;39:388">
+                费用未上报
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:829;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:829;39:390">
+                ​
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:829;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:829;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:829;39:393">
+                未知
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:829;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:830" data-name="资源行 / coordinator-05">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:830;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:830;39:375">
+                5
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:830;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:830;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:830;39:378">
+                coordinator-anthrop…-sonnet-4-6
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:830;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[64px]" data-node-id="I43:830;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:830;39:381">
+                启用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:830;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:830;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/green,#35654b)] text-ellipsis w-full" data-node-id="I43:830;39:384">
+                正常
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:830;39:385">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:830;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:830;39:387">
+                尝试 132 · 成功 128
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:830;39:388">
+                $26.91
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:830;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:830;39:390">
+                剩 42% · 10-29 重置
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:830;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:830;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:830;39:393">
+                空闲
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:830;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:831" data-name="资源行 / coordinator-06">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:831;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:831;39:375">
+                6
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:831;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:831;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:831;39:378">
+                coordinator-openai-gpt-5-4
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:831;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[64px]" data-node-id="I43:831;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:831;39:381">
+                启用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:831;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:831;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/red,#a24138)] text-ellipsis w-full" data-node-id="I43:831;39:384">
+                熔断
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:831;39:385">
+                额度耗尽
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:831;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:831;39:387">
+                尝试 7 · 成功 5
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:831;39:388">
+                $0.31
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:831;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:831;39:390">
+                已耗尽 · 16:05 重置
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:831;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:831;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:831;39:393">
+                空闲
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:831;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:832" data-name="资源行 / coordinator-07">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:832;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:832;39:375">
+                7
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:832;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:832;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:832;39:378">
+                coordinator-google-…ini-2-5-pro
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:832;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 text-[color:var(--color\/muted,#58616a)] w-[64px]" data-node-id="I43:832;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-ellipsis w-full" data-node-id="I43:832;39:381">
+                停用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-ellipsis w-full" data-node-id="I43:832;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:832;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/green,#35654b)] text-ellipsis w-full" data-node-id="I43:832;39:384">
+                正常
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:832;39:385">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:832;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:832;39:387">
+                尝试 2 · 成功 2
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:832;39:388">
+                $0.04
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:832;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:832;39:390">
+                ​
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:832;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:832;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:832;39:393">
+                空闲
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:832;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+          <a className="content-stretch flex gap-[4px] h-[64px] items-center px-[16px] relative shrink-0 w-[1176px]" data-node-id="43:833" data-name="资源行 / coordinator-08">
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[32px]" data-node-id="I43:833;39:374" data-name="rank">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:833;39:375">
+                8
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:833;39:376">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] w-[248px]" data-node-id="I43:833;39:377" data-name="candidate">
+              <p className="font-['IBM_Plex_Mono:Regular'] h-[20px] not-italic overflow-hidden relative shrink-0 text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:833;39:378">
+                coordinator-local-q…3-coder-30b
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] overflow-hidden relative shrink-0 text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:833;39:379">
+                local
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 text-[color:var(--color\/muted,#58616a)] w-[64px]" data-node-id="I43:833;39:380" data-name="enabled">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-ellipsis w-full" data-node-id="I43:833;39:381">
+                停用
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-ellipsis w-full" data-node-id="I43:833;39:382">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col h-[44px] items-start overflow-clip relative shrink-0 w-[128px]" data-node-id="I43:833;39:383" data-name="circuit">
+              <p className="font-['Noto_Sans_SC:Medium'] font-medium h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/green,#35654b)] text-ellipsis w-full" data-node-id="I43:833;39:384">
+                正常
+              </p>
+              <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:833;39:385">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start overflow-clip relative shrink-0 w-[232px]" data-node-id="I43:833;39:386" data-name="week">
+              <p className="h-[20px] leading-[22px] overflow-hidden relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-ellipsis w-full" data-node-id="I43:833;39:387">
+                尝试 0 · 成功 0
+              </p>
+              <p className="h-[20px] leading-[20px] overflow-hidden relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] text-ellipsis w-full" data-node-id="I43:833;39:388">
+                $0.00（已上报）
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[184px]" data-node-id="I43:833;39:389" data-name="quota">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:833;39:390">
+                ​
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:833;39:391">
+                ​
+              </p>
+            </div>
+            <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal h-[44px] items-start leading-[20px] overflow-clip relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-[232px]" data-node-id="I43:833;39:392" data-name="runtime">
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:833;39:393">
+                空闲
+              </p>
+              <p className="h-[20px] overflow-hidden relative shrink-0 text-ellipsis w-full" data-node-id="I43:833;39:394">
+                ​
+              </p>
+            </div>
+          </a>
+        </div>
+      </div>
+      <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[920px] left-[900px] overflow-clip rounded-[12px] top-[78px] w-[516px]" data-node-id="43:839" data-name="右侧编辑面板">
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] left-[23px] text-[18px] text-[color:var(--color\/ink,#222b35)] top-[19px] w-[344px]" data-node-id="69:4167">
+          添加协调者候选
+        </p>
+        <a className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex h-[36px] items-center justify-center left-[391px] rounded-[5px] top-[11px] w-[100px]" data-node-id="69:4168" data-name="Console/SecondaryButton">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-left whitespace-nowrap" data-node-id="I69:4168;39:305">
+            返回草稿
+          </p>
+        </a>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[105px] whitespace-nowrap" data-node-id="69:4171">
+          profileId
+        </p>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[23px] px-[12px] rounded-[5px] top-[129px] w-[468px]" data-node-id="69:4172" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4172;39:310">
+            coordinator-openrouter-deepseek-r1-0528
+          </p>
+        </div>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[189px] whitespace-nowrap" data-node-id="69:4174">
+          端点
+        </p>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex gap-[8px] h-[42px] items-center left-[23px] px-[12px] rounded-[5px] top-[213px] w-[468px]" data-node-id="69:4175" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4175;39:312">
+            local
+          </p>
+          <div className="relative shrink-0 size-[16px]" data-node-id="I69:4175;39:313" data-name="icon">
+            <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon} />
+          </div>
+        </div>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[273px] whitespace-nowrap" data-node-id="69:4179">
+          runtime：pi（固定）
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[321px] whitespace-nowrap" data-node-id="69:4180">
+          适配层参数
+        </p>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[23px] px-[12px] rounded-[5px] top-[353px] w-[160px]" data-node-id="69:4181" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4181;39:310">
+            provider
+          </p>
+        </div>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[191px] px-[12px] rounded-[5px] top-[353px] w-[300px]" data-node-id="69:4183" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4183;39:310">
+            openrouter
+          </p>
+        </div>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[23px] px-[12px] rounded-[5px] top-[403px] w-[160px]" data-node-id="69:4185" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4185;39:310">
+            model
+          </p>
+        </div>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[191px] px-[12px] rounded-[5px] top-[403px] w-[300px]" data-node-id="69:4187" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4187;39:310">
+            deepseek/deepseek-r1-0528
+          </p>
+        </div>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[23px] px-[12px] rounded-[5px] top-[453px] w-[160px]" data-node-id="69:4189" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4189;39:310">
+            prompt_channel
+          </p>
+        </div>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[191px] px-[12px] rounded-[5px] top-[453px] w-[300px]" data-node-id="69:4191" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4191;39:310">
+            user
+          </p>
+        </div>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[36px] items-center justify-center left-[23px] rounded-[5px] top-[515px] w-[128px]" data-node-id="69:4193" data-name="Console/SecondaryButton">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] whitespace-nowrap" data-node-id="I69:4193;39:305">
+            添加参数
+          </p>
+        </div>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[571px] whitespace-nowrap" data-node-id="69:4196">
+          顺序
+        </p>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[42px] items-center left-[23px] px-[12px] rounded-[5px] top-[595px] w-[140px]" data-node-id="69:4197" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)]" data-node-id="I69:4197;39:310">
+            9
+          </p>
+        </div>
+        <ConsoleSwitch className="absolute content-stretch flex gap-[8px] h-[32px] items-center left-[23px] top-[659px] w-[210px]" />
+        <a className="absolute content-stretch cursor-pointer flex flex-col h-[36px] items-center left-[23px] top-[723px] w-[164px]" data-node-id="69:4203" data-name="Console/PrimaryButton">
+          <div className="bg-[var(--color\/accent,#275d74)] content-stretch flex h-[36px] items-center justify-center overflow-clip relative rounded-[5px] shrink-0 w-[128px]" data-node-id="I69:4203;39:285" data-name="face">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/white,white)] text-left whitespace-nowrap" data-node-id="I69:4203;39:286">
+              加入角色草稿
+            </p>
+          </div>
+        </a>
+      </div>
+      <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex gap-[16px] h-[84px] items-center left-[224px] overflow-clip p-[16px] rounded-[8px] top-[1012px] w-[1176px]" data-node-id="69:4158" data-name="角色统一草稿保存条">
+        <div className="[word-break:break-word] content-stretch flex flex-[1_0_0] flex-col gap-[2px] h-[48px] items-start min-w-px overflow-clip relative" data-node-id="69:4159" data-name="角色草稿摘要">
+          <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] w-full" data-node-id="69:4160">
+            有 2 处未保存：顺序、启用
+          </p>
+          <p className="font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="69:4161">
+            协调者 · 修订 2f3bb069
+          </p>
+        </div>
+        <a className="content-stretch cursor-pointer flex flex-col h-[36px] items-center relative shrink-0 w-[156px]" data-node-id="69:4162" data-name="Console/PrimaryButton">
+          <div className="bg-[var(--color\/accent,#275d74)] content-stretch flex h-[36px] items-center justify-center overflow-clip relative rounded-[5px] shrink-0 w-[128px]" data-node-id="I69:4162;39:285" data-name="face">
+            <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/white,white)] text-left whitespace-nowrap" data-node-id="I69:4162;39:286">
+              保存整个角色
+            </p>
+          </div>
+        </a>
+        <a className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex h-[36px] items-center justify-center relative rounded-[5px] shrink-0 w-[140px]" data-node-id="69:4165" data-name="Console/SecondaryButton">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-left whitespace-nowrap" data-node-id="I69:4165;39:305">
+            放弃草稿
+          </p>
+        </a>
+      </div>
+    </div>
+  );
+}
+SUPER CRITICAL: The generated React+Tailwind code MUST be converted to match the target project's technology stack and styling system.
+1. Analyze the target codebase to identify: technology stack, styling approach, component patterns, and design tokens
+2. Convert React syntax to the target framework/library
+3. Transform all Tailwind classes to the target styling system while preserving exact visual design
+4. Follow the project's existing patterns and conventions
+DO NOT install any Tailwind as a dependency unless the user instructs you to do so.
+
+Node ids have been added to the code as data attributes, e.g. `data-node-id="1:2"`.
+These styles are contained in the design: Console/Section: Font(family: "Noto Sans SC", style: Medium, size: 18, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Record: Font(family: "Noto Sans SC", style: Medium, size: 16, weight: 500, lineHeight: 24, letterSpacing: 0), Console/Body: Font(family: "Noto Sans SC", style: Regular, size: 14, weight: 400, lineHeight: 22, letterSpacing: 0), Console/Meta: Font(family: "Noto Sans SC", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0), Console/Page: Font(family: "Noto Serif SC", style: Medium, size: 32, weight: 500, lineHeight: 44, letterSpacing: 0), Console/Emphasis: Font(family: "Noto Sans SC", style: Medium, size: 14, weight: 500, lineHeight: 22, letterSpacing: 0), Console/Data: Font(family: "IBM Plex Mono", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0).
+Component descriptions: The following components have usage descriptions or documentation links defined in Figma. These descriptions provide important context about the intended usage, best practices, and any constraints for each component. Follow these guidelines when implementing or using these components.
+
+## Console/NavItem
+**Node ID:** 39:244
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Field
+**Node ID:** 39:320
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Tab
+**Node ID:** 39:249
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/SecondaryButton
+**Node ID:** 39:308
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/TableRow
+**Node ID:** 39:395
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Switch
+**Node ID:** 39:329
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/PrimaryButton
+**Node ID:** 39:303
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+The generated code contains image and SVG URL constants, e.g. const image = `${assetPathPrefix}/<asset file name>`, where assetPathPrefix is declared once at the top of the code and every asset URL interpolates it. These URLs are temporary download sources and expire after 7 days. Download each asset into the project with curl -L, then replace its URL in the generated code with a reference to the downloaded asset. Never use the temporary URLs as runtime image sources.
