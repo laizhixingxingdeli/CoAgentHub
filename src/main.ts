@@ -61,6 +61,7 @@ import {
 import { attachLoopbackWriterIdentity, listenLoopback } from './application/loopback-listen.ts';
 import {
   parseReconcileIntervalMs,
+  archiveEligibleMissions,
   reconcileInterruptedAttempts,
   reconcileMergedMissionBranches,
   reconcileOrphanedWorktrees,
@@ -379,6 +380,45 @@ export async function buildPersistentPlatform(
           error instanceof Error ? error.message : String(error)
         }`,
       );
+    }
+
+    // ADR-0009 状态瘦身：①一次性把主状态里的遥测事件搬进边车（之后遥测追加
+    // 不再进主状态、也不再触发整份落盘）；②把「completed 且已合入、超过 30 天」
+    // 的 Mission 归档进 .coagent-archive 旁路包（读侧按需取，详情不丢）。
+    // 都只在常驻服务的排他启动做；失败只记 warning，不挡启动。
+    if (options.startupMaintenance) {
+      try {
+        const migrated = store.migrateTelemetryEventsToSidecars();
+        if (migrated.moved > 0) {
+          console.warn(
+            `[state slim] 遥测外置：${migrated.moved} 条事件（${migrated.missions} 个 Mission）迁入 .coagent-events/`,
+          );
+        }
+      } catch (error) {
+        console.warn(
+          `[state slim] 遥测迁移失败（不阻断）：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      try {
+        const sweep = await archiveEligibleMissions(await projects.list(), store, {
+          now: new Date(),
+          maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+        });
+        if (sweep.archived.length > 0) {
+          console.warn(`[state slim] 归档 ${sweep.archived.length} 条已合入 Mission（.coagent-archive/）`);
+        }
+        for (const kept of sweep.kept) {
+          console.warn(`[state slim] 保留 ${kept.projectId}/${kept.missionId}：${kept.reason}`);
+        }
+      } catch (error) {
+        console.warn(
+          `[state slim] 归档清扫失败（不阻断）：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
   }
 
