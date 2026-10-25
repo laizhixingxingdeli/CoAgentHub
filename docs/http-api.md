@@ -412,6 +412,7 @@ curl.exe -sS --noproxy '*' -X POST -H 'Authorization: Bearer <token>' -H 'Conten
 - `waitResumeAt`：平台打算自动接着跑的时刻（ISO）。退避写队列行的 `availableAt`；候选全冷却时写最早的明确到期时刻。没有 = 平台不会自动恢复，要人处理。
 - `waitInfo`：等待状态的统一投影。`owner`（`platform` 平台自己会好 / `coordinator` / `l3` / `user`）、`autoResume`（平台会不会自动继续：有恢复时刻、没暂停 / 挂起 / 未决升级、不在门禁原因上；服务级开关 `COAGENT_AUTO_RESUME=0` 关着、或此部署没装配调度器（PG）时一律是 `false`，`owner` 改为 `l3`，不给 `nextRetryAt`）、`nextRetryAt`、`retry`（失败退避的 `attempt`/`max`）、`activeAgent`（现在有没有 in_progress 的 Attempt）、`action`（下一步一句话）。列表接口 `GET /api/missions` 的每一行同样带 `waitInfo`（不含重试计数）。
 - `modelPolicy`：Mission 级模型约束，见 `/model-policy`。
+- `costCap`：票级费用上限（美元），就是内核记录的那个值，增额（`/budget/raise`、或答复 `cost_cap` 门禁）后此处跟着变成新上限。**没有这一格 = 上限未知**：上限落盘之前的旧记录没有存过这个字段，平台不替它补一个默认 10——把「不知道」画成一条看起来生效的门禁会误导增额判断。
 - `runner`（服务装配了运行探针时才有）：`running` 是服务进程里确有托管运行在跑——权威、不依赖发起方的流；`autoResume.enabled` / `resuming` 是自动恢复调度是否启用、是否正在替这条 Mission 续跑。
 
 四件事要分开看：**HTTP 受理**（`POST /api/control/run-mission` 的流打开，只说明启动请求被接收，断线不取消）、**runner 在跑**（`runner.running`）、**等待**（`waitReason` / `waitInfo`：runner 退出后仍可能「会自动恢复」）、**完成**（`status` / `result` 与终审）。一个在退避的 Mission：`runner.running=false`、`waitInfo.autoResume=true`——不需要人动手，服务到点自己续跑。

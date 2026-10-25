@@ -289,6 +289,12 @@ export interface MissionView {
   waitResumeAt?: string;
   /** Mission 级模型约束（平台在派发前强制）；没设就没有这一格。 */
   modelPolicy?: MissionModelPolicy;
+  /**
+   * 票级费用上限（美元），取内核记录的真实值；增额后这里就是新上限。
+   * **没有这一格 = 上限未知**（旧快照写在 costCap 落盘之前），不是「上限是 10」。
+   * 缺省补 10 会让观测面把「不知道」画成一条其实不存在的门禁。
+   */
+  costCap?: number;
   /** 等待状态的统一投影：谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步。没有停机原因就没有这一格。 */
   waitInfo?: MissionWaitInfo;
   updatedAt: string | undefined;
