@@ -49,7 +49,7 @@ node scripts/coagent.mjs doctor   # 应该能看到“适配层能列出 N 个�
 
 选一种，详见 [l3-agents.md](l3-agents.md)：
 
-- **Claude Code**：把 `integrations/claude-code/.mcp.json.example` 的内容加进你的 MCP 配置，装上技能 `integrations/claude-code/skills/coagent-l3`。
+- **Claude Code**：把 `integrations/claude-code/.mcp.json.example` 的内容加进你的 MCP 配置，装上技能 `skills/coagent-l3`（direct 主控另装 `skills/coagent-l2`，来源都在仓库根 `skills/`）。
 - **Codex**：装 `integrations/codex` 插件（带会话绑定和实时投递）。
 - **其他 agent**：把 MCP 服务器 `integrations/codex/mcp-server/dist/index.js` 配成 stdio MCP；或者什么都不装，让 agent 直接用命令行（`node scripts/coagent.mjs ...`、`node src/l3.ts ...`）和 HTTP。
 
