@@ -13,6 +13,8 @@ node_modules/
 .coagent-plans/
 # 已归档 Mission 的旁路包。
 .coagent-archive/
+# 遥测事件边车（ADR-0009）：runtime.command.started / runtime.tool.completed 的 NDJSON。
+.coagent-events/
 # 文件存储把大输出外置到状态文件旁边的 artifacts/。
 /artifacts/
 .coagent-worktrees/
