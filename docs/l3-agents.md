@@ -12,8 +12,8 @@
 
 | 宿主 | 调用方式 | 唤醒方式 | 装什么 |
 |---|---|---|---|
-| **Claude Code** | MCP + 技能 | 拉：后台跑 `watch`，命令一退出就唤醒会话 | [integrations/claude-code](../integrations/claude-code/) |
-| **Codex** | 插件（MCP + 会话绑定钩子） | 推：投递桥把新通知排进绑定的会话 | [integrations/codex](../integrations/codex/) |
+| **Claude Code** | MCP + 技能 | 拉：后台跑 `watch`，命令一退出就唤醒会话 | [agents/claude-code](../agents/claude-code/) |
+| **Codex** | 插件（MCP + 会话绑定钩子） | 推：投递桥把新通知排进绑定的会话 | [agents/codex](../agents/codex/) |
 | **其他支持 MCP 的 agent**（Cursor、Cline、Gemini CLI、opencode……） | stdio MCP | 拉：`watch` 或周期读状态 | 同一个 MCP 服务器 |
 | **只有 shell 的 agent** | 命令行 + HTTP | 拉：`watch` | 什么都不用装 |
 
@@ -22,7 +22,7 @@
 ## 共同的前置
 
 ```bash
-node scripts/coagent.mjs setup     # 构建 MCP 服务器：integrations/codex/mcp-server/dist/index.js
+node scripts/coagent.mjs setup     # 构建 MCP 服务器：l3-mcp-server/dist/index.js
 node scripts/coagent.mjs start     # 平台必须已经在跑，MCP 服务器和命令行都是它的客户端
 ```
 
@@ -44,10 +44,10 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
      -e COAGENTHUB_API_BASE=http://127.0.0.1:3101/api \
      -e COAGENTHUB_REVIEWER_ID="claude-code-l3" \
      -e COAGENTHUB_REVIEW_CONFIRMED_BY="<你的名字>：集成分支合入由检视者签，合 main 需我签字" \
-     -- node /绝对路径/CoAgentHub/integrations/codex/mcp-server/dist/index.js
+     -- node /绝对路径/CoAgentHub/l3-mcp-server/dist/index.js
    ```
 
-   或者把 [integrations/claude-code/.mcp.json.example](../integrations/claude-code/.mcp.json.example) 改好路径后放到项目根的 `.mcp.json`。
+   或者把 [agents/claude-code/.mcp.json.example](../agents/claude-code/.mcp.json.example) 改好路径后放到项目根的 `.mcp.json`。
 
 2. **装技能**：技能的唯一来源是仓库根的 `skills/`，把 `skills/coagent-l3` 与 `skills/coagent-l2` 两个目录复制到 `~/.claude/skills/`（所有项目可用）或项目的 `.claude/skills/`。技能很薄：告诉 Claude 该读哪份手册、哪一步用哪个工具、哪里最容易出事；规则本身在 [l3-guide.md](l3-guide.md)（direct 主控另见 [direct-controller.md](direct-controller.md)）。
 
@@ -62,13 +62,12 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
 
 ## Codex
 
-[integrations/codex](../integrations/codex/) 是完整的 Codex 插件：
+[agents/codex](../agents/codex/) 是 **Codex 专属**的插件（宿主中立的 MCP 服务器在仓库根 [l3-mcp-server/](../l3-mcp-server/)）：
 
-- `mcp-server/`：同一个 MCP 服务器；
 - `hooks/hooks.json`：`SessionStart` 钩子，把当前 Codex 根会话绑定到本地投递桥；
 - 投递桥守护进程：以 1 秒为间隔轮询平台的收件箱 `/api/inbox`，把每条新投递用 `codex queue` 排进绑定的会话，**排队成功才 ACK**；排队失败投递留在原处，ACK 失败只重试 ACK，不会重复排队。
 
-安装：构建 MCP 服务器（`setup` 已做），把 `integrations/codex` 目录作为本地插件加进 Codex；首次会话 Codex 会请你**信任**钩子——钩子只写插件本地的绑定状态并拉起本地桥进程。插件的 `.mcp.json` 里路径用的是 `${PLUGIN_ROOT}`，如果你的 Codex 版本在 MCP 配置里不展开这个占位符，改成 `mcp-server/dist/index.js` 的绝对路径。
+安装：构建 MCP 服务器（`setup` 已做），把 `agents/codex` 目录作为本地插件加进 Codex；首次会话 Codex 会请你**信任**钩子——钩子只写插件本地的绑定状态并拉起本地桥进程。插件的 `.mcp.json` 把 MCP 服务器指向仓库根的 `l3-mcp-server/dist/index.js`（插件包不再自带服务器），安装时把占位绝对路径改成真实路径。
 
 缺省只消费投递给**当前 Codex 会话**的通知（用会话 UUID 对 Mission 的 `conversationRef`），免得一个会话 ACK 了另一个宿主的投递。想让一个 Codex 会话当所有 Mission 的中央检视者，设 `COAGENTHUB_INBOX_SCOPE=all`；想绑定某个指定接收者，设 `COAGENTHUB_INBOX_RECIPIENT`。
 
@@ -77,7 +76,7 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
 ```toml
 [mcp_servers.coagenthub]
 command = "node"
-args = ["/绝对路径/CoAgentHub/integrations/codex/mcp-server/dist/index.js"]
+args = ["/绝对路径/CoAgentHub/l3-mcp-server/dist/index.js"]
 env = { COAGENTHUB_API_BASE = "http://127.0.0.1:3101/api", COAGENTHUB_REVIEWER_ID = "codex-l3" }
 ```
 
@@ -90,7 +89,7 @@ env = { COAGENTHUB_API_BASE = "http://127.0.0.1:3101/api", COAGENTHUB_REVIEWER_I
   "mcpServers": {
     "coagenthub": {
       "command": "node",
-      "args": ["/绝对路径/CoAgentHub/integrations/codex/mcp-server/dist/index.js"],
+      "args": ["/绝对路径/CoAgentHub/l3-mcp-server/dist/index.js"],
       "env": {
         "COAGENTHUB_API_BASE": "http://127.0.0.1:3101/api",
         "COAGENTHUB_REVIEWER_ID": "<这个 agent 的名字>",

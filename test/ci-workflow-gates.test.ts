@@ -40,8 +40,8 @@ test('必过步骤覆盖确定性适配器测试、tsc 构建与 MCP 测试，�
     .filter((line) => line.startsWith('      - run: ') && !line.startsWith('      - run: npm test'))
     .join('\n');
   assert.match(gated, /node --import tsx --test .*--test-skip-pattern=.*"adapters\/pi\/src\/\*\.spec\.ts"/, '适配器测试要排除真实 DNS 用例后必过');
-  assert.match(gated, /node node_modules\/typescript\/bin\/tsc -p integrations\/codex\/mcp-server\/tsconfig\.json/);
-  assert.match(gated, /node node_modules\/vitest\/vitest\.mjs run --root integrations\/codex\/mcp-server/);
+  assert.match(gated, /node node_modules\/typescript\/bin\/tsc -p l3-mcp-server\/tsconfig\.json/);
+  assert.match(gated, /node node_modules\/vitest\/vitest\.mjs run --root l3-mcp-server/);
 });
 
 test('真实 DNS 用例单独一步、只显示不挡合并', () => {

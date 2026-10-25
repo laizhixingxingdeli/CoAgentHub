@@ -258,14 +258,14 @@ function runSetup(argv) {
     }
   }
 
-  const mcpDist = resolve(repoRoot, 'integrations/codex/mcp-server/dist/index.js');
+  const mcpDist = resolve(repoRoot, 'l3-mcp-server/dist/index.js');
   if (skipMcp) {
     console.log('! 按 --skip-mcp 跳过 MCP server 构建。');
   } else if (existsSync(mcpDist) && !force) {
     console.log('! MCP server 产物已存在，跳过构建（--force 可强制重建）。');
   } else {
-    console.log('→ 构建 MCP server（integrations/codex/mcp-server）…');
-    const build = spawnNpm(['npm', 'run', 'build', '-w', 'integrations/codex/mcp-server'], {
+    console.log('→ 构建 MCP server（l3-mcp-server）…');
+    const build = spawnNpm(['npm', 'run', 'build', '-w', 'l3-mcp-server'], {
       cwd: repoRoot,
       stdio: 'inherit',
     });
@@ -345,7 +345,7 @@ async function runDoctor(argv) {
     ok('adapters/pi 依赖可解析（tsx、pi-coding-agent）');
   }
 
-  if (existsSync(resolve(repoRoot, 'integrations/codex/mcp-server/dist/index.js'))) {
+  if (existsSync(resolve(repoRoot, 'l3-mcp-server/dist/index.js'))) {
     ok('MCP server 产物存在');
   } else {
     bad('MCP server 产物不存在（先跑 node scripts/coagent.mjs setup）');

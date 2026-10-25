@@ -42,8 +42,8 @@ jobs:
       # the shell. The skipped test is the only one that needs real DNS: on runners behind a
       # proxy the lookup surfaces as ECONNRESET instead of ENOTFOUND, so it is probed below.
       - run: node --import tsx --test --test-skip-pattern="DNS 解析不了" "adapters/pi/src/*.spec.ts"
-      - run: node node_modules/typescript/bin/tsc -p integrations/codex/mcp-server/tsconfig.json
-      - run: node node_modules/vitest/vitest.mjs run --root integrations/codex/mcp-server
+      - run: node node_modules/typescript/bin/tsc -p l3-mcp-server/tsconfig.json
+      - run: node node_modules/vitest/vitest.mjs run --root l3-mcp-server
       # Visibility only: a failure here depends on the runner's network stack, not on the code.
       - continue-on-error: true
         run: node --import tsx --test --test-name-pattern="DNS 解析不了" adapters/pi/src/failure-classify.integration.spec.ts

@@ -7,10 +7,13 @@
 把原本散在三个本地目录里的组件放进本仓：
 
 - `adapters/pi/`：pi 适配层（原 coagent-pi 仓库，2026-10-09 并入时取其 master 61ebe21）；
-- `integrations/codex/`：L3 的 MCP 服务器（`mcp-server/`，宿主中立的 stdio MCP）、Codex 的 `SessionStart` 钩子与插件清单（原 coagenthub-codex 仓库的**工作区**，其 git 里只有 v4 时代的提交）；
-- `integrations/claude-code/`：Claude Code 的技能与 MCP 配置示例。
+- `l3-mcp-server/`：宿主中立的 L3 MCP 服务器（原 coagenthub-codex 仓库的**工作区**，其 git 里只有 v4 时代的提交）；
+- `agents/codex/`：Codex 专属插件——`SessionStart` 钩子与插件清单；
+- `agents/claude-code/`：Claude Code 的 MCP 配置示例。
 
-根 `package.json` 用 npm workspaces 管 `adapters/pi` 与 `integrations/codex/mcp-server` 两个子包的依赖，一次 `npm ci` 装进根 `node_modules`。**平台本体仍然零第三方依赖**（`pg` 只在 `src/application/pg-store.ts`，且按需加载）。
+（2026-10-25 调整：MCP 服务器从 `agents/codex/` 迁到仓库根 `l3-mcp-server/`、技能收到仓库根 `skills/`、`integrations/` 改名 `agents/`——宿主中立的资产与单家接入分开，避免「服务器住在 codex 目录里」的误导；用户确认。）
+
+根 `package.json` 用 npm workspaces 管 `adapters/pi` 与 `l3-mcp-server` 两个子包的依赖，一次 `npm ci` 装进根 `node_modules`。**平台本体仍然零第三方依赖**（`pg` 只在 `src/application/pg-store.ts`，且按需加载）。
 
 不采用：
 
@@ -28,7 +31,7 @@ Mission 的 worktree 在 `<项目根>/.coagent-worktrees/<id>/`（`workspace.ts`
 - 适配器的缺省位置是仓内 `adapters/pi`；`COAGENT_ADAPTER_DIR` 与 `--adapter` 仍可指向别处。平台不 import 任何 agent SDK 的性质不变：适配层通过 stdin / stdout 协议被拉起。
 - 适配层每跳现读、合入即生效；平台代码要重启才生效。两者相互依赖的改动，适配层后合。
 - 改适配层的票与改平台的票走同一个项目、同一个集成分支，不再有独立的 coagent-pi 状态。
-- L3 的接口三层并存：HTTP、命令行（`scripts/coagent.mjs`、`src/l3.ts`）、MCP；平台里没有任何某个 agent 专属的代码，Codex 专属的只有 `integrations/codex/` 里的钩子与投递桥。
+- L3 的接口三层并存：HTTP、命令行（`scripts/coagent.mjs`、`src/l3.ts`）、MCP；平台里没有任何某个 agent 专属的代码，Codex 专属的只有 `agents/codex/` 里的钩子与投递桥；宿主中立资产在仓库根（`l3-mcp-server/`、`skills/`）。
 
 ## 后果
 
