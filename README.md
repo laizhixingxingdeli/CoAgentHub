@@ -74,7 +74,8 @@ node scripts/coagent.mjs start     # 启动平台，浏览器打开 http://127.0
 ```
 src/            平台本体：kernel（纯领域）/ application（用例）/ runtime（跑 agent 的端口）/ api（HTTP）/ web（网页，原生 ES module，无构建）
 adapters/pi/    L2 / L1 的 pi 适配层：平台通过 stdin / stdout 协议拉起它，平台本身不 import 任何 agent SDK
-integrations/   L3 接入：MCP 服务器（任何 agent 可用）、Codex 插件钩子、Claude Code 的技能和配置
+integrations/   L3 接入：MCP 服务器（任何 agent 可用）、Codex 插件钩子、Claude Code 的 MCP 配置示例
+skills/         L3 技能的唯一来源（coagent-l3 检视者、coagent-l2 direct 主控），各 agent 复制安装
 scripts/        启动器 coagent.mjs，以及只读 MCP / 值守脚本
 examples/       Mission 契约、候选池、pi 模型配置的示例
 .coagent/       项目自己的长期记忆：规格、架构决定、模块地图（这个项目用自己开发自己）

@@ -196,26 +196,38 @@ export function mapQueryOutcome(input: {
 const EVENT_PREFIX = "__COAGENT_EVENT__ ";
 
 /**
- * 执行者没交结构化结果就结束时的中文提醒（同一会话只发一次）。
- * 提醒里只说动作、不重复长篇思考：已完成就提交、卡住就 report_blocked、没做完直接接着做。
+ * 会话结束仍没有结构化提交时，同一会话提醒一次的文案（按角色）。
+ * 提醒里只说动作、不重复长篇思考。
  */
 const EXECUTOR_NO_SUBMIT_REMINDER =
 	"上一条回复已经结束，但本程尚未终结提交。任务已完成就调用 coagent_submit_execution_result 提交；无法继续就调用 coagent_report_blocked 并写明原因；还没做完就直接接着做，不要重复长篇思考。";
 
+const COORDINATOR_NO_SUBMIT_REMINDER =
+	"上一条回复已经结束，但本跳尚未以结构化动作收尾。要派发就调用 coagent_dispatch_work_item；Mission 已满足交卷条件就调用 coagent_submit_mission_result；需要检视者裁决就调用 coagent_escalate_to_l3；无法继续就调用 coagent_report_blocked 并写明原因；还没做完就直接接着做，不要重复长篇思考。";
+
+const NO_SUBMIT_REMINDERS: Partial<Record<Role, string>> = {
+	executor: EXECUTOR_NO_SUBMIT_REMINDER,
+	coordinator: COORDINATOR_NO_SUBMIT_REMINDER,
+};
+
 /**
- * 是否要给执行者同会话提醒一次：非 executor，或已提交/上游失败/平台不可达都不再提醒。
+ * 是否要给该角色同会话提醒一次：文案表里没有的角色（solo / query / 独立检视）、
+ * 已提交、上游失败或平台不可达都不提醒。
  * 单对象参数，纯函数；stopReason=length 时前缀「上一条回复超过输出上限被截断了。」。
+ * 协调者原先是「跑完没提交就整跳白费」：2026-10 一个月 32 次 no_structured_result、
+ * $13.54 与 33 万 output token 白烧（占全部失败尝试浪费的六成），比执行者还贵——
+ * 所以把执行者的 PI-END1 提醒同样给协调者。
  */
-export function executorReminder(input: {
+export function noSubmitReminder(input: {
 	role: Role;
 	submitted: boolean;
 	hasFailure: boolean;
 	unreachable: boolean;
 	stopReason?: string;
 }): string | undefined {
-	if (input.role !== "executor") return undefined;
+	const base = NO_SUBMIT_REMINDERS[input.role];
+	if (!base) return undefined;
 	if (input.submitted || input.hasFailure || input.unreachable) return undefined;
-	const base = EXECUTOR_NO_SUBMIT_REMINDER;
 	if (input.stopReason === "length") {
 		return "上一条回复超过输出上限被截断了。" + base;
 	}
@@ -874,13 +886,14 @@ export async function startRun(spec: AgentRunSpec): Promise<AgentRunOutcome> {
 	// 传输层证据要在真正发请求之前开始观察：provider SDK 把 429/ECONNREFUSED
 	// 吞成一句文案时，这里是唯一还能拿到真实状态码/错误码的地方。
 	const transport = recordTransport();
-	// 执行者没交结构化结果就结束：在同一会话再问一次，模型手上的上下文和已做的
-	// 改动都还在——「忘了提交」基本当场就交，「想满被截断」可以接着做。每程最多一次。
+	// 执行者 / 协调者没交结构化结果就结束：在同一会话再问一次，模型手上的上下文
+	// 和已做的改动都还在——「忘了提交」基本当场就交，「想满被截断」可以接着做。
+	// 每程最多一次。
 	let remindedStopReason: string | undefined;
 	let reminded = false;
 	try {
 		await session.prompt(spec.instruction);
-		const reminder = executorReminder({
+		const reminder = noSubmitReminder({
 			role: spec.role,
 			submitted: completion.submitted,
 			hasFailure: !!failureMessage,

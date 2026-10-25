@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { InMemoryProjectRepository } from '../src/application/in-memory.ts';
-import { reconcileOrphanedWorktrees } from '../src/application/reconcile.ts';
+import { reconcileMergedMissionBranches, reconcileOrphanedWorktrees } from '../src/application/reconcile.ts';
 import {
   GitWorktreeManager,
   InPlaceWorkspaceManager,
@@ -295,5 +295,40 @@ describe('buildPersistentPlatform worktree reconcile 入口', () => {
     const ro = await buildPersistentPlatform(statePath, { workspace: manager });
     assert.equal(ro.workspaceReconciled, undefined);
     assert.ok(existsSync(again.cwd), '只读路径不得全局清 worktree');
+  });
+});
+
+describe('reconcileMergedMissionBranches', () => {
+  test('completed 且已合入的分支重试时删掉；分支不是 HEAD 祖先的一律保留', async () => {
+    const repo = tempRepo();
+    const wtRoot = mkdtempSync(join(tmpdir(), 'coagent-wtroot-'));
+    dirs.push(wtRoot);
+    const manager = new GitWorktreeManager(wtRoot);
+
+    // 已合入：prepare 后无新提交，分支与 HEAD 同点（天然祖先）。
+    const merged = await manager.prepare('M-merged', repo);
+    await manager.release('M-merged', repo);
+
+    // 未合入：在 worktree 里提交一个领先 HEAD 的提交。
+    const ahead = await manager.prepare('M-ahead', repo);
+    writeFileSync(join(ahead.cwd, 'b.txt'), 'ahead\n');
+    git(ahead.cwd, 'add', '-A');
+    git(ahead.cwd, 'commit', '-q', '-m', 'ahead');
+    await manager.release('M-ahead', repo);
+
+    const projects = new InMemoryProjectRepository();
+    const project = await projects.ensure('P1');
+    for (const id of ['M-merged', 'M-ahead']) {
+      const m = project.createMission({ id, contract: CONTRACT });
+      m.recordWorkspace({ projectRoot: repo, branch: `mission/${id}`, baseRevision: merged.baseRevision });
+      m.submitForReview();
+      m.complete({ verdict: 'merge', reasons: ['ok'], mergedInto: 'main' });
+    }
+
+    const result = await reconcileMergedMissionBranches(await projects.list(), manager);
+    assert.deepEqual(result.deleted, [{ missionId: 'M-merged', projectRoot: repo }]);
+    assert.ok(!branchExists(repo, 'mission/M-merged'));
+    assert.ok(branchExists(repo, 'mission/M-ahead'));
+    assert.ok(result.kept.some((k) => k.missionId === 'M-ahead'));
   });
 });

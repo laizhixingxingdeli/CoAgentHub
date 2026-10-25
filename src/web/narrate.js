@@ -829,7 +829,10 @@ const EVENT_TABLE = {
     detail: `${or(event.data?.owner, '未指定会话')}，代次 ${num(event.data?.generation)}；${or(event.data?.action, '更新')}`,
   }),
   'workspace.branch_cleanup_failed': (event) => ({
-    badge: 'L3', action: '合入后保留 Mission 分支', detail: text(event?.data?.reason),
+    badge: 'L3',
+    action: '合入后清理失败',
+    // step 只有这两步：回收 worktree / 删除 mission 分支；旧事件没有 step，退回笼统说法。
+    detail: `${event?.data?.step === 'release_worktree' ? '回收 worktree' : event?.data?.step === 'delete_branch' ? '删除分支' : '清理'}：${text(event?.data?.reason)}`,
   }),
 
   'mission.waiting': (event) => {

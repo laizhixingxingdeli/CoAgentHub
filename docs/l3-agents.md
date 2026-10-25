@@ -49,7 +49,7 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
 
    或者把 [integrations/claude-code/.mcp.json.example](../integrations/claude-code/.mcp.json.example) 改好路径后放到项目根的 `.mcp.json`。
 
-2. **装技能**：把 `integrations/claude-code/skills/coagent-l3` 整个目录复制到 `~/.claude/skills/`（所有项目可用）或项目的 `.claude/skills/`。技能很薄：告诉 Claude 该读哪份手册、哪一步用哪个工具、哪里最容易出事；规则本身在 [l3-guide.md](l3-guide.md)。
+2. **装技能**：技能的唯一来源是仓库根的 `skills/`，把 `skills/coagent-l3` 与 `skills/coagent-l2` 两个目录复制到 `~/.claude/skills/`（所有项目可用）或项目的 `.claude/skills/`。技能很薄：告诉 Claude 该读哪份手册、哪一步用哪个工具、哪里最容易出事；规则本身在 [l3-guide.md](l3-guide.md)（direct 主控另见 [direct-controller.md](direct-controller.md)）。
 
 3. **唤醒**：Claude Code 的会话不会被外部推送，所以用拉的办法。开跑之后让它在后台跑
    `node scripts/coagent.mjs watch <missionId>`（Bash 工具的后台模式），命令一退出 Claude 就被唤醒、去读 Mission。

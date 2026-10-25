@@ -197,3 +197,72 @@ describe('SpawnRuntime 合成结果行 contextMetrics', () => {
     assert.equal(dumped.includes('pathDigest'), false);
   });
 });
+
+/** 带 setTimeout 的假适配器：先发一条 command 类 tool.started，延迟后再收尾。 */
+function timedCommandAdapter(commandMs: number, finish: boolean): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coagent-spawn-idle-'));
+  dirs.push(dir);
+  const file = join(dir, 'adapter.mjs');
+  writeFileSync(
+    file,
+    [
+      'const write = (line) => process.stdout.write(line + "\\n");',
+      'write("__COAGENT_EVENT__ " + JSON.stringify({ t: "tool.started", name: "bash", callId: "c1", activityClass: "command" }));',
+      `setTimeout(() => {`,
+      '  write("__COAGENT_EVENT__ " + JSON.stringify({ t: "tool.completed", name: "bash", callId: "c1" }));',
+      ...finish
+        ? [
+            '  write("__COAGENT_OUTCOME__ " + JSON.stringify({ endedBy: "structured_submit", usage: ' +
+              JSON.stringify(USAGE) + ' }));',
+            '  process.exit(0);',
+          ]
+        : ['  process.stdin.resume();'],
+      `}, ${commandMs});`,
+    ].join('\n'),
+    'utf8',
+  );
+  return file;
+}
+
+async function runTimedAdapter(
+  file: string,
+  timeoutMs: number,
+  commandGraceMs: number,
+): Promise<RuntimeOutcome> {
+  const runtime = new SpawnRuntime({
+    kind: 'fake',
+    command: 'node',
+    args: [file],
+    cwd: process.cwd(),
+    envPassthrough: [],
+    timeoutMs,
+    commandGraceMs,
+  });
+  const run = await runtime.start({
+    role: 'executor',
+    attemptId: 'A1',
+    missionId: 'M1',
+    workItemId: 'W-1',
+    cwd: process.cwd(),
+    profile: { endpoint: 'local', profileId: 'p' },
+    instruction: 'go',
+    tools: [],
+    endpoint: { baseUrl: 'http://127.0.0.1:1', token: 't' },
+  });
+  return run.wait();
+}
+
+describe('SpawnRuntime 命令执行中的静默宽限', () => {
+  test('命令在跑时不按静默掐：超过 timeoutMs 仍无输出也能活着交卷', async () => {
+    // 200ms 静默超时连烧三轮，命令 600ms 才完成——宽限 1000ms 内，不许杀。
+    const outcome = await runTimedAdapter(timedCommandAdapter(600, true), 200, 1000);
+    assert.equal(outcome.endedBy, 'structured_submit');
+  });
+
+  test('命令挂死超过宽限上限仍判 killed_idle，失败消息带命令在执行的线索', async () => {
+    // 命令 3 秒不返回：宽限 1000ms 用尽后必须杀，且消息要说清还有命令在跑。
+    const outcome = await runTimedAdapter(timedCommandAdapter(3000, false), 200, 1000);
+    assert.equal(outcome.endedBy, 'killed_idle');
+    assert.match(outcome.failureMessage ?? '', /命令在执行/);
+  });
+});

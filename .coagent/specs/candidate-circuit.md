@@ -8,6 +8,8 @@ Standard 执行者的 `no_structured_result` 另有工作项级局部规则，�
 
 只有当前 `open` 且调用者提供的 `now >= openUntil` 时，`tryClaimProbe` 才能原子地领取一次，转成带 `probeClaimed: true` 的 `half_open`，保留原失败分类和截止；其他领取返回 false。只有已领取的 `half_open` 可 `resolveProbe`：成功转 `closed` 并清除失败字段，失败带新分类和截止重新转 `open`；非法或重复解决拒绝且不更改状态。文件部署上，RetryWakeScheduler 既有周期 tick 至少隔 30 秒观察一次：`half_open` 且 `probeClaimed`、而 durable 队列没有该 profile 的活租约，连续观察满 2 分钟，就用 `candidateCircuits.reset({ actor: 'platform:probe-reclaim' })` 复位，不加存储字段。观察时刻只在进程内；出现活租约或熔断状态变化就清记录；重启后重新计时。其余熔断状态不碰。PG 不装配这一回收。输入须提供非空 profileId/失败分类以及有效的标准 ISO 时间戳。
 
+**常驻服务**启动时清理**孤儿熔断记录**（装配选项 `startupMaintenance`，仅 startServer 传）：按当前候选池所有角色的 profileId 名单 `pruneAbsent`，删掉 profileId 不在任何角色配置里的记录——候选换血后旧记录只会让池健康面长期显示已移除候选的 open 熔断。复位审计（`candidateCircuitResetEvents`）不随之删除；名单外候选将来重新加进池时从 `closed` 起步，语义不变。l3 / run-mission 这类单命令排他装配**不**清理——它们承诺命令被拒不改状态字节；只读观测面同样不清理。失败只记 warning 不挡启动。
+
 文件仓储将状态与现有状态文件一起持久化；旧版缺少候选熔断字段的状态按空集合加载。事务失败回滚候选状态。唯一探测领取只保证在同一个 FileStateStore 的单写者约束下成立，不保证不同文件实例/进程对同一路径并发写的互斥。PostgreSQL 仓储通过逐 profile 主键记录和条件 UPDATE 领取/解决，跨数据库连接并发领取同一名额只成功一个。
 
 `buildPersistentPlatform` 和 `buildPgPlatform` 分别创建与各自状态存储绑定的候选熔断仓储；生产 `run-mission`、`run-plan` 将该平台的同一仓储注入 `MissionRunner`，后者交给 `Orchestrator`。重建持久平台及 Runner 后，未到期的 `open` 候选不启动 Agent；未提供仓储的调用继续使用原有进程内 cooldown 行为。候选配置的追加与顺序不变。

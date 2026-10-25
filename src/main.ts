@@ -62,6 +62,7 @@ import { attachLoopbackWriterIdentity, listenLoopback } from './application/loop
 import {
   parseReconcileIntervalMs,
   reconcileInterruptedAttempts,
+  reconcileMergedMissionBranches,
   reconcileOrphanedWorktrees,
   repairMissingDeliveries,
   startPeriodicReconcile,
@@ -197,6 +198,12 @@ export interface PersistentOptions {
    */
   exclusive?: { what: string; instanceId?: string; apiVersion?: string };
   /**
+   * 常驻服务启动维护。只由 startServer 传：清掉不在当前候选池里的孤儿熔断记录。
+   * l3 / run-mission 这类**单命令**排他装配不传——它们有的承诺「命令被拒不改状态
+   * 字节」（`test/l3-reviewer-signature.test.ts` 钉着），启动期顺手写状态会破坏它。
+   */
+  startupMaintenance?: boolean;
+  /**
    * 可选 query runtime。仅 `supportsQuery === true` 时暴露 queryRunner/runQuery；
    * 未传或不支持则 undefined（fail-closed）。
    */
@@ -330,6 +337,48 @@ export async function buildPersistentPlatform(
         kept: [],
         warnings: [error instanceof Error ? error.message : String(error)],
       };
+    }
+
+    // 交卷释放时那一次分支清理是一次性的，失败后无人重试（2026-10 记了 40 次
+    // branch_cleanup_failed）。排他装配时补一刀：只动 completed 且已合入的 mission
+    // 分支，祖先核对与 -d 的安全判断都在 deleteMergedBranch 里（用户 2026-10-25：
+    // 合入之后要删除）。纯 git 操作不写状态；失败只记 warning，不挡启动。
+    try {
+      const branchCleanup = await reconcileMergedMissionBranches(await projects.list(), workspace);
+      for (const kept of branchCleanup.kept) {
+        console.warn(`[branch cleanup] 保留 mission/${kept.missionId}：${kept.reason}`);
+      }
+    } catch (error) {
+      console.warn(
+        `[branch cleanup] 启动重试失败（不阻断）：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  // 候选换血后，已移除候选的熔断记录只会让池健康面长期显示 open 熔断
+  //（2026-10 的 27 条记录里 15 条属于已不在池里的候选）。只在常驻服务启动时清
+  //（startupMaintenance）：单命令排他装配（l3 等）承诺被拒不改状态字节，不能顺手写。
+  if (options.startupMaintenance) {
+    try {
+      const snapshot = await agentPool.list();
+      const profileIds = new Set(
+        Object.values(snapshot).flatMap((candidates) =>
+          candidates.map((candidate) => candidate.profileId),
+        ),
+      );
+      const prunedCircuits = (await candidateCircuits.pruneAbsent?.(profileIds)) ?? [];
+      if (prunedCircuits.length > 0) {
+        store.flush();
+        console.warn(`[circuit prune] 清理 ${prunedCircuits.length} 条已不在池中的候选熔断记录`);
+      }
+    } catch (error) {
+      console.warn(
+        `[circuit prune] 启动清理失败（不阻断）：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -803,7 +852,7 @@ export async function startServer(
       what: '常驻服务',
       instanceId,
       apiVersion: API_VERSION,
-    } });
+    }, startupMaintenance: true });
     if ('releaseLock' in built && typeof built.releaseLock === 'function') {
       releaseMainLock = built.releaseLock;
     }

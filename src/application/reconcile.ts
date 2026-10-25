@@ -214,6 +214,77 @@ export async function reconcileOrphanedWorktrees(
   return { removed, kept, warnings, roots: byRoot.size };
 }
 
+/* ------------------------------ 已合入分支清理 ------------------------------ */
+
+export interface MergedBranchCleanupResult {
+  /** 这次真的删掉的 mission 分支。 */
+  readonly deleted: readonly { missionId: string; projectRoot: string }[];
+  /** 还留着没删掉的，原因要说清。 */
+  readonly kept: readonly { missionId: string; projectRoot: string; reason: string }[];
+  readonly roots: number;
+}
+
+/**
+ * 启动时重试「已完成且已合入」Mission 的自身分支清理。
+ *
+ * 交卷释放工作区时那一次清理是**一次性**的：当时 worktree 还没释放（或被
+ * 别的进程占着）就记 `workspace.branch_cleanup_failed` 保留分支，之后没人
+ * 再试——分支就这么积下来（2026-10 一个月 40 次失败、约 20 条 mission/*
+ * 分支残留）。启动时先跑过孤儿 worktree 收敛，此刻再补一刀正合适。
+ *
+ * 安全边界不变：只碰 `mission/<id>` 分支、只碰 status=completed 且
+ * finalReview.mergedInto 存在的 Mission；`deleteMergedBranch` 自己还要先验
+ * 「分支是当前 HEAD 的祖先」再用 `git branch -d`。未合入、被放弃、合并失败
+ * 的分支照旧保留。不发 ActivityEvent——和孤儿 worktree 收敛一样，这是磁盘
+ * 卫生，不是领域事件。
+ */
+export async function reconcileMergedMissionBranches(
+  projects: readonly Project[],
+  workspace: WorkspaceManager,
+): Promise<MergedBranchCleanupResult> {
+  if (!workspace.deleteMergedBranch || !workspace.listMissionBranches) {
+    return { deleted: [], kept: [], roots: 0 };
+  }
+  const byRoot = new Map<string, { missionId: string }[]>();
+  for (const project of projects) {
+    for (const mission of project.missions) {
+      const root = mission.workspaceRef?.projectRoot;
+      if (!root) continue;
+      if (mission.status !== 'completed' || !mission.finalReview?.mergedInto) continue;
+      const bucket = byRoot.get(root) ?? [];
+      bucket.push({ missionId: mission.id });
+      byRoot.set(root, bucket);
+    }
+  }
+
+  const deleted: MergedBranchCleanupResult['deleted'][number][] = [];
+  const kept: MergedBranchCleanupResult['kept'][number][] = [];
+  for (const [projectRoot, missions] of byRoot) {
+    let branches: readonly string[];
+    try {
+      branches = await workspace.listMissionBranches(projectRoot);
+    } catch {
+      // 列不出来就不动这个仓：宁可留着，不可误删。
+      continue;
+    }
+    const existing = new Set(branches);
+    for (const { missionId } of missions) {
+      if (!existing.has(missionId)) continue;
+      try {
+        await workspace.deleteMergedBranch(missionId, projectRoot);
+        deleted.push({ missionId, projectRoot });
+      } catch (error) {
+        kept.push({
+          missionId,
+          projectRoot,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return { deleted, kept, roots: byRoot.size };
+}
+
 /* ------------------------------ 缺失投递补建 ------------------------------ */
 
 /** 只有这些状态下当前 result 才对应一次已经交卷的结局，执行中的正文不算。 */
