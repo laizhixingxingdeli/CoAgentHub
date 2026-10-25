@@ -1,9 +1,16 @@
 ---
-name: coagenthub
-description: Operate CoAgentHub v5 as the L3 reviewer from a Codex session.
+name: coagent-l3
+description: Operate CoAgentHub v5 as the L3 reviewer from a Codex session - freeze tickets, run and watch missions, answer escalations, final review and merge signing.
 ---
 
 # CoAgentHub v5 L3 in Codex
+
+This skill covers the **L3 reviewer duty**: missions here are hierarchical unless
+stated otherwise, and the final review of ANY mission (including direct ones)
+belongs here. If a Mission was created with `coordinationMode: "direct"`, this
+session is also the L2 controller for it — use the `coagent-l2` skill together
+with this one: L2 skill for plan / work orders / dispatch / review / submit,
+this skill for the final review, boundaries and red lines.
 
 This plugin targets the local CoAgentHub v5 Mission model. Use the exact domain terms
 Project, Mission, WorkItem, Attempt, Delivery and L3. Do not use the legacy
@@ -31,8 +38,10 @@ For `delivered` or `blocked`, if the Mission is `awaiting_review`, review:
 - the Mission diff and guardrails;
 - unresolved escalations or explicitly missing evidence.
 
-Use `coagenthub_finalize_mission` only after that review. Use `send_back` with
-concrete reasons when evidence or acceptance is insufficient. Do not claim merge,
+Use `coagenthub_finalize_mission` only after that review — and once the review
+passes, finalizing **is** the standard closing action: do not stop at reporting
+and leave the Mission in `awaiting_review`. Use `send_back` with concrete
+reasons when evidence or acceptance is insufficient. Do not claim merge,
 send-back or abandon unless the tool call succeeded.
 
 Reviewer authority is explicit. Never invent `confirmedBy`. It must come from the
@@ -75,7 +84,7 @@ Use `coagenthub_get_inbox` for diagnosis or recovery. If the bridge is disabled
 or unavailable, leave the Delivery pending until the session can receive it.
 
 ## Mission 创建与服务托管启动（0.2.2）
-- `coagenthub_create_mission`：提交完整冻结 Contract，只创建 Standard Mission；Delivery recipient 默认取实际 SessionStart 绑定，也可显式指定真实会话。
+- `coagenthub_create_mission`：提交完整冻结 Contract 创建 Mission；显式传 `coordinationMode: "direct"` 建两层协作任务（主控工作走 coagent-l2 技能），缺省 hierarchical。Delivery recipient 默认取实际 SessionStart 绑定，也可显式指定真实会话。
 - `coagenthub_start_mission`：对已存在且可运行的 Mission，提交明确 cwd/adapter/maxRounds，经既有单写者 hosted 接口开跑；不打开状态文件，不启动 CLI/终端，不热改适配器。环境透传声明固定为 `-`，不携带变量值。
 - `coagenthub_get_hosted_run`：查询本 MCP 实例的启动流观测。accepted 只表示 HTTP 受理，running 表示平台输出已确认，ended 携带退出码；断流没有终帧为 unknown。Mission 完成仍须查权威状态和审查证据。重启后本地跟踪丢失，不能因此推断 runner 已退出。
 - `coagenthub_get_platform_status`：读取服务持锁身份、队列占用和适配器配置。

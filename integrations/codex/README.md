@@ -6,7 +6,8 @@
 .codex-plugin/plugin.json   Codex 插件清单
 .mcp.json                   插件的 MCP 配置（路径用 ${PLUGIN_ROOT}）
 hooks/hooks.json            SessionStart 钩子：把当前 Codex 根会话绑定到本地投递桥
-skills/coagenthub/SKILL.md  Codex 里的检视者技能
+skills/coagent-l3/SKILL.md     检视者技能（hierarchical 模式全流程 + 一切终审）
+skills/coagent-l2/SKILL.md     L2 主控技能（direct 两层协作，与 coagent-l3 一起用）
 mcp-server/                 stdio MCP 服务器（TypeScript，34 个工具）；Codex 专属的只有 l3-bridge / l3-daemon / session-*
 ```
 
