@@ -79,12 +79,12 @@ test("pi 1.4.0：settings.json packages 声明的插件按 provider 前缀解析
 	writeFileSync(join(pkg, "src/index.js"), "export default function () {}");
 	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-proxy-router", join("plugins", "pi-codebuddy-oauth").replaceAll("\\", "/")] }));
 	try {
-		const main = resolveProviderExtensionPaths("codebuddy", undefined, agentDir);
+		const main = resolveProviderExtensionPaths("codebuddy", undefined, agentDir, { COAGENT_PI_RUNTIME_CONFIG: join(agentDir, "missing.json") });
 		assert.equal(main.length, 1);
 		assert.ok(main[0].replaceAll("\\", "/").endsWith("pi-codebuddy-oauth/src/index.js"));
-		const intl = resolveProviderExtensionPaths("codebuddy-intl", undefined, agentDir);
+		const intl = resolveProviderExtensionPaths("codebuddy-intl", undefined, agentDir, { COAGENT_PI_RUNTIME_CONFIG: join(agentDir, "missing.json") });
 		assert.deepEqual(intl, main);
-		assert.deepEqual(resolveProviderExtensionPaths("qoder-cn", undefined, agentDir), []);
+		assert.deepEqual(resolveProviderExtensionPaths("qoder-cn", undefined, agentDir, { COAGENT_PI_RUNTIME_CONFIG: join(agentDir, "missing.json") }), []);
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });
 	}

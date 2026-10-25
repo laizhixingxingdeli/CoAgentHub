@@ -32,6 +32,27 @@ export type ReviewerRole = "reviewer";
 export const QUERY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
 
 /**
+ * 1.3.0 CLI 会把这些内置扩展注册进 loader。
+ * 名字是扩展名（tool-search），不是工具名（tool_search）。
+ * 不关掉的话，settings 或 -e builtin:… 会把 MCP / codemode 装进托管会话。
+ */
+export const DISABLED_BUILTIN_EXTENSIONS = ["codemode", "llama.cpp", "mcp", "tool-search"] as const;
+
+/**
+ * 1.3.0 的 tools 白名单不以 mcp__ 开头时，MCP 工具仍留在 callable / getAllTools，
+ * 给 codemode 与 tool_search 用。excludeTools 在白名单之后生效，且包含 MCP。
+ * 漏掉资源工具名时，list/read_mcp_resource 仍可从脚本调用。
+ */
+export const EXCLUDED_EXPANSION_TOOLS = [
+	"mcp__*",
+	"list_mcp_resources",
+	"list_mcp_resource_templates",
+	"read_mcp_resource",
+	"codemode",
+	"tool_search",
+] as const;
+
+/**
  * 检视者平台工具名，顺序与冻结 toolTable 一致。
  * 不进 tools.ts 的 SPECS，避免污染 coordinator/executor 工具面。
  */
