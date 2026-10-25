@@ -1409,6 +1409,27 @@ export class FileCandidateCircuitRepository implements CandidateCircuitRepositor
     return events.filter((event) => profileId === undefined || event.profileId === profileId).map((event) => ({ ...event }));
   }
 
+  async pruneAbsent(profileIds: ReadonlySet<string>): Promise<readonly string[]> {
+    // 没有可删记录时必须零写入：run() 会无条件重写状态文件，而「被拒的命令 /
+    // 干净状态上的启动不改状态字节」是被 test/ 钉着的不变量。
+    this.#store.refreshIfChanged();
+    const current = this.#store.raw().candidateCircuits;
+    if (!Array.isArray(current) || current.every((row) => profileIds.has(row.profileId))) {
+      return [];
+    }
+    await this.#store.settle();
+    this.#store.refreshIfChanged();
+    return this.#store.run(async () => {
+      const rows = this.#rows();
+      const stale = rows.filter((row) => !profileIds.has(row.profileId));
+      if (stale.length === 0) return [];
+      const pruned = stale.map((row) => row.profileId);
+      this.#store.raw().candidateCircuits = rows.filter((row) => profileIds.has(row.profileId));
+      this.#store.flush();
+      return pruned;
+    });
+  }
+
   async resolveProbe(input: ResolveCandidateProbeInput): Promise<CandidateCircuit> {
     validateResolveCandidateProbe(input);
     await this.#store.settle();

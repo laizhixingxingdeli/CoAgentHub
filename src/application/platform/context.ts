@@ -142,13 +142,22 @@ export class PlatformContext {
   }
 
   async releaseWorkspace(missionId: string, projectRoot?: string): Promise<void> {
-    if (this.workspace && projectRoot) await this.workspace.release(missionId, projectRoot).catch(() => undefined);
     const { mission } = await this.locate(missionId);
+    // 释放 worktree 与删已合入分支各自记事件：吞掉任何一步的失败，失败就无人
+    // 知晓、也无人重试——worktree 与分支就是这么堆起来的（2026-10 有 40 次
+    // 只记了删分支失败的 branch_cleanup_failed，释放失败一次都没露过面）。
+    if (this.workspace && projectRoot) {
+      try {
+        await this.workspace.release(missionId, projectRoot);
+      } catch (error) {
+        await this.event(mission, 'workspace.branch_cleanup_failed', { step: 'release_worktree', reason: String(error) }).catch(() => undefined);
+      }
+    }
     if (mission.status === 'completed' && mission.finalReview?.mergedInto && this.workspace?.deleteMergedBranch && projectRoot) {
       try {
         await this.workspace.deleteMergedBranch(missionId, projectRoot);
       } catch (error) {
-        await this.event(mission, 'workspace.branch_cleanup_failed', { reason: String(error) }).catch(() => undefined);
+        await this.event(mission, 'workspace.branch_cleanup_failed', { step: 'delete_branch', reason: String(error) }).catch(() => undefined);
       }
     }
     await this.onProjectIdle?.(mission.projectId);

@@ -235,6 +235,13 @@ export interface SpawnRuntimeOptions {
    * 砍掉的正是这种活；而真卡住的特征是不再产出任何东西。
    */
   readonly timeoutMs?: number;
+  /**
+   * 命令执行中的静默宽限上限。一条 command 类工具调用（bash 等）在跑时，
+   * 静默不等于卡死——构建/编码可以十几分钟不吐输出；pi 的 bash 又没有
+   * 自己的超时。从命令开始算起超过这个上限仍无动静才判死。
+   * 不设默认 20 分钟；最终兜底是上层 runaway 墙钟（30 分钟零证据），不是这里。
+   */
+  readonly commandGraceMs?: number;
   /** 把子进程输出转发到平台 stdout。 */
   readonly stream?: boolean;
   /**
@@ -325,6 +332,11 @@ export class SpawnRuntime implements AgentRuntime {
     let outcomeLine: string | undefined;
     let stderr = '';
     let buffer = '';
+    // 在跑的 command 类工具调用。命令执行期可以合法地长时间静默，静默判死
+    // 要给它让路（见下面 checkIdle 的宽限）。适配器没分类（事件无 activityClass）
+    // 时集合恒空，退回纯静默判死，行为与之前一致。
+    const inFlightCommands = new Set<string>();
+    let inFlightSince: number | undefined;
 
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
@@ -343,6 +355,13 @@ export class SpawnRuntime implements AgentRuntime {
           const event = parseEvent(line.slice(EVENT_PREFIX.length));
           if (event) {
             emit(event);
+            if (event.kind === 'tool.started' && event.activityClass === 'command') {
+              inFlightCommands.add(event.callId);
+              if (inFlightSince === undefined) inFlightSince = Date.now();
+            } else if (event.kind === 'tool.completed') {
+              inFlightCommands.delete(event.callId);
+              if (inFlightCommands.size === 0) inFlightSince = undefined;
+            }
             // 转人话再打给看 run-mission 的人；原始 JSON 行不往外露。
             if (options.stream) process.stdout.write(render(event));
           }
@@ -368,16 +387,33 @@ export class SpawnRuntime implements AgentRuntime {
      *
      * 每来一行输出就续一次。判据换成这个之后，长任务不受影响，
      * 真死循环仍然在几分钟内被收掉。
+     *
+     * 例外：**命令还在执行时**不算卡死。pi 的 bash 工具没有自己的超时，
+     * 一条构建/编码命令十几分钟不吐输出是正常工作；按静默掐会把整个会话
+     * 连同已做的活一起杀掉，重派后往往原样再挂一次（2026-10 一个月里 43 次
+     * killed_idle 都发生在命令启动后 5 分钟整）。所以 command 类工具调用
+     * 在跑时，超时到期改为再续一个窗口，直到自命令开始起 commandGraceMs
+     * 用尽才判死；无上限挂死的最终兜底是上层 runaway 墙钟，不是这里。
      */
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
+    const commandGraceMs = options.commandGraceMs ?? 20 * 60 * 1000;
+    const checkIdle = () => {
+      if (
+        inFlightCommands.size > 0 &&
+        inFlightSince !== undefined &&
+        Date.now() - inFlightSince < commandGraceMs
+      ) {
+        arm();
+        return;
+      }
+      timedOut = true;
+      killTree(child);
+    };
     const arm = () => {
       if (!options.timeoutMs) return;
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        timedOut = true;
-        killTree(child);
-      }, options.timeoutMs);
+      timer = setTimeout(checkIdle, options.timeoutMs);
     };
     arm();
     bumpIdle = arm;
@@ -461,7 +497,9 @@ export class SpawnRuntime implements AgentRuntime {
           endedBy: idleKilled ? 'killed_idle' : 'upstream_failure',
           usage: UNKNOWN_USAGE,
           failureMessage: idleKilled
-            ? `子进程静默超过 ${options.timeoutMs} ms，判为卡住并连同子孙进程一起杀掉`
+            ? inFlightCommands.size > 0
+              ? `子进程静默超过 ${options.timeoutMs} ms，且仍有 ${inFlightCommands.size} 条命令在执行（宽限 ${commandGraceMs} ms 用尽），判为卡住并连同子孙进程一起杀掉`
+              : `子进程静默超过 ${options.timeoutMs} ms，判为卡住并连同子孙进程一起杀掉`
             : signal === 'SIGKILL'
               ? `子进程被 ${signal} 杀掉且没有回传结果`
               : `子进程退出 code=${code} 且没有回传结果。stderr: ${stderr.slice(-500) || '(空)'}`,

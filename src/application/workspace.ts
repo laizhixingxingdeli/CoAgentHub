@@ -247,6 +247,8 @@ export interface WorktreeReconcileResult {
 export interface WorkspaceManager {
   /** 成功合入并释放 worktree 后才可安全删除本 Mission 分支。 */
   deleteMergedBranch?(missionId: string, projectRoot: string): Promise<void>;
+  /** 列出项目仓里现存的 mission/* 本地分支（返回不带 `mission/` 前缀的 missionId）。启动清理用。 */
+  listMissionBranches?(projectRoot: string): Promise<readonly string[]>;
   /**
    * @param pinnedBase 指定从哪个版本分叉。不给就用目标分支当前的 HEAD。
    *
@@ -1051,7 +1053,9 @@ ${dirty}` };
     // remove --force 不会问，也不会留下任何痕迹。
     await this.#commitPending(cwd, missionId, '回收工作区前保存未提交的产出');
     // 只摘掉 worktree，**不删分支**：改动是 Mission 的产出，要留给 L3 检视。
-    await run('git', ['worktree', 'remove', '--force', cwd], { cwd: repo }).catch(() => undefined);
+    // remove 失败必须抛给调用方记事件：吞掉的话失败无人知晓，worktree 就这么
+    // 一个个堆起来（2026-10 一个月 40 次 branch_cleanup_failed 的近因之一）。
+    await run('git', ['worktree', 'remove', '--force', cwd], { cwd: repo });
     await run('git', ['worktree', 'prune'], { cwd: repo }).catch(() => undefined);
   }
 
@@ -1062,6 +1066,17 @@ ${dirty}` };
     // 显式核对相对当前集成 HEAD 已合入，再用 -d，避免 upstream 改变安全判断。
     await run('git', ['merge-base', '--is-ancestor', branch, 'HEAD'], { cwd: projectRoot });
     await run('git', ['branch', '-d', '--', branch], { cwd: projectRoot });
+  }
+
+  async listMissionBranches(projectRoot: string): Promise<readonly string[]> {
+    const repo = resolve(projectRoot);
+    const out = (
+      await run('git', ['for-each-ref', 'refs/heads/mission', '--format=%(refname:short)'], { cwd: repo })
+    ).stdout;
+    return out
+      .split('\n')
+      .map((line) => line.trim().replace(/^mission\//u, ''))
+      .filter((id) => id.length > 0);
   }
 
   /**

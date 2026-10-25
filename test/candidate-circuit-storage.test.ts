@@ -79,3 +79,18 @@ test('file candidate circuits persist, isolate profiles, claim once, and rollbac
     assert.deepEqual(await new FileCandidateCircuitRepository(new FileStateStore(path)).get('legacy'), { profileId: 'legacy', state: 'closed' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('pruneAbsent 删掉名单外的候选记录，名单内的原样保留', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'candidate-circuit-prune-'));
+  try {
+    const path = join(dir, 'state.json');
+    const repo = new FileCandidateCircuitRepository(new FileStateStore(path));
+    await repo.open({ profileId: 'keep-a', failureClass: 'timeout', openUntil: deadline });
+    await repo.open({ profileId: 'gone-b', failureClass: 'quota', openUntil: null });
+    await repo.open({ profileId: 'gone-c', failureClass: 'unknown', openUntil: deadline });
+    const pruned = await repo.pruneAbsent(new Set(['keep-a']));
+    assert.deepEqual([...pruned].sort(), ['gone-b', 'gone-c']);
+    assert.equal((await repo.get('keep-a')).state, 'open');
+    assert.deepEqual(await repo.get('gone-b'), { profileId: 'gone-b', state: 'closed' });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

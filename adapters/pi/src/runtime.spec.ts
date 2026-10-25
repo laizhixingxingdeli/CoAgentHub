@@ -20,6 +20,7 @@ import {
 	mapQueryOutcome,
 	appendXaiQuotaReset,
 	toolStartedEvent,
+	noSubmitReminder,
 } from "./runtime.js";
 import type { AttemptContextMetricsV1 } from "./runtime.js";
 import type { Role } from "./roles.js";
@@ -773,4 +774,23 @@ test("contextMetrics：遍历 content 抛错仍 partial 且不猜字节", () => 
 	const metrics = collector.finalize();
 	assert.equal(metrics.coverage, "partial");
 	assert.deepEqual(metrics.tools, [{ kind: "grep", calls: 1, returnedUtf8Bytes: 0 }]);
+});
+
+test("noSubmitReminder：协调者提示以结构化动作收尾；执行者保持原提示；其它角色/已提交不提醒", () => {
+	assert.match(
+		noSubmitReminder({ role: "coordinator", submitted: false, hasFailure: false, unreachable: false }) ?? "",
+		/coagent_dispatch_work_item[\s\S]*coagent_submit_mission_result/,
+	);
+	assert.match(
+		noSubmitReminder({ role: "executor", submitted: false, hasFailure: false, unreachable: false }) ?? "",
+		/coagent_submit_execution_result/,
+	);
+	assert.equal(
+		noSubmitReminder({ role: "coordinator", submitted: true, hasFailure: false, unreachable: false }),
+		undefined,
+	);
+	assert.equal(
+		noSubmitReminder({ role: "query", submitted: false, hasFailure: false, unreachable: false }),
+		undefined,
+	);
 });

@@ -72,7 +72,7 @@
 3. 合入：`node src/l3.ts merge <missionId> --as "检视者（<模型名>）" --confirmed-by "用户常设授权：集成分支合入由检视者签，仅合入 master 需用户签名（2026-09-28）" --reason "…"`。
 4. 方案源里把该票标 done，并记下合入提交、用时、花费。
 5. 平台合不进去时（集成分支在交卷后被推进、或工作区不干净，平台没有换基线再合的通路）：先查两边改动的文件有没有重叠、Mission 有没有规格改动要落地，再请用户批准手动合入——`git merge --no-ff <Mission 分支>`，对合并结果跑全量 `node --test`；绿了再 `l3 merge` 留签名（预期被基线校验拒、Mission 转 blocked，同时释放改动名额），方案源标 done 并写明手动合入的提交（AC1 25903aa、REF1 25eea70）。
-6. 合入之后删除该 Mission 的 worktree：`git worktree remove .coagent-worktrees/<目录>`；嵌套的（Mission worktree 建在集成 worktree 里面）先删内层再删外层。只删「分支已合入 master 且工作区干净」的，未合入的留着；删之前用 `git merge-base --is-ancestor <HEAD> master` 核实。用户 2026-10-25：`.coagent-worktrees/` 合入之后要删除，不长期堆积（当天一次清掉 19 个已合入的）。
+6. 合入之后删除该 Mission 的 worktree：`git worktree remove .coagent-worktrees/<目录>`；嵌套的（Mission worktree 建在集成 worktree 里面）先删内层再删外层。只删「分支已合入 master 且工作区干净」的，未合入的留着；删之前用 `git merge-base --is-ancestor <HEAD> master` 核实。用户 2026-10-25：`.coagent-worktrees/` 合入之后要删除，不长期堆积（当天一次清掉 19 个已合入的）。平台侧 2026-10-25 起自动兜底：Mission 分支的删除失败会在服务启动时重试（`reconcileMergedMissionBranches`），释放 / 删分支的失败都记 `workspace.branch_cleanup_failed`（data.step 区分）；手工清理主要剩集成分支的 worktree（见第 6 节）。
 
 ## 6. 合入 master（用户签）
 
@@ -159,3 +159,11 @@ Git 已成功而队列确认丢失时，提交标记与最终文档内容用于�
 - **断网与启动续跑（RESUME2，2026-10-15，合 master 并重启后生效）**：多家候选连续出现断网类失败（fetch failed / Request timed out / 连不上 / 静默 0 token 被杀）时，不再逐个换候选冻结、也不再进死信：这一跳释放租约，`no_available_agent` + `waitResumeAt`，按约 1、5、15 分钟自动重试，第 5 次才 `attempt_limit_reached` 等人（`waitDetail` 以「上游网络中断」开头，不要当成票的问题去拆单）。半开探测名额被占却无人结算的候选（以前要靠人发现再 `candidate_reset`），连续 2 分钟没有活租约会自动 reset（审计 actor `platform:probe-reclaim`）。
 - **池健康有缓存（POOLS1，2026-10-15，合 master 并重启后生效）**：`GET /api/pools` 以前每次都重扫全部历史，单次 1.1–1.4 秒同步 CPU、期间整个服务不响应（网页总览页每 5 秒拉一次，所以开着页面服务就常被卡住）。现在服务装配为 15 秒缓存 + 并发合并，扫描每个 Mission 让出一次事件循环。**我自己写池 / 复位熔断（走 HTTP）后缓存立刻失效，读到的是新值；但编排器自己开熔断不经 HTTP 写路由，最多滞后 15 秒，想立刻看就加 `?fresh=1`**（rmcp / mcp 的池查询工具没有这个参数时，直接 `curl 'http://127.0.0.1:3101/api/pools?fresh=1'`）。缓存关闭是 `createApi` 的缺省，所以直接起 API 的测试不受影响。
 - **部署**：合 master 之后服务仍是旧代码，要重启才加载（静态网页文件按磁盘现读，新网页对老接口向后兼容）。重启前提不变——没有在跑的 agent（第 7 节）；合并本身不重启、不推送。
+
+## 2026-10-25 补充（运行数据优化批次：直接实施例外）
+
+- **这批是直接实施的一次性例外**：用户 10-25 要求「不走平台，你直接进行修改，要注意更新文档」（继 10-03、10-13 之后第三次）。由检视者在隔离 worktree `codex/direct-opt-20261025` 实现，验证只有本机全量 `node --test` 与适配层 spec；第 0 节的划线不因此改变。master 合入仍等用户说「合」。
+- **依据是当天对 `.coagent-state.json` 的只读诊断**（服务停机时做的；25 个活跃日、214 个 Mission、$505、81k 事件）：协调者 no_structured_result 32 次 / $13.54（失败浪费的六成）；killed_idle 62 次其中 43 次是命令启动后 5 分钟整被掐（pi 的 bash 无超时，命令执行期静默被当卡死）；`branch_cleanup_failed` 40 次后无人重试（worktree / mission 分支堆积的根因）；熔断记录 27 条里 15 条属于已移除的候选。
+- **已实现**（重启服务后生效）：①spawn 静默超时对命令执行中让路（`commandGraceMs` 默认 20 分钟，挂死的兜底交给 runaway 墙钟）；②PI-END1 结束提醒扩到协调者（`noSubmitReminder`，按角色给收尾动作）；③`release` 失败不再吞、两步清理失败都记 `workspace.branch_cleanup_failed`（`data.step` 区分），排他装配时重试已合入 mission 分支的删除；④常驻服务启动时按当前池清掉孤儿熔断记录（`pruneAbsent`，复位审计保留；l3 单命令装配不清——它承诺被拒不改状态字节）。
+- **快车道利用率低的结论**（未改代码）：214 个 Mission 只有 36 个走过分类入口、6 个 lightweight（中位 6 分钟 / $0.36，对比 Standard 48 分钟 / $2.65），29 个完成的 Standard 完全符合轻量特征。瓶颈在 L3 工作流不走分类入口——插件没有分类建单工具，直接走 HTTP 又违反「平台操作只经插件」。要不要给插件加该工具由用户决定（涉及插件升级部署），分类阈值本身不动。
+- **状态文件瘦身**（100 MB、58% 事件字节是两条遥测、flush 约 0.5 秒同步阻塞）已立 ADR-0009（提案状态，`adr-0009-state-slimming-telemetry-sidecar-and-archive.md`），实施另立票；本轮不动存储。

@@ -102,6 +102,12 @@ export interface CandidateCircuitRepository {
   /** Atomically closes an open/half_open circuit and appends its operator audit record. */
   reset(input: { profileId: string; actor: string; at: string; reason: string }): Promise<CandidateCircuit>;
   listResetEvents(profileId?: string): Promise<Array<{ profileId: string; actor: string; at: string; reason: string }>>;
+  /**
+   * 删掉 profileId 不在给定名单里的熔断记录，返回被删的 profileId。
+   * 候选换血后旧记录只会让池健康面长期显示已移除候选的 open 熔断；
+   * 名单外候选将来加回来时从 closed 起步，语义不变。可选：实现方不支持就跳过。
+   */
+  pruneAbsent?(profileIds: ReadonlySet<string>): Promise<readonly string[]>;
 }
 
 export interface Clock {
