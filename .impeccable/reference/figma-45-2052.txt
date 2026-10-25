@@ -1,0 +1,101 @@
+export default function DataStates() {
+  return (
+    <div className="bg-[var(--color\/paper,#f5f3ed)] border border-[var(--color\/line,#d6d5ce)] border-solid overflow-clip relative rounded-[12px] size-full" data-node-id="45:2052" data-name="data-states">
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] left-[23px] text-[18px] text-[color:var(--color\/ink,#222b35)] top-[23px] w-[1392px]" data-node-id="45:2053">
+        数据状态与出现位置
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[79px] w-[1392px]" data-node-id="45:2054">
+        顶栏下方：服务未运行横幅；同步位：数据过期；列表内部：首次加载、空项目、局部失败、未知值。
+      </p>
+      <a className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex h-[36px] items-center justify-center left-[23px] rounded-[5px] top-[1319px] w-[120px]" data-node-id="45:2055" data-name="Console/SecondaryButton">
+        <div className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[0] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] text-left whitespace-nowrap" data-node-id="I45:2055;39:305">
+          <p className="leading-[22px]">返回</p>
+        </div>
+      </a>
+      <div className="[word-break:break-word] absolute bg-[var(--color\/redbg,#f4e5e1)] content-stretch flex flex-col h-[70px] items-center left-[23px] px-[16px] py-[6px] rounded-[8px] text-[color:var(--color\/red,#a24138)] top-[149px] w-[1392px]" data-node-id="45:2057" data-name="Console/Banner">
+        <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] w-full" data-node-id="I45:2057;39:334">
+          连不上本机平台服务（127.0.0.1:3101）
+        </p>
+        <p className="font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] w-full" data-node-id="I45:2057;39:335">
+          已显示的内容停在 14:32；请在项目目录运行 node scripts/coagent.mjs start。
+        </p>
+      </div>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[249px] whitespace-nowrap" data-node-id="45:2060">
+        顶栏同步状态 · 数据过期
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[285px] whitespace-nowrap" data-node-id="45:2061">
+        最近同步 14:32:08 · 数据已过期
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[349px] whitespace-nowrap" data-node-id="45:2062">
+        列表内部 · 首次加载
+      </p>
+      <div className="absolute bg-[var(--color\/nav,#eceae2)] h-[44px] left-[23px] overflow-clip rounded-[4px] top-[389px] w-[1392px]" data-node-id="45:2063" data-name="骨架行">
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-[10px] left-[16px] rounded-[4px] top-[12px] w-[420px]" data-node-id="45:2064" data-name="骨架编号" />
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-[10px] left-[620px] rounded-[4px] top-[12px] w-[140px]" data-node-id="45:2065" data-name="骨架状态" />
+      </div>
+      <div className="absolute bg-[var(--color\/nav,#eceae2)] h-[44px] left-[23px] overflow-clip rounded-[4px] top-[443px] w-[1392px]" data-node-id="45:2066" data-name="骨架行">
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-[10px] left-[16px] rounded-[4px] top-[12px] w-[420px]" data-node-id="45:2067" data-name="骨架编号" />
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-[10px] left-[620px] rounded-[4px] top-[12px] w-[140px]" data-node-id="45:2068" data-name="骨架状态" />
+      </div>
+      <div className="absolute bg-[var(--color\/nav,#eceae2)] h-[44px] left-[23px] overflow-clip rounded-[4px] top-[497px] w-[1392px]" data-node-id="45:2069" data-name="骨架行">
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-[10px] left-[16px] rounded-[4px] top-[12px] w-[420px]" data-node-id="45:2070" data-name="骨架编号" />
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-[10px] left-[620px] rounded-[4px] top-[12px] w-[140px]" data-node-id="45:2071" data-name="骨架状态" />
+      </div>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[599px] whitespace-nowrap" data-node-id="45:2072">
+        内容区 · 空项目
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[637px] whitespace-nowrap" data-node-id="45:2073">
+        这个项目还没有任务 · 任务由检视者会话创建
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[714px] whitespace-nowrap" data-node-id="45:2074">
+        仅出错单元格 · 局部失败
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal h-[44px] leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[752px] w-[1000px]" data-node-id="45:2075">
+        coordinator-zai-glm-4-6 · 健康未知 · 近 7 天：读取失败 · 占用：未知
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[729px] text-[14px] text-[color:var(--color\/red,#a24138)] top-[752px] whitespace-nowrap" data-node-id="45:2076">
+        读取失败
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[834px] whitespace-nowrap" data-node-id="45:2077">
+        字段位置 · 未知值
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[872px] whitespace-pre" data-node-id="45:2078">{`费用：未知    思考档：未知    主控模型：平台不可见`}</p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[949px] whitespace-nowrap" data-node-id="45:2079">
+        实时输出区 · 可能停滞
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[987px] whitespace-nowrap" data-node-id="45:2080">
+        最后输出 4 分钟前 · 心跳 3 分钟前 · 可能卡住，检查当前会话
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[1064px] whitespace-nowrap" data-node-id="45:2081">
+        费用区 · 预算门禁
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[1102px] whitespace-nowrap" data-node-id="45:2082">
+        $8.40 / $10 · 接近上限
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[1139px] whitespace-nowrap" data-node-id="45:2083">
+        $10 / $10 · 已停，等检视者批准追加预算
+      </p>
+    </div>
+  );
+}
+SUPER CRITICAL: The generated React+Tailwind code MUST be converted to match the target project's technology stack and styling system.
+1. Analyze the target codebase to identify: technology stack, styling approach, component patterns, and design tokens
+2. Convert React syntax to the target framework/library
+3. Transform all Tailwind classes to the target styling system while preserving exact visual design
+4. Follow the project's existing patterns and conventions
+DO NOT install any Tailwind as a dependency unless the user instructs you to do so.
+
+Node ids have been added to the code as data attributes, e.g. `data-node-id="1:2"`.
+These styles are contained in the design: Console/Section: Font(family: "Noto Sans SC", style: Medium, size: 18, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Body: Font(family: "Noto Sans SC", style: Regular, size: 14, weight: 400, lineHeight: 22, letterSpacing: 0), Console/Emphasis: Font(family: "Noto Sans SC", style: Medium, size: 14, weight: 500, lineHeight: 22, letterSpacing: 0), Console/Meta: Font(family: "Noto Sans SC", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0).
+Component descriptions: The following components have usage descriptions or documentation links defined in Figma. These descriptions provide important context about the intended usage, best practices, and any constraints for each component. Follow these guidelines when implementing or using these components.
+
+## Console/SecondaryButton
+**Node ID:** 39:308
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Banner
+**Node ID:** 39:339
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+The generated code contains image and SVG URL constants, e.g. const image = `${assetPathPrefix}/<asset file name>`, where assetPathPrefix is declared once at the top of the code and every asset URL interpolates it. These URLs are temporary download sources and expire after 7 days. Download each asset into the project with curl -L, then replace its URL in the generated code with a reference to the downloaded asset. Never use the temporary URLs as runtime image sources.

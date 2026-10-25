@@ -1,0 +1,297 @@
+{
+  "source": "Figma live design contexts 2026-10-26",
+  "frames": {
+    "2:47": [
+      {
+        "symbol": "imgIcon",
+        "file": "36ecc.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon2",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon3",
+        "file": "d48d2.svg"
+      },
+      {
+        "symbol": "imgTrack",
+        "file": "1ea34.svg"
+      },
+      {
+        "symbol": "imgIcon4",
+        "file": "43f6b.svg"
+      },
+      {
+        "symbol": "imgIcon5",
+        "file": "e10cf.svg"
+      },
+      {
+        "symbol": "imgIcon6",
+        "file": "b8b86.svg"
+      },
+      {
+        "symbol": "imgIcon7",
+        "file": "24045.svg"
+      }
+    ],
+    "2:140": [
+      {
+        "symbol": "imgIcon",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "1130f.svg"
+      }
+    ],
+    "2:214": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "41:488": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "41:574": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "44:1322": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "44:1440": [
+      {
+        "symbol": "imgIcon",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "1130f.svg"
+      }
+    ],
+    "44:1558": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "44:1676": [
+      {
+        "symbol": "imgIcon",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "1130f.svg"
+      }
+    ],
+    "44:1750": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "44:1824": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "45:1388": [
+      {
+        "symbol": "imgIcon",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "1130f.svg"
+      }
+    ],
+    "45:1593": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "45:1798": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "49:3990": [
+      {
+        "symbol": "imgIcon",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "1130f.svg"
+      }
+    ],
+    "43:630": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "43:712": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "43:794": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "43:871": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "48:3380": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "48:3607": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "45:1510": [
+      {
+        "symbol": "imgIcon",
+        "file": "a4d41.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "1130f.svg"
+      }
+    ],
+    "45:1715": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "45:1920": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      },
+      {
+        "symbol": "imgIcon1",
+        "file": "43f6b.svg"
+      }
+    ],
+    "49:4094": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "43:492": [
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "48:3834": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ],
+    "48:3923": [
+      {
+        "symbol": "imgTrack",
+        "file": "6121f.svg"
+      },
+      {
+        "symbol": "imgIcon",
+        "file": "1130f.svg"
+      }
+    ]
+  }
+}

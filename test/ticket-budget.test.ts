@@ -34,6 +34,7 @@ import { ScriptedRuntime } from '../src/runtime/scripted.ts';
 import type { ScriptTable } from '../src/runtime/scripted.ts';
 import { evaluateMissionCost } from '../src/application/ticket-budget.ts';
 import type { MissionContract, TokenUsage, WorkOrder } from '../src/kernel/index.ts';
+import { Project } from '../src/kernel/index.ts';
 
 const CONTRACT: MissionContract = {
   intent: '把 X 修好',
@@ -148,7 +149,7 @@ async function harness(opts: { coordinator: ScriptTable; executor: ScriptTable; 
     coordinator: { runtime: coordinatorRt, candidates: [{ endpoint: 'local', profileId: 'coordinator-a' }] },
     executor: { runtime: executorRt, candidates: [{ endpoint: 'local', profileId: 'exec-a' }] },
   });
-  return { platform, deliveries, server, orchestrator, coordinatorRt, executorRt };
+  return { platform, projects, deliveries, server, orchestrator, coordinatorRt, executorRt };
 }
 
 test('费用到 $10 在下一执行者之前停下并可增额续跑；重跑链与 subscription/free 记 0', async () => {
@@ -180,6 +181,8 @@ test('费用到 $10 在下一执行者之前停下并可增额续跑；重跑链
     assert.equal(after1.workItems.find((i) => i.id === 'W-2')?.status, 'dispatched');
     assert.equal(after1.workItems.find((i) => i.id === 'W-2')?.attempts, 0, '第二项还没起来就被停下了');
     assert.equal(after1.waitReason, 'mission_cost_cap_reached');
+    // 停下时视图必须给出内核记的真实上限：观测面据此判断要不要增额。
+    assert.equal(after1.costCap, 10);
     const gates = after1.openEscalations;
     assert.equal(gates.length, 1);
     assert.equal(gates[0]!.platformGate?.kind, 'cost_cap');
@@ -205,6 +208,8 @@ test('费用到 $10 在下一执行者之前停下并可增额续跑；重跑链
     assert.equal(raised.costCap, 20);
     const afterRaise = await h.platform.getMissionView('M-cost');
     assert.equal(afterRaise.waitReason, undefined);
+    // 增额后视图跟上新上限，不是创建时那个 10。
+    assert.equal(afterRaise.costCap, 20);
     assert.deepEqual(afterRaise.openEscalations, []);
 
     // 同一条 Mission 续跑：这一轮 W-2 真的留下了一次执行尝试与提交结果。
@@ -266,6 +271,15 @@ test('费用到 $10 在下一执行者之前停下并可增额续跑；重跑链
         { candidateId: 'unknown', cost: 5 },
       ],
     );
+
+    // 旧快照（costCap 落盘之前就存下的）重启后：上限仍是未知。
+    // 视图若补一个默认 10，观测面会显示一条从未生效过的门禁。
+    await h.platform.createMission({ projectId: 'P', missionId: 'M-legacy', contract: CONTRACT });
+    const snapshot = (await h.projects.get('P'))!.toSnapshot();
+    delete (snapshot.missions.find((m) => m.id === 'M-legacy') as { costCap?: number }).costCap;
+    await h.projects.save(Project.restore(snapshot));
+    const legacyView = await h.platform.getMissionView('M-legacy');
+    assert.equal(legacyView.costCap, undefined, '旧快照缺上限仍未知，不默认补 10');
   } finally {
     h.server.close();
     await rm(projectRoot, { recursive: true, force: true });

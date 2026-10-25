@@ -1,0 +1,317 @@
+const assetPathPrefix = "https://www.figma.com/api/mcp/asset/c2806c83-0313-4d6c-882f-d1877301e7cf";
+const imgIcon = `${assetPathPrefix}/a4d41.svg`;
+const imgIcon1 = `${assetPathPrefix}/1130f.svg`;
+
+type ConsoleTabProps = {
+  className?: string;
+  state?: "Default" | "Selected";
+};
+
+function ConsoleTab({ className, state = "Default" }: ConsoleTabProps) {
+  const isSelected = state === "Selected";
+  return (
+    <div className={className || `content-stretch flex h-[40px] items-center justify-center relative w-[130px] ${isSelected ? String.raw`border-[var(--color\/accent,#275d74)] border-b-2 border-solid` : ""}`} id={isSelected ? "node-39_247" : "node-39_245"}>
+      <p className={`[word-break:break-word] font-["Noto_Sans_SC:Medium"] font-medium leading-[22px] relative shrink-0 text-[14px] whitespace-nowrap ${isSelected ? String.raw`text-[color:var(--color\/accent,#275d74)]` : String.raw`text-[color:var(--color\/muted,#58616a)]`}`} id={isSelected ? "node-39_248" : "node-39_246"}>
+        工作流
+      </p>
+    </div>
+  );
+}
+
+type ConsoleStatusProps = {
+  className?: string;
+  state?: "执行中";
+};
+
+function ConsoleStatus({ className, state = "执行中" }: ConsoleStatusProps) {
+  return (
+    <div className={className || "content-stretch flex gap-[8px] h-[28px] items-center relative w-[142px]"} data-node-id="39:258">
+      <div className="relative shrink-0 size-[16px]" data-node-id="39:259" data-name="icon">
+        <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon} />
+      </div>
+      <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/running,#2457b2)] whitespace-nowrap" data-node-id="39:261">
+        执行中
+      </p>
+    </div>
+  );
+}
+
+type ConsoleNavItemProps = {
+  className?: string;
+  state?: "Default" | "Selected";
+};
+
+function ConsoleNavItem({ className, state = "Default" }: ConsoleNavItemProps) {
+  const isSelected = state === "Selected";
+  return (
+    <div className={className || `content-stretch flex h-[40px] items-center pl-[16px] pr-[12px] relative w-[152px] ${isSelected ? String.raw`bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid` : ""}`} id={isSelected ? "node-39_242" : "node-39_240"}>
+      <p className={`[word-break:break-word] font-["Noto_Sans_SC:Medium"] font-medium leading-[24px] relative shrink-0 text-[16px] whitespace-nowrap ${isSelected ? String.raw`text-[color:var(--color\/accent,#275d74)]` : String.raw`text-[color:var(--color\/white,white)]`}`} id={isSelected ? "node-39_243" : "node-39_241"}>
+        任务
+      </p>
+    </div>
+  );
+}
+
+export default function Component02() {
+  return (
+    <div className="bg-[var(--color\/paper,#f5f3ed)] relative size-full" data-node-id="2:140" data-name="02 任务详情 · 三层">
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[334px] w-[1176px]" data-node-id="82:4092" data-name="任务页头 / 底部分界" />
+      <div className="absolute bg-[var(--color\/white,white)] h-[266px] left-[184px] top-[69px] w-[1256px]" data-node-id="82:4091" data-name="任务页头 / 白色信息层" />
+      <div className="absolute bg-[var(--color\/nav,#eceae2)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[40px] left-[224px] rounded-[6px] top-[248px] w-[1176px]" data-node-id="86:4090" data-name="任务事实 / 独立信息带" />
+      <div className="absolute bg-[var(--color\/ink,#222b35)] content-stretch flex flex-col gap-[10px] h-[1240px] items-start left-0 overflow-clip p-[16px] top-0 w-[184px]" data-node-id="41:403" data-name="一级导航">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] relative shrink-0 text-[18px] text-[color:var(--color\/white,white)] whitespace-nowrap" data-node-id="41:404">
+          CoAgentHub
+        </p>
+        <div className="h-[42px] relative shrink-0 w-px" data-node-id="41:405" data-name="导航间距" />
+        <ConsoleNavItem className="bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid content-stretch cursor-pointer flex h-[40px] items-center pl-[16px] pr-[12px] relative shrink-0 w-[152px]" state="Selected" />
+        <a className="content-stretch cursor-pointer flex h-[40px] items-center pl-[16px] pr-[12px] relative shrink-0 w-[152px]" data-node-id="41:408" data-name="Console/NavItem">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/white,white)] text-left whitespace-nowrap" data-node-id="I41:408;39:241">
+            资源
+          </p>
+        </a>
+      </div>
+      <div className="absolute content-stretch flex gap-[16px] h-[42px] items-center left-[224px] overflow-clip top-[18px] w-[1176px]" data-node-id="41:410" data-name="项目与同步状态">
+        <a className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex gap-[8px] h-[42px] items-center px-[12px] relative rounded-[5px] shrink-0 w-[256px]" data-node-id="41:411" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)] text-left" data-node-id="I41:411;39:312">
+            项目：全部项目
+          </p>
+          <div className="relative shrink-0 size-[16px]" data-node-id="I41:411;39:313" data-name="icon">
+            <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon1} />
+          </div>
+        </a>
+        <div className="flex-[1_0_0] h-px min-w-px relative" data-node-id="41:415" data-name="空白" />
+        <a className="[word-break:break-word] block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] relative shrink-0 text-[13px] text-[color:var(--color\/green,#35654b)] whitespace-nowrap" data-node-id="41:416">
+          <p className="leading-[20px]">最近同步 14:32:08 · 服务正常</p>
+        </a>
+      </div>
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[68px] w-[1176px]" data-node-id="41:418" data-name="分隔线" />
+      <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[224px] text-[14px] text-[color:var(--color\/accent,#275d74)] top-[88px] whitespace-nowrap" data-node-id="41:419">
+        <p className="leading-[22px]">返回任务列表</p>
+      </a>
+      <p className="[word-break:break-word] absolute font-['IBM_Plex_Mono:Medium'] leading-[28px] left-[224px] not-italic text-[20px] text-[color:var(--color\/ink,#222b35)] top-[122px] w-[1176px]" data-node-id="41:420">
+        MiRing-Notification-Correlation-Recovery-20261014
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal h-[44px] leading-[22px] left-[224px] overflow-hidden text-[14px] text-[color:var(--color\/muted,#58616a)] text-ellipsis top-[162px] w-[1080px]" data-node-id="41:421">
+        调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢复路径，保留原始会话身份以及已有验证证据；必须验证重连后不会重复分发或错误地归因给另一会话，并明确仍未覆盖的设备条件。
+      </p>
+      <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[1310px] text-[14px] text-[color:var(--color\/accent,#275d74)] top-[166px] whitespace-nowrap" data-node-id="41:422">
+        <p className="leading-[22px]">展开 intent</p>
+      </a>
+      <ConsoleStatus className="absolute content-stretch flex gap-[8px] h-[28px] items-center left-[224px] top-[214px] w-[142px]" />
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[380px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[218px] whitespace-nowrap" data-node-id="41:427">
+        补修
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[604px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[218px] w-[796px]" data-node-id="41:428">
+        平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[240px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[255px] whitespace-nowrap" data-node-id="41:429">
+        执行保障：标准
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[414px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[255px] whitespace-nowrap" data-node-id="41:430">
+        协作方式：三层
+      </p>
+      <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[624px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[255px] whitespace-nowrap" data-node-id="41:431">
+        <p className="leading-[22px]">费用（标价折算）$2.11 / 上限 $10 · 部分为估算</p>
+      </a>
+      <p className="-translate-x-full [word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[1384px] text-[13px] text-[color:var(--color\/muted,#58616a)] text-right top-[256px] w-[348px]" data-node-id="41:432">
+        运行 5 小时 32 分 · 创建于 10-25 09:00
+      </p>
+      <ConsoleTab className="absolute border-[var(--color\/accent,#275d74)] border-b-2 border-solid content-stretch flex h-[40px] items-center justify-center left-[224px] top-[294px] w-[110px]" state="Selected" />
+      <a className="absolute content-stretch cursor-pointer flex h-[40px] items-center justify-center left-[354px] top-[294px] w-[150px]" data-node-id="41:436" data-name="Console/Tab">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I41:436;39:246">
+          交付与验证
+        </p>
+      </a>
+      <a className="absolute content-stretch cursor-pointer flex h-[40px] items-center justify-center left-[524px] top-[294px] w-[100px]" data-node-id="41:438" data-name="Console/Tab">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I41:438;39:246">
+          契约
+        </p>
+      </a>
+      <a className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex gap-[8px] h-[42px] items-center left-[224px] px-[12px] rounded-[5px] top-[346px] w-[300px]" data-node-id="41:440" data-name="Console/Field">
+        <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)] text-left" data-node-id="I41:440;39:312">
+          工作项：W-684 进行中
+        </p>
+        <div className="relative shrink-0 size-[16px]" data-node-id="I41:440;39:313" data-name="icon">
+          <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon1} />
+        </div>
+      </a>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[550px] text-[13px] text-[color:var(--color\/green,#35654b)] top-[357px] whitespace-nowrap" data-node-id="41:444">
+        W-683 已验收
+      </p>
+      <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[194px] left-[224px] overflow-clip rounded-[12px] top-[402px] w-[1176px]" data-node-id="41:445" data-name="已发生环节">
+        <div className="absolute bg-[var(--color\/nav,#eceae2)] h-[44px] left-[-1px] top-[-1px] w-[1176px]" data-node-id="82:4093" data-name="工作流标题带" />
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[19px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[11px] whitespace-nowrap" data-node-id="41:446">
+          W-684 · 第 3 轮 · 已记录 13 次执行
+        </p>
+        <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[877px] text-[14px] text-[color:var(--color\/accent,#275d74)] top-[11px] whitespace-nowrap" data-node-id="41:447">
+          <p className="leading-[22px]">展开全部 15 环节</p>
+        </a>
+        <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex h-[36px] items-center justify-center left-[1031px] rounded-[5px] top-[5px] w-[124px]" data-node-id="41:448" data-name="Console/SecondaryButton">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] whitespace-nowrap" data-node-id="I41:448;39:305">
+            定位当前
+          </p>
+        </div>
+        <div className="[word-break:break-word] absolute content-stretch cursor-pointer flex gap-[16px] h-[136px] items-start left-[15px] overflow-clip text-left top-[47px] w-[1144px]" data-node-id="41:450" data-name="最近四次 / 自动布局">
+          <a className="content-stretch flex flex-col gap-[6px] h-[136px] items-start px-[16px] py-[12px] relative rounded-[8px] shrink-0 w-[274px]" data-node-id="67:4090" data-name="Console/TimelineStep">
+            <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/ink,#222b35)] w-full" data-node-id="I67:4090;39:341">
+              协调者修订工单
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[40px] leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4090;39:342">
+              协调者 · coordinator-antigravity-claude-opus-4-6-thinking · 高
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4090;39:343">
+              14:20 · 已记录
+            </p>
+          </a>
+          <a className="content-stretch flex flex-col gap-[6px] h-[136px] items-start px-[16px] py-[12px] relative rounded-[8px] shrink-0 w-[274px]" data-node-id="67:4095" data-name="Console/TimelineStep">
+            <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/ink,#222b35)] w-full" data-node-id="I67:4095;39:341">
+              执行第 11 次
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[40px] leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4095;39:342">
+              执行者 · executor-openrouter-qwen3-coder · 高
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4095;39:343">
+              14:24 · 被打回
+            </p>
+          </a>
+          <a className="content-stretch flex flex-col gap-[6px] h-[136px] items-start px-[16px] py-[12px] relative rounded-[8px] shrink-0 w-[274px]" data-node-id="67:4100" data-name="Console/TimelineStep">
+            <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/ink,#222b35)] w-full" data-node-id="I67:4100;39:353">
+              执行第 12 次
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[40px] leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4100;39:354">
+              执行者 · executor-zai-glm-4-6 · 中
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/amber,#8b5429)] w-full" data-node-id="I67:4100;39:355">
+              14:27 · 改派 Qwen → GLM
+            </p>
+          </a>
+          <a className="bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid content-stretch flex flex-col gap-[6px] h-[136px] items-start px-[16px] py-[12px] relative rounded-[8px] shrink-0 w-[274px]" data-node-id="67:4105" data-name="Console/TimelineStep">
+            <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/ink,#222b35)] w-full" data-node-id="I67:4105;39:349">
+              执行第 13 次
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal h-[40px] leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4105;39:350">
+              执行者 · executor-zai-glm-4-6 · 中
+            </p>
+            <p className="font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] w-full" data-node-id="I67:4105;39:351">
+              14:30 · 进行中
+            </p>
+          </a>
+        </div>
+      </div>
+      <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[566px] left-[224px] overflow-clip rounded-[12px] top-[622px] w-[704px]" data-node-id="41:467" data-name="实时输出区">
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[-1px] top-[85px] w-[704px]" data-node-id="82:4095" data-name="功能区标题分隔" />
+        <div className="absolute bg-[var(--color\/nav,#eceae2)] h-[86px] left-[-1px] top-[-1px] w-[704px]" data-node-id="82:4094" data-name="功能区标题带" />
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] left-[23px] text-[18px] text-[color:var(--color\/ink,#222b35)] top-[19px] whitespace-nowrap" data-node-id="41:468">
+          当前实时输出 · 当前执行（第 13 次）
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/green,#35654b)] top-[57px] whitespace-nowrap" data-node-id="41:469">
+          最后输出 12 秒前 · 心跳 8 秒前
+        </p>
+        <div className="absolute bg-[var(--color\/ink,#222b35)] h-[444px] left-[23px] overflow-clip rounded-[8px] top-[97px] w-[656px]" data-node-id="41:470" data-name="输出正文">
+          <div className="[word-break:break-word] absolute font-['IBM_Plex_Mono:Regular'] font-normal leading-[0] left-[18px] text-[13px] text-[color:var(--color\/paper,#f5f3ed)] top-[18px] w-[620px]" data-node-id="41:471">
+            <p className="leading-[20px] mb-0">09:00:00 [平台] 创建通知关联恢复任务</p>
+            <p className="leading-[20px] mb-0">14:20:00 [协调者] 修订 W-684，冻结关联恢复范围</p>
+            <p className="leading-[20px] mb-0">14:24:00 [执行者] 第 11 次：去重边界未通过</p>
+            <p className="leading-[20px] mb-0">14:27:00 [平台] 上游失败，按候选顺序自动改派</p>
+            <p className="leading-[20px] mb-0">14:27:01 [平台] executor-openrouter-qwen3-coder →</p>
+            <p className="leading-[20px] mb-0">14:27:01 [平台] executor-zai-glm-4-6</p>
+            <p className="leading-[20px] mb-0">14:30:00 [执行者] 第 13 次核对冻结工单与原始会话身份</p>
+            <p className="leading-[20px] mb-0">14:31:02 [工具] node --test test/notification-recovery.test.ts</p>
+            <p className="leading-[20px]">14:32:06 [执行者] 继续修复通知恢复中的重复分发</p>
+          </div>
+        </div>
+      </div>
+      <div className="absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[566px] left-[944px] overflow-clip rounded-[12px] top-[622px] w-[456px]" data-node-id="41:472" data-name="选中环节">
+        <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[-1px] top-[101px] w-[456px]" data-node-id="82:4097" data-name="功能区标题分隔" />
+        <div className="absolute bg-[var(--color\/nav,#eceae2)] h-[102px] left-[-1px] top-[-1px] w-[456px]" data-node-id="82:4096" data-name="功能区标题带" />
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] left-[23px] text-[18px] text-[color:var(--color\/ink,#222b35)] top-[17px] whitespace-nowrap" data-node-id="41:473">
+          选中环节
+        </p>
+        <div className="absolute border-[var(--color\/accent,#275d74)] border-b-2 border-solid content-stretch flex h-[40px] items-center justify-center left-[23px] top-[55px] w-[90px]" data-node-id="41:474" data-name="Console/Tab">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/accent,#275d74)] whitespace-nowrap" data-node-id="I41:474;39:248">
+            概要
+          </p>
+        </div>
+        <a className="absolute content-stretch cursor-pointer flex h-[40px] items-center justify-center left-[147px] top-[55px] w-[180px]" data-node-id="41:476" data-name="Console/Tab">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I41:476;39:246">
+            修改的文件 2
+          </p>
+        </a>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] left-[23px] text-[16px] text-[color:var(--color\/ink,#222b35)] top-[111px] whitespace-nowrap" data-node-id="41:478">
+          执行第 13 次
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[145px] w-[408px]" data-node-id="41:479">
+          执行者 · executor-zai-glm-4-6 · 中
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[197px] whitespace-nowrap" data-node-id="41:480">
+          冻结工单与允许范围
+        </p>
+        <div className="[word-break:break-word] absolute font-['IBM_Plex_Mono:Regular'] leading-[0] left-[23px] not-italic text-[13px] text-[color:var(--color\/ink,#222b35)] top-[223px] w-[408px]" data-node-id="41:481">
+          <p className="leading-[20px] mb-0">W-684</p>
+          <p className="leading-[20px] mb-0">src/application/notification-recovery.ts</p>
+          <p className="leading-[20px]">test/notification-recovery.test.ts</p>
+        </div>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[293px] whitespace-nowrap" data-node-id="41:482">
+          候选变更
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[319px] w-[408px]" data-node-id="41:483">
+          平台调度器因上游失败，按候选顺序自动改派；第 11 次用 executor-openrouter-qwen3-coder，第 12 次改用 executor-zai-glm-4-6。
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[395px] whitespace-nowrap" data-node-id="41:484">
+          本环节费用
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[419px] whitespace-nowrap" data-node-id="41:485">
+          $0.18 · 估算
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[23px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[455px] whitespace-nowrap" data-node-id="41:486">
+          交回结果
+        </p>
+        <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[23px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[479px] w-[408px]" data-node-id="41:487">
+          尚未交回
+        </p>
+      </div>
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[292px] w-[1176px]" data-node-id="86:4091" data-name="任务事实与页签 / 分隔" />
+    </div>
+  );
+}
+SUPER CRITICAL: The generated React+Tailwind code MUST be converted to match the target project's technology stack and styling system.
+1. Analyze the target codebase to identify: technology stack, styling approach, component patterns, and design tokens
+2. Convert React syntax to the target framework/library
+3. Transform all Tailwind classes to the target styling system while preserving exact visual design
+4. Follow the project's existing patterns and conventions
+DO NOT install any Tailwind as a dependency unless the user instructs you to do so.
+
+Node ids have been added to the code as data attributes, e.g. `data-node-id="1:2"`.
+These styles are contained in the design: Console/Section: Font(family: "Noto Sans SC", style: Medium, size: 18, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Record: Font(family: "Noto Sans SC", style: Medium, size: 16, weight: 500, lineHeight: 24, letterSpacing: 0), Console/Body: Font(family: "Noto Sans SC", style: Regular, size: 14, weight: 400, lineHeight: 22, letterSpacing: 0), Console/Meta: Font(family: "Noto Sans SC", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0), Console/Identifier: Font(family: "IBM Plex Mono", style: Medium, size: 20, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Emphasis: Font(family: "Noto Sans SC", style: Medium, size: 14, weight: 500, lineHeight: 22, letterSpacing: 0), Console/Data: Font(family: "IBM Plex Mono", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0).
+Component descriptions: The following components have usage descriptions or documentation links defined in Figma. These descriptions provide important context about the intended usage, best practices, and any constraints for each component. Follow these guidelines when implementing or using these components.
+
+## Console/NavItem
+**Node ID:** 39:244
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Field
+**Node ID:** 39:320
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Status
+**Node ID:** 39:283
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Tab
+**Node ID:** 39:249
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/SecondaryButton
+**Node ID:** 39:308
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/TimelineStep
+**Node ID:** 39:356
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+The generated code contains image and SVG URL constants, e.g. const image = `${assetPathPrefix}/<asset file name>`, where assetPathPrefix is declared once at the top of the code and every asset URL interpolates it. These URLs are temporary download sources and expire after 7 days. Download each asset into the project with curl -L, then replace its URL in the generated code with a reference to the downloaded asset. Never use the temporary URLs as runtime image sources.

@@ -252,6 +252,15 @@ describe('HTTP 面', () => {
     assert.equal(json.workItems[0].status, 'accepted');
     assert.equal(json.result.outcome, 'delivered');
     assert.equal(json.usage.cacheRead, 900, '用量按分项聚合');
+
+    // 只读视图给出内核记的真实上限；增额后同一接口反映新值。
+    const beforeRaise = json as unknown as { costCap?: number };
+    assert.equal(beforeRaise.costCap, 10, 'Standard 新 Mission 默论 $10');
+    const raised = await call('/api/missions/M-api/budget/raise', { by: 5 });
+    assert.equal(raised.status, 200);
+    assert.equal((raised.json as { costCap: number }).costCap, 15);
+    const afterRaise = await call('/api/missions/M-api');
+    assert.equal((afterRaise.json as unknown as { costCap?: number }).costCap, 15, '详情视图跟上新上限');
   });
 
   test('执行者拿自己的 token 调协调者的工具会被挡', async () => {

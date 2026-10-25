@@ -1,0 +1,283 @@
+const assetPathPrefix = "https://www.figma.com/api/mcp/asset/af34fef8-1c38-4dcc-8cd9-40fc253f00c6";
+const imgIcon = `${assetPathPrefix}/1130f.svg`;
+const imgIcon1 = `${assetPathPrefix}/43f6b.svg`;
+
+type ConsoleTabProps = {
+  className?: string;
+  state?: "Default";
+};
+
+function ConsoleTab({ className, state = "Default" }: ConsoleTabProps) {
+  return (
+    <div className={className || "content-stretch flex h-[40px] items-center justify-center relative w-[130px]"} data-node-id="39:245">
+      <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="39:246">
+        工作流
+      </p>
+    </div>
+  );
+}
+
+type ConsoleNavItemProps = {
+  className?: string;
+  state?: "Default" | "Selected";
+};
+
+function ConsoleNavItem({ className, state = "Default" }: ConsoleNavItemProps) {
+  const isSelected = state === "Selected";
+  return (
+    <div className={className || `content-stretch flex h-[40px] items-center pl-[16px] pr-[12px] relative w-[152px] ${isSelected ? String.raw`bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid` : ""}`} id={isSelected ? "node-39_242" : "node-39_240"}>
+      <p className={`[word-break:break-word] font-["Noto_Sans_SC:Medium"] font-medium leading-[24px] relative shrink-0 text-[16px] whitespace-nowrap ${isSelected ? String.raw`text-[color:var(--color\/accent,#275d74)]` : String.raw`text-[color:var(--color\/white,white)]`}`} id={isSelected ? "node-39_243" : "node-39_241"}>
+        任务
+      </p>
+    </div>
+  );
+}
+
+export default function Component04Direct() {
+  return (
+    <div className="bg-[var(--color\/paper,#f5f3ed)] relative size-full" data-node-id="44:1558" data-name="04 交付与验证 · direct">
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[334px] w-[1176px]" data-node-id="82:4123" data-name="任务页头 / 底部分界" />
+      <div className="absolute bg-[var(--color\/white,white)] h-[266px] left-[184px] top-[69px] w-[1256px]" data-node-id="82:4122" data-name="任务页头 / 白色信息层" />
+      <div className="absolute bg-[var(--color\/nav,#eceae2)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[40px] left-[224px] rounded-[6px] top-[248px] w-[1176px]" data-node-id="86:4100" data-name="任务事实 / 独立信息带" />
+      <div className="absolute bg-[var(--color\/ink,#222b35)] content-stretch flex flex-col gap-[10px] h-[1240px] items-start left-0 overflow-clip p-[16px] top-0 w-[184px]" data-node-id="44:1559" data-name="一级导航">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] relative shrink-0 text-[18px] text-[color:var(--color\/white,white)] whitespace-nowrap" data-node-id="44:1560">
+          CoAgentHub
+        </p>
+        <div className="h-[42px] relative shrink-0 w-px" data-node-id="44:1561" data-name="导航间距" />
+        <ConsoleNavItem className="bg-[var(--color\/select,#e6ecee)] border-[var(--color\/accent,#275d74)] border-l-2 border-solid content-stretch cursor-pointer flex h-[40px] items-center pl-[16px] pr-[12px] relative shrink-0 w-[152px]" state="Selected" />
+        <a className="content-stretch cursor-pointer flex h-[40px] items-center pl-[16px] pr-[12px] relative shrink-0 w-[152px]" data-node-id="44:1563" data-name="Console/NavItem">
+          <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[24px] relative shrink-0 text-[16px] text-[color:var(--color\/white,white)] text-left whitespace-nowrap" data-node-id="I44:1563;39:241">
+            资源
+          </p>
+        </a>
+      </div>
+      <div className="absolute content-stretch flex gap-[16px] h-[42px] items-center left-[224px] overflow-clip top-[18px] w-[1176px]" data-node-id="44:1564" data-name="项目与同步状态">
+        <a className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch cursor-pointer flex gap-[8px] h-[42px] items-center px-[12px] relative rounded-[5px] shrink-0 w-[256px]" data-node-id="44:1565" data-name="Console/Field">
+          <p className="[word-break:break-word] flex-[1_0_0] font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] min-w-px relative text-[14px] text-[color:var(--color\/ink,#222b35)] text-left" data-node-id="I44:1565;39:312">
+            项目：全部项目
+          </p>
+          <div className="relative shrink-0 size-[16px]" data-node-id="I44:1565;39:313" data-name="icon">
+            <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon} />
+          </div>
+        </a>
+        <div className="flex-[1_0_0] h-px min-w-px relative" data-node-id="44:1566" data-name="空白" />
+        <a className="[word-break:break-word] block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] relative shrink-0 text-[13px] text-[color:var(--color\/green,#35654b)] whitespace-nowrap" data-node-id="44:1567">
+          <p className="leading-[20px]">最近同步 14:32:08 · 服务正常</p>
+        </a>
+      </div>
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[68px] w-[1176px]" data-node-id="44:1569" data-name="分隔线" />
+      <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[224px] text-[14px] text-[color:var(--color\/accent,#275d74)] top-[88px] whitespace-nowrap" data-node-id="44:1570">
+        <p className="leading-[22px]">返回任务列表</p>
+      </a>
+      <p className="[word-break:break-word] absolute font-['IBM_Plex_Mono:Medium'] leading-[28px] left-[224px] not-italic text-[20px] text-[color:var(--color\/ink,#222b35)] top-[122px] w-[1176px]" data-node-id="44:1571">
+        SmartCar-SceneMode-Policy-Recovery-20261018
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal h-[44px] leading-[22px] left-[224px] overflow-hidden text-[14px] text-[color:var(--color\/muted,#58616a)] text-ellipsis top-[162px] w-[1080px]" data-node-id="44:1572">
+        核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条验收与交卷，执行者只处理允许范围内的修复。本次暂停等待设备侧输入，平台无法获知主控会话的模型与费用。
+      </p>
+      <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[1310px] text-[14px] text-[color:var(--color\/accent,#275d74)] top-[166px] whitespace-nowrap" data-node-id="44:1573">
+        <p className="leading-[22px]">展开 intent</p>
+      </a>
+      <div className="absolute content-stretch flex gap-[8px] h-[28px] items-center left-[224px] top-[214px] w-[142px]" data-node-id="44:1574" data-name="Console/Status">
+        <div className="relative shrink-0 size-[16px]" data-node-id="I44:1574;39:263" data-name="icon">
+          <img alt="" className="absolute block inset-0 max-w-none size-full" src={imgIcon1} />
+        </div>
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/amber,#8b5429)] whitespace-nowrap" data-node-id="I44:1574;39:265">
+          执行中
+        </p>
+      </div>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[380px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[218px] whitespace-nowrap" data-node-id="44:1575">
+        已暂停 · 直接主控
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[604px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[218px] w-[796px]" data-node-id="44:1576">
+        用户处理 · 不会自动恢复 · 下一步：补充设备侧输入
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[240px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[255px] whitespace-nowrap" data-node-id="44:1577">
+        执行保障：标准
+      </p>
+      <p className="[word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[414px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[255px] whitespace-nowrap" data-node-id="44:1578">
+        协作方式：直接主控
+      </p>
+      <a className="[word-break:break-word] absolute block cursor-pointer font-['Noto_Sans_SC:Regular'] font-normal leading-[0] left-[624px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[255px] whitespace-nowrap" data-node-id="44:1579">
+        <p className="leading-[22px]">平台可见 $1.06 · 不含主控会话 / 上限 $10</p>
+      </a>
+      <p className="-translate-x-full [word-break:break-word] absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[20px] left-[1384px] text-[13px] text-[color:var(--color\/muted,#58616a)] text-right top-[256px] w-[348px]" data-node-id="44:1580">
+        运行 4 小时 28 分 · 创建于 10-25 10:00
+      </p>
+      <ConsoleTab className="absolute content-stretch cursor-pointer flex h-[40px] items-center justify-center left-[224px] top-[294px] w-[110px]" />
+      <div className="absolute border-[var(--color\/accent,#275d74)] border-b-2 border-solid content-stretch flex h-[40px] items-center justify-center left-[354px] top-[294px] w-[150px]" data-node-id="44:1583" data-name="Console/Tab">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/accent,#275d74)] whitespace-nowrap" data-node-id="I44:1583;39:248">
+          交付与验证
+        </p>
+      </div>
+      <a className="absolute content-stretch cursor-pointer flex h-[40px] items-center justify-center left-[524px] top-[294px] w-[100px]" data-node-id="44:1584" data-name="Console/Tab">
+        <p className="[word-break:break-word] font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] relative shrink-0 text-[14px] text-[color:var(--color\/muted,#58616a)] text-left whitespace-nowrap" data-node-id="I44:1584;39:246">
+          契约
+        </p>
+      </a>
+      <div className="[word-break:break-word] absolute content-stretch flex flex-col gap-[12px] h-[770px] items-start left-[224px] overflow-clip top-[360px] w-[784px]" data-node-id="70:4201" data-name="分层验证 / 各层状态独立">
+        <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[112px] overflow-clip relative rounded-[8px] shrink-0 w-[784px]" data-node-id="70:4202" data-name="机器验证">
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[17px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[15px] w-[150px]" data-node-id="70:4203">
+            机器验证
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[15px] w-[430px]" data-node-id="70:4204">
+            等待设备输入
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[47px] w-[570px]" data-node-id="70:4205">
+            设备侧输入未齐；没有本轮可信验证报告。
+          </p>
+          <p className="absolute font-['IBM_Plex_Mono:Regular'] leading-[20px] left-[675px] not-italic text-[13px] text-[color:var(--color\/muted,#58616a)] top-[17px] w-[90px]" data-node-id="70:4206">
+            14:28
+          </p>
+        </div>
+        <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[142px] overflow-clip relative rounded-[8px] shrink-0 w-[784px]" data-node-id="70:4207" data-name="主控验收">
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[17px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[15px] w-[150px]" data-node-id="70:4208">
+            主控验收
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/amber,#8b5429)] top-[15px] w-[430px]" data-node-id="70:4209">
+            等待用户
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[47px] w-[570px]" data-node-id="70:4210">
+            外部主控核对设备侧输入；模型与费用平台不可见。
+          </p>
+          <p className="absolute font-['IBM_Plex_Mono:Regular'] leading-[20px] left-[675px] not-italic text-[13px] text-[color:var(--color\/muted,#58616a)] top-[17px] w-[90px]" data-node-id="70:4211">
+            14:28
+          </p>
+        </div>
+        <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[112px] overflow-clip relative rounded-[8px] shrink-0 w-[784px]" data-node-id="70:4212" data-name="独立复核">
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[17px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[15px] w-[150px]" data-node-id="70:4213">
+            独立复核
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[15px] w-[430px]" data-node-id="70:4214">
+            不适用
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[47px] w-[570px]" data-node-id="70:4215">
+            标准保障不要求独立复核。
+          </p>
+          <p className="absolute font-['IBM_Plex_Mono:Regular'] font-normal leading-[20px] left-[675px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[17px] w-[90px]" data-node-id="70:4216">
+            未知
+          </p>
+        </div>
+        <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[112px] overflow-clip relative rounded-[8px] shrink-0 w-[784px]" data-node-id="70:4217" data-name="检视者终审">
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[17px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[15px] w-[150px]" data-node-id="70:4218">
+            检视者终审
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[15px] w-[430px]" data-node-id="70:4219">
+            未开始
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[47px] w-[570px]" data-node-id="70:4220">
+            尚未最终交卷。
+          </p>
+          <p className="absolute font-['IBM_Plex_Mono:Regular'] font-normal leading-[20px] left-[675px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[17px] w-[90px]" data-node-id="70:4221">
+            未知
+          </p>
+        </div>
+        <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[112px] overflow-clip relative rounded-[8px] shrink-0 w-[784px]" data-node-id="70:4222" data-name="合入集成分支">
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[17px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[15px] w-[150px]" data-node-id="70:4223">
+            合入集成分支
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[15px] w-[430px]" data-node-id="70:4224">
+            未开始
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[47px] w-[570px]" data-node-id="70:4225">
+            没有已记录的合入证据。
+          </p>
+          <p className="absolute font-['IBM_Plex_Mono:Regular'] font-normal leading-[20px] left-[675px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[17px] w-[90px]" data-node-id="70:4226">
+            未知
+          </p>
+        </div>
+        <div className="bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid h-[112px] overflow-clip relative rounded-[8px] shrink-0 w-[784px]" data-node-id="70:4227" data-name="合入 master">
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[17px] text-[14px] text-[color:var(--color\/ink,#222b35)] top-[15px] w-[150px]" data-node-id="70:4228">
+            合入 master
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Medium'] font-medium leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[15px] w-[430px]" data-node-id="70:4229">
+            未开始
+          </p>
+          <p className="absolute font-['Noto_Sans_SC:Regular'] font-normal leading-[22px] left-[179px] text-[14px] text-[color:var(--color\/muted,#58616a)] top-[47px] w-[570px]" data-node-id="70:4230">
+            需要用户明确说“合”。
+          </p>
+          <p className="absolute font-['IBM_Plex_Mono:Regular'] font-normal leading-[20px] left-[675px] text-[13px] text-[color:var(--color\/muted,#58616a)] top-[17px] w-[90px]" data-node-id="70:4231">
+            未知
+          </p>
+        </div>
+      </div>
+      <div className="[word-break:break-word] absolute bg-[var(--color\/white,white)] border border-[var(--color\/line,#d6d5ce)] border-solid content-stretch flex flex-col gap-[22px] h-[770px] items-start left-[1024px] overflow-clip p-[20px] rounded-[8px] top-[360px] w-[376px]" data-node-id="70:4232" data-name="交卷摘要">
+        <p className="font-['Noto_Sans_SC:Medium'] font-medium leading-[28px] relative shrink-0 text-[18px] text-[color:var(--color\/ink,#222b35)] whitespace-nowrap" data-node-id="70:4233">
+          暂停中的交付状态
+        </p>
+        <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal gap-[6px] h-[92px] items-start overflow-clip relative shrink-0 w-[336px]" data-node-id="70:4234" data-name="当前工单">
+          <p className="leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="70:4235">
+            当前工单
+          </p>
+          <p className="leading-[22px] min-w-full relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] w-[min-content]" data-node-id="70:4236">
+            W-712 · 已暂停
+          </p>
+        </div>
+        <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal gap-[6px] h-[92px] items-start overflow-clip relative shrink-0 w-[336px]" data-node-id="70:4237" data-name="最后执行">
+          <p className="leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="70:4238">
+            最后执行
+          </p>
+          <p className="leading-[22px] min-w-full relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] w-[min-content]" data-node-id="70:4239">
+            第 13 次已交回 · 14:27
+          </p>
+        </div>
+        <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal gap-[6px] h-[92px] items-start overflow-clip relative shrink-0 w-[336px]" data-node-id="70:4240" data-name="最终交卷">
+          <p className="leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="70:4241">
+            最终交卷
+          </p>
+          <p className="leading-[22px] min-w-full relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] w-[min-content]" data-node-id="70:4242">
+            尚未提交；等待设备侧输入
+          </p>
+        </div>
+        <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal gap-[6px] h-[92px] items-start overflow-clip relative shrink-0 w-[336px]" data-node-id="70:4243" data-name="最终受评提交与行数">
+          <p className="leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="70:4244">
+            最终受评提交与行数
+          </p>
+          <p className="leading-[22px] min-w-full relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] w-[min-content]" data-node-id="70:4245">
+            未知
+          </p>
+        </div>
+        <div className="content-stretch flex flex-col font-['Noto_Sans_SC:Regular'] font-normal gap-[6px] h-[92px] items-start overflow-clip relative shrink-0 w-[336px]" data-node-id="70:4246" data-name="主控与费用">
+          <p className="leading-[20px] relative shrink-0 text-[13px] text-[color:var(--color\/muted,#58616a)] whitespace-nowrap" data-node-id="70:4247">
+            主控与费用
+          </p>
+          <p className="leading-[22px] min-w-full relative shrink-0 text-[14px] text-[color:var(--color\/ink,#222b35)] w-[min-content]" data-node-id="70:4248">
+            外部会话 · 平台不可见
+          </p>
+        </div>
+      </div>
+      <div className="absolute bg-[var(--color\/line,#d6d5ce)] h-px left-[224px] top-[292px] w-[1176px]" data-node-id="86:4101" data-name="任务事实与页签 / 分隔" />
+    </div>
+  );
+}
+SUPER CRITICAL: The generated React+Tailwind code MUST be converted to match the target project's technology stack and styling system.
+1. Analyze the target codebase to identify: technology stack, styling approach, component patterns, and design tokens
+2. Convert React syntax to the target framework/library
+3. Transform all Tailwind classes to the target styling system while preserving exact visual design
+4. Follow the project's existing patterns and conventions
+DO NOT install any Tailwind as a dependency unless the user instructs you to do so.
+
+Node ids have been added to the code as data attributes, e.g. `data-node-id="1:2"`.
+These styles are contained in the design: Console/Section: Font(family: "Noto Sans SC", style: Medium, size: 18, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Record: Font(family: "Noto Sans SC", style: Medium, size: 16, weight: 500, lineHeight: 24, letterSpacing: 0), Console/Body: Font(family: "Noto Sans SC", style: Regular, size: 14, weight: 400, lineHeight: 22, letterSpacing: 0), Console/Meta: Font(family: "Noto Sans SC", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0), Console/Identifier: Font(family: "IBM Plex Mono", style: Medium, size: 20, weight: 500, lineHeight: 28, letterSpacing: 0), Console/Emphasis: Font(family: "Noto Sans SC", style: Medium, size: 14, weight: 500, lineHeight: 22, letterSpacing: 0), Console/Data: Font(family: "IBM Plex Mono", style: Regular, size: 13, weight: 400, lineHeight: 20, letterSpacing: 0).
+Component descriptions: The following components have usage descriptions or documentation links defined in Figma. These descriptions provide important context about the intended usage, best practices, and any constraints for each component. Follow these guidelines when implementing or using these components.
+
+## Console/NavItem
+**Node ID:** 39:244
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Field
+**Node ID:** 39:320
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Status
+**Node ID:** 39:283
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+
+## Console/Tab
+**Node ID:** 39:249
+
+CoAgentHub 共用控件；颜色绑定语义变量，正文绑定 Console 文字样式。
+The generated code contains image and SVG URL constants, e.g. const image = `${assetPathPrefix}/<asset file name>`, where assetPathPrefix is declared once at the top of the code and every asset URL interpolates it. These URLs are temporary download sources and expire after 7 days. Download each asset into the project with curl -L, then replace its URL in the generated code with a reference to the downloaded asset. Never use the temporary URLs as runtime image sources.

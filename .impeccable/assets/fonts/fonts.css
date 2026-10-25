@@ -1,0 +1,20 @@
+/* 设计交付资产：实施时与前端同源分发，不从 CDN 拉字体。 */
+@font-face {
+  font-family: 'Noto Serif SC Fixed';
+  src: url('./NotoSerifSC-fixed-names-medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+.fixed-page-title {
+  font-family: 'Noto Serif SC Fixed', 'Microsoft YaHei', sans-serif;
+  font-size: 32px;
+  font-weight: 500;
+  line-height: 44px;
+}
+.console-body, .dynamic-task-name {
+  font-family: 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+}
+.console-data, .mission-identifier {
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+}
