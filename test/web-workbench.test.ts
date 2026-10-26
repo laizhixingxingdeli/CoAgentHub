@@ -285,3 +285,70 @@ test('模型顺序保存真实 HTTP CAS，保留配置事实与停用，旧版�
     assert.ok(view.includes('读取最新配置'));
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
+
+test('补充投影只叠在可见行：补修/落地/真实运行上屏，且不压过终态、自动恢复与等人', () => {
+  // 两条任务、只显示一条：overlay 必须只落在可见的那条上。把它套在进
+  // buildOverview 的 missions 上，隐藏行的附标就会跟着分组/计数一路走进去。
+  // M-live 给更新的 updatedAt：分页切的是「组内倒序」之后的头一批，
+  // 同刻时用 missionId 兜底排序，会让 M-hidden 排到前面去。
+  const missions = [
+    overviewRow({ missionId: 'M-live', status: 'executing', updatedAt: '2026-10-26T07:00:00.000Z' }),
+    overviewRow({ missionId: 'M-hidden', status: 'executing', updatedAt: '2026-10-26T05:00:00.000Z' }),
+  ];
+  const before = JSON.parse(JSON.stringify(missions));
+  const html = overviewHtml({ missions }, {
+    now: OVERVIEW_NOW,
+    shown: 1,
+    overlay: {
+      'M-live': { repair: true, problem: false, landingLine: '落地未记录 · master 未记录', liveAttempt: true, runningText: '执行者运行中' },
+      'M-hidden': { repair: true, landingLine: '隐藏行不该出现', liveAttempt: true, runningText: '隐藏运行' },
+    },
+  });
+  assert.ok(html.includes('补修'), '补修附标没上屏');
+  assert.ok(html.includes('落地未记录 · master 未记录'), '落地那一句没和附标拼在一格里');
+  assert.ok(html.includes('执行者运行中'), '真实运行的文案没上屏');
+  assert.ok(html.includes('src="/console-icon-running.svg"'), '有真实 in_progress 的 Attempt 却不是运行蓝');
+  assert.equal(html.includes('隐藏行不该出现'), false, '不可见那一行的落地文案被画出来了');
+  assert.equal(html.includes('隐藏运行'), false, '不可见那一行的运行文案被画出来了');
+  // 全集计数不能被 overlay 或可见批次改动。
+  assert.ok(html.includes('全部 2'), '页签计数不是完整匹配集');
+  assert.ok(html.includes('显示 1 / 2'), '分页不是「显示 可见 / 完整」');
+  assert.equal(html.includes('119'), false, '出现了一个没人算过的计数');
+
+  // 终态压过一切：运行蓝不能盖掉绿勾，落地那句不许写成「未合入」或设计稿的样本文案。
+  const done = overviewHtml({ missions: [overviewRow({ missionId: 'M-done', status: 'completed' })] }, {
+    now: OVERVIEW_NOW,
+    overlay: { 'M-done': { liveAttempt: true, runningText: '执行者运行中', landingLine: '已合入集成 · master 未记录' } },
+  });
+  assert.ok(done.includes('console-icon-complete.svg'), '终态图标被运行蓝盖掉了');
+  assert.equal(done.includes('console-icon-running.svg'), false, '已完成的任务被画成运行中');
+  assert.ok(done.includes('已合入集成 · master 未记录'), '已合入那一句没上屏');
+  assert.equal(done.includes('master 未合入'), false, '写了设计稿上的样本文案「master 未合入」');
+  assert.equal(done.includes('master 等待用户签名'), false, '写了设计稿上的样本文案「master 等待用户签名」');
+  assert.equal(done.includes('已合入集成分支'), false, '写了设计稿上的样本文案「已合入集成分支」');
+
+  // 等人动手（检视者）仍是琥珀，不能因为 liveAttempt 变成运行蓝。
+  const review = overviewHtml({ missions: [overviewRow({ missionId: 'M-rev', status: 'awaiting_review' })] }, {
+    now: OVERVIEW_NOW,
+    overlay: { 'M-rev': { liveAttempt: true } },
+  });
+  assert.ok(review.includes('console-icon-review.svg'), '等检视者的琥珀图标被运行蓝盖掉了');
+  assert.equal(review.includes('console-icon-running.svg'), false, '等人工处理的行被画成运行中');
+
+  // 自动恢复（灰色时钟）也压得住：运行文案不能盖掉「它会自己接着跑」这句话。
+  const backoff = overviewHtml({ missions: [overviewRow({
+    missionId: 'M-backoff',
+    status: 'executing',
+    waitInfo: { owner: 'platform', autoResume: true, activeAgent: false, reason: 'retry_backoff' },
+  })] }, {
+    now: OVERVIEW_NOW,
+    overlay: { 'M-backoff': { liveAttempt: true, runningText: '执行者运行中' } },
+  });
+  assert.ok(backoff.includes('console-icon-clock.svg'), '自动重试的灰色时钟被运行蓝盖掉了');
+  assert.equal(backoff.includes('console-icon-running.svg'), false, '自动重试的行被画成运行中');
+  assert.ok(backoff.includes('执行者运行中'), '真实运行的事实被丢掉了');
+  assert.equal(/自动重试|会自动恢复/.test(backoff), true, '恢复方式被运行文案盖掉了');
+
+  // 纯呈现：入参一个字段都不改。
+  assert.deepEqual(missions, before, '渲染改了入参');
+});

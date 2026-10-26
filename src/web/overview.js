@@ -20,6 +20,7 @@ import {
   stageText,
 } from './console-overview-model.js';
 import { createOverviewController } from './console-overview-controller.js';
+import { applyOverlay } from './console-overview-enrich.js';
 
 /* ============================ 纯排版工具 ============================ */
 
@@ -47,6 +48,13 @@ const attr = (name, value) => {
   const text = String(value ?? '');
   return text === '' ? '' : ' ' + name + '="' + esc(text) + '"';
 };
+
+/**
+ * 补充投影带来的整句（落地未记录、运行中）：只认**非空字符串**。
+ * 缺失、null、数字一律当没有——把它们 String() 一下就会在屏幕上出现一格
+ * 「undefined」，而人读到的是一句像事实的话。
+ */
+const lineText = (value) => (typeof value === 'string' ? value.trim() : '');
 
 /**
  * 更新时间：同一天只给 HH:MM，跨天补 MM-DD。
@@ -90,8 +98,13 @@ const STATUS_VIEW = {
  *   1. 终态压过一切残留等待信息（终态在内核里没有出边）；
  *   2. 平台会自己接着跑（autoResume === true）→ 时钟，别让人去手动推；
  *   3. 要人动手（检视者 / 用户）→ 琥珀；
- *   4. 真有活动 Agent（activeAgent === true）→ running 蓝，这是唯一该用蓝的地方；
+ *   4. 真有活动 Agent（activeAgent === true）或真实 in_progress 的 Attempt
+ *      （liveAttempt === true）→ running 蓝，这是唯一该用蓝的地方；
  *   5. 其余（含「不知道」）→ 墨色点：不确定不是故障。
+ *
+ * liveAttempt 排在这个位置而不是最前面：它只能把「说不清在不在跑」的行染蓝，
+ * 不能把已完成/已中止画成蓝、不能把等人工答复画成蓝、也不能压过灰色时钟——
+ * 那三种情况下蓝色的意思是「别再看了，它自己会动」，恰好是相反的意思。
  */
 function statusView(row) {
   if (row.terminal) {
@@ -100,7 +113,7 @@ function statusView(row) {
   const owner = row.owner && typeof row.owner === 'object' ? row.owner : {};
   if (owner.autoResume === true) return STATUS_VIEW.auto;
   if (owner.key === 'l3' || owner.key === 'user') return STATUS_VIEW.waiting;
-  if (owner.activeAgent === true) return STATUS_VIEW.running;
+  if (row.liveAttempt === true || owner.activeAgent === true) return STATUS_VIEW.running;
   return STATUS_VIEW.default;
 }
 
@@ -248,7 +261,17 @@ function rowHtml(row, options) {
   // 恢复方式必须在主行上看得见：只塞进 title 等于把它藏起来，而「平台会不会自己
   // 接着跑」正是决定人要不要动手的那条事实。终态没有待办，就不跟着说恢复。
   const resume = row.terminal ? '' : resumeText(row.owner, options.formatTime);
-  const ownerLine = resume === '' ? row.owner.text : row.owner.text + ' · ' + resume;
+  // 顺序是「谁处理 → 在跑什么 → 会不会自己恢复」：先说谁，再说此刻，最后说下一步。
+  // 空段直接丢掉，不留一个孤零零的「 · 」。row.owner / row.owner.text 一个字都不改，
+  // 别的渲染方拿到的是同一份处理人事实。
+  const ownerLine = [row.owner.text, lineText(row.runningText), resume]
+    .filter((part) => part !== '')
+    .join(' · ');
+  // 附标：暂停/补修/问题升级这些「为什么不动」的标记，加上落地那一句。
+  // 两者拼在一格里是因为它们都属于「附标」，多开一格会把 64px 的记录撑成两行。
+  const marksLine = [lineText(row.marksText), lineText(row.landingLine)]
+    .filter((part) => part !== '')
+    .join(' · ');
   const retry = retryText(row.owner.retry);
   const nextLine = [retry, row.nextStep].filter((part) => part !== '').join(' · ');
   const ownerTitle = [ownerLine, nextLine].filter((part) => part !== '').join(' · ');
@@ -264,7 +287,7 @@ function rowHtml(row, options) {
     + '<div class="co-cell co-status"><span class="co-status-line">'
     + '<img class="co-icon" src="/' + view.icon + '" width="16" height="16" alt="" />'
     + '<span class="co-status-text" data-tone="' + view.tone + '">' + esc(row.statusText) + '</span></span>'
-    + '<p class="co-marks"' + attr('title', row.marksText) + '>' + esc(row.marksText) + '</p></div>'
+    + '<p class="co-marks"' + attr('title', marksLine) + '>' + esc(marksLine) + '</p></div>'
     + '<div class="co-cell co-owner">'
     + '<p class="co-owner-text" data-tone="' + ownerTone + '"' + attr('title', ownerTitle) + '>'
     + esc(ownerLine) + '</p>'
@@ -312,6 +335,22 @@ const HEAD_HTML = '<div class="co-head">'
   + '<div class="co-cell co-updated">更新时间</div>'
   + '</div>';
 
+/**
+ * 把补充投影套到即将画出去的那批行上。
+ *
+ * 每个 group 复制一份、rows 逐个换成 applyOverlay 的副本：就地改会把行上的补丁
+ * 留在模型里，下一次刷新（或同时打开的另一个视图）就会看到上一轮叠加出来的附标。
+ * 这里只动 groups，不动 built.counts / built.page / built.matched —— 那三个数说的是
+ * 完整匹配集，与这一屏叠了几条详情无关。
+ */
+function overlayGroups(groups, overlay) {
+  if (overlay === null) return groups;
+  return groups.map((group) => ({
+    ...group,
+    rows: group.rows.map((row) => applyOverlay(row, overlay[row.missionId])),
+  }));
+}
+
 function groupsHtml(groups, options) {
   // 空组不画空标题：三个组头下面都没有行，看起来像加载失败。
   const shown = groups.filter((group) => group.rows.length > 0);
@@ -355,7 +394,9 @@ function pageHtml(page) {
  *   - `selectedId` 当前打开的任务。不传就没有任何行是选中的——首屏不编一个
  *               默认选中，那会让人以为进来就点开了一条；
  *   - `load`    读取状态 `{ status, error, lastOkAt }`。看不出来源时一律当成
- *               「已经拿到列表」，这样纯渲染调用方不必凭空造一个状态对象。
+ *               「已经拿到列表」，这样纯渲染调用方不必凭空造一个状态对象；
+ *   - `overlay` 按 missionId 索引的补充投影（补修/问题/落地/真实运行），
+ *               只作用于这一屏可见的行；缺了就画模型原样给的事实。
  */
 export function overviewHtml(data, options) {
   const d = data && typeof data === 'object' ? data : {};
@@ -377,6 +418,12 @@ export function overviewHtml(data, options) {
   if (!read) {
     return open + title + toolbarHtml(filter) + loadNoteHtml({ ...load, status }) + '</section>';
   }
+
+  // 补充投影只套在**即将画出去的那一批**（built.groups）上，不套在进 buildOverview
+  // 的 missions 上：补修/运行中/落地都不参与筛选、分组和计数，套在入参上会让
+  // 「全部 60」跟着页面上叠了几层详情变成别的数字。overlay 不是对象就当没有——
+  // 一个字符串或数组不会是「每行的补充事实」，猜下去只会画出没有来源的行。
+  const overlay = opts.overlay !== null && typeof opts.overlay === 'object' ? opts.overlay : null;
 
   const built = buildOverview(d.missions, {
     filter,
@@ -401,7 +448,7 @@ export function overviewHtml(data, options) {
     + toolbarHtml(built.filter)
     + '<div class="co-board">'
     + tabsHtml(built.filter, built.counts)
-    + '<div class="co-table">' + HEAD_HTML + groupsHtml(built.groups, rowOptions) + '</div></div>'
+    + '<div class="co-table">' + HEAD_HTML + groupsHtml(overlayGroups(built.groups, overlay), rowOptions) + '</div></div>'
     + pageHtml(built.page)
     + '</section>';
 }
