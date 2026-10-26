@@ -43,6 +43,7 @@ const UNKNOWN = '未知';
 const HISTORY_OUTPUT_UNKNOWN = '历史正文未知';
 const HISTORY_FILES_UNKNOWN = '该尝试没有单独的文件清单';
 const HEARTBEAT_NOT_APPLICABLE = '心跳不适用';
+const HEARTBEAT_UNKNOWN = '心跳未知';
 const HEARTBEAT_STALLED = '疑似停滞';
 
 const text = (value) => (value === undefined || value === null ? '' : String(value)).trim();
@@ -93,10 +94,13 @@ function projectHistoryUsage(selectedAttempt, selectedAttemptId, matched) {
 /**
  * 当前这一跳的心跳。
  *
- * 判据与 `src/kernel/attempt.ts` 的 isAbandoned 一致（非 in_progress 不谈没人管；
- * 没有心跳的 in_progress 算没人管），但这里**只做展示投影**，不替平台收尾。
  * 已结束的两跳即使带着很久以前的心跳，也只能说「不适用」：把它读成停滞，
  * 人就会去重启一个明明已经交回结果的环节。
+ *
+ * 只有「in_progress + 可解析的真实 heartbeatAt + 可解析的 nowIso + 超窗口」才说
+ * 疑似停滞。字段缺失、空串、非法时间读不出来，一律只说「心跳未知」：master 上
+ * 已有的 Attempt 响应根本没有 heartbeatAt 这个键，把它读成停滞，人就会去重启一个
+ * 也许正在正常输出的环节，而界面上没有任何东西能揭穿这个误判。
  */
 function projectHeartbeat(currentAttempt, nowIso) {
   const attempt = object(currentAttempt);
@@ -119,8 +123,9 @@ function projectHeartbeat(currentAttempt, nowIso) {
   const last = Date.parse(heartbeatAt);
   const now = Date.parse(iso(nowIso));
   if (heartbeatAt === '' || Number.isNaN(last) || Number.isNaN(now)) {
-    // 没有心跳或时间读不出来：和 kernel 一样算没人管，别让人对着一个死掉的环节干等。
-    return { applicable: true, heartbeatAt: heartbeatAt === '' ? null : heartbeatAt, stateText: HEARTBEAT_STALLED, stalled: true };
+    // 心跳缺失/为空/读不出，或当前时间读不出：这里没有任何事实能支持「停滞」，
+    // 只能承认不知道。判成停滞会催人去重启一条可能还在正常输出的尝试，代价不可逆。
+    return { applicable: true, heartbeatAt: heartbeatAt === '' ? null : heartbeatAt, stateText: HEARTBEAT_UNKNOWN, stalled: false };
   }
 
   const stalled = now - last > LEASE_TOLERANCE_MS;

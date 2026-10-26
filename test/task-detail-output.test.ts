@@ -50,7 +50,7 @@ test('当前实时输出与历史选择各认各的 Attempt，历史缺失正文
   assert.equal(LEASE_TOLERANCE_MS, 90000);
 });
 
-test('已结束不谈停滞；进行中超过容忍窗口或没有心跳才算疑似停滞', () => {
+test('已结束不谈停滞；只有进行中且真实心跳超过容忍窗口才算疑似停滞，心跳缺失只是未知', () => {
   const base = {
     currentAttemptId: 'W-1.exec-3',
     selectedAttemptId: 'W-1.exec-3',
@@ -80,9 +80,14 @@ test('已结束不谈停滞；进行中超过容忍窗口或没有心跳才算�
   assert.equal(fresh.stalled, false);
   assert.ok(fresh.stateText.includes('2026-10-26T09:59:50.000Z'));
 
-  // 进行中但没有心跳：和 kernel 的 isAbandoned 一样算没人管。
-  const missing = beat('in_progress', null);
-  assert.equal(missing.applicable, true);
-  assert.equal(missing.stalled, true);
-  assert.ok(missing.stateText.includes('疑似停滞'));
+  // 心跳缺失、空串、读不出来都只是「未知」：master 上已有的 Attempt 响应没有
+  // heartbeatAt 键，把这些判成停滞会让人去重启一条可能还在正常输出的尝试。
+  for (const heartbeatAt of [null, '', 'not-a-time']) {
+    const unknown = beat('in_progress', heartbeatAt);
+    assert.equal(unknown.applicable, true);
+    assert.equal(unknown.stalled, false);
+    assert.equal(unknown.stateText, '心跳未知');
+    // 文本里不许出现「疑似停滞」——界面上一句话就能把人推去动手。
+    assert.ok(!unknown.stateText.includes('疑似停滞'));
+  }
 });
