@@ -16,7 +16,7 @@ import { renderModelPriorityPage, leaveModelPriorityPage } from './model-priorit
 import { renderProjectCatalogPage } from './project-catalog.js';
 import { renderProjectSpecPage } from './project-spec.js';
 import { renderInboxPage } from './inbox.js';
-import { renderTaskPage } from './task.js';
+import { renderTaskDetailPage } from './task-detail-controller.js';
 import { renderAgentsPage } from './agents.js';
 import { renderSettingsPage } from './settings.js';
 import { renderPoolPage } from './pool.js';
@@ -257,7 +257,9 @@ function render() {
   }
 
   if (route.name === 'mission') {
-    void renderTaskPage(view, route.missionId, route.selectedStep);
+    // view 是外壳给的 DOM 容器，不是 Mission JSON：控制器自己拉只读接口。
+    // 入口在这里取数会把"只读详情"变成外壳的职责，外壳就不再只管"在看哪"。
+    void renderTaskDetailPage(view, route.missionId, route.selectedStep);
     return;
   }
 

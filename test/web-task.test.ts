@@ -363,8 +363,8 @@ describe('任务页的文件形状', () => {
 
   test('app.js import task.js 并认得 #/missions/<id>', () => {
     const shell = read('app.js');
-    assert.match(shell, /from '\.\/task\.js'/);
-    assert.match(shell, /renderTaskPage/);
+    assert.match(shell, /from '\.\/task-detail-controller\.js'/);
+    assert.match(shell, /renderTaskDetailPage/);
     assert.ok(shell.includes('/missions/'), 'parseRoute 要认 #/missions/<id>');
     // 项目页仍在：任务页是加进去的第四种路由，不是替掉项目页。
     assert.match(shell, /from '\.\/projects\.js'/);
