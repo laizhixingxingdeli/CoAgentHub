@@ -1,10 +1,12 @@
 /**
- * 「当前实时输出 / 历史选择」两区的渲染层（src/web/task-detail-output-view.js）。
+ * 「当前实时输出 / 选中环节」两张卡的渲染层（src/web/task-detail-output-view.js）。
  *
- * 只写两条，对应验收的两条：
- *   1. 历史 Attempt 与当前实时输出的 id 可以不同；实时正文只含当前那一跳的行，
+ * 只写三条，对应验收的两条：
+ *   1. 历史 Attempt 与当前实时输出的 id 可以不同；实时行只含当前那一跳且逐条成块，
  *      历史正文缺失显示未知，文件与用量面板不借用实时行、任务累计或 missionDiff。
- *   2. 心跳的三种结论（不适用 / 疑似停滞 / 未知）由投影给出，本层只渲染：
+ *   2. 概要那一块写的是**选中这一跳自己**的标题/身份/允许范围/费用质量/交回结果，
+ *      缺的一律「未知」，任务级路径不进概要与文件区。
+ *   3. 心跳的三种结论（不适用 / 疑似停滞 / 未知）由投影给出，本层只渲染：
  *      已结束不说停滞，缺失或非法时间只说未知且 stalled 不为真。
  *
  * 这些错了浏览器都不报错：屏幕上看着都挺合理，只是把上一跳的结尾、或者整条任务的
@@ -115,6 +117,88 @@ test('实时输出认当前 Attempt、历史选择认选中的那跳：缺失正
   assert.ok(filesText.includes('该尝试没有单独的文件清单'), '文件面板没说明为什么没有清单：' + filesText);
   assert.deepEqual(all('[data-panel]').map((el) => el.getAttribute('data-panel')), ['summary', 'files', 'usage']);
   assert.deepEqual(all('[data-panel]').map(shown), [false, true, false]);
+});
+
+test('概要写这一跳自己的身份、范围、费用与交回结果，实时行逐条分块且只含当前 Attempt', () => {
+  const { q, all } = mount({
+    currentAttemptId: 'W-1.exec-13',
+    selectedAttemptId: 'W-1.exec-13',
+    nowIso: '2026-10-26T10:00:00.000Z',
+    currentAttempt: {
+      attemptId: 'W-1.exec-13',
+      status: 'in_progress',
+      heartbeatAt: '2026-10-26T09:59:50.000Z',
+    },
+    selectedAttempt: {
+      attemptId: 'W-1.exec-13',
+      kind: 'executor',
+      status: 'succeeded',
+      profile: {
+        profileId: 'exec-codebuddy-cn-ds41-flash',
+        facts: [
+          { key: 'provider', value: 'codebuddy' },
+          { key: 'model', value: 'deepseek-v4.1-flash' },
+          { key: 'reasoning', value: 'medium' },
+        ],
+      },
+      usage: { cost: 0, quality: 'reported' },
+      output: '已完成',
+    },
+    selectedWorkItem: {
+      id: 'W-1',
+      status: 'dispatched',
+      attemptIds: ['W-1.exec-12', 'W-1.exec-13'],
+      order: { allowedScope: ['src/web/app.js', 'test/web-task.test.ts'] },
+    },
+    liveChunks: [
+      { attemptId: 'W-1.exec-13', at: '2026-10-26T09:59:48.000Z', kind: 'executor', text: '第一行' },
+      { attemptId: 'W-1.exec-13', at: '2026-10-26T09:59:49.000Z', kind: 'tool', text: '第二行' },
+      { attemptId: 'W-1.exec-12', at: '2026-10-26T09:00:00.000Z', kind: 'executor', text: '旧行' },
+    ],
+    // 任务级的改动路径不能冒充允许范围，也不能进文件区。
+    missionDiff: ['src/web/other.js'],
+  });
+
+  // 两张卡各自是独立的白卡：它们是并列的兄弟节点，不是同一张卡的两个子区。
+  const live = q('.td-live');
+  const history = q('.td-history');
+  assert.ok(live && history);
+  assert.equal(live?.parentElement?.classList.contains('td-output'), true);
+  assert.equal(history?.parentElement?.classList.contains('td-output'), true);
+  assert.equal(q('.td-history-title')?.textContent, '选中环节');
+
+  // 实时行逐条成块：两条正文黏成一段时，屏幕上分不出是哪一秒、谁说的。
+  const lines = all('.td-live-line');
+  assert.equal(lines.length, 2, '实时行没有被拆成两条独立块：' + lines.length);
+  assert.ok(lines[0].textContent?.includes('第一行'));
+  assert.ok(lines[1].textContent?.includes('第二行'));
+  // 认得出的角色才前缀，认不出的（这里是空 kind）不能编一个。
+  assert.ok(lines[0].textContent?.startsWith('[2026-10-26T09:59:48.000Z] [执行者]'));
+  assert.ok(lines[1].textContent?.startsWith('[2026-10-26T09:59:49.000Z] [工具]'));
+  assert.equal((q('.td-live-text')?.textContent || '').includes('旧行'), false, '实时区混进了别的 Attempt 的行');
+
+  // 概要的六格事实来自这一跳自己。
+  const summary = q('[data-panel="summary"]');
+  const summaryText = summary?.textContent || '';
+  assert.equal(q('[data-fact="title"]')?.textContent?.includes('执行第 13 次'), true, summaryText);
+  assert.ok(summaryText.includes('exec-codebuddy-cn-ds41-flash'), '概要缺候选：' + summaryText);
+  assert.ok(summaryText.includes('codebuddy/deepseek-v4.1-flash'), '概要缺 provider/model：' + summaryText);
+  assert.ok(summaryText.includes('medium'), '概要缺思考档：' + summaryText);
+  assert.ok(summaryText.includes('src/web/app.js'), '概要不准允诺范围：' + summaryText);
+  assert.ok(summaryText.includes('test/web-task.test.ts'), '概要不准允诺范围：' + summaryText);
+  // cost 0 必须当值显示，不能当成缺失。
+  assert.ok((q('[data-fact="cost"]')?.textContent || '').includes('0'), '费用 0 被当成了未知');
+  assert.ok((q('[data-fact="cost"]')?.textContent || '').includes('reported'), '质量没显示原值');
+  assert.ok(summaryText.includes('已交回'), '概要缺交回结果：' + summaryText);
+  // 历史正文单独一块，事实区不替代它。
+  assert.ok(summaryText.includes('历史正文'), '概要缺历史正文标签：' + summaryText);
+  assert.ok(q('[data-panel="summary"] .td-history-text')?.textContent?.includes('已完成'), '历史正文丢了');
+
+  // 任务级改动路径任何地方都不能出现：概要不带，文件区也不带。
+  assert.equal((q('.td-output')?.textContent || '').includes('src/web/other.js'), false, 'missionDiff 漏进了输出区');
+  click(q('[data-side="files"]'));
+  assert.equal((q('[data-panel="files"]')?.textContent || '').includes('src/web/other.js'), false,
+    '文件区拿 missionDiff 冒充了这一跳的文件清单');
 });
 
 test('心跳只渲染投影的结论：已结束不适用，超窗口才疑似停滞，缺失或非法只说未知', () => {

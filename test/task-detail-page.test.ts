@@ -155,9 +155,20 @@ test('三页签切换显隐对应面板，展开 intent 不改 mission id，dire
   assert.equal(root.getAttribute('data-mission-id'), missionId);
   assert.equal(q('.td-mission-id')?.textContent, missionId);
 
-  // 输出区始终是页面的最后一块，不随页签变化消失。
-  const last = root.lastElementChild as HTMLElement | null;
-  assert.equal(last?.classList.contains('td-output'), true);
+  // 输出区只挂在工作流面板里：页面上只有一份，且它的祖先面板就是 workflow。
+  const outputRoot = q('.td-output');
+  assert.ok(outputRoot, '没有渲染出输出区');
+  assert.equal(outputRoot?.closest('[data-panel]')?.getAttribute('data-panel'), 'workflow',
+    '输出区的祖先面板不是工作流');
+  assert.equal(root.querySelectorAll('.td-output').length, 1, '页面上出现了不止一份输出区');
+
+  // 切到契约后，输出区跟着工作流面板一起 hidden，交付 / 契约面板里也没有「当前实时输出」。
+  assert.equal(shown(outputRoot?.closest('[data-panel]') as HTMLElement | null), false,
+    '切到契约后输出区仍然可见');
+  assert.equal((q('[data-panel="delivery"]')?.textContent || '').includes('当前实时输出'), false,
+    '交付面板里挂了输出区');
+  assert.equal((q('[data-panel="contract"]')?.textContent || '').includes('当前实时输出'), false,
+    '契约面板里挂了输出区');
 });
 
 test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-current，切工作项与切面板都不改实时 id', () => {

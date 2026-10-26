@@ -41,11 +41,11 @@ const DEFAULT_TAB = 'workflow';
 const DEFAULT_OUTPUT_SIDE = 'summary';
 
 /**
- * 「定位当前」的文案。它与 task-detail-flow-view.js 里的展开文案是同一句话的两半：
- * 定位之后根上的 data-expanded 被设成 true，按钮文案必须跟着变成「收起…」，
- * 否则按钮说的和页面上的实际状态相反。
+ * 「定位当前」的文案已经不在本层了（按钮由环节视图放进标题带，见
+ * task-detail-flow-view.js），但绑定仍然在这里：data-action=locate-current 的处理器
+ * 必须留着，否则本层是唯一知道「定位」还要同时改展开状态的地方，删掉就等于按钮
+ * 点了只选中不展开。
  */
-const LOCATE_LABEL = '定位当前';
 const HISTORY_EXPANDED_LABEL = '收起纵向历史';
 
 /**
@@ -116,11 +116,17 @@ function panelHtml(key, inner, current) {
 /**
  * 整页 HTML。根节点 div.td-page。
  *
- * 顺序由这里定死（页头 → 三页签 → 输出区），不从数据里推：按数据推出来的顺序会随
+ * 顺序由这里定死（页头 → 三页签），不从数据里推：按数据推出来的顺序会随
  * 哪一块先有值而变化，人每次进来看到的位置都不一样。
  *
- * **输出区始终在最后、不在任何页签里**：实时输出是这一页唯一会自己变的东西，把它塞
- * 进某个页签，切到契约再切回来它就跟着一起消失/重建，看起来像「刚跑的那一段没了」。
+ * **输出区在**工作流页签的面板内部，**且只挂一份**。它说的是「这一跳在跑什么」与
+ * 「我点开的这一跳是什么」，两者都是工作流的事；挂到交付/契约面板里就是同一块内容
+ * 在两个页签上各讲一遍，而两边刷新的节奏与游标一旦不同，其中一侧会停在旧数据上
+ * 而看起来完全正常。
+ *
+ * 定位按钮不在本层拼：它属于环节区的标题带（task-detail-flow-view.js），在那个
+ * 带子里与「展开纵向历史」是同一排控件；本层再拼一个，页面上就会出现两个都能点、
+ * 文案还可能不一致的「定位当前」。
  *
  * model = { view, activity, nowIso, tab, intentExpanded, historyExpanded, outputSide,
  *           selectedWorkItemId, selectedAttemptId, currentAttempt, selectedAttempt,
@@ -145,11 +151,63 @@ export function taskDetailHtml(model) {
     expanded: historyExpanded,
   });
 
-  // 历史选择：调用方点名优先；否则跟着「当前环节」走；再没有就是空串（不拿实时跳顶上）。
+  // 历史选择：调用方点名优先；否则跟着「当前环节」走；再没有就取该工作项 stages 里
+  // 最后一条非空 attemptId；都不行就空串。**不拿实时那一跳顶上**：那正是「点开历史，
+  // 右边展示的其实是这一跳」的来源，而界面上没任何东西能揭穿它。
   const askedAttemptId = typeof m.selectedAttemptId === 'string' ? m.selectedAttemptId.trim() : '';
   const currentStage = flow.stages.find((stage) => stage.key === flow.currentKey) || null;
   const stageAttemptId = currentStage === null ? '' : text(currentStage.attemptId);
-  const selectedAttemptId = askedAttemptId !== '' ? askedAttemptId : stageAttemptId;
+  const lastStageAttemptId = flow.stages.reduce((last, stage) => {
+    const id = text(stage.attemptId);
+    return id === '' ? last : id;
+  }, '');
+  const selectedAttemptId = askedAttemptId !== ''
+    ? askedAttemptId
+    : (stageAttemptId !== '' ? stageAttemptId : lastStageAttemptId);
+
+  // 输出区的输入只放**这两跳自己的东西**。
+  //
+  //   - selectedWorkItem：只留 id / status / attemptIds / order.allowedScope——允许范围
+  //     与 attemptIds 都在这张工单上。整个 view.workItems 传下去，渲染层就会有一份
+  //     完整清单可挑，写着写着就变成「只要是张工单的就列出来」。
+  //   - selectedActivity：只传 attemptId 等于选中那一跳的事件（候选变更只在那里）。
+  //   - **不传** missionDiff / executionResult / missionUsage：它们是任务级事实，
+  //     一旦传下去就会被当成某一跳的，而那笔账谁也说不清。
+  //
+  // 工单优先认调用方点名的那个（id 等于 selectedWorkItemId）；它没点名时退回环节区
+  // 实际选中的那张（flow.selectedId）。选工单的规则只在 projectWorkflow 里有一份，
+  // 它已经按「正在跑的那张 → 最后一张未作废的」选过了；这里若只认调用方的空串，
+  // 就会出现「环节区显示 W-1、概要却说允许范围未知」——两处都对、合起来错。
+  const rawWorkItems = Array.isArray(view.workItems) ? view.workItems : [];
+  const itemWithId = (id) => (id === ''
+    ? null
+    : rawWorkItems.find((item) => object(item) !== null && text(item.id) === id) || null);
+  const rawItem = itemWithId(selectedWorkItemId) ?? itemWithId(text(flow.selectedId));
+  const workItemOrder = rawItem === null ? null : object(rawItem.order);
+  const selectedWorkItem = rawItem === null ? null : {
+    id: text(rawItem.id),
+    status: text(rawItem.status),
+    attemptIds: Array.isArray(rawItem.attemptIds) ? rawItem.attemptIds.map(iso) : [],
+    order: workItemOrder === null
+      ? null
+      : { allowedScope: Array.isArray(workItemOrder.allowedScope) ? workItemOrder.allowedScope.map(iso) : null },
+  };
+  // 空串不当作「这一跳的事件」：没有 attemptId 的事件是平台 / L3 零散动的手，
+  // 混进某一跳名下就会把一次全局改派说成这一跳的候选变更。
+  const selectedActivity = selectedAttemptId === ''
+    ? []
+    : activity.filter((event) => text(event && event.attemptId) === selectedAttemptId);
+
+  const output = taskOutputHtml({
+    currentAttemptId: currentLiveAttemptId(activity),
+    selectedAttemptId,
+    nowIso,
+    currentAttempt: m.currentAttempt,
+    selectedAttempt: m.selectedAttempt,
+    liveChunks: Array.isArray(m.liveChunks) ? m.liveChunks : [],
+    selectedWorkItem,
+    selectedActivity,
+  }, { side: outputSide });
 
   const header = taskHeaderHtml(view, {
     tab,
@@ -161,9 +219,11 @@ export function taskDetailHtml(model) {
 
   const workflowPanel = panelHtml(
     'workflow',
-    '<button type="button" class="td-locate-current" data-action="locate-current">'
-      + esc(LOCATE_LABEL) + '</button>'
-      + taskFlowHtml(view, activity, { selectedWorkItemId, expanded: historyExpanded }),
+    taskFlowHtml(view, activity, { selectedWorkItemId, expanded: historyExpanded })
+      // 输出区**只放在工作流面板里**：它是这一页唯一会自己变的东西，两边各挂一份就是
+      // 两个游标、两种刷新节奏，其中一份会停在旧数据上而看起来完全正常。放在面板内部
+      // 而不是外面，切到交付/契约页签时它跟着 hidden——人不会以为它还在追这一跳。
+      + output,
     tab === 'workflow',
   );
 
@@ -179,17 +239,6 @@ export function taskDetailHtml(model) {
     tab === 'contract',
   );
 
-  // 输出区的 input **只放这两跳自己的东西**：missionDiff / executionResult / missionUsage
-  // 是任务级事实，传进来就会被当成某一跳的，而那笔账谁也说不清。
-  const output = taskOutputHtml({
-    currentAttemptId: currentLiveAttemptId(activity),
-    selectedAttemptId,
-    nowIso,
-    currentAttempt: m.currentAttempt,
-    selectedAttempt: m.selectedAttempt,
-    liveChunks: Array.isArray(m.liveChunks) ? m.liveChunks : [],
-  }, { side: outputSide });
-
   return '<div class="td-page"'
     + ' data-mission-id="' + esc(iso(view.missionId)) + '"'
     + ' data-tab="' + esc(tab) + '">'
@@ -197,7 +246,6 @@ export function taskDetailHtml(model) {
     + workflowPanel
     + deliveryPanel
     + contractPanel
-    + output
     + '</div>';
 }
 

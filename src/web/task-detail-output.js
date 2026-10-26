@@ -22,6 +22,12 @@
  * 心跳看的是**当前**这一跳（currentAttempt），不是选中的历史那一跳：选中历史时右侧
  * 显示的是已保存的结尾，用它的心跳去说「还在跑」或「疑似停滞」都答非所问。
  *
+ * 概要用的事实格（projectSelectedFacts）同理只认选中那一跳：标题里的次数从 attemptId
+ * 的 `.exec-N` 尾巴解析、身份取自它自己的 profile、允许范围来自包含它的那张工单、
+ * 候选变更来自它自己的 auto_redispatched 事件、费用与交回结果来自它自己。任何一处
+ * 拿别的 Attempt、拿任务累计用量、拿 missionDiff 顶上，屏幕上都长得一样，只是数字
+ * 全是别人的。
+ *
  * 90000 与 `src/application/reconcile.ts` 的 DEFAULT_LEASE_TOLERANCE_MS 同值，但
  * **不 import 那个文件**：这是浏览器模块，拉 application 层会把整条服务端的依赖
  * 拽进前端。两处同值这件事只能靠这条注释和常量名保持，改一处就得改另一处。
@@ -49,6 +55,9 @@ const HEARTBEAT_STALLED = '疑似停滞';
 const text = (value) => (value === undefined || value === null ? '' : String(value)).trim();
 const object = (value) => (value && typeof value === 'object' ? value : null);
 const iso = (value) => (value === undefined || value === null ? '' : String(value));
+
+/** 角色中文名。只翻这两个：别的 kind 原样带出，编一个「执行者」会认错这一跳是谁。 */
+const KIND_LABELS = { executor: '执行者', coordinator: '协调者' };
 
 /** 结束态只有这两个。别的状态既不能说「已结束」，也不能据此断言停滞。 */
 const TERMINAL_STATUSES = ['succeeded', 'failed'];
@@ -139,10 +148,168 @@ function projectHeartbeat(currentAttempt, nowIso) {
 }
 
 /**
+ * 概要里的「这是第几次」。
+ *
+ * 次数只从 attemptId 的 `.exec-N` 尾巴解析，**不写死 13、也不按数组下标算**：画板
+ * 上那个 13 是那次实测里恰好第 13 次，抄进代码之后每一条 Mission 的每一次执行都会
+ * 被叫成 13，而它看起来完全正常。协调者的这一跳没有次数，只说「协调」。
+ */
+function projectTitle(selectedAttempt, matched) {
+  if (!matched) return UNKNOWN;
+  const matchedTimes = /\.exec-(\d+)$/.exec(text(selectedAttempt.attemptId));
+  if (matchedTimes) return `执行第 ${Number(matchedTimes[1])} 次`;
+  if (text(selectedAttempt.kind) === 'coordinator') return '协调';
+  return UNKNOWN;
+}
+
+/** profile.facts 里的一条不透明键值；没有就空串（由调用方翻成「未知」）。 */
+function factOf(profile, key) {
+  const facts = Array.isArray(profile.facts) ? profile.facts : [];
+  const hit = facts.find((fact) => object(fact) !== null && text(fact.key) === key);
+  return hit ? text(hit.value) : '';
+}
+
+/**
+ * 这一跳的身份：谁、哪个候选、真实 provider/model/思考档。
+ *
+ * 一律取自**这一跳自己的** profile，不查当前候选池、不借相邻那一跳的：候选表会被
+ * 改，查今天配置等于给昨天那一跳换一个模型；借来的 profile 长得和事实一模一样，而
+ * 这一跳根本没跑过它。direct 协作下平台看不见主控用的模型，所以这里也**不编**一个
+ * L2 模型名——没有 profile 就整格「未知」。
+ */
+function projectIdentity(selectedAttempt, matched) {
+  if (!matched) return UNKNOWN;
+  const profile = object(selectedAttempt.profile);
+  if (profile === null) return UNKNOWN;
+
+  const kind = text(selectedAttempt.kind);
+  const roleLabel = kind === '' ? UNKNOWN : (KIND_LABELS[kind] || kind);
+  const profileId = text(profile.profileId) || UNKNOWN;
+  const provider = factOf(profile, 'provider');
+  const model = factOf(profile, 'model');
+  const reasoning = factOf(profile, 'reasoning');
+  // provider/model 是一段：只缺一半时把缺的那半写成未知，写成「grok-4.7」会让人以为
+  // provider 也记过了。
+  const pair = provider === '' && model === ''
+    ? UNKNOWN
+    : (provider || UNKNOWN) + '/' + (model || UNKNOWN);
+  return [roleLabel, profileId, pair, reasoning || UNKNOWN].join(' · ');
+}
+
+/**
+ * 冻结范围：工单在派发那一刻冻结的 allowedScope。
+ *
+ * 三重门禁缺一不可——这一跳属于这张工单（attemptIds 含它）、工单带着 order、
+ * allowedScope 是数组。任何一条不成立就「未知」：**绝不**用 missionDiff /
+ * executionResult.changedFiles 顶上，那是「这一跳事后动了哪些文件」，和「派活时
+ * 允许它动哪些」是两笔账，混在一起人就会拿事后结果去核对事前授权。
+ *
+ * 返回 null = 未知；返回数组 = 真的逐条列出来。
+ */
+function projectScope(selectedWorkItem, selectedAttemptId, matched) {
+  if (!matched) return null;
+  const item = object(selectedWorkItem);
+  if (item === null) return null;
+
+  const attemptIds = Array.isArray(item.attemptIds) ? item.attemptIds.map(text) : [];
+  if (!attemptIds.includes(selectedAttemptId)) return null;
+
+  const order = object(item.order);
+  const scope = order === null ? null : order.allowedScope;
+  if (!Array.isArray(scope)) return null;
+  return scope.map(text).filter((file) => file !== '');
+}
+
+/**
+ * 候选变更：平台把这张工单退回候选顺序的那一条事件。
+ *
+ * 只认 attemptId 等于这一跳的 `work_item.auto_redispatched`：别的 Attempt 的改派
+ * 记在这下面，就是把上一跳的故事说成这一跳的。原文用 data.summary，没有就用
+ * data.reason 原样（**不翻译**）：把 validation_failed 翻成「验证没过」是 narrate 的
+ * 职责，这里翻会让概要说的和事件流里的原话不是一句。
+ */
+function projectCandidateChange(selectedActivity, selectedAttemptId, matched) {
+  if (!matched) return UNKNOWN;
+  const events = Array.isArray(selectedActivity) ? selectedActivity : [];
+  const hit = events.find((event) => {
+    const e = object(event);
+    return e !== null
+      && text(e.kind) === 'work_item.auto_redispatched'
+      && text(e.attemptId) === selectedAttemptId;
+  });
+  if (hit === undefined) return UNKNOWN;
+
+  const data = object(hit.data);
+  const summary = text(data && data.summary);
+  if (summary !== '') return summary;
+  const reason = text(data && data.reason);
+  return reason === '' ? UNKNOWN : reason;
+}
+
+/**
+ * 本环节费用与质量：只取这一跳自己的 usage。
+ *
+ * cost 为 0 就写 0——「报过 0」和「没报过」在预算判断上是两件事，把 0 当成缺失会让
+ * 人以为这一跳的花费还没回来。**不读 missionUsage**：那是整条 Mission 的累计数。
+ */
+function projectCost(selectedAttempt, matched) {
+  if (!matched) return null;
+  const usage = object(selectedAttempt.usage);
+  if (usage === null) return null;
+  return {
+    cost: usage.cost === undefined || usage.cost === null ? UNKNOWN : String(usage.cost),
+    quality: usage.quality === undefined || usage.quality === null ? UNKNOWN : String(usage.quality),
+  };
+}
+
+/**
+ * 交回结果。只翻这三个状态，别的一律「未知」：把 pending 说成「尚未交回」听着像
+ * 还正常，实际上这一跳可能根本还没开始跑。
+ */
+function projectResult(selectedAttempt, matched) {
+  if (!matched) return UNKNOWN;
+  const status = text(selectedAttempt.status);
+  if (status === 'succeeded') return '已交回';
+  if (status === 'failed') return '失败';
+  if (status === 'in_progress') return '尚未交回';
+  return UNKNOWN;
+}
+
+/**
+ * 概要用的事实格：选中那一跳到底是谁、被允许动什么、钱花了多少、交回来了没有。
+ *
+ * **每一格都只在 `selectedAttempt.attemptId === selectedAttemptId` 时才读详情**，
+ * 对不上一律「未知」。理由与 historyOutput 相同：退而求其次拿实时跳、拿任务级事实、
+ * 拿别的 Attempt 顶上，界面上看不出它是别人的账，而人会据此去核对一个根本没发生过的
+ * 授权或改派。
+ *
+ * input = { selectedAttemptId, selectedAttempt, selectedWorkItem, selectedActivity }
+ */
+export function projectSelectedFacts(input) {
+  const it = object(input) ?? {};
+  const selectedAttemptId = text(it.selectedAttemptId);
+  const selected = object(it.selectedAttempt);
+  const matched = selected !== null
+    && selectedAttemptId !== ''
+    && text(selected.attemptId) === selectedAttemptId;
+
+  return {
+    attemptId: matched ? selectedAttemptId : null,
+    matched,
+    title: projectTitle(selected, matched),
+    identity: projectIdentity(selected, matched),
+    scope: projectScope(it.selectedWorkItem, selectedAttemptId, matched),
+    candidateChange: projectCandidateChange(it.selectedActivity, selectedAttemptId, matched),
+    cost: projectCost(selected, matched),
+    result: projectResult(selected, matched),
+  };
+}
+
+/**
  * 一条详情页数据 → 实时 / 历史 / 心跳三块互不串账的事实。
  *
  * input = { currentAttemptId, selectedAttemptId, nowIso, currentAttempt,
- *           selectedAttempt, liveChunks, missionUsage }
+ *           selectedAttempt, liveChunks, selectedWorkItem, selectedActivity }
  * 纯函数：不改入参、不读时钟、不发请求、不拼 HTML。
  */
 export function projectOutputBinding(input) {
@@ -155,13 +322,15 @@ export function projectOutputBinding(input) {
   // 这是本模块存在的理由：两者共用一个变量时，选中历史就会把左边也换掉。
   const liveAttemptId = currentAttemptId === '' ? null : currentAttemptId;
   const liveChunks = Array.isArray(it.liveChunks) ? it.liveChunks : [];
-  const liveText = currentAttemptId === ''
-    ? ''
+  // 过滤只做一次，逐行结果给渲染层按行摆、拼成一段给需要整段的调用方：两处各写一份
+  // 过滤，迟早只改到一处，而漏改的那侧会把上一跳的结尾摆进「当前实时输出」。
+  const liveLines = currentAttemptId === ''
+    ? []
+    // 别的 Attempt 的行一律不进：混一行进来，人就会把上一跳的结尾当成这一跳的进度。
     : liveChunks
-      // 别的 Attempt 的行一律不进：混一行进来，人就会把上一跳的结尾当成这一跳的进度。
       .filter((chunk) => text(chunk && chunk.attemptId) === currentAttemptId)
-      .map((chunk) => iso(chunk.text))
-      .join('');
+      .map((chunk) => ({ at: iso(chunk.at), kind: text(chunk.kind), text: iso(chunk.text) }));
+  const liveText = liveLines.map((line) => line.text).join('');
 
   const historyOutput = projectHistoryOutput(it.selectedAttempt, selectedAttemptId);
   const historyUsage = projectHistoryUsage(object(it.selectedAttempt), selectedAttemptId, historyOutput.matched);
@@ -170,6 +339,7 @@ export function projectOutputBinding(input) {
     liveAttemptId,
     historyAttemptId: selectedAttemptId === '' ? null : selectedAttemptId,
     liveText,
+    liveLines,
     historyOutput,
     historyUsage,
     // 本接口拿不到按 Attempt 的文件清单。恒为 null：拿 missionDiff / executionResult
@@ -181,5 +351,8 @@ export function projectOutputBinding(input) {
     },
     // 心跳看当前这一跳，不看选中的历史那一跳。
     heartbeat: projectHeartbeat(it.currentAttempt, it.nowIso),
+    // 概况写在选中那一跳名下。整份 input 原样传进去：形状由 projectSelectedFacts
+    // 自己挑，调用方不必知道它读哪几个键。
+    facts: projectSelectedFacts(it),
   };
 }

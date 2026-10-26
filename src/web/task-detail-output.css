@@ -1,10 +1,14 @@
 /*
- * 任务详情页「当前实时输出 / 历史选择」两区。
+ * 任务详情页「当前实时输出 / 选中环节」两张卡。
  *
- * 为什么单开一个文件：这两区的排版事实是「左实时、右历史」这一对并列形状，且实时
+ * 为什么单开一个文件：这两区的排版事实是「左 704、右 456」这一对并列形状，且实时
  * 框是**深底浅字**（它模拟一块正在滚动的终端）。挤进全站样式里，任何一处手改都会
  * 顺带改到任务总览与项目页，而「实时框变浅了、和页面糊成一片」在屏幕上不报错，
  * 只是越来越分不出哪块是正在跑的。
+ *
+ * **为什么是两张卡而不是一张**：两张卡分别答两个不同的问题（左边「现在在跑什么」、
+ * 右边「我点开的这一跳是什么」），它们的事实来源也不同。包在同一张白卡里，人就会
+ * 把右下角的身份与账当“左边那一跳的”。
  *
  * 为什么全部挂在 .td-output 作用域下：这份文件与 old 业务样式（ui.css 的 .card、
  * .chip）同时在线，一条不限定作用域的 `.td-live-text { padding: 16px }` 会把别人的
@@ -20,23 +24,48 @@
 .td-output {
   display: flex;
   gap: var(--space-lg);
+  /* 左 704 + 间距 16 + 右 456 = 1176，与画板内容列同宽。
+   * 靠 content 顶对齐而不是 stretch：两张卡各自 566 高，拉伸会在右卡比左卡矮时
+   * 把右下角那块白撑出来，看起来像右卡里还有内容没显示。 */
   align-items: flex-start;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 外层**不画框**：两张卡各自是一个独立的区域，套一层共用边框＋圆角＋内缩之后，
+ * 「当前在跑的那一跳」与「你点开的那一跳」看起来就是同一张卡的两个子区，而它们的
+ * 事实来源完全不同。 */
+.td-output .td-live,
+.td-output .td-history {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border: 1px solid var(--color-line);
   border-radius: var(--radius-region);
   background: var(--color-white);
-  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-  color: var(--color-ink);
-  padding: var(--space-lg);
 }
 
-/* 左区固定宽度：实时正文每刷新一次就变长，让它按内容伸缩会把右区一把一把地推走，
- * 而人正盯着右区在读历史。 */
+/* 宽度写死：实时正文每刷新一次就变长，让它按内容伸缩会把右卡一把一把地推走，
+ * 而人正盯着右卡在读历史。 */
 .td-output .td-live {
+  flex: 0 0 704px;
+  width: 704px;
+  height: 566px;
+}
+
+/* 标题带：底 nav 与页面纸面区分开，高 86px。心跳就摆在标题下面一行，
+ * 它是「这一跳还活着吗」的答案，与标题回答的是同一件事。 */
+.td-output .td-live-head {
+  box-sizing: border-box;
+  flex: 0 0 86px;
+  height: 86px;
   display: flex;
-  flex: 0 0 480px;
   flex-direction: column;
-  gap: var(--space-sm);
-  min-width: 0;
+  gap: var(--space-xs);
+  padding: 19px 23px 0;
+  background: var(--color-nav);
+  border-bottom: 1px solid var(--color-line);
 }
 
 .td-output .td-live-title {
@@ -49,9 +78,10 @@
 /* 实时正文：深底浅字 + 等宽 + 保留换行。pre 自带 white-space: pre，模型输出里的
  * 逐行进度靠它才排得对；换成 div 之后所有换行会挤成一段，看起来很「干净」但读不出顺序。 */
 .td-output .td-live-text {
-  margin: 0;
-  min-height: 240px;
-  max-height: 420px;
+  box-sizing: border-box;
+  margin: 11px 23px 0;
+  width: 656px;
+  height: 444px;
   overflow: auto;
   padding: var(--space-md);
   border-radius: var(--radius-output);
@@ -64,6 +94,13 @@
   word-break: break-word;
 }
 
+/* 每条实时行独占一块：黏成一段之后，「这行是哪一秒、谁说的」只能在长串里找，
+ * 而相邻两条正文之间往往连换行符都没有。 */
+.td-output .td-live-line {
+  display: block;
+  min-height: var(--type-data-line);
+}
+
 /* 心跳只占一行小字。它回答「这一跳还活着吗」，不该和正文抢视线。 */
 .td-output .td-heartbeat {
   margin: 0;
@@ -73,21 +110,41 @@
 }
 
 /* 疑似停滞才变色：**只认 data-stalled**，不按文本另判一次。两处判断迟早漂开，
- * 漂开的样子是「字说停滞、颜色说正常」，人只会更糊涂。 */
+ * 漂开的样子是「字说停滞、颜色说正常」，人只会更糊涂。
+ * 背景只包住字本身（inline-block），否则带底色的心跳会在标题带里拉成一整行。 */
 .td-output .td-heartbeat[data-stalled='true'] {
+  align-self: flex-start;
   color: var(--color-amber);
   background: var(--color-amber-bg);
   border-radius: var(--radius-control);
   padding: 0 var(--space-sm);
 }
 
-/* 右区吃掉剩余宽度：概要与历史正文是主内容，越宽越好读。 */
+/* 右卡：与左卡同高、独立一张卡。宽 456px、高 566px。 */
 .td-output .td-history {
+  flex: 0 0 456px;
+  width: 456px;
+  height: 566px;
+}
+
+/* 右卡标题带：标题 + 三个页签。高 102px（页签高 40，压在标题下面一行）。 */
+.td-output .td-history-head {
+  box-sizing: border-box;
+  flex: 0 0 102px;
+  height: 102px;
   display: flex;
-  flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--space-md);
-  min-width: 0;
+  gap: var(--space-xs);
+  padding: 17px 23px 0;
+  background: var(--color-nav);
+  border-bottom: 1px solid var(--color-line);
+}
+
+.td-output .td-history-title {
+  margin: 0;
+  font-size: var(--type-section-size);
+  line-height: var(--type-section-line);
+  font-weight: 500;
 }
 
 .td-output .td-side-switch {
@@ -95,7 +152,7 @@
   gap: var(--space-sm);
 }
 
-/* 未选中的页签是白底带线；选中的用 select 浅底 + 强调色下边，与「当前」的读法一致
+/* 未选中的页签是透底带线；选中的用 select 浅底 + 强调色下边，与「当前」的读法一致
  * （见 task-detail-flow.css 的 data-current）。 */
 .td-output .td-side {
   height: 32px;
@@ -121,12 +178,66 @@
  * 有一瞬间是空的，看起来像这一跳确实没有内容。 */
 .td-output .td-panel {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--space-sm);
+  min-height: 0;
+  overflow: auto;
+  padding: 9px 23px 23px;
 }
 
 .td-output .td-panel[hidden] {
   display: none;
+}
+
+/* ===== 概要用的事实区 ===== */
+
+/* 六格顺序写死（见 task-detail-output-view.js 的 factsHtml）：按数据顺序排会让
+ * 「交回结果」在每次刷新时上下跳，而人正拿它对着同一块区域的另一条页面在核。 */
+.td-output .td-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.td-output .td-fact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.td-output .td-fact-label {
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--color-muted);
+}
+
+.td-output .td-fact-value {
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-line);
+  color: var(--color-ink);
+}
+
+/* 允许范围是一串路径，等宽才扫得动；缩进与留白跟其它格分开，免得被读成一行正文。 */
+.td-output .td-fact-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.td-output .td-fact-item {
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  font-size: var(--type-data-size);
+  line-height: var(--type-data-line);
+  color: var(--color-ink);
+}
+
+/* 「历史正文」这一句是分区标签，不是内容：它把上面的身份/账与下面的原话分开。 */
+.td-output .td-history-label {
+  margin: var(--space-md) 0 0;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--color-muted);
 }
 
 /* 历史正文与实时正文同一套等宽排版，但用页面底色：它不是活的，不该看起来同样「亮」。 */

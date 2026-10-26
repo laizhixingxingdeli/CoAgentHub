@@ -1,9 +1,10 @@
 /**
  * 当前输出与历史 Attempt 的绑定投影（src/web/task-detail-output.js）。
  *
- * 只写两条：这一层最容易出的错都不报错也不崩——选中历史时把实时行也换掉、历史正文
+ * 只写三条：这一层最容易出的错都不报错也不崩——选中历史时把实时行也换掉、历史正文
  * 缺失时借实时行或任务累计用量顶上、拿任务级统计冒充单跳花费、已结束的环节还被说成
- * 「疑似停滞」。每条断言对应工单里的一句验收。
+ * 「疑似停滞」、概要用别的 Attempt 的身份/范围/改派/费用冒充选中那一跳的。每条断言
+ * 对应工单里的一句验收。
  */
 
 import { test } from 'node:test';
@@ -48,6 +49,74 @@ test('当前实时输出与历史选择各认各的 Attempt，历史缺失正文
 
   // 容忍窗口与 reconcile 的租约一致，且是具名常量。
   assert.equal(LEASE_TOLERANCE_MS, 90000);
+});
+
+test('概要展示选中那一跳自己的身份、允许范围、费用质量与交回结果，缺失为未知且不借任务级事实', () => {
+  const facts = projectOutputBinding({
+    currentAttemptId: 'W-1.exec-13',
+    selectedAttemptId: 'W-1.exec-13',
+    nowIso: '2026-10-26T10:00:00.000Z',
+    currentAttempt: { attemptId: 'W-1.exec-13', status: 'in_progress' },
+    selectedAttempt: {
+      attemptId: 'W-1.exec-13',
+      kind: 'executor',
+      status: 'succeeded',
+      profile: {
+        profileId: 'exec-codebuddy-cn-ds41-flash',
+        facts: [
+          { key: 'provider', value: 'codebuddy' },
+          { key: 'model', value: 'deepseek-v4.1-flash' },
+          { key: 'reasoning', value: 'medium' },
+        ],
+      },
+      usage: { cost: 0, quality: 'reported' },
+      output: '已完成',
+    },
+    selectedWorkItem: {
+      id: 'W-1',
+      status: 'dispatched',
+      attemptIds: ['W-1.exec-12', 'W-1.exec-13'],
+      order: { allowedScope: ['src/web/app.js', 'test/web-task.test.ts'] },
+    },
+    liveChunks: [],
+    // 任务级的改动与累计用量不能被当成这一跳的。
+    missionDiff: ['src/web/other.js'],
+    missionUsage: { cost: 9, quality: 'reported' },
+  }).facts;
+
+  // 次数从 attemptId 的尾巴解析，不是写死的 13。
+  assert.equal(facts.title, '执行第 13 次');
+  assert.ok(facts.identity.includes('执行者'));
+  assert.ok(facts.identity.includes('exec-codebuddy-cn-ds41-flash'));
+  assert.ok(facts.identity.includes('codebuddy/deepseek-v4.1-flash'));
+  assert.ok(facts.identity.includes('medium'));
+  assert.deepEqual(facts.scope, ['src/web/app.js', 'test/web-task.test.ts']);
+  // cost 为 0 就写 0：报过 0 不等于没报。
+  assert.equal(facts.cost.cost, '0');
+  assert.equal(facts.cost.quality, 'reported');
+  assert.equal(facts.result, '已交回');
+  // 没有这一跳的改派事件就是未知，不编故事。
+  assert.equal(facts.candidateChange, '未知');
+
+  // 选中详情对不上 id：每一格都是未知，且绝不退回任务级事实。
+  const mismatched = projectOutputBinding({
+    currentAttemptId: 'W-1.exec-13',
+    selectedAttemptId: 'W-1.exec-12',
+    nowIso: '2026-10-26T10:00:00.000Z',
+    currentAttempt: { attemptId: 'W-1.exec-13', status: 'in_progress' },
+    selectedAttempt: { attemptId: 'W-1.exec-13', kind: 'executor', status: 'succeeded', usage: { cost: 0, quality: 'reported' } },
+    selectedWorkItem: { id: 'W-1', attemptIds: ['W-1.exec-13'], order: { allowedScope: ['src/web/app.js'] } },
+    selectedActivity: [{ kind: 'work_item.auto_redispatched', attemptId: 'W-1.exec-13', data: { summary: '别人的改派' } }],
+    liveChunks: [],
+    missionDiff: ['src/web/other.js'],
+  }).facts;
+
+  assert.equal(mismatched.matched, false);
+  for (const name of ['title', 'identity', 'candidateChange', 'result']) {
+    assert.equal(mismatched[name], '未知', name + ' 在 id 对不上时不是未知：' + mismatched[name]);
+  }
+  assert.equal(mismatched.scope, null);
+  assert.equal(mismatched.cost, null);
 });
 
 test('已结束不谈停滞；只有进行中且真实心跳超过容忍窗口才算疑似停滞，心跳缺失只是未知', () => {
