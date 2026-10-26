@@ -12,10 +12,11 @@
  * 列表，吐纯数据。取数是控制器的事，接线是渲染层的事。
  *
  * 四条不许越界的判断（每一条错了都不报错，只是让人对着屏幕做错判断）：
- *   1. **补修只读工单正文**：真实数据里没有指向原工作项的结构化字段，`repairOf`
- *      不存在、`origin.rerunOf` 是重跑不是补修。只有工单正文里明说「补修」并点名
- *      原工作项（「原项」或 `W-\d+`）才算。把重跑画成补修，人会去找一张并不存在
- *      的原单据。
+ *   1. **补修只认工单自己的开单声明**：真实数据里没有指向原工作项的结构化字段，
+ *      `repairOf` 不存在、`origin.rerunOf` 是重跑不是补修。声明只能写在标题里，或写在
+ *      `order.requiredBehaviour` 的第一行；正文后部的实现说明、代码块、测试夹具、
+ *      上下文引用和检视意见都不算。把重跑画成补修，人会去找一张并不存在的原单据。
+ *      全文关键词命中的危害见 `explicitRepair` 上方。
  *   2. **落地只认 finalReview.mergedInto**：没有这条证据就照实说「未记录」，
  *      不替平台断言「没合入」，也不引一句设计稿里的样本文案。
  *   3. **运行中只认真实 in_progress 的 Attempt**：executing 是阶段、isMutating 是
@@ -30,9 +31,6 @@ const text = (value) => (value === undefined || value === null ? '' : String(val
 const list = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === 'object' ? value : null);
 
-/** 工单正文里点名原工作项 id 的写法（W-12 / W-7）。 */
-const WORK_ITEM_ID = /W-\d+/;
-
 /** Attempt 只有这三种 kind 才对应一个能说出名字的角色。 */
 const LIVE_KINDS = new Set(['executor', 'coordinator', 'independent_reviewer']);
 
@@ -40,12 +38,46 @@ const LIVE_KINDS = new Set(['executor', 'coordinator', 'independent_reviewer']);
 const MASTER_UNRECORDED = 'master 未记录';
 
 /**
- * 补修：**只看 L2 交给 L1 那张工单的正文**。
+ * 「正文说了补修并且点名原单就行」的老判据是错的，所以改成只认开单声明。
  *
- * 判据是「正文说了补修，并且点名了要补的那张原单」——两者缺一不可：
- *   - 只看到「补修」：正文里「补修」也出现在别的语境（比如「已验收不能修订，
- *     要补做就新建一张补修单」是对规则的复述），单独出现不构成证据；
- *   - 只看到 `W-\d+`：几乎每张工单都引用别的工单 id，那不是补修。
+ * 为什么不能拼全文做关键词命中：正在**实现**补修附标的那张单，标题就写着
+ * 「总览补充投影：补修、落地与真实运行」，正文后部还抄了一条测试规则「含「补修」
+ * 且含「原项」或「W-12」」；下游那些单的正文和 DOM 夹具里嵌着「补修原项 W-1 的
+ * 缺口」。拼全文就会把这些正在实现附标的任务自己标成补修——它会让人去找一张并不
+ * 存在的原单据，而且越是被引用得多、越容易被误判。
+ *
+ * 所以声明只有两个位置：标题，或 `requiredBehaviour` 的第一行。代码块、测试夹具行、
+ * `contextRefs`、`doNot`、检视意见里引用的样例都是「提到补修」，不是「本单是补修」。
+ */
+function openingLine(body) {
+  const raw = text(body);
+  const lines = raw.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '') return '';
+    if (trimmed.startsWith('```')) return '';
+    if (/^(assert\.|explicitRepair\s*\(|it\s*\(|test\s*\(|title\s*:|order\s*:|requiredBehaviour\s*:|contextRefs\s*:|workItems\s*:)/.test(trimmed)) return '';
+    return trimmed;
+  }
+  return '';
+}
+
+const TITLE_DECLARATION = /补修原项(?:\s+W-\d+)?|补修(?:工单|单)?[：:\s]+W-\d+|本单补修原项(?:\s+W-\d+)?/;
+const OPENING_DECLARATION = /^(?:补修原项(?:\s+W-\d+)?|补修(?:工单|单)?[：:\s]+W-\d+|本单补修原项(?:\s+W-\d+)?)/;
+
+function declaresRepair(title, body) {
+  if (TITLE_DECLARATION.test(text(title))) return true;
+  if (OPENING_DECLARATION.test(openingLine(body))) return true;
+  return false;
+}
+
+/**
+ * 补修：**只看 L2 交给 L1 那张工单自己的标题和 first line**。
+ *
+ * 每个 workItem 只交这两个字段给 `declaresRepair`：`objective`、`constraints`、
+ * `acceptance`、`verification`、`doNot`、`contextRefs`、`executionResult`、`notes`、
+ * `origin`、`repairOf` 一概不读。读它们就等于允许「复述一条规则」或「引用一个样例」
+ * 变成一条附标。任一工单声明为真即返回真。
  *
  * `origin.rerunOf` 明确不看：它是「同一个目标重来一遍」，与「补上一张单没做完的
  * 部分」是两件事。`repairOf` 这个字段真实数据里不存在，也不认——认了就等于给
@@ -60,10 +92,7 @@ export function explicitRepair(detail) {
     const item = object(workItem);
     if (item === null) continue;
     const order = object(item.order) ?? {};
-    // 标题与正文拼在一起看：标题写「补修单」、正文写原工作项 id，是正常的分工。
-    const haystack = `${text(item.title)} ${text(order.requiredBehaviour)}`;
-    if (!haystack.includes('补修')) continue;
-    if (haystack.includes('原项') || WORK_ITEM_ID.test(haystack)) return true;
+    if (declaresRepair(item.title, order.requiredBehaviour)) return true;
   }
   return false;
 }
