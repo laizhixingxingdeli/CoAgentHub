@@ -1,10 +1,11 @@
 /**
  * 交付验证六层投影（src/web/task-detail-delivery.js）。
  *
- * 只写两条，对应工单里两条验收：这一层的错都不报错也不崩——把重派后残留的旧报告/
+ * 只写四条，对应工单里三条验收：这一层的错都不报错也不崩——把重派后残留的旧报告/
  * 旧交卷说成「当前已通过」、把 direct 的验收写成「协调者验收」、把标准任务的独立复核
- * 写成「未知」、把「没有 master 证据」说成「未合入」。夹具写在文件里，不读仓库外的
- * JSON（外部文件一改，测试静默换了意思）。
+ * 写成「未知」、把「没有 master 证据」说成「未合入」；以及已交回时三处时间与已跑命令
+ * 能不能从 activity / 完整报告组对。夹具写在文件里，不读仓库外的 JSON（外部文件
+ * 一改，测试静默换了意思）。
  */
 
 import { test } from 'node:test';
@@ -107,6 +108,171 @@ test('重派未交回：旧报告与旧交卷都不算当前结果', () => {
   assert.equal(byKey.master.detail.includes('未记录'), true);
   assert.equal(byKey.master.detail.includes('未合入'), false);
   assert.equal(byKey.master.detail.includes('已合入 master'), false);
+});
+
+/**
+ * 已交回且事件链对得上：三处时间分别是对应事件的 at，受评执行是执行者而不是评审者。
+ *
+ * 这里错一笔都不报错——屏幕上只是「提交时间未知」或者「受评执行 coord-8」，而人正靠
+ * 这一行判断结论是对着哪一跳下的。
+ */
+test('已交回：提交 / 机器 / 角色三处时间来自对应事件，受评执行不是评审者', () => {
+  const delivery = projectDelivery({
+    missionId: 'CUI3-task-detail-20261026',
+    status: 'executing',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    workItems: [
+      {
+        id: 'W-906',
+        title: '交卷证据时间',
+        status: 'accepted',
+        attemptIds: ['W-906.exec-1'],
+        lastReview: { verdict: 'accept', attemptId: 'coord-8' },
+        validationReport: { reportId: 'VR-639', passed: true },
+        executionResult: { outcome: 'completed', summary: '补齐时间', changedFiles: ['src/web/a.js'] },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+  }, {
+    selectedWorkItemId: 'W-906',
+    activity: [
+      {
+        kind: 'execution_result.submitted',
+        at: '2026-10-26T13:29:13.113Z',
+        attemptId: 'W-906.exec-1',
+        workItemId: 'W-906',
+        data: { orderRevision: 'r2' },
+      },
+      {
+        kind: 'validation.reported',
+        at: '2026-10-26T13:31:17.987Z',
+        workItemId: 'W-906',
+        data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+      },
+      {
+        kind: 'review.recorded',
+        at: '2026-10-26T13:33:47.061Z',
+        attemptId: 'coord-8',
+        workItemId: 'W-906',
+        data: { verdict: 'accept' },
+      },
+    ],
+    validationReport: {
+      id: 'VR-639',
+      missionId: 'CUI3-task-detail-20261026',
+      workItemId: 'W-906',
+      attemptId: 'W-906.exec-1',
+      passed: true,
+      checks: [
+        {
+          kind: 'command',
+          passed: true,
+          command: {
+            argv: ['node', '--test'],
+            cwd: '/repo',
+            exitCode: 0,
+            timedOut: false,
+            durationMs: 1000,
+            outputTail: '# tests 2033\n# pass 2033\n# fail 0\n',
+          },
+        },
+        // 行数只认 diff-size 的可计里程：有才写，没有就是未知。
+        { kind: 'diff-size', passed: true, diffSize: { limits: {}, used: { changedLines: 37 }, unknown: [] } },
+      ],
+    },
+  });
+
+  const byKey = Object.fromEntries(delivery.layers.map((l) => [l.key, l]));
+  assert.equal(byKey.machine.timeText, '2026-10-26T13:31:17.987Z');
+  assert.equal(byKey.role.timeText, '2026-10-26T13:33:47.061Z');
+  assert.equal(delivery.submission.submittedAtText, '2026-10-26T13:29:13.113Z');
+  assert.equal(delivery.submission.lineDeltaText, '37 行');
+
+  // 受评的是执行者；评审者（coord-8）只用来对齐事件。
+  assert.ok(delivery.submission.reviewedExecution.includes('W-906.exec-1'));
+  assert.equal(delivery.submission.reviewedExecution.includes('coord-8'), false,
+    '受评执行写成了评审者：' + delivery.submission.reviewedExecution);
+
+  // 已跑命令与计数只从归属对得上的完整报告来。
+  assert.deepEqual(delivery.submission.ranCommands, ['node --test']);
+  assert.equal(delivery.submission.ranCounts, 'tests 2033 · pass 2033');
+  // 工单要求那一份仍在，并标明不是已跑结果。
+  assert.deepEqual(delivery.submission.verification.commands, ['node --test test/a.test.ts']);
+  assert.equal(delivery.submission.verification.note.includes('不是已跑结果'), true);
+});
+
+/**
+ * 未交回：即使残留报告、残留评审事件、甚至把完整报告递进来，三处时间与已跑命令都是未知。
+ *
+ * 这是上面那条的反面。缺了它，「当前未交回时继承旧报告」这种错就没人看得见。
+ */
+test('未交回（dispatched）：三处时间与已跑命令仍未知，不采用残留报告', () => {
+  const delivery = projectDelivery({
+    missionId: 'CUI3-task-detail-20261026',
+    status: 'executing',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    workItems: [
+      {
+        id: 'W-906',
+        title: '交卷证据时间',
+        status: 'dispatched',
+        attemptIds: ['W-906.exec-1'],
+        lastReview: { verdict: 'accept', attemptId: 'coord-8' },
+        validationReport: { reportId: 'VR-639', passed: true },
+        executionResult: { outcome: 'completed', summary: '上一跳', changedFiles: [] },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+  }, {
+    selectedWorkItemId: 'W-906',
+    activity: [
+      {
+        kind: 'execution_result.submitted',
+        at: '2026-10-26T13:29:13.113Z',
+        attemptId: 'W-906.exec-1',
+        workItemId: 'W-906',
+      },
+      {
+        kind: 'validation.reported',
+        at: '2026-10-26T13:31:17.987Z',
+        workItemId: 'W-906',
+        data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+      },
+      {
+        kind: 'review.recorded',
+        at: '2026-10-26T13:33:47.061Z',
+        attemptId: 'coord-8',
+        workItemId: 'W-906',
+        data: { verdict: 'accept' },
+      },
+    ],
+    validationReport: {
+      id: 'VR-639',
+      missionId: 'CUI3-task-detail-20261026',
+      workItemId: 'W-906',
+      attemptId: 'W-906.exec-1',
+      passed: true,
+      checks: [
+        {
+          kind: 'command',
+          passed: true,
+          command: { argv: ['node', '--test'], cwd: '/repo', exitCode: 0, outputTail: '# tests 2033\n# pass 2033\n' },
+        },
+      ],
+    },
+  });
+
+  const byKey = Object.fromEntries(delivery.layers.map((l) => [l.key, l]));
+  assert.equal(delivery.currentReturned, false);
+  assert.equal(byKey.machine.timeText, '未知');
+  assert.equal(byKey.role.timeText, '未知');
+  assert.equal(delivery.submission.submittedAtText, '未知');
+  assert.equal(delivery.submission.lineDeltaText, '未知');
+  assert.equal(delivery.submission.ranCommands, null);
+  assert.equal(delivery.submission.ranCounts, null);
+  assert.equal(delivery.submission.reviewedExecution, null);
 });
 
 /**

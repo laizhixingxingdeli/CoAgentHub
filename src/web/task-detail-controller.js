@@ -10,9 +10,13 @@
  * **不 import src/application**：这里跑在浏览器里，拉 application 层会把整条服务端
  * 依赖拽进前端。页面只认 `/api/*` 投影出来的 view。
  *
- * **只发四条只读 GET**：mission、activity、attempts/:attemptId、live?cursor=。审批、
- * 取消、恢复、终审、合入都要人明说且各有入口，在这一层补一个 POST，屏幕上就会多出
- * 一个看起来能点、其实没有业务含义的控件。
+ * **只发五条只读 GET**：mission、activity、attempts/:attemptId、live?cursor=、
+ * validation-reports/:reportId。审批、取消、恢复、终审、合入都要人明说且各有入口，
+ * 在这一层补一个 POST，屏幕上就会多出一个看起来能点、其实没有业务含义的控件。
+ *
+ * 最后那一条就是为了交付区能写出「已跑命令与计数」：Mission 视图只带报告简版
+ * （reportId/passed），命令的 argv 与输出尾都在完整报告里。它是只读 GET、不新增端点，
+ * 所以不违背上面那条边界。
  *
  * **不自己判交付**：六层验证只在 task-detail-delivery.js 里投影一次。本层再判一份
  * 「这一跳算不算交回」，两处迟早只改到一处，而漏改的那边在界面上就是一句「通过」。
@@ -23,6 +27,7 @@ import {
   ensureTaskDetailStylesheets,
   taskDetailHtml,
 } from './task-detail-page.js';
+import { currentReportIdOf } from './task-detail-delivery.js';
 import { normalizeLiveLine } from './session-output.js';
 import { nextRefresh } from './projects.js';
 
@@ -33,6 +38,8 @@ const list = (value) => (Array.isArray(value) ? value : []);
 const pathOfMission = (missionId) => '/api/missions/' + encodeURIComponent(missionId);
 const pathOfAttempt = (missionId, attemptId) => pathOfMission(missionId) + '/attempts/' + encodeURIComponent(attemptId);
 const pathOfLive = (missionId, cursor) => pathOfMission(missionId) + '/live?cursor=' + cursor;
+const pathOfReport = (missionId, reportId) => pathOfMission(missionId)
+  + '/validation-reports/' + encodeURIComponent(reportId);
 
 /**
  * 每个 Mission 的 live 游标与已收行，模块级。
@@ -177,6 +184,12 @@ export function createTaskDetailController(deps = {}) {
     selectedAttemptId: '',
     currentAttempt: null,
     selectedAttempt: null,
+    /**
+     * 当前选中那一跳的完整机器验证报告（已跑命令、计数、行数的唯一来源）。
+     * 切工作项或报告对不上时必须先置 null 再 paint：留着上一份，屏幕上就会把
+     * 别人的命令当成本跳跑过的。
+     */
+    validationReportFull: null,
   };
 
   let running = false;
@@ -237,6 +250,7 @@ export function createTaskDetailController(deps = {}) {
       selectedAttemptId: state.selectedAttemptId,
       currentAttempt: state.currentAttempt,
       selectedAttempt: state.selectedAttempt,
+      validationReportFull: state.validationReportFull,
       // 重绘时 live 正文用这份 lines：它不是「这一轮新到的」，而是这一任务至今收到的
       // 全部行——只传本轮新增的话，每次重绘屏幕上就只剩最新一段。
       liveChunks: entry.lines,
@@ -278,12 +292,19 @@ export function createTaskDetailController(deps = {}) {
     const attemptId = currentStageAttemptId(state.view, state.activity, id);
     state.selectedAttemptId = attemptId;
     state.selectedAttempt = null;
+    // 切工作项先清掉上一项的完整报告再 paint：留着它，屏幕上会把上一项跑过的命令
+    // 写在新选中项的摘要里，而两者看起来完全一样。
+    state.validationReportFull = null;
     paint();
-    if (attemptId === '' || missionId === '') return;
+    if (missionId === '') return;
     const gen = cycleGen;
-    const detail = await loadAttempt(gen, missionId, attemptId);
+    state.validationReportFull = await loadValidationReport(gen, missionId, state.view);
     if (gen !== cycleGen || stopped || !isVisible()) return;
-    state.selectedAttempt = detail;
+    if (attemptId !== '') {
+      const detail = await loadAttempt(gen, missionId, attemptId);
+      if (gen !== cycleGen || stopped || !isVisible()) return;
+      state.selectedAttempt = detail;
+    }
     paint();
   }
 
@@ -319,6 +340,27 @@ export function createTaskDetailController(deps = {}) {
       return detail;
     } catch {
       // 一跳的明细拉不到只影响那一格：把整页说成「加载失败」，人会以为整条任务没了。
+      return null;
+    }
+  }
+
+  /**
+   * 拉当前选中那一跳的完整机器验证报告（已跑命令 / 计数 / 行数）。
+   *
+   * 三个前置条件缺一个就不发请求：没选中项、未交回、报告号为空。dispatched 上
+   * 残留着上一跳的 reportId 时，那份报告讲不出这一跳过没过，拉回来只会把它贴上。
+   *
+   * 失败一律回 null：报告拉不到只影响「已跑命令」那几行，整页六层事实还在；
+   * 但绝不能用上一份顶上——那就是把别人的命令当这一跳跑过的。
+   */
+  async function loadValidationReport(gen, missionId, view) {
+    const reportId = currentReportIdOf(view, state.selectedWorkItemId);
+    if (reportId === '') return null;
+    try {
+      const full = await fetchJson(pathOfReport(missionId, reportId));
+      if (gen !== cycleGen || stopped) return null;
+      return object(full);
+    } catch {
       return null;
     }
   }
@@ -420,6 +462,12 @@ export function createTaskDetailController(deps = {}) {
         state.selectedWorkItemId = defaultWorkItemId(state.view, state.activity);
       }
 
+      // 完整报告在 activity 之后、paint 之前取：交付投影要同时用到两者。
+      // 先清掉上一份再拉：这份是「新的选中项的报告」，不是「上一份加上新的」，
+      // 拉失败时屏幕上必须回到未知，而不是继续登着上一项的命令。
+      state.validationReportFull = null;
+      state.validationReportFull = await loadValidationReport(gen, missionId, state.view);
+      if (gen !== cycleGen || stopped || !isVisible()) return;
       const liveAttemptId = currentLiveAttemptId(state.activity);
 
       const current = liveAttemptId === null ? null : await loadAttempt(gen, missionId, liveAttemptId);

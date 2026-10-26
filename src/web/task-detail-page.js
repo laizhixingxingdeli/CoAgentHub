@@ -130,7 +130,10 @@ function panelHtml(key, inner, current) {
  *
  * model = { view, activity, nowIso, tab, intentExpanded, historyExpanded, outputSide,
  *           selectedWorkItemId, selectedAttemptId, currentAttempt, selectedAttempt,
- *           liveChunks }
+ *           liveChunks, validationReportFull }
+ *
+ * validationReportFull 是 `GET /api/missions/:id/validation-reports/:reportId` 取回来的
+ * 完整报告：它是「已跑命令 / 计数 / 行数」的唯一来源，没取到就是 null。
  */
 export function taskDetailHtml(model) {
   const m = object(model) ?? {};
@@ -229,7 +232,14 @@ export function taskDetailHtml(model) {
 
   const deliveryPanel = panelHtml(
     'delivery',
-    taskDeliveryHtml(view, { selectedWorkItemId }),
+    // activity 是交付六层时间的唯一来源，validationReportFull 是「已跑命令与计数」的唯一
+    // 来源：两者都不传，屏幕上就只能写「未知」，而事实明明已经在只读数据里了。
+    taskDeliveryHtml(view, {
+      selectedWorkItemId,
+      activity,
+      validationReport: object(m.validationReportFull),
+      formatTime,
+    }),
     tab === 'delivery',
   );
 

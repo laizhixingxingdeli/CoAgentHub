@@ -1,11 +1,13 @@
 /**
  * 交付与验证区的渲染层（src/web/task-detail-delivery-view.js）。
  *
- * 只写两条，对应验收的两条：
+ * 只写四条，对应验收的三条：
  *   1. 派出去了但还没交回时，机器层说的是「当前未交回」，残留的通过报告只是残留；
  *      交卷摘要也不抄上一跳的改动文件。
  *   2. direct 的角色层标题是「外部主控验收」，标准任务的独立复核是「不适用」，
  *      master 只说未记录、不说未合入。
+ *   3. 已交回时时间画成本地时刻且 title 留原 ISO；已跑命令与工单要求分开画，
+ *      受评执行不写评审者。
  *
  * 这些错了浏览器都不报错：屏幕上的字看着都挺合理，只是把上一跳的通过贴到这一跳头上，
  * 或者替平台断言一件它没有证据的事。
@@ -137,6 +139,92 @@ test('direct 已交回未验收：外部主控验收待处理、独立复核不�
   // 交回了但还没验收：不得出现「未合入」这种替平台断言的结论。
   const whole = q('.td-delivery')?.textContent || '';
   assert.equal(whole.includes('未合入'), false, '交付区出现了未合入：' + whole);
+});
+
+/**
+ * 时间画成本地时刻、原文留在 title；已跑命令只画在交卷摘要里并带 data-ran-command。
+ *
+ * 只印 ISO 时一行被挤满且看的人要自己换算；只印本地时间则事后对不上台账。两者的
+ * 错都不报错，只是屏幕上少了一个能核对的东西。
+ */
+test('已交回：时间显示为本地时刻且 title 保留原 ISO；已跑命令带 data-ran-command', () => {
+  const formatTime = (iso: string) => '本地(' + iso + ')';
+  const { root, q } = mount({
+    missionId: 'CUI3-task-detail-20261026',
+    status: 'executing',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    workItems: [
+      {
+        id: 'W-906',
+        title: '交卷证据时间',
+        status: 'accepted',
+        attemptIds: ['W-906.exec-1'],
+        lastReview: { verdict: 'accept', attemptId: 'coord-8' },
+        validationReport: { reportId: 'VR-639', passed: true },
+        executionResult: { outcome: 'completed', summary: '补齐时间', changedFiles: ['src/web/a.js'] },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+  }, {
+    selectedWorkItemId: 'W-906',
+    formatTime,
+    activity: [
+      {
+        kind: 'execution_result.submitted',
+        at: '2026-10-26T13:29:13.113Z',
+        attemptId: 'W-906.exec-1',
+        workItemId: 'W-906',
+      },
+      {
+        kind: 'validation.reported',
+        at: '2026-10-26T13:31:17.987Z',
+        workItemId: 'W-906',
+        data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+      },
+      {
+        kind: 'review.recorded',
+        at: '2026-10-26T13:33:47.061Z',
+        attemptId: 'coord-8',
+        workItemId: 'W-906',
+        data: { verdict: 'accept' },
+      },
+    ],
+    validationReport: {
+      id: 'VR-639',
+      missionId: 'CUI3-task-detail-20261026',
+      workItemId: 'W-906',
+      attemptId: 'W-906.exec-1',
+      passed: true,
+      checks: [
+        {
+          kind: 'command',
+          passed: true,
+          command: { argv: ['node', '--test'], cwd: '/repo', exitCode: 0, outputTail: '# tests 2033\n# pass 2033\n' },
+        },
+      ],
+    },
+  });
+
+  const machineTime = q('[data-layer="machine"] .td-layer-time');
+  assert.equal(machineTime?.textContent, '本地(2026-10-26T13:31:17.987Z)');
+  assert.equal(machineTime?.getAttribute('title'), '2026-10-26T13:31:17.987Z');
+
+  const roleTime = q('[data-layer="role"] .td-layer-time');
+  assert.equal(roleTime?.getAttribute('title'), '2026-10-26T13:33:47.061Z');
+
+  const submission = q('.td-submission');
+  const said = submission?.textContent || '';
+  // 受评执行是执行者，不是评审者。
+  assert.ok(said.includes('W-906.exec-1'), '交卷摘要没写受评执行：' + said);
+  assert.equal(said.includes('coord-8'), false, '交卷摘要把评审者当成了受评执行：' + said);
+  // 已跑命令与计数单独一块，并带标记可供后续断言。
+  const ran = [...(root.querySelectorAll('[data-ran-command="true"]') as unknown as HTMLElement[])]
+    .map((el) => el.textContent || '');
+  assert.deepEqual(ran, ['node --test']);
+  assert.ok(said.includes('tests 2033 · pass 2033'), '交卷摘要没写计数：' + said);
+  // 工单要求那一行仍标明不是已跑结果。
+  assert.ok(said.includes('工单要求，不是已跑结果'), '交卷摘要没把要求与已跑分开：' + said);
 });
 
 /**

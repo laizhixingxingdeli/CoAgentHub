@@ -10,6 +10,8 @@
  *      别的 Attempt 的行不进实时正文。
  *   3. 路由离开（容器被资源页换掉 + hash 指向 #/pool）时不靠人调 stop：旧轮询与在途
  *      响应都不再把详情画回同一个容器，也不再请求该 Mission。
+ *   4. 已验收的工作项按 reportId 去取已有的只读完整报告，交付区的提交时间不再是
+ *      未知，受评执行与已跑命令归属到执行者；dispatched 残留报告不得去拉。
  *
  * 这些错了浏览器都不报错：屏幕上只是「进度卡住了」「这条任务已经通过」「它又重跑了一遍」。
  *
@@ -57,13 +59,19 @@ function harness() {
   return { window, document, container, timers, setInterval, clearInterval, q, all, textOf };
 }
 
-/** 只读的四条 GET 之外一律算错：多打一个端点就是这一页在替别的层下结论。 */
+/**
+ * 只读的 GET 之外一律算错：多打一个端点就是这一页在替别的层下结论。
+ *
+ * validation-reports 也在白名单里：它是已有只读 GET，交付区的「已跑命令与计数」只能从
+ * 完整报告里取（Mission 视图只带简版）。
+ */
 function assertOnlyAllowedPaths(paths: string[]): void {
   for (const path of paths) {
     const allowed = /^\/api\/missions\/[^/]+$/.test(path)
       || /^\/api\/missions\/[^/]+\/activity$/.test(path)
       || /^\/api\/missions\/[^/]+\/attempts\/.+$/.test(path)
-      || /^\/api\/missions\/[^/]+\/live\?cursor=\d+$/.test(path);
+      || /^\/api\/missions\/[^/]+\/live\?cursor=\d+$/.test(path)
+      || /^\/api\/missions\/[^/]+\/validation-reports\/[^/]+$/.test(path);
     assert.equal(allowed, true, '发了一条不该发的请求：' + path);
   }
 }
@@ -145,6 +153,12 @@ test('页头用 Mission JSON 的真实字段；残留报告是当前未交回；
   await flush();
 
   assertOnlyAllowedPaths(requested);
+  // dispatched 上残留着 VR-1：那一份讲不出这一跳过没过，不得去拉它。
+  assert.equal(
+    requested.some((path) => path.includes('/validation-reports/')),
+    false,
+    'dispatched 残留报告也去拉完整报告了：' + requested.join(', '),
+  );
 
   // 页头：编号全文与原始 intent。
   assert.equal(h.textOf('.td-mission-id'), 'M-1');
@@ -385,4 +399,131 @@ test('容器被资源页接管且 hash 指向 #/pool 后，不调用 stop 也不
 
   const afterLeave = requested.slice(beforeLeave);
   assert.deepEqual(afterLeave, [], '离页后仍在请求该 Mission：' + afterLeave.join(', '));
+});
+
+/**
+ * 已验收的工作项：按 reportId 去取完整报告，三处时间从 activity 对齐出来。
+ *
+ * 这条验的是「接线接对了」：投影本身已经在交付测试里验过，但如果页面不传 activity 与
+ * 完整报告，屏幕上就永远是未知，而事实明明就在只读数据里。
+ */
+test('已验收：按 reportId 取完整报告，提交时间不再是未知，受评执行不是评审者', async () => {
+  const h = harness();
+  const requested: string[] = [];
+
+  const view: Record<string, unknown> = {
+    missionId: 'M-3',
+    projectId: 'coagenthub-v5',
+    status: 'executing',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    contract: { intent: '交付证据时间' },
+    usage: { quality: 'unknown', cost: 0 },
+    workItems: [
+      {
+        id: 'W-906',
+        title: '交卷证据时间',
+        status: 'accepted',
+        attemptIds: ['W-906.exec-1'],
+        lastReview: { verdict: 'accept', attemptId: 'coord-8' },
+        validationReport: { reportId: 'VR-639', passed: true },
+        executionResult: { outcome: 'completed', summary: '补齐时间', changedFiles: ['src/web/a.js'] },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+    updatedAt: '2026-10-26T14:00:00.000Z',
+  };
+
+  const activity: Array<Record<string, unknown>> = [
+    {
+      kind: 'execution_result.submitted',
+      at: '2026-10-26T13:29:13.113Z',
+      attemptId: 'W-906.exec-1',
+      workItemId: 'W-906',
+      data: { orderRevision: 'r2' },
+    },
+    {
+      kind: 'validation.reported',
+      at: '2026-10-26T13:31:17.987Z',
+      workItemId: 'W-906',
+      data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+    },
+    {
+      kind: 'review.recorded',
+      at: '2026-10-26T13:33:47.061Z',
+      attemptId: 'coord-8',
+      workItemId: 'W-906',
+      data: { verdict: 'accept' },
+    },
+  ];
+
+  const fullReport: Record<string, unknown> = {
+    id: 'VR-639',
+    missionId: 'M-3',
+    workItemId: 'W-906',
+    attemptId: 'W-906.exec-1',
+    passed: true,
+    startedAt: '2026-10-26T13:30:00.000Z',
+    endedAt: '2026-10-26T13:31:00.000Z',
+    checks: [
+      {
+        kind: 'command',
+        passed: true,
+        command: { argv: ['node', '--test'], cwd: '/repo', exitCode: 0, outputTail: '# tests 2033\n# pass 2033\n' },
+      },
+    ],
+  };
+
+  async function fetchJson(path: string): Promise<unknown> {
+    requested.push(path);
+    if (path === '/api/missions/M-3') return view;
+    if (path === '/api/missions/M-3/activity') return activity;
+    if (path === '/api/missions/M-3/attempts/W-906.exec-1') {
+      return { attemptId: 'W-906.exec-1', status: 'completed' };
+    }
+    if (path === '/api/missions/M-3/validation-reports/VR-639') return fullReport;
+    if (path === '/api/missions/M-3/live?cursor=0') return { cursor: 0, chunks: [] };
+    throw new Error('unexpected ' + path);
+  }
+
+  const controller = createTaskDetailController({
+    doc: h.document,
+    container: h.container,
+    missionId: 'M-3',
+    fetchJson,
+    nowIso: () => NOW,
+    setInterval: h.setInterval,
+    clearInterval: h.clearInterval,
+  });
+
+  await controller.start();
+  await flush();
+
+  assertOnlyAllowedPaths(requested);
+  assert.ok(
+    requested.includes('/api/missions/M-3/validation-reports/VR-639'),
+    '没有去取这一跳的完整报告：' + requested.join(', '),
+  );
+
+  const submissionText = h.textOf('.td-submission');
+  assert.equal(submissionText.includes('提交时间未知'), false, '提交时间仍是未知：' + submissionText);
+  assert.ok(submissionText.includes('W-906.exec-1'), '交卷摘要没写受评执行：' + submissionText);
+  assert.equal(submissionText.includes('coord-8'), false, '交卷摘要把评审者当成了受评执行：' + submissionText);
+  // 已跑命令与计数来自完整报告。
+  const ran = h.all('[data-ran-command="true"]').map((el) => el.textContent || '');
+  assert.deepEqual(ran, ['node --test']);
+  assert.ok(submissionText.includes('tests 2033 · pass 2033'), '没写出计数：' + submissionText);
+
+  // 机器层与角色层的时间也从事件对齐出来（换算成本地时刻，title 留原文）。
+  const machineBox = h.q('.td-layer[data-layer="machine"] .td-layer-time');
+  assert.equal(machineBox?.getAttribute('title'), '2026-10-26T13:31:17.987Z');
+  const roleBox = h.q('.td-layer[data-layer="role"] .td-layer-time');
+  assert.equal(roleBox?.getAttribute('title'), '2026-10-26T13:33:47.061Z');
+  // 交卷摘要里的提交时间也是对应事件那一刻，原文留在 title 里可查。
+  const submittedTitles = [...h.container.querySelectorAll('.td-submission .td-submission-value')]
+    .map((el) => el.getAttribute('title'));
+  assert.ok(submittedTitles.includes('2026-10-26T13:29:13.113Z'),
+    '交卷摘要的提交时间没对上提交事件：' + JSON.stringify(submittedTitles));
+
+  controller.stop();
 });
