@@ -52,10 +52,18 @@
 }
 
 /* 两列六格，按画板 572px 一列。minmax(0, 1fr) 而不是 1fr：长原文（intent 常常
- * 是一整段）在 1fr 下会把列撑过容器宽度，横着溢出去。 */
+ * 是一整段）在 1fr 下会把列撑过容器宽度，横着溢出去。
+ *
+ * 必须按列填（grid-auto-flow: column + 三行）而不是默认的按行填：画板 70:4092 起
+ * 左列是 intent / acceptance / constraints，右列是 nonGoals / guardrails /
+ * allowedScope。按行填出来是左 intent 右 acceptance、左 constraints 右 nonGoals，
+ * 六格全在、顺序全错，屏幕上看不出是 bug，只是把「不做什么」读成了验收条件后面
+ * 的一句。用列填就不用为了这个顺序去改 DOM，CARDS 的阅读顺序也保持原样。 */
 .td-contract .td-contract-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: column;
   gap: 16px;
   align-items: start;
 }
@@ -68,7 +76,6 @@
   border: 1px solid var(--color-line);
   border-radius: var(--radius-output);
   background: var(--color-white);
-  overflow: clip;
 }
 
 .td-contract .td-contract-card-title {

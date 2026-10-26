@@ -24,6 +24,9 @@ import { taskContractHtml } from '../src/web/task-detail-contract-view.js';
 
 const CSS = readFileSync(new URL('../src/web/task-detail-contract.css', import.meta.url), 'utf8');
 
+/** 断言要看规则、不看注释：注释里写着「不设 line-clamp」，按整份文件搜就会搜到自己。 */
+const CSS_RULES = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+
 const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
 const document = window.document as unknown as Document;
 
@@ -98,6 +101,67 @@ test('修订号与契约原文按原文出现，缺失的 nonGoals 说未记录�
   for (const selector of ['.td-contract-grid', '.td-contract-card', '.td-contract-card-title', '.td-contract-missing']) {
     assert.ok(CSS.includes('.td-contract ' + selector), selector + ' 没有 .td-contract 作用域');
   }
+});
+
+function cssRuleBody(selector: string) {
+  const start = CSS.indexOf(selector);
+  assert.ok(start >= 0, 'CSS 里没有 ' + selector);
+  const open = CSS.indexOf('{', start);
+  const close = CSS.indexOf('}', open);
+  return CSS.slice(open + 1, close);
+}
+
+/**
+ * 列的顺序。格子顺序在 DOM 里是 CARDS 的固定顺序，怎么分成两列由 .td-contract-grid
+ * 的流向决定：按列填时前 N 项进第一列（N 是声明了三行），剩下的进第二列。
+ *
+ * 只读声明、不读渲染结果：浏览器算出来的位置在 happy-dom 里没有布局，量不出来。
+ * 这条错的时候页面六格都在、每格都有自己的标题，看上去完全正常，只有读的人把
+ * 「不做什么」当成了验收条件的续句。
+ */
+function columnsFromGrid() {
+  const grid = cssRuleBody('.td-contract .td-contract-grid');
+  assert.match(grid, /grid-auto-flow:\s*column/, '六格不是按列堆叠，会是左 intent / 右 acceptance 的交错');
+  const rows = Number(/grid-template-rows:\s*repeat\(\s*(\d+)/.exec(grid)?.[1]);
+  assert.equal(rows, 3, '列高不是三行，六格分不成左三右三');
+  return rows;
+}
+
+test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/guardrails/allowedScope', () => {
+  const { all } = mount({
+    missionId: 'CUI3-task-detail-20261026',
+    contractRevision: 2,
+    contract: {
+      intent: '把契约页签按画板铺成两列六格。',
+      acceptance: ['左列三项顺序正确'],
+      constraints: ['不改投影'],
+      nonGoals: ['不新增写操作'],
+      guardrails: ['不读取凭据'],
+    },
+    workItems: [
+      { id: 'W-1', title: '契约页只读视图', status: 'dispatched', order: { allowedScope: ['src/web/task.js'] } },
+    ],
+  }, { selectedWorkItemId: 'W-1' });
+
+  const rows = columnsFromGrid();
+  const fields = all('[data-field]').map((el) => el.getAttribute('data-field') || '');
+
+  const columns: string[][] = [];
+  fields.forEach((field, index) => {
+    const col = Math.floor(index / rows);
+    (columns[col] ||= []).push(field);
+  });
+
+  assert.deepEqual(columns, [
+    ['intent', 'acceptance', 'constraints'],
+    ['nonGoals', 'guardrails', 'allowedScope'],
+  ], '左右列不是左三右三：' + JSON.stringify(columns));
+
+  // 原文不因样式被截短：这两条一旦出现在正文规则里，被收起来的那半句在屏幕上
+  // 再也看不到，而卡片看起来是满的。
+  const text = cssRuleBody('.td-contract .td-contract-text');
+  assert.equal(/max-height\s*:/.test(text), false, '正文被 max-height 截短');
+  assert.equal(/line-clamp/.test(CSS_RULES), false, 'CSS 规则里出现了 line-clamp');
 });
 
 test('没有契约也没有工作项：三格说未记录，不抛错，仍然是只读', () => {
