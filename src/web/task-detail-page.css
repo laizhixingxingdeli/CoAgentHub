@@ -1,0 +1,58 @@
+/*
+ * 任务详情页的组合层（src/web/task-detail-page.js）：页头 → 三页签 → 输出区的排布，
+ * 以及「非当前页签的面板不占位」这一条。
+ *
+ * 为什么单开一个文件：这里只有版面事实（纵向堆叠、面板间距、定位按钮那一行）。
+ * 挤进任何一张子视图的样式表里，那张表就同时管着两件事，改页签间距会顺带改到环节卡。
+ *
+ * 为什么全部挂在 .td-page 作用域下：这份文件与子视图的 .td-header / .td-flow /
+ * .td-output 同时在线，一条不限定作用域的 `.td-tab-panel { padding: 16px }` 会把
+ * 别的页签面板与别人的卡片一起改了。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，改一处忘
+ * 另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ *
+ * 面板的显隐靠 hidden 属性（见 task-detail-page.js 的 panelHtml），**不靠预铺未来
+ * 环节**：这里若给 .td-tab-panel 写 display: flex，会把 hidden 自带的 display: none
+ * 顶掉——面板看不见内容却仍然占位，切页签时页面高度不动，人以为点击没生效。
+ */
+
+.td-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* hidden 是唯一依据：显式补一条，免得某张样式表给 div 写了 display 之后覆盖掉它。 */
+.td-page .td-tab-panel[hidden] {
+  display: none;
+}
+
+/* 工作流面板里「定位当前」独占一行、靠右：它与下面的环节带不是一组内容，
+ * 混进环节标题带里会被读成又一个筛选条件。 */
+.td-page .td-locate-current {
+  align-self: flex-end;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-white);
+  color: var(--color-accent);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.td-page .td-locate-current:hover {
+  background: var(--color-select);
+}
+
+/* 输出区固定在最后一块，长满一屏宽：它在这一页里是唯一的「正在变化」的区域，
+ * 窄一截会让人以为它是某个页签的附属内容。 */
+.td-page .td-output {
+  width: 100%;
+}
