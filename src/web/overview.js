@@ -7,8 +7,10 @@
  * 不在这份文件里再算一遍——同一个判断写两处，加一个状态时只会改到一处，另一处
  * 静悄悄地退回默认值，而屏幕上看起来完全正常。
  *
- * 网络部分（renderOverviewPage 的读取/取消/隐藏停轮询）本单不动：换数据显示层
- * 却顺手改请求生命周期，等于把两件事的故障混在一起排查。
+ * 事件与请求（筛选项、定时刷新、取消、迟到响应作废）在 console-overview-controller.js：
+ * 渲染函数是纯的，喂什么画什么，所以 node 里能直接断言一段 HTML；控制器被注入本文件
+ * 的 overviewHtml，反过来依赖就成了环（浏览器里先求值的那一个会拿到半个模块）。
+ * 本文件对外只留 renderOverviewPage 这个小入口，它不承载任何新逻辑。
  */
 import { esc, stageChip, stateChip } from './projects.js';
 import {
@@ -17,6 +19,7 @@ import {
   buildOverview,
   stageText,
 } from './console-overview-model.js';
+import { createOverviewController } from './console-overview-controller.js';
 
 /* ============================ 纯排版工具 ============================ */
 
@@ -101,6 +104,49 @@ function statusView(row) {
   return STATUS_VIEW.default;
 }
 
+/* ============================ 读取状态 ============================ */
+
+/**
+ * 读取失败的原因照实说，三类**不合并**：HTTP 5xx 说明服务活着但这一页读不出来
+ * （先别重启），连不上说明进程没了（该去看服务），返回的不是列表说明接口变了。
+ * 合成一句「加载失败」会让人对着三种情况做同一个动作。
+ */
+export function loadErrorText(error) {
+  if (!error || typeof error !== 'object') return '原因未知';
+  if (error.kind === 'http') return '服务返回 HTTP ' + String(error.status);
+  if (error.kind === 'invalid') return '接口返回的不是任务列表';
+  return '连不上服务';
+}
+
+/**
+ * 一次都没成功取到列表时的说明。
+ *
+ * **不画任何计数**：这时候「全部 0」是编出来的，人会以为平台上一条任务都没有，
+ * 而真相是这一页根本没读到。真正空集合是另一句话（列表读到了，长度就是 0），
+ * 两件事在屏幕上必须长得不一样。
+ */
+function loadNoteHtml(load) {
+  if (load.status === 'error') {
+    return '<div class="note" role="status" data-overview-state="error">任务列表读取失败：'
+      + esc(loadErrorText(load.error)) + '；还没读到过列表，因此这里没有条数可显示。</div>';
+  }
+  return '<div class="note" role="status" data-overview-state="loading">正在读取任务列表…</div>';
+}
+
+/**
+ * 已经有旧数据时刷新失败：保留那份数据，另加一条「这是什么时候的」。
+ *
+ * 清空列表最省事，但等于把「刚刚还看得到的事实」换成「什么都不知道」，
+ * 而屏幕上只是少了一屏、没有报错。留着旧行 + 最后成功时刻，人才知道自己在看
+ * 几分钟前的世界，而不是现在的。
+ */
+function refreshNoteHtml(load, nowMs) {
+  const at = Number.isFinite(Number(load.lastOkAt)) ? Number(load.lastOkAt) : null;
+  const when = at === null ? '上一次成功时刻未知' : '最后成功 ' + formatUpdated(new Date(at).toISOString(), nowMs);
+  return '<div class="note" role="status" data-overview-state="stale">刷新失败：'
+    + esc(loadErrorText(load.error)) + '；' + esc(when) + '，下面是那一刻读到的数据。</div>';
+}
+
 /* ============================ 片段 ============================ */
 
 function bannerHtml(built, needsYou) {
@@ -140,17 +186,32 @@ function bannerHtml(built, needsYou) {
     + '<p class="co-banner-note">' + scope + '；' + note + '</p></div>';
 }
 
+/**
+ * 工具栏：搜索是**真的** input，暂停是**真的** button。
+ *
+ * 旧版这里是一个 span 冒充占位文字、一个 span 冒充开关：它们没有 value、不能输入、
+ * 不能 Tab 到、按回车也没有任何反应，而屏幕上和能用的控件长得一模一样——人试两次
+ * 之后就会认为整个筛选功能坏了。图标仍是画板里那张 16x16 原图，位置在左：
+ * ConsoleField Search（39:315）就是 icon 后接输入区，反过来会被读成「先有文字，
+ * 后面跟了个别的东西」。
+ *
+ * 开关用 button + aria-pressed 而不是自己接 keydown：原生按钮本来就能 Tab 到、
+ * 空格/回车能触发、读屏软件会念出按下状态；自己接键盘等于把这些都重写一遍，
+ * 且一定会漏（漏掉的那一次无声无息）。
+ */
 function toolbarHtml(filter) {
   const pausedOn = filter.pausedOnly === true;
-  // 图标在文字左侧：画板里的 ConsoleField Search（39:315）是 icon 后接 placeholder，
-  // 反过来的话输入提示会被读成「先有一段文字，后面跟了个按钮」。
+  const query = String(filter.query ?? '');
   return '<div class="co-toolbar">'
     + '<div class="co-field" data-overview-search>'
     + '<img class="co-field-icon" src="/console-icon-search.svg" width="16" height="16" alt="" />'
-    + '<span class="co-field-text">搜索编号或 intent</span></div>'
-    + '<span class="co-switch" data-overview-paused="' + (pausedOn ? '1' : '0') + '">'
+    + '<input class="co-field-input" type="search" data-overview-query'
+    + ' value="' + esc(query) + '" placeholder="搜索编号或 intent" aria-label="搜索编号或 intent" />'
+    + '</div>'
+    + '<button class="co-switch" type="button" data-overview-paused="' + (pausedOn ? '1' : '0') + '"'
+    + ' aria-pressed="' + (pausedOn ? 'true' : 'false') + '">'
     + '<img class="co-switch-track" src="/' + (pausedOn ? 'console-icon-switch-on.svg' : 'console-icon-switch.svg')
-    + '" width="34" height="20" alt="" /><span class="co-switch-label">仅看已暂停</span></span>'
+    + '" width="34" height="20" alt="" /><span class="co-switch-label">仅看已暂停</span></button>'
     + '</div>';
 }
 
@@ -160,14 +221,16 @@ function toolbarHtml(filter) {
  *
  * 选中态由真实 filter.status 决定，首屏默认的「全部」也是过滤条件的真实取值，
  * 不是画板上的静态高亮——写死一个选中，页签和列表就会各说各的。
+ *
+ * 用原生 <button>：页签是要点的，div 只能靠脚本模拟，键盘用户按不到。
  */
 function tabsHtml(filter, counts) {
   const current = String(filter.status ?? '') === '' ? 'all' : String(filter.status);
   const tab = (key, label, count) => {
     const selected = key === current;
-    return '<div class="co-tab" role="tab" data-overview-status="' + key + '"'
+    return '<button class="co-tab" type="button" role="tab" data-overview-status="' + key + '"'
       + ' data-selected="' + (selected ? '1' : '0') + '" aria-selected="' + (selected ? 'true' : 'false') + '">'
-      + esc(label) + ' ' + String(count) + '</div>';
+      + esc(label) + ' ' + String(count) + '</button>';
   };
   const tabs = [tab('all', '全部', counts.all)];
   for (const key of OVERVIEW_STATUS_ORDER) tabs.push(tab(key, stageText(key), counts[key]));
@@ -190,7 +253,10 @@ function rowHtml(row, options) {
   const nextLine = [retry, row.nextStep].filter((part) => part !== '').join(' · ');
   const ownerTitle = [ownerLine, nextLine].filter((part) => part !== '').join(' · ');
 
+  // data-mission-id 给重画后的焦点还原用：整棵子树被 innerHTML 换掉之后，
+  // 原来的节点已经离开文档，只有语义位置还认得出来。
   return '<a class="co-row" href="#/missions/' + encodeURIComponent(row.missionId) + '"'
+    + attr('data-mission-id', row.missionId)
     + attr('data-group', row.group) + (selected ? ' data-selected="1"' : '') + '>'
     + '<div class="co-cell co-identity">'
     + '<p class="co-id"' + attr('title', row.missionId) + '>' + esc(middleEllipsis(row.missionId)) + '</p>'
@@ -249,40 +315,69 @@ const HEAD_HTML = '<div class="co-head">'
 function groupsHtml(groups, options) {
   // 空组不画空标题：三个组头下面都没有行，看起来像加载失败。
   const shown = groups.filter((group) => group.rows.length > 0);
-  if (shown.length === 0) return '<div class="co-empty">没有符合条件的任务</div>';
+  if (shown.length === 0) {
+    // 「一条任务都没有」与「筛选之后没有」是两件事：前者说明平台上还什么都没有，
+    // 后者说明条件太窄。写成同一句，人会去放宽一个本来就不需要放宽的筛选。
+    const text = options.emptyAll ? '平台上还没有任务' : '没有符合条件的任务';
+    return '<div class="co-empty" data-overview-empty="' + (options.emptyAll ? 'all' : 'filtered') + '">'
+      + text + '</div>';
+  }
   return shown.map((group) => '<div class="co-group" data-group="' + esc(group.key) + '">'
     + '<div class="co-group-head">' + esc(group.title) + '</div>'
     + group.rows.map((row) => rowHtml(row, options)).join('')
     + '</div>').join('');
 }
 
+/**
+ * 分页条。「加载更早」是**真的** button：一次点击把 shown 加一个具名批次，
+ * 由控制器接着重画。旧版这里是一个 span 冒充按钮，点它没有任何反应，
+ * 而屏幕上看不出它其实没接线。
+ */
 function pageHtml(page) {
-  // 「加载更早」这一单只留标记：接线（改 shown 再重画）属于下一单的 DOM 层，
-  // 这里给一个能点的 href 会真的把页面跳走，人看到的是「点一下就重置」。
   return '<div class="co-page"><span class="co-page-count">显示 ' + String(page.shown)
     + ' / ' + String(page.total) + '</span>'
-    + (page.hasMore ? '<span class="co-more" data-overview-more>加载更早</span>' : '')
+    + (page.hasMore
+      ? '<button class="co-more" type="button" data-overview-more>加载更早</button>'
+      : '')
     + '</div>';
 }
 
 /* ============================ 页面 ============================ */
 
 /**
- * 总览页的完整 HTML。
+ * 总览页的完整 HTML（纯函数：同样的入参永远同样的字符串）。
  *
  * options 全部可选：
  *   - `filter`  真实的筛选条件（projectId / status / pausedOnly / query），
- *               页签选中态、开关轨道、计数都从它和模型来；
- *   - `shown`   一屏显示多少条（缺省 OVERVIEW_PAGE_SIZE）；
+ *               页签选中态、开关轨道、搜索框的值、计数都从它和模型来；
+ *   - `shown`   这一屏显示多少条（缺省 OVERVIEW_PAGE_SIZE）；
  *   - `now`     判定「同一天」用的当前时刻，测试里固定它才能断言时间格式；
  *   - `selectedId` 当前打开的任务。不传就没有任何行是选中的——首屏不编一个
- *               默认选中，那会让人以为进来就点开了一条。
+ *               默认选中，那会让人以为进来就点开了一条；
+ *   - `load`    读取状态 `{ status, error, lastOkAt }`。看不出来源时一律当成
+ *               「已经拿到列表」，这样纯渲染调用方不必凭空造一个状态对象。
  */
 export function overviewHtml(data, options) {
   const d = data && typeof data === 'object' ? data : {};
   const opts = options && typeof options === 'object' ? options : {};
   const now = Number.isFinite(Number(opts.now)) ? Number(opts.now) : Date.now();
   const filter = opts.filter && typeof opts.filter === 'object' ? opts.filter : {};
+  const load = opts.load && typeof opts.load === 'object' ? opts.load : {};
+  // 列表是否**曾经**读到过：null / 缺失都不是空集合，空集合是一个真实的 []。
+  const read = Array.isArray(d.missions);
+  const status = load.status === 'error' || load.status === 'loading'
+    ? load.status
+    : (read ? 'ready' : 'loading');
+
+  const title = '<h1 class="fixed-page-title co-title">任务总览</h1>';
+  const open = '<section class="screen console-overview">';
+
+  // 未成功取到列表：不画页签、不画计数、不画空态。它们的每一个数字都会变成
+  // 「平台上一条任务都没有」这句话。
+  if (!read) {
+    return open + title + toolbarHtml(filter) + loadNoteHtml({ ...load, status }) + '</section>';
+  }
+
   const built = buildOverview(d.missions, {
     filter,
     shown: opts.shown,
@@ -290,21 +385,19 @@ export function overviewHtml(data, options) {
     formatTime: (iso) => formatUpdated(iso, now),
   });
   const needsYou = built.matched.filter((row) => row.group === 'needs_you');
-  const errors = Array.isArray(d.errors) ? d.errors : [];
   const rowOptions = {
     now,
     selectedId: typeof opts.selectedId === 'string' ? opts.selectedId : '',
+    emptyAll: d.missions.length === 0,
     // 重试时刻与「更新时间」用同一个格式化函数：同一格里出现 14:36 与 ISO 两种写法，
     // 人会以为它们不是同一个时区。
     formatTime: (iso) => formatUpdated(iso, now),
   };
 
-  return '<section class="screen console-overview">'
-    + '<h1 class="fixed-page-title co-title">任务总览</h1>'
+  return open
+    + title
+    + (status === 'error' ? refreshNoteHtml(load, now) : '')
     + bannerHtml(built, needsYou)
-    + (errors.length > 0
-      ? '<div class="note">部分数据未更新：' + esc(errors.join('；')) + '</div>'
-      : '')
     + toolbarHtml(built.filter)
     + '<div class="co-board">'
     + tabsHtml(built.filter, built.counts)
@@ -340,68 +433,30 @@ export function missionTableHtml(rows) {
     + '</tbody></table></div>';
 }
 
-async function readJson(path, signal) {
-  const response = await fetch(path, { cache: 'no-store', signal });
-  if (!response.ok) throw new Error('HTTP ' + response.status);
-  return response.json();
-}
+/* ============================ 入口 ============================ */
 
-let active = null;
-
-/** 页面所有请求共用 AbortController，离页与隐藏立即取消，防止旧响应覆盖。 */
-export async function renderOverviewPage(container, projectId = null) {
-  active?.stop();
-  const root = document.createElement('section');
-  container.replaceChildren(root);
-  const controller = new AbortController();
-  const state = { projects: [], missions: [], status: null, pools: null, errors: [] };
-  let stopped = false;
-  let busy = false;
-  let requestController = null;
-  const paint = () => {
-    if (projectId === null) { root.innerHTML = overviewHtml(state); return; }
-    const selected = projectId || state.projects[0]?.projectId || '';
-    root.innerHTML = '<section class="screen"><h1 class="fixed-page-title screen-title">项目任务列表</h1><div class="toolbar"><label>项目 <select data-project-select>'
-      + state.projects.map(p => '<option value="' + esc(p.projectId) + '"' + (selected === p.projectId ? ' selected' : '') + '>' + esc(p.projectId) + '</option>').join('')
-      + '</select></label></div>' + (state.errors.length ? '<div class="note">' + esc(state.errors.join('；')) + '</div>' : '')
-      + '<section class="card">' + missionTableHtml(state.missions.filter(m => m.projectId === selected)) + '</section></section>';
-  };
-  const pull = async () => {
-    if (busy || stopped || document.visibilityState === 'hidden') return;
-    busy = true;
-    const paths = projectId === null ? ['/api/projects', '/api/missions', '/api/platform/status', '/api/pools'] : ['/api/projects', '/api/missions'];
-    requestController = new AbortController();
-    const results = await Promise.allSettled(paths.map(path => readJson(path, requestController.signal)));
-    if (!stopped && root.isConnected && document.visibilityState !== 'hidden') {
-      state.errors = [];
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') state[['projects', 'missions', 'status', 'pools'][index]] = result.value;
-        else {
-          state[['projects', 'missions', 'status', 'pools'][index]] = index < 2 ? [] : null;
-          state.errors.push(paths[index] + '：' + result.reason.message);
-        }
-      });
-      paint();
-    }
-    busy = false;
-  };
-  root.addEventListener('change', event => {
-    if (event.target.matches('[data-project-select]')) location.hash = '#/projects/' + encodeURIComponent(event.target.value);
+/**
+ * 总览页入口：把纯视图交给控制器，剩下的事归 console-overview-controller.js。
+ *
+ * 项目范围只从 hash 路由来（`#/` 与 `#/projects` 是全部项目，`#/projects/<id>` 是
+ * 某个项目）。旧版这里还渲染了一个页内「项目」下拉，并在没指定项目时静默选中
+ * `projects[0]`——那等于替人做了一个它没做的选择：屏幕上看的是「P-1」，而地址栏
+ * 什么都没说，刷新一次又换一个项目。同一个项目范围现在由公共的顶栏控件表达。
+ */
+export function renderOverviewPage(container, projectId = null) {
+  const controller = createOverviewController({
+    container,
+    projectId,
+    render: (state) => overviewHtml(
+      { missions: state.missions },
+      {
+        filter: state.filter,
+        shown: state.shown,
+        selectedId: state.selectedId,
+        now: state.now,
+        load: state.load,
+      },
+    ),
   });
-  const timer = setInterval(() => { if (!root.isConnected) stop(); else void pull(); }, 5000);
-  const onHash = () => stop();
-  const onVisibility = () => { if (document.visibilityState === 'hidden') requestController?.abort(); else void pull(); };
-  function stop() {
-    stopped = true;
-    controller.abort();
-    requestController?.abort();
-    clearInterval(timer);
-    window.removeEventListener('hashchange', onHash);
-    document.removeEventListener('visibilitychange', onVisibility);
-  }
-  window.addEventListener('hashchange', onHash);
-  document.addEventListener('visibilitychange', onVisibility);
-  active = { stop };
-  root.innerHTML = '<div class="note">加载中…</div>';
-  await pull();
+  return controller.start();
 }

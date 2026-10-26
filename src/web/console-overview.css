@@ -93,6 +93,23 @@
   color: var(--color-muted);
 }
 
+.console-overview .co-field-input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+  outline: none;
+}
+.console-overview .co-field-input::placeholder { color: var(--color-muted); }
+
 /* 图标是画板原样复制的 16x16 SVG：尺寸写在 CSS 里的是兜底，属性上的
  * width/height 才是主值。不用字符代替——字符箭头在各平台的字宽和基线都
  * 不一样，而画板上这个位置就是一张确定的图。 */
@@ -381,14 +398,32 @@
   color: var(--color-muted);
 }
 
-/* 「加载更早」的接线在下一单（DOM 层）；这里只把它画成画板上的样子，
- * 用按钮语义的颜色而不是链接蓝，免得人以为它已经能点。 */
+/* 加载更早已是原生 button，样式仍用强调色，不用链接蓝。 */
 .console-overview .co-more {
   font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
   color: var(--color-accent);
+  cursor: pointer;
+}
+
+.console-overview button.co-switch,
+.console-overview button.co-more {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.console-overview button.co-tab {
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
   cursor: pointer;
 }
 

@@ -107,7 +107,7 @@ test('五列宽度/行高/分组底与画板一致，状态与开关用落盘的
   }
   assert.match(html, /width="16" height="16"/, '状态图标是 16x16');
   // 搜索图标在文字左侧（ConsoleField Search：icon 后接 placeholder）。
-  assert.match(html, /data-overview-search><img class="co-field-icon"[^>]*\/><span class="co-field-text">搜索编号或 intent</, '搜索图标与文字的顺序反了');
+  assert.match(html, /data-overview-search><img class="co-field-icon"[^>]*\/><input class="co-field-input"[^>]*placeholder="搜索编号或 intent"/, '搜索图标不在输入框左侧');
   // 页签、表头、分组在同一个白色 wrapper 里；分页在白板外。
   const board = /<div class="co-board">([\s\S]*?)<div class="co-page">/.exec(html);
   assert.ok(board, '找不到白色数据底板');
