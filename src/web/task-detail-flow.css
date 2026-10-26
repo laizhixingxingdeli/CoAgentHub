@@ -1,0 +1,170 @@
+/*
+ * 任务详情页「工作流环节」区（画板 .impeccable/reference/figma-2-140.txt 41:445 的
+ * 已发生环节带，与 figma-45-1388.txt 45:1457 的纵向历史列表）。
+ *
+ * 为什么单开一个文件：这一块的排版事实是「收起时一排横向步骤卡、展开后一份纵向
+ * 列表」这一对形状。挤进全站样式里，任何一处手改都会顺带改到任务总览与项目页，
+ * 而「卡片矮了 6px」在屏幕上不报错，只是越来越不像画板。
+ *
+ * 为什么全部挂在 .td-flow 作用域下：这份文件与 old 业务样式（ui.css 的 .card、
+ * .chip）同时在线，一条不限定作用域的 `.td-stage { padding: 16px }` 会把别人的
+ * 卡片也改了。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，改一处
+ * 忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ */
+
+.td-flow {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-white);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+  overflow: clip;
+}
+
+/* 标题带：工作项选择、已验收标记、轮次与次数、展开按钮在同一行。
+ * 底色用 nav 令牌，让它与下面的步骤卡明显分层——它与环节不是一组。 */
+.td-flow .td-flow-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--color-nav);
+}
+
+.td-flow .td-work-item {
+  height: 28px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--color-ink);
+  background: var(--color-white);
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+}
+
+/* 已验收的其它工作项只是标记，不是可选项：做成绿色文字而不是按钮，
+ * 免得看起来像能点去切换。 */
+.td-flow .td-accepted {
+  font-size: 13px;
+  color: var(--color-green);
+  white-space: nowrap;
+}
+
+.td-flow .td-flow-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+/* 展开按钮靠右：它是这一带的附属动作，摆在中间会跟标题抢第一眼。 */
+.td-flow .td-history-toggle {
+  margin-left: auto;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+/* 收起时的一排步骤卡。overflow-clip + 不换行：卡片宽度固定，超出的部分由
+ * 展开纵向历史去看，而不是把这一排挤成一堆窄条。 */
+.td-flow .td-flow-stages {
+  display: flex;
+  gap: 16px;
+  padding: 12px 16px;
+  overflow: clip;
+}
+
+.td-flow .td-stage {
+  display: flex;
+  flex: 0 0 274px;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 136px;
+  padding: 12px 16px;
+  border-left: 2px solid transparent;
+  border-radius: 8px;
+  background: var(--color-white);
+  cursor: pointer;
+}
+
+/* 当前项：左侧 2px 强调色条 + 选中底。**只认 data-current**，不按「最后一个」
+ * 另算一次——两处判断迟早漂开，而漂开的样子是「当前」标在了已经跑完的那一条上。 */
+.td-flow [data-current='true'] {
+  border-left: 2px solid var(--color-accent);
+  background: var(--color-select);
+}
+
+.td-flow .td-badge {
+  align-self: flex-start;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--color-muted);
+  background: var(--color-nav);
+}
+
+.td-flow .td-stage-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+/* 明细与状态都小一号、灰一阶：它们回答「怎么发生的」，标题回答「发生了什么」。 */
+.td-flow .td-stage-detail {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  /* 收起时明细最多两行：再长会把同一排卡片的高度撑得不齐。 */
+  max-height: 40px;
+  overflow: hidden;
+}
+
+.td-flow .td-stage-state {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+}
+
+/* 纵向历史：展开后按发生顺序一行一条，旧在前。
+ *
+ * **收起时靠 CSS 隐藏，而不是不渲染**：bindTaskFlow 按契约只翻根上的
+ * data-expanded 与按钮文案、不重算环节。历史行若不预先在 DOM 里，点一下按钮就
+ * 永远什么都不出现，而那个样子和"这张工单确实没有历史"一模一样。 */
+.td-flow[data-expanded='false'] .td-history {
+  display: none;
+}
+
+.td-flow .td-history {
+  margin: 0;
+  padding: 0 0 12px;
+  list-style: none;
+}
+
+.td-flow .td-history-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-left: 2px solid transparent;
+  border-top: 1px solid var(--color-line);
+  cursor: pointer;
+}
+
+.td-flow .td-history-row .td-stage-detail {
+  flex: 1 1 auto;
+  max-height: none;
+}
