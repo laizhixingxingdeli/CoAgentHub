@@ -150,6 +150,17 @@ body {
   background: var(--color-white);
 }
 
+/* 控件里那段固定可见的「项目：」。画板上前缀与选中值是连续的一行字，所以它跟着
+ * select 一起排在同一条基线上，不收缩、不加外边距——多一个间距，前缀和值之间就
+ * 出现一道画板上没有的缝。
+ * 不拼进 option 文案：那样每行选项都带前缀，选中值也不再是纯项目名。 */
+.cs-project .cs-project-prefix {
+  flex: none;
+  white-space: nowrap;
+  color: var(--color-ink);
+  font: 400 14px/22px 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+}
+
 .cs-project select {
   flex: 1 1 auto;
   min-width: 0;

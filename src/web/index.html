@@ -371,6 +371,12 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
       <!-- 项目下拉的选项由 console-shell.js 从 GET /api/projects 真实读回来填。
            这里只放一个空的 select：写死几个项目名，就是让人以为平台里只有那几个。 -->
       <label class="cs-project" id="cs-project">
+        <!-- 「项目：」是画板顶栏那行正文的一部分（Figma 2:214 上是「项目：全部项目」）。
+             漏掉它，控件里就只剩一个裸的项目名，人看不出那一格在说什么。
+             前缀单独成一个节点，**不**拼进 option 文案：拼进去每一行 option 都多一段
+             「项目：」，选中值也脏了，而 option.value / projectId 必须是纯 id。
+             aria-hidden：可访问名仍由 select 的 aria-label 给出，否则读屏会把「项目」念两遍。 -->
+        <span class="cs-project-prefix" aria-hidden="true">项目：</span>
         <select id="cs-project-select" aria-label="项目"></select>
         <span class="cs-caret" aria-hidden="true"></span>
       </label>
