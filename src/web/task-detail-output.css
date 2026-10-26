@@ -1,0 +1,190 @@
+/*
+ * 任务详情页「当前实时输出 / 历史选择」两区。
+ *
+ * 为什么单开一个文件：这两区的排版事实是「左实时、右历史」这一对并列形状，且实时
+ * 框是**深底浅字**（它模拟一块正在滚动的终端）。挤进全站样式里，任何一处手改都会
+ * 顺带改到任务总览与项目页，而「实时框变浅了、和页面糊成一片」在屏幕上不报错，
+ * 只是越来越分不出哪块是正在跑的。
+ *
+ * 为什么全部挂在 .td-output 作用域下：这份文件与 old 业务样式（ui.css 的 .card、
+ * .chip）同时在线，一条不限定作用域的 `.td-live-text { padding: 16px }` 会把别人的
+ * 代码块也改了。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，改一处
+ * 忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ *
+ * 底色/文字用 ink/paper 这一对：实时正文是「纸上的墨」，与页面（paper 底、ink 字）
+ * 正好反过来，扫一眼就知道哪一块是活的输出。
+ */
+
+.td-output {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: flex-start;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-region);
+  background: var(--color-white);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+  padding: var(--space-lg);
+}
+
+/* 左区固定宽度：实时正文每刷新一次就变长，让它按内容伸缩会把右区一把一把地推走，
+ * 而人正盯着右区在读历史。 */
+.td-output .td-live {
+  display: flex;
+  flex: 0 0 480px;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.td-output .td-live-title {
+  margin: 0;
+  font-size: var(--type-section-size);
+  line-height: var(--type-section-line);
+  font-weight: 500;
+}
+
+/* 实时正文：深底浅字 + 等宽 + 保留换行。pre 自带 white-space: pre，模型输出里的
+ * 逐行进度靠它才排得对；换成 div 之后所有换行会挤成一段，看起来很「干净」但读不出顺序。 */
+.td-output .td-live-text {
+  margin: 0;
+  min-height: 240px;
+  max-height: 420px;
+  overflow: auto;
+  padding: var(--space-md);
+  border-radius: var(--radius-output);
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  font-size: var(--type-data-size);
+  line-height: var(--type-data-line);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 心跳只占一行小字。它回答「这一跳还活着吗」，不该和正文抢视线。 */
+.td-output .td-heartbeat {
+  margin: 0;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--color-muted);
+}
+
+/* 疑似停滞才变色：**只认 data-stalled**，不按文本另判一次。两处判断迟早漂开，
+ * 漂开的样子是「字说停滞、颜色说正常」，人只会更糊涂。 */
+.td-output .td-heartbeat[data-stalled='true'] {
+  color: var(--color-amber);
+  background: var(--color-amber-bg);
+  border-radius: var(--radius-control);
+  padding: 0 var(--space-sm);
+}
+
+/* 右区吃掉剩余宽度：概要与历史正文是主内容，越宽越好读。 */
+.td-output .td-history {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.td-output .td-side-switch {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+/* 未选中的页签是白底带线；选中的用 select 浅底 + 强调色下边，与「当前」的读法一致
+ * （见 task-detail-flow.css 的 data-current）。 */
+.td-output .td-side {
+  height: 32px;
+  padding: 0 var(--space-md);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control);
+  background: var(--color-white);
+  font-family: inherit;
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-line);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+.td-output .td-side[aria-selected='true'] {
+  background: var(--color-select);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+/* 面板切换只翻 hidden 属性，样式不做任何位移/动画：动画会让「刚点开的那一格」
+ * 有一瞬间是空的，看起来像这一跳确实没有内容。 */
+.td-output .td-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.td-output .td-panel[hidden] {
+  display: none;
+}
+
+/* 历史正文与实时正文同一套等宽排版，但用页面底色：它不是活的，不该看起来同样「亮」。 */
+.td-output .td-history-text {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: var(--space-md);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-output);
+  background: var(--color-paper);
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  font-size: var(--type-data-size);
+  line-height: var(--type-data-line);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 「未知」「该尝试没有单独的文件清单」这类话必须读起来像一句说明，而不是像正文内容：
+ * 灰字、无边框，免得被当成这一跳的输出。 */
+.td-output .td-history-note {
+  margin: 0;
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-line);
+  color: var(--color-muted);
+}
+
+.td-output .td-file-list,
+.td-output .td-usage-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.td-output .td-file-item {
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  font-size: var(--type-data-size);
+  line-height: var(--type-data-line);
+  color: var(--color-ink);
+}
+
+/* 用量一行一对：标签灰、数值墨。数值右对齐，不同长度的数字也排得成一列。 */
+.td-output .td-usage-item {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-line);
+}
+
+.td-output .td-usage-label {
+  color: var(--color-muted);
+}
+
+.td-output .td-usage-value {
+  color: var(--color-ink);
+  font-variant-numeric: tabular-nums;
+}
