@@ -502,6 +502,7 @@ export function renderOverviewPage(container, projectId = null) {
         selectedId: state.selectedId,
         now: state.now,
         load: state.load,
+        overlay: state.overlay,
       },
     ),
   });

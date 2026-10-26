@@ -18,6 +18,7 @@ import { Window } from 'happy-dom';
 
 import { renderOverviewPage, overviewHtml } from '../src/web/overview.js';
 import {
+  OVERVIEW_ENRICH_CONCURRENCY,
   OVERVIEW_INITIAL_BATCH,
   OVERVIEW_REFRESH_MS,
   createOverviewController,
@@ -107,6 +108,7 @@ function mount(projectId: string | null = null) {
         selectedId: state.selectedId,
         now: state.now,
         load: state.load,
+        overlay: state.overlay,
       },
     ),
     now: () => Date.parse('2026-10-26T08:00:00.000Z'),
@@ -165,7 +167,9 @@ describe('筛选 / 加载更早 / 焦点与刷新保留', () => {
     await settle();
 
     // 只取 /api/missions 一个接口：这一页不读平台状态，也不该等别的请求。
-    assert.deepEqual(requests.map((r) => r.path), ['/api/missions']);
+    // （补充会另起对可见任务的详情请求，所以这里只数列表那一条。）
+    assert.equal(requests[0]?.path, '/api/missions');
+    assert.equal(requests.filter((r) => r.path === '/api/missions').length, 1);
     // 首屏显示的是分页容量（具名批次），不是全部 12 条；分母与页签计数是完整集合。
     assert.equal(pageCount().trim(), `显示 ${OVERVIEW_INITIAL_BATCH} / 12`);
     assert.equal(container.querySelectorAll('.co-row').length, OVERVIEW_INITIAL_BATCH, '首屏条数不是批次大小');
@@ -335,12 +339,14 @@ describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', () => {
 
     // 在途请求不重叠：上一轮没回来，再点一次刷新也不该再发一个。
     mode = 'hold';
+    const before = requests.length;
     const first = controller.refresh();
     await settle();
-    assert.equal(requests.length, 2, '这一轮该发一个请求');
+    assert.equal(requests.length, before + 1, '这一轮该发一个请求');
+    assert.equal(requests[before]?.path, '/api/missions');
     await controller.refresh();
     await settle();
-    assert.equal(requests.length, 2, '上一轮还在路上又发了一轮');
+    assert.equal(requests.length, before + 1, '上一轮还在路上又发了一轮');
 
     // 隐藏：立刻停定时器，并把这个在飞的请求取消掉（它回来时页面看不见，
     // 写上去还会覆盖恢复可见后补拉的那份）。
@@ -361,7 +367,8 @@ describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', () => {
     // 恢复可见：立即补拉（不等 5 秒），并重设定时器。
     setVisible(true);
     await settle();
-    assert.equal(requests.length, 1, '恢复可见没有立即补拉');
+    assert.equal(requests[0]?.path, '/api/missions', '恢复可见没有立即补拉');
+    assert.equal(requests.filter((r) => r.path === '/api/missions').length, 1);
     assert.equal(timers.size, 1, '恢复可见没有重设定时器');
 
     // 离页：stop 之后在飞的响应晚到也不许覆盖已经画上的那一份。
@@ -409,7 +416,8 @@ describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', () => {
     );
     void renderOverviewPage(container, 'P-1');
     await settle();
-    assert.deepEqual(requests.map((r) => r.path), ['/api/missions']);
+    assert.equal(requests[0]?.path, '/api/missions');
+    assert.equal(requests.filter((r) => r.path === '/api/missions').length, 1);
     assert.equal(document.querySelectorAll('link[href="/console-overview.css"]').length, 1);
     globalThis.document = prev.document;
     globalThis.window = prev.window;
@@ -417,4 +425,144 @@ describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', () => {
     globalThis.setInterval = prev.setInterval;
     globalThis.clearInterval = prev.clearInterval;
   });
+});
+
+test('补充只为可见任务取详情与尾部 Attempt：限并发、先出列表、失败不清列表、隐藏会取消', async () => {
+  const waveRows = Array.from({ length: 9 }, (_, i) => mission(`M-${String(i).padStart(2, '0')}`, {
+    status: 'executing',
+    updatedAt: new Date(Date.UTC(2026, 9, 26, 6, 0, 0) - i * 60_000).toISOString(),
+  }));
+  const pending: Array<{ path: string; signal: AbortSignal | undefined; resolve: (value: unknown) => void }> = [];
+  const seen: string[] = [];
+  let phase: 'hold' | 'fail' | 'late' = 'hold';
+  const emptyDetail = (id: string) => ({
+    missionId: id,
+    status: 'executing',
+    coordinatorAttemptIds: [],
+    independentReviewerAttemptIds: [],
+    openEscalations: [],
+    workItems: [],
+  });
+  const idOf = (path: string) => decodeURIComponent(path.split('/')[3] || '');
+  const fetchJson = (path: string, signal?: AbortSignal): Promise<unknown> => {
+    seen.push(path);
+    if (path === '/api/missions') return Promise.resolve(waveRows);
+    if (phase === 'fail') {
+      if (path === '/api/missions/M-01') return Promise.reject(new Error('HTTP 500'));
+      if (path.includes('/attempts/')) {
+        return Promise.resolve({ attemptId: idOf(path), status: 'completed', kind: 'executor' });
+      }
+      return Promise.resolve(emptyDetail(idOf(path)));
+    }
+    return new Promise((resolve, reject) => {
+      pending.push({ path, signal, resolve });
+      signal?.addEventListener('abort', () => {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        reject(error);
+      });
+    });
+  };
+  const controller = createOverviewController({
+    doc: document,
+    win: window as unknown as Window & typeof globalThis,
+    container,
+    fetchJson,
+    render: (state: Record<string, unknown>) => overviewHtml(
+      { missions: state.missions },
+      {
+        filter: state.filter,
+        shown: state.shown,
+        selectedId: state.selectedId,
+        now: state.now,
+        load: state.load,
+        overlay: state.overlay,
+      },
+    ),
+    now: () => Date.parse('2026-10-26T08:00:00.000Z'),
+    refreshMs: OVERVIEW_REFRESH_MS,
+    setInterval: ((fn: () => void, ms?: number) => {
+      const id = nextTimerId++;
+      timers.set(id, { fn, ms: Number(ms) });
+      return id as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval,
+    clearInterval: ((id: ReturnType<typeof setInterval>) => {
+      timers.delete(id as unknown as number);
+    }) as typeof clearInterval,
+  });
+  await controller.start();
+  await settle();
+  assert.ok(container.querySelector('.co-row'), '列表还没画出来');
+  assert.equal(text().includes('补修'), false, '详情还没返回就出现了补修');
+  const enriching = pending.filter((item) => item.path !== '/api/missions');
+  assert.equal(enriching.length, OVERVIEW_ENRICH_CONCURRENCY);
+  assert.ok(OVERVIEW_ENRICH_CONCURRENCY < 8);
+  assert.equal(seen.some((path) => path.includes('M-08')), false, '请求了不可见任务');
+  const take = (pred: (path: string) => boolean) => {
+    const index = pending.findIndex((item) => pred(item.path));
+    assert.ok(index >= 0, '缺预期请求');
+    return pending.splice(index, 1)[0]!;
+  };
+  take((path) => path === '/api/missions/M-00').resolve({
+    missionId: 'M-00',
+    status: 'executing',
+    coordinatorAttemptIds: [],
+    independentReviewerAttemptIds: [],
+    openEscalations: [],
+    workItems: [{
+      title: '补修单',
+      order: { requiredBehaviour: '补修原项 W-1 的缺口' },
+      attemptIds: ['W-1.exec-1'],
+    }],
+  });
+  await settle();
+  take((path) => path.endsWith('/attempts/W-1.exec-1')).resolve({
+    attemptId: 'W-1.exec-1',
+    status: 'in_progress',
+    kind: 'executor',
+  });
+  for (let i = 0; i < 40 && pending.length > 0; i += 1) {
+    const batch = pending.splice(0, pending.length);
+    for (const item of batch) {
+      if (item.path.includes('/attempts/')) {
+        item.resolve({ attemptId: idOf(item.path), status: 'completed', kind: 'executor' });
+      } else {
+        item.resolve(emptyDetail(idOf(item.path)));
+      }
+    }
+    await settle();
+  }
+  await settle();
+  assert.match(text(), /补修/);
+  assert.match(text(), /执行者运行中/);
+  assert.match(text(), /全部 9/);
+  assert.equal(container.innerHTML.includes('119'), false);
+
+  phase = 'fail';
+  await controller.refresh();
+  await settle();
+  assert.ok(container.querySelectorAll('.co-row').length > 0, '详情失败把列表清掉了');
+  assert.equal(text().includes('刷新失败'), false, '补充失败被画成了刷新失败');
+
+  phase = 'late';
+  pending.splice(0, pending.length);
+  await controller.refresh();
+  await settle();
+  const late = pending.filter((item) => item.path !== '/api/missions');
+  assert.ok(late.length > 0, '没有在飞的补充请求');
+  setVisible(false);
+  await settle();
+  for (const item of late) assert.equal(item.signal?.aborted, true, '隐藏没有取消补充请求');
+  for (const item of late) {
+    item.resolve({
+      missionId: 'M-00',
+      status: 'executing',
+      openEscalations: [{ reason: '范围冲突' }],
+      workItems: [],
+    });
+  }
+  await settle();
+  assert.equal(text().includes('已升级（问题）'), false, '隐藏后的晚到结果改了页面');
+  assert.ok(container.querySelectorAll('.co-row').length > 0, '晚到结果把列表清掉了');
+  controller.stop();
 });

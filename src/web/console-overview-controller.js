@@ -14,7 +14,13 @@
  * 本文件也不 import console-shell.js：外壳那套 statusErrorOf 是它自己顶栏的私有
  * 判断，借用会把两个页面的错误文案绑在一起——外壳改一句措辞，总览的「刷新失败」
  * 跟着变，而没人会去改这里。
+ *
+ * 列表与补充是两条独立的路：列表是 `/api/missions` 一轮一轮地换，补充是「当前这一屏
+ * 看得见的那些任务」各自去读详情和尾部 Attempt。分开的理由是首屏——把两者串起来，
+ * 人就得等最慢的那条详情才看得见第一行，而列表早就回来了。
  */
+import { buildOverview } from './console-overview-model.js';
+import { candidateAttemptRefs, overlayFromDetail } from './console-overview-enrich.js';
 
 /** 可见时的刷新周期。5 秒是「人盯着这一页时的合适粒度」：更快只是白打接口，更慢则暂停/交付这种状态变化看起来像卡住了。 */
 export const OVERVIEW_REFRESH_MS = 5000;
@@ -28,6 +34,16 @@ export const OVERVIEW_REFRESH_MS = 5000;
  * 点击的增量会静悄悄地变。
  */
 export const OVERVIEW_INITIAL_BATCH = 8;
+
+/**
+ * 同一时刻最多有几条补充任务在取详情（含它的尾部 Attempt）。
+ *
+ * 补充是按可见行发起的，一屏 8 条一次全打出去，浏览器对同源的并发连接就排满了，
+ * 列表的下一轮刷新会排在它们后面——人看到的是「刷新变慢」，而不是「详情很多」。
+ * 4 是既能把一屏分两批取完、又不至于把连接池占满的折中。这个数不是行数门禁，
+ * 改它只改补充的排队宽度。
+ */
+export const OVERVIEW_ENRICH_CONCURRENCY = 4;
 
 /** 样式与页面同源：从这里取而不是让 index.html 引，见 ensureOverviewStylesheet。 */
 const STYLESHEET_HREF = '/console-overview.css';
@@ -120,6 +136,9 @@ export function createOverviewController(deps = {}) {
     loadStatus: 'loading',
     error: null,
     lastOkAt: null,
+    // 按 missionId 索引的补充投影（补修/问题/落地/真实运行）。空对象而不是 null：
+    // 渲染层把「不是对象」当成没有补充，null 会让每条详情回来时都要判一次。
+    overlay: {},
   };
 
   let stopped = false;
@@ -127,6 +146,29 @@ export function createOverviewController(deps = {}) {
   let inflight = null;
   let seq = 0;
   let epoch = 0;
+
+  /**
+   * 补充这一路的全部状态。
+   *
+   * `wave` 是「第几轮补充」：一轮成功才写屏，失败/取消/晚到的结果凭它作废。
+   * `cache` 只装**这一波已经成功取到**的投影，`queue` 是还没开始的，`active` 是
+   * 正在飞的任务数。三者分开是因为它们回答三个不同的问题：谁还没取、谁正在取、
+   * 谁已经有结果了——合成一个 Map 之后「排队中」和「有旧结果」就分不开，
+   * noteVisibleChanged 会把已经缓存过的又入队一遍。
+   */
+  const enrich = {
+    wave: 0,
+    gen: 0,
+    controller: null,
+    queue: [],
+    queued: new Set(),
+    active: 0,
+    cache: new Map(),
+  };
+
+  /** 当前这一波补充的代号。放在 enrich 旁边而不是里面，是因为它是「代次」本身，
+   * 而 enrich 装的是这一代的队列与在飞计数。 */
+  let enrichGen = 0;
 
   /* ---------------------------- 焦点与选区 ---------------------------- */
 
@@ -190,8 +232,127 @@ export function createOverviewController(deps = {}) {
       selectedId: state.selectedId,
       now: now(),
       load: { status: state.loadStatus, error: state.error, lastOkAt: state.lastOkAt },
+      // 补充投影原样交出去：哪些行能叠、叠什么由渲染层按 missionId 取，
+      // 这里只负责「这些是已经取到的真实事实」。
+      overlay: state.overlay,
     }));
     restoreFocus(focused);
+  }
+
+  /* ---------------------------- 补充（可见任务的详情） ---------------------------- */
+
+  function visibleIds() {
+    if (!Array.isArray(state.missions)) return [];
+    const built = buildOverview(state.missions, { filter: state.filter, shown: state.shown });
+    const ids = [];
+    for (const group of built.groups || []) {
+      for (const row of group.rows || []) {
+        if (row && row.missionId) ids.push(String(row.missionId));
+      }
+    }
+    return ids;
+  }
+
+  function armEnrich(nextWave) {
+    // 换代次：旧任务的 finally 看到 gen 变了就立刻返回。不换的话，上一波收尾会把
+    // 这一波的 active 减成负数，队列里的 id 也会被删掉，补充就再也不发了。
+    enrichGen += 1;
+    enrich.gen = enrichGen;
+    enrich.wave = nextWave;
+    enrich.controller = new AbortController();
+    enrich.queue = [];
+    enrich.queued = new Set();
+    enrich.active = 0;
+    enrich.cache = new Map();
+    return enrich.gen;
+  }
+
+  function abortEnrich() {
+    const previous = enrich.controller;
+    enrichGen += 1;
+    enrich.gen = enrichGen;
+    enrich.controller = null;
+    enrich.queue = [];
+    enrich.queued = new Set();
+    enrich.active = 0;
+    if (previous) previous.abort();
+  }
+
+  function enqueue(ids, refetch) {
+    for (const id of ids) {
+      if (enrich.queued.has(id)) continue;
+      if (!refetch && enrich.cache.has(id)) continue;
+      enrich.queued.add(id);
+      enrich.queue.push(id);
+    }
+  }
+
+  function publishIfIdle(gen) {
+    if (gen !== enrich.gen) return;
+    if (enrich.queue.length > 0 || enrich.active > 0) return;
+    if (stopped || doc.visibilityState === 'hidden') return;
+    const overlay = { ...state.overlay };
+    for (const [id, value] of enrich.cache) overlay[id] = value;
+    state.overlay = overlay;
+    paint();
+  }
+
+  function pump() {
+    const controller = enrich.controller;
+    const gen = enrich.gen;
+    if (!controller || controller.signal.aborted) return;
+    while (enrich.active < OVERVIEW_ENRICH_CONCURRENCY && enrich.queue.length > 0) {
+      const id = enrich.queue.shift();
+      const wave = enrich.wave;
+      enrich.active += 1;
+      void runOne(id, wave, gen, controller.signal).finally(() => {
+        if (gen !== enrich.gen) return;
+        enrich.active -= 1;
+        enrich.queued.delete(id);
+        pump();
+        publishIfIdle(gen);
+      });
+    }
+  }
+
+  async function runOne(id, wave, gen, signal) {
+    let detail;
+    try {
+      detail = await fetchJson('/api/missions/' + encodeURIComponent(id), signal);
+    } catch (reason) {
+      return;
+    }
+    if (gen !== enrich.gen || signal.aborted || wave !== enrich.wave || stopped) return;
+    if (doc.visibilityState === 'hidden') return;
+    const attempts = [];
+    for (const ref of candidateAttemptRefs(detail)) {
+      if (gen !== enrich.gen || signal.aborted || stopped) return;
+      const missionId = ref.missionId || id;
+      const path = '/api/missions/' + encodeURIComponent(missionId) + '/attempts/' + encodeURIComponent(ref.attemptId);
+      try {
+        attempts.push(await fetchJson(path, signal));
+      } catch (reason) {
+        if (isAbort(reason) || signal.aborted || gen !== enrich.gen || stopped) return;
+      }
+    }
+    if (gen !== enrich.gen || signal.aborted || wave !== enrich.wave || stopped) return;
+    if (doc.visibilityState === 'hidden') return;
+    enrich.cache.set(id, overlayFromDetail(detail, attempts));
+  }
+
+  function beginEnrichWave() {
+    const previous = enrich.controller;
+    armEnrich(enrich.wave + 1);
+    if (previous) previous.abort();
+    enqueue(visibleIds(), true);
+    pump();
+  }
+
+  function noteVisibleChanged() {
+    if (stopped || doc.visibilityState === 'hidden') return;
+    if (!enrich.controller || enrich.controller.signal.aborted) armEnrich(enrich.wave);
+    enqueue(visibleIds(), false);
+    pump();
   }
 
   /* ---------------------------- 取 ---------------------------- */
@@ -267,6 +428,8 @@ export function createOverviewController(deps = {}) {
     state.error = null;
     state.lastOkAt = now();
     paint();
+    // 列表先上屏，补充另起一波：串起来的话人得等最慢的那条详情才看得见第一行。
+    beginEnrichWave();
   }
 
   /**
@@ -297,6 +460,7 @@ export function createOverviewController(deps = {}) {
     // 悄悄跳过，看起来像搜不到。
     resetBatch();
     paint();
+    noteVisibleChanged();
   }
 
   function onHashChange() {
@@ -310,6 +474,8 @@ export function createOverviewController(deps = {}) {
       // 已经发出去的请求也要掐掉：它回来时页面是看不见的，写上去也没有人看，
       // 而晚到的响应还会覆盖恢复可见后补拉的那一份。
       abortInflight();
+      // 补充也一起掐掉：它回来时页面看不见，写上去还会盖掉恢复可见后重取的那份。
+      abortEnrich();
       return;
     }
     // 恢复可见立即补拉一次，不等下一个周期：人切回来看到的第一屏必须是现在的。
@@ -333,6 +499,7 @@ export function createOverviewController(deps = {}) {
     if (hit.matches('[data-overview-more]')) {
       state.shown += OVERVIEW_INITIAL_BATCH;
       paint();
+      noteVisibleChanged();
       return;
     }
 
@@ -340,6 +507,7 @@ export function createOverviewController(deps = {}) {
       state.filter.pausedOnly = hit.getAttribute('data-overview-paused') !== '1';
       resetBatch();
       paint();
+      noteVisibleChanged();
       return;
     }
 
@@ -348,6 +516,7 @@ export function createOverviewController(deps = {}) {
     state.filter.status = status;
     resetBatch();
     paint();
+    noteVisibleChanged();
   }
 
   /* ---------------------------- 生命周期 ---------------------------- */
@@ -358,6 +527,8 @@ export function createOverviewController(deps = {}) {
     // epoch 一变，所有在飞的响应都作废（包括之后才 reject 的那一批）。
     epoch += 1;
     abortInflight();
+    // 补充是在飞的另一路：不停它，离页之后它还会往一个已经不在的容器里画。
+    abortEnrich();
     stopTimer();
     doc.removeEventListener('visibilitychange', onVisibilityChange);
     if (win) win.removeEventListener('hashchange', onHashChange);
@@ -373,6 +544,7 @@ export function createOverviewController(deps = {}) {
     state.selectedId = selectionByScope.get(next) || '';
     resetBatch();
     paint();
+    noteVisibleChanged();
   }
 
   function start() {
