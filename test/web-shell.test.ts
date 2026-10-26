@@ -8,8 +8,14 @@
  *      页面照样渲染，只是又变回老观测面了。
  *   2. **静态服务认不认这套文件名。** SAFE_NAME 只认一层小写文件名，
  *      写成 /src/web/app.js 或 App.js 就是浏览器里一个 404，控制台之外没人知道。
- *   3. **色彩令牌是不是同源。** 令牌一旦在两处各存一份，两个界面的"执行中"
- *      就开始漂，而颜色对不上不会有人报 bug。
+ *   3. **外壳的几何与配色是不是画板那一套。** 这些是设计值，不是实现细节，
+ *      所以断言它们**含义**（哪些令牌、哪些尺寸），而不是把整段 CSS 逐字抄进
+ *      测试——逐字抄的断言在配色换代时只会红一次，然后被人顺手改成新的一份。
+ *
+ * 旧的「tokens.css 必须与观测面 src/api/web.ts 逐字相同」已经删掉：那条规则
+ * 表达的是"两个界面在演示阶段碰巧长得一样"，而现在是正式页按已批准的画板走、
+ * 观测面留自己那套历史配色。强行要求逐字相等，只能逼出一件事——为了测试去改
+ * 其中一边的配色。
  */
 
 import { after, describe, test } from 'node:test';
@@ -78,7 +84,7 @@ describe('外壳的文件形状', () => {
   test('四个文件都在，且都是静态服务认得的扁平小写名', () => {
     // 静态服务只认 `^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$`：大写、多级目录、
     // 别的扩展名，全都是浏览器里一个 404。这里先红，好过界面上是白屏。
-    for (const name of ['index.html', 'app.js', 'tokens.css', 'ui.css', 'projects.js', 'project-catalog.js', 'project-spec.js', 'inbox.js', 'agents.js', 'settings.js', 'plan-run.js', 'platform.js']) {
+    for (const name of ['index.html', 'app.js', 'tokens.css', 'ui.css', 'console-shell.js', 'console-shell.css', 'console-fonts.css', 'projects.js', 'project-catalog.js', 'project-spec.js', 'inbox.js', 'agents.js', 'settings.js', 'plan-run.js', 'platform.js']) {
       assert.ok(existsSync(new URL(`../src/web/${name}`, import.meta.url)), `缺 src/web/${name}`);
       assert.match(name, /^[a-z0-9][a-z0-9._-]*\.(html|css|js|svg)$/);
     }
@@ -91,25 +97,66 @@ describe('外壳的文件形状', () => {
     assert.match(html, /projects\.js/);
   });
 
-  test('外壳有新版主导航、设置入口和面包屑容器', () => {
+  test('一级入口只有任务和资源，且指向 #/ 与 #/pool', () => {
+    // 已批准的导航（DESIGN.md Overview / surfaces/console.md）：任务、资源两个
+    // 一级入口。六个入口排一排等于没有入口，人每次都得先把整排读一遍。
     const html = read('index.html');
     assert.match(html, /CoAgentHub/);
+    const nav = /<nav[\s\S]*?<\/nav>/.exec(html);
+    assert.ok(nav, '找不到导航');
+    const links = [...nav[0].matchAll(/<a[^>]*>([^<]*)<\/a>/g)];
+    assert.equal(links.length, 2, `一级入口只该有两个，实际：${links.map((m) => m[1]).join('、')}`);
+    assert.deepEqual(links.map((m) => m[1].trim()), ['任务', '资源']);
+    assert.ok(nav[0].includes('href="#/"'), '任务入口指向 #/');
+    assert.ok(nav[0].includes('href="#/pool"'), '资源入口指向 #/pool');
+    // 旧入口不再占位，但页面本身还在（深链接仍能开）：这里断言的是"没有导航项"，
+    // 不是"路由被删了"。
     for (const label of ['首页', '项目任务列表', '角色与模型']) {
-      assert.ok(html.includes(label), `导航缺 ${label}`);
-    }
-    for (const href of ['#/', '#/projects', '#/agents']) {
-      assert.ok(html.includes(`href="${href}"`), `导航缺 ${href}`);
+      assert.equal(nav[0].includes(label), false, `导航里还有旧入口「${label}」`);
     }
     assert.equal(/>用户</.test(html), false, '用户占位还在');
+    // 面包屑容器留着：task.js / plan-run.js 会往它里面写。视觉上隐藏，不能删。
     assert.match(html, /id="crumbs"/);
   });
 
-  test('导航图标不依赖外链图片，使用本地 glyph', () => {
+  test('导航不吃外链图片：选中态、箭头都用本地同源文件', () => {
+    // 图标全部来自 src/web/ 下的本地 SVG（从画板原样复制），不引 figma 的临时
+    // 下载地址：那些地址会过期，而失败的样子只是一个空图标。
     const html = read('index.html');
     const nav = /<nav[\s\S]*?<\/nav>/.exec(html);
     assert.ok(nav, '找不到导航');
-    assert.ok((nav[0].match(/class="nav-glyph"/g) || []).length === 3, '三项导航都有 glyph');
-    assert.equal(/<img/.test(nav[0]), false, '导航不引外链图片');
+    assert.equal(/<img/.test(nav[0]), false, '导航不引图片');
+    assert.equal(html.includes('figma.com/api/mcp/asset'), false, '页面里出现了 figma 临时下载地址');
+    for (const name of ['console-icon-chevron.svg', 'console-icon-switch.svg', 'console-icon-switch-on.svg']) {
+      assert.ok(
+        existsSync(new URL(`../src/web/${name}`, import.meta.url)),
+        `缺本地图标 ${name}`,
+      );
+      assert.match(name, /^[a-z0-9][a-z0-9._-]*\.svg$/);
+    }
+    // 箭头由 console-shell.css 引用（背景图），不是写在 HTML 里的 <img>。
+    assert.match(read('console-shell.css'), /console-icon-chevron\.svg/);
+  });
+
+  test('同源字体与外壳样式都接上了，页名才用子集', () => {
+    const html = read('index.html');
+    // 固定页名的衬线子集：不同源分发就等于 @font-face 永远失败，页面静默退回雅黑。
+    assert.match(html, /<link rel="stylesheet" href="\/console-fonts\.css" \/>/);
+    assert.match(html, /<link rel="stylesheet" href="\/console-shell\.css" \/>/);
+    // 顺序有意义：console-shell.css 要在 ui.css 之前被声明吗？——不，反过来。
+    // 外壳的后加载才能盖住旧业务层里同名的 .nav/.topbar。
+    assert.ok(
+      html.indexOf('/console-shell.css') > html.indexOf('/ui.css'),
+      'console-shell.css 必须排在 ui.css 之后，否则旧业务层的同名规则会盖住外壳',
+    );
+
+    const fonts = read('console-fonts.css');
+    // 固定页名用衬线子集，动态内容用无衬线，编号/时间用等宽——三种分工各一条。
+    assert.match(fonts, /@font-face[\s\S]*?console-title\.woff2/);
+    assert.match(fonts, /\.fixed-page-title\s*\{[^}]*Noto Serif SC Fixed/);
+    assert.match(fonts, /\.fixed-page-title\s*\{[^}]*var\(--type-page-size\)|font-size: 32px/);
+    assert.match(fonts, /Noto Sans SC/);
+    assert.match(fonts, /IBM Plex Mono|Consolas, monospace/);
   });
 
   test('narrate.js 被 modulepreload，且不是会执行的 script', () => {
@@ -137,14 +184,35 @@ describe('外壳的文件形状', () => {
     for (const id of ids) {
       assert.ok(html.includes(`id="${id}"`), `app.js 取 #${id}，index.html 里没有`);
     }
-    // 项目页自己建的骨架与导航类名：nav 的高亮选择器要真能命中。
+    // 项目页自己建的骨架。
     const projects = read('projects.js');
     for (const id of ['proj-list', 'proj-detail']) {
       assert.ok(projects.includes(`#${id}`) && projects.includes(`id="${id}"`), `骨架里缺 #${id}`);
     }
-    assert.match(html, /class="item"[^>]*data-route="projects"/);
-    assert.match(html, /class="item"[^>]*data-route="agents"/);
-    assert.match(html, /class="item"[^>]*data-route="home"/);
+    // 导航项带 data-route（指向的路由名）与 data-nav（属于哪个一级入口）。
+    // 缺 data-route 不算错——高亮由 data-nav 决定；缺两者才是"点不动也亮不对"。
+    assert.match(html, /class="item"[^>]*href="#\/"[^>]*data-nav="tasks"/);
+    assert.match(html, /class="item"[^>]*href="#\/pool"[^>]*data-nav="pool"/);
+  });
+
+  test('console-shell.js 要的锚点在 index.html 里都在', () => {
+    // 外壳模块从页面里按 id/class 取这几个位置；写错一个字母不会报错，
+    // 只会往 null 上写：导航一个都不亮、下拉是空的、同步状态那格永远空着。
+    const html = read('index.html');
+    const shellSrc = read('console-shell.js');
+    const ids = [...shellSrc.matchAll(/getElementById\('([^']+)'\)/g)].map((m) => m[1]);
+    assert.ok(ids.length >= 3, '外壳该从 index.html 里取到项目、同步状态与横幅锚点');
+    for (const id of ids) {
+      assert.ok(html.includes(`id="${id}"`), `console-shell.js 取 #${id}，index.html 里没有`);
+    }
+    assert.match(html, /class="nav cs-nav"/, '导航要有 cs-nav 这个钩子（外壳按它取入口项）');
+    // 外壳用 hidden 开关的两处锚点必须有对应的 CSS 兜底：.cs-project 是 display:flex，
+    // 会把 UA 的 [hidden]{display:none} 盖掉，于是"资源页不显示项目下拉"变成"它还在"。
+    assert.match(read('console-shell.css'), /#cs-project\[hidden\], #cs-banner\[hidden\]\s*\{\s*display:\s*none !important/);
+    // 外壳模块本身必须是会执行的那个入口的依赖，不能只 modulepreload：
+    // 只预取不执行，导航高亮和顶栏就永远停在初始状态。
+    assert.match(read('app.js'), /from '\.\/console-shell\.js'/);
+    assert.equal(/<script[^>]+src="\/console-shell\.js"/.test(html), false, '不许把它写成第二个 script');
   });
 
   test('外壳不靠内置观测面', () => {
@@ -156,37 +224,96 @@ describe('外壳的文件形状', () => {
   });
 });
 
-describe('色彩令牌与观测面同源', () => {
+describe('外壳的几何、基底与文字层级', () => {
   test('表格行色条与阶段 chip 同源，且只用 --status-*', () => {
     const html = read('index.html');
     for (const tone of ['queued', 'running', 'done', 'failed', 'unconfirmed', 'cancelled']) {
       const rule = ruleBody(html, new RegExp(`\\.tasks tbody tr\\.row-${tone}\\s*\\{([^}]*)\\}`));
       assert.ok(rule.includes(`var(--status-${tone})`), `row-${tone} 该用 var(--status-${tone})`);
     }
-    // 色条本身不写死色值：新摧一个 oklch 就是与观测面分叉一处。
+    // 色条本身不写死色值：新摧一个色就是与令牌分叉一处。
     const bar = ruleBody(html, /\.tasks tbody tr td:first-child\s*\{([^}]*)\}/);
     assert.ok(bar.includes('var(--row-tone)'), `色条要走 --row-tone：${bar}`);
     assert.equal(/oklch\(|#[0-9a-fA-F]{3,6}/.test(bar), false, '色条不该写死颜色');
   });
-  test(':root 两块是从 web.ts 逐字搬过来的', () => {
-    const source = WEB_PAGE.replace(/\r\n/g, '\n');
-    const from = source.indexOf(':root {');
-    const to = source.indexOf('* {', from);
-    const original = source.slice(from, to < 0 ? source.length : to).trim();
-    assert.ok(original.length > 1000, '没从观测面里取到那两块令牌');
-    // 整段比对，不挨个断言几个"代表值"：抽几个值测恰好放过剩下几十个被人
-    // 顺手改一个的情况，而那种改动在界面上看不出名堂，只是颜色在漂。
-    assert.ok(
-      read('tokens.css').includes(original),
-      'tokens.css 的 :root 与 :root[data-theme="dark"] 必须与 src/api/web.ts 逐字相同',
-    );
+
+  test('1440 宽的外壳尺寸来自画板：184 / 224 / 40 / 68 / 96', () => {
+    // 数值出处：.impeccable/reference/figma-2-47.txt（data-name「一级导航」宽 184、
+    // 「项目与同步状态」left 224 top 18、高 42、分隔线 top 68、内容区 top 96）。
+    // 断言的是**这些尺寸还在**，不是"CSS 长这样"——尺寸被人顺手改掉时，页面上
+    // 什么都不报错，只是每一列都偏了一点，肉眼很难说是哪里不对。
+    const css = read('console-shell.css');
+    const root = ruleBody(css, /:root\s*\{([^}]*)\}/s);
+    const value = (name: string): string => {
+      const hit = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(root);
+      assert.ok(hit, `console-shell.css 的 :root 里没有 ${name}`);
+      return hit[1].trim();
+    };
+    assert.equal(value('--shell-nav-width'), '184px', '左导航宽');
+    assert.equal(value('--shell-content-gutter'), '40px', '内容左右内缩');
+    assert.equal(value('--shell-topbar-height'), '68px', '顶栏高（分隔线在 y68）');
+    assert.equal(value('--shell-topbar-inset'), '18px', '项目控件距顶 18');
+    // 内容左边界 224 = 导航 184 + 40，内容起点 96 = 顶栏 68 + 28。
+    const nav = parseInt(value('--shell-nav-width'), 10);
+    const gutter = parseInt(value('--shell-content-gutter'), 10);
+    assert.equal(nav + gutter, 224, '内容左边界该是 224');
+    const top = parseInt(value('--shell-topbar-height'), 10);
+    const view = parseInt(value('--shell-view-inset'), 10);
+    assert.equal(top + view, 96, '页面内容起点该是 96');
+
+    // 项目控件 256×42、导航项 40 高、品牌 18px —— 同样是画板上的数。
+    const project = ruleBody(css, /\.cs-project\s*\{([^}]*)\}/s);
+    assert.match(project, /width:\s*256px/);
+    assert.match(project, /height:\s*42px/);
+    const item = ruleBody(css, /\.cs-shell \.nav \.item\s*\{([^}]*)\}/s);
+    assert.match(item, /height:\s*40px/);
+    assert.match(item, /padding:\s*0 12px 0 16px/);
+    assert.match(ruleBody(css, /\.cs-shell \.brand\s*\{([^}]*)\}/s), /font-size:\s*18px/);
   });
 
-  test('关键 oklch 值与全部 status 令牌都在', () => {
+  test('导航 ink 底白字、选中浅 select 底与 2px 左线，只走 --color-* 令牌', () => {
+    const css = read('console-shell.css');
+    const nav = ruleBody(css, /\.cs-shell \.nav\s*\{([^}]*)\}/s);
+    assert.match(nav, /background:\s*var\(--color-ink\)/, '导航是 ink 深墨底');
+    assert.match(nav, /color:\s*var\(--color-white\)/, '导航是白字');
+    const active = ruleBody(css, /\.cs-shell \.nav \.item\[data-active="1"\]\s*\{([^}]*)\}/s);
+    assert.match(active, /background:\s*var\(--color-select\)/, '选中是浅 select 底');
+    assert.match(active, /border-left-color:\s*var\(--color-accent\)/, '选中是 accent 左线');
+    // 2px 左线不能靠 border-left 简写盖掉：那样未选中项没有预留位置，点一下文字横跳。
+    assert.match(ruleBody(css, /\.cs-shell \.nav \.item\s*\{([^}]*)\}/s), /border-left:\s*2px solid transparent/);
+
+    // 外壳里不许出现写死的色值：--color-* 是唯一来源，抄一份就多一个要同步的地方。
+    assert.equal(/#[0-9a-fA-F]{3,6}\s*[;,}]/.test(css), false, 'console-shell.css 里出现了写死的十六进制色');
+    assert.equal(/oklch\(/.test(css), false, 'console-shell.css 里出现了写死的 oklch');
+    assert.equal(/var\(--sidebar/.test(css), false, '外壳不接旧的 --sidebar 兼容别名');
+  });
+
+  test('浅色是默认且不被系统暗色覆盖；旧 dark 块只作兼容保留', () => {
+    // 已批准的三张画板只有暖白纸面一套值。跟着系统翻黑 = 把没评审过的配色推给人看。
+    // 注释里提到这件事不算：判的是真有没有去问系统主题（matchMedia）。
+    assert.equal(read('app.js').includes('matchMedia('), false, 'app.js 又在按系统主题切换了');
+    assert.match(read('app.js'), /dataset\.theme = 'light'/, '外壳要显式固定浅色');
+    assert.match(read('console-shell.css'), /color-scheme:\s*light/);
+    // 兼容块留着：旧业务页面还在引用它，删掉等于悄悄取消暗色支持。
+    // 这里只断言它还在、且不再被外壳用来做默认。
+    assert.match(read('tokens.css'), /:root\[data-theme="dark"\]/);
+  });
+
+  test('设计值对得上 DESIGN.md 的前置令牌', () => {
+    // 令牌的实际取值在 tokens.css 里；这条守的是"颜色还是画板那一套"。
+    // 不逐字比对 src/api/web.ts：观测面那套历史配色与正式页是两件事，
+    // 强行要求相等只能逼出"为了测试去改其中一边的配色"。
     const tokens = read('tokens.css');
-    // 亮暗两个 --background：少一个就说明某一边的整页配色是猜出来的。
-    assert.match(tokens, /--background: oklch\(0\.991 0\.001 106\.423\)/);
-    assert.match(tokens, /--background: oklch\(0\.201 0\.011 242\.328\)/);
+    for (const [name, hex] of [
+      ['--color-paper', '#f5f3ed'],
+      ['--color-ink', '#222b35'],
+      ['--color-accent', '#275d74'],
+      ['--color-select', '#e6ecee'],
+      ['--color-nav', '#eceae2'],
+      ['--color-line', '#d6d5ce'],
+    ] as [string, string][]) {
+      assert.match(tokens, new RegExp(`${name}\\s*:\\s*${hex};`, 'i'), `${name} 不是 DESIGN.md 里的 ${hex}`);
+    }
     for (const name of [
       '--status-queued',
       '--status-running',
@@ -195,10 +322,11 @@ describe('色彩令牌与观测面同源', () => {
       '--status-cancelled',
       '--status-unconfirmed',
     ]) {
-      // 亮色 + 暗色各一次。只出现一次的那几个等于暗色主题下没有对应色。
-      const count = tokens.split(name + ':').length - 1;
-      assert.ok(count >= 2, `${name} 要在亮暗两块里都有`);
+      assert.ok(tokens.includes(name + ':'), `缺状态令牌 ${name}`);
     }
+    // 兼容别名指回设计值，不复制色值：复制之后改一处忘另一处，两个界面开始各走各的色。
+    assert.match(tokens, /--background:\s*var\(--color-paper\)/);
+    assert.match(tokens, /--sidebar:\s*var\(--color-ink\)/);
   });
 
   test('chip 的配色公式与观测面 .badge 一致', () => {
@@ -488,7 +616,7 @@ describe('GET / 是正式页，不是内置观测面', () => {
 
   test('三个资源都能按扁平路径取到', async () => {
     const { base } = await serveDefaultWebRoot();
-    for (const path of ['/index.html', '/app.js', '/tokens.css', '/ui.css', '/projects.js', '/project-catalog.js', '/project-spec.js', '/inbox.js', '/agents.js', '/settings.js', '/plan-run.js', '/platform.js']) {
+    for (const path of ['/index.html', '/app.js', '/tokens.css', '/ui.css', '/console-shell.js', '/console-shell.css', '/console-fonts.css', '/console-title.woff2', '/console-icon-chevron.svg', '/console-icon-switch-on.svg', '/projects.js', '/project-catalog.js', '/project-spec.js', '/inbox.js', '/agents.js', '/settings.js', '/plan-run.js', '/platform.js']) {
       const res = await fetch(base + path);
       assert.equal(
         res.status,

@@ -1,52 +1,21 @@
-/* CoAgentHub 2026 UI layer. Loaded after index.html legacy styles. */
-:root {
-  --background: #f6f8fb;
-  --foreground: #172033;
-  --card: #ffffff;
-  --muted: #f2f5f9;
-  --muted-foreground: #7b8699;
-  --accent: #3478f6;
-  --accent-foreground: #ffffff;
-  --accent-faint: #eaf2ff;
-  --destructive: #ef4444;
-  --border: #e4e9f1;
-  --status-queued: #8c96a8;
-  --status-running: #3478f6;
-  --status-done: #20b86a;
-  --status-failed: #ef4444;
-  --status-cancelled: #8c96a8;
-  --status-unconfirmed: #f59e0b;
-  --role-reviewer: #7c3aed;
-  --role-coordinator: #f59e0b;
-  --role-executor: #16b86a;
-  --sidebar: #ffffff;
-  --sidebar-foreground: #566174;
-  --sidebar-accent: #2563eb;
-  --terminal-bg: #172033;
-  --terminal-fg: #eef2f7;
-  --terminal-dim: #9aa5b6;
-  --radius: 12px;
-}
+/*
+ * 业务页面的排版层。**只管排版**，颜色一律从 tokens.css 取。
+ *
+ * 外壳（导航 / 顶栏 / 内容列）的几何与配色在 console-shell.css；这个文件里
+ * 原来那套 .nav / .topbar / .view 同色同名的规则已经删掉——两处定义同一个选择器，
+ * 谁赢只取决于文件顺序，而"看起来不像画板"根本不会有人去查是哪条规则。
+ */
+/*
+ * 这里**不再定义颜色令牌**。
+ *
+ * 这一段曾经把整套旧调色板（蓝 #3478f6、冷白 #f6f8fb）重新赋值给 --background /
+ * --accent / --status-* —— 相同的变量名、后加载的文件，于是 tokens.css 里那套
+ * DESIGN.md 的暖白纸面被它整个盖掉，而界面上看不出"谁赢了"，只是颜色一直不对。
+ * 颜色只从 tokens.css 进来（那里的 --color-* 是权威，兼容别名指回它）。
+ * 这个文件只剩业务页面的排版。
+ */
 * { box-sizing: border-box; }
 body { min-width: 0; background: var(--background); color: var(--foreground); font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif; }
-.shell { grid-template-columns: 236px minmax(0, 1fr); }
-.nav {
-  padding: 14px 12px;
-  background: #fff;
-  color: var(--sidebar-foreground);
-  border-right: 1px solid var(--border);
-  box-shadow: none;
-}
-.brand { display:flex; align-items:center; gap:10px; height:42px; padding:0 8px 12px; color:#172033; font-size:16px; }
-.brand::before { content:"C"; display:grid; place-items:center; width:26px; height:26px; border-radius:8px; background:#3478f6; color:#fff; font-weight:800; }
-.nav .item { min-height:40px; padding:0 10px; gap:10px; border-radius:8px; color:#566174; font-size:14px; }
-.nav .item:hover { background:#f5f7fa; color:#172033; }
-.nav .item[data-active="1"] { background:#eaf2ff; color:#2563eb; }
-.nav .item .ico { width:17px; height:17px; }
-.nav-section { margin:18px 10px 7px; color:#9aa4b3; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
-.nav .foot { padding-top:10px; border-top:1px solid var(--border); }
-.topbar { min-height:60px; padding:0 20px; background:#fff; border-bottom:1px solid var(--border); color:#7b8699; }
-.view { padding:18px 20px 24px; }
 .card { border:1px solid var(--border); border-radius:12px; box-shadow:0 1px 2px rgba(16,24,40,.035); margin-bottom:12px; padding:16px; }
 .card h2 { font-size:15px; }
 button, .button {
@@ -172,13 +141,10 @@ pre.term { max-height:280px; }
 
 @media (max-width:1260px) {
   body { min-width:0; }
-  .shell { grid-template-columns:214px minmax(0,1fr); }
   .task { grid-template-columns:minmax(0,1fr) 360px; }
   .project-grid { grid-template-columns:1fr; }
 }
 
-.nav-glyph { width:18px; text-align:center; font-size:15px; color:currentColor; }
-.nav .foot .item { padding-left:10px; }
 .project-detail-tabs { display:flex; gap:22px; margin:0 0 12px; border-bottom:1px solid var(--border); }
 .project-detail-tabs a { padding:10px 0; color:#7b8699; text-decoration:none; font-size:13px; }
 .project-detail-tabs a.active { color:#2563eb; border-bottom:2px solid #3478f6; font-weight:600; }
@@ -249,10 +215,9 @@ pre.term { max-height:280px; }
 .mission-process .terminal,.mission-process .live-terminal{max-height:330px;overflow:auto}.mission-process .detail-block{background:color-mix(in oklch,var(--card) 95%,var(--role-coordinator));padding:12px;border-radius:var(--radius);margin-bottom:12px}
 .mission-process .task-side-card{min-width:0}.priority-row button:disabled{opacity:.45}.priority-actions pre{white-space:pre-wrap}
 @media(max-width:1050px){.mission-process .task-cols{grid-template-columns:minmax(0,1fr)}.mission-process .current-output{order:-1}}
-@media(max-width:800px){.nav{flex-direction:row;flex-wrap:wrap}.nav .brand{width:100%}.nav .spacer,.nav .foot{display:none}.view{padding:12px}.platform-strip{gap:8px 14px}.mission-process .stage{flex-basis:235px}}
+@media(max-width:800px){.platform-strip{gap:8px 14px}.mission-process .stage{flex-basis:235px}}
 
 .mission-process .stage-list{padding-left:0}.mission-process .stage-list::before,.mission-process .stage::before{display:none}.mission-process .stage[hidden]{display:none}.step-usage-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.step-usage-grid div{background:var(--accent-faint);padding:9px;border-radius:6px}.step-usage-grid dt{font-size:12px;color:var(--muted-foreground)}.step-usage-grid dd{margin:5px 0 0}.mission-process .stage-head,.mission-process .evt{background:var(--card)}
-:root[data-theme="dark"] .nav,:root[data-theme="dark"] .topbar{background:var(--card);color:var(--foreground)}:root[data-theme="dark"] .brand,:root[data-theme="dark"] .nav .item{color:var(--foreground)}
 button:focus-visible,a:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 
 .mission-process{display:block}.mission-process .task-head{margin-bottom:12px}.mission-process .task-right{grid-column:auto;grid-row:auto}.mission-process .task-cols{display:grid}.mission-process .stage-summary{font-size:12px}.mission-process .step-usage-grid div:nth-child(2){background:color-mix(in oklch,var(--card) 90%,var(--role-reviewer))}.mission-process .step-usage-grid div:nth-child(3){background:color-mix(in oklch,var(--card) 90%,var(--status-done))}
@@ -290,4 +255,4 @@ button:focus-visible,a:focus-visible,select:focus-visible{outline:3px solid var(
 .mission-process .detail-block pre.term.so-platform .so-who{color:var(--session-output-platform)}
 .mission-process .detail-block pre.term.so-unknown .so-who{color:var(--session-output-unknown)}
 .mission-process .detail-block .so-tail-note{font-size:12px}
-@media(max-width:1000px){.shell{grid-template-columns:minmax(0,1fr)}.nav{height:auto;position:static;display:flex;flex-direction:row;flex-wrap:wrap}.nav .brand{width:100%}.nav .spacer,.nav .foot{display:none}.mission-process{display:flex;flex-direction:column;align-items:stretch}.mission-process .task-cols{display:contents}.mission-process .current-output{order:1}.mission-process .timeline-panel{order:2}.mission-process .task-right{order:3}.mission-process>details{order:4}.mission-process .task-head{order:0}.view{padding:12px}.mission-process .task-head .task-title{font-size:18px}}
+@media(max-width:1000px){.mission-process{display:flex;flex-direction:column;align-items:stretch}.mission-process .task-cols{display:contents}.mission-process .current-output{order:1}.mission-process .timeline-panel{order:2}.mission-process .task-right{order:3}.mission-process>details{order:4}.mission-process .task-head{order:0}.mission-process .task-head .task-title{font-size:18px}}

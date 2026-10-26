@@ -1081,8 +1081,10 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(html, /<link rel="modulepreload" href="\/pool\.js" \/>/);
     // app.js 会 import 它；再写一个会执行的 <script> 就是执行两遍、监听注册两次。
     assert.equal(/<script[^>]+src="\/pool\.js"/.test(html), false, 'pool.js 被写成会执行的 script');
-    assert.match(html, /href="#\/agents"[^>]*data-route="agents"/);
-    assert.ok(html.includes('角色与模型</a>'), '主导航为角色与模型');
+    // 一级入口收敛为「任务」「资源」之后，资源池就是 #/pool 那一项；角色与模型仍是
+    // 可达的深链接（#/agents），但不再占主导航。
+    assert.match(html, /href="#\/pool"[^>]*data-nav="pool"/, '资源入口指向 #/pool');
+    assert.equal(/href="#\/agents"/.test(html), false, '角色与模型不再占主导航');
     assert.equal(existsSync(join(webRoot, 'pool.css')), false, '不另起 pool.css');
 
     const shell = readWeb('app.js');
