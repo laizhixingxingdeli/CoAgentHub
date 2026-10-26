@@ -1,0 +1,128 @@
+/*
+ * 任务详情「契约」页签六格（画板 .impeccable/reference/figma-44-1676.txt 的
+ * 70:4090 契约内容：修订号一行 + 两列各三张卡片）。
+ *
+ * 为什么单开一个文件：这一块的排版事实是「两列六格、每格一标题一段原文」这一对
+ * 形状。挤进全站样式里，任何一处手改都会顺带改到任务总览与项目页，而「卡片矮了
+ * 6px」在屏幕上不报错，只是越来越不像画板。
+ *
+ * 为什么全部挂在 .td-contract 作用域下：这份文件与旧业务样式（ui.css 的 .card、
+ * .chip）同时在线，一条不限定作用域的 `.td-contract-card { padding: 20px }` 会把
+ * 别人的卡片也改了。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，改一处
+ * 忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ */
+
+.td-contract {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 修订号那一行：三件事分开成三个节点——「契约修订」是标签、数字是值、最后一词
+ * 说明这一页不能改。合成一句之后，人读到的是一个编号，看不出这一页是只读的。 */
+.td-contract .td-contract-revision {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+}
+
+.td-contract .td-contract-revision-value {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* 「只读」靠右：它是这一区的整体说明，不是修订号的一部分。 */
+.td-contract .td-contract-readonly {
+  margin-left: auto;
+  padding: 0 8px;
+  border-radius: var(--radius-control);
+  background: var(--color-nav);
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--color-muted);
+}
+
+/* 两列六格，按画板 572px 一列。minmax(0, 1fr) 而不是 1fr：长原文（intent 常常
+ * 是一整段）在 1fr 下会把列撑过容器宽度，横着溢出去。 */
+.td-contract .td-contract-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.td-contract .td-contract-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-output);
+  background: var(--color-white);
+  overflow: clip;
+}
+
+.td-contract .td-contract-card-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 28px;
+}
+
+/* 原文按原样折行：**不设 max-height、不设 -webkit-line-clamp**。契约页的价值就是
+ * 完整原文，收起一截之后被藏起来的那半句在屏幕上再也看不到，而卡片看起来是满的。 */
+.td-contract .td-contract-text,
+.td-contract .td-contract-missing {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  word-break: break-word;
+}
+
+/* 「未记录」画成灰字而不是空列表：它说的是「这一格契约里没写」，
+ * 与「写了，但清单是空的」是两件事，长得一样就再也分不出来。 */
+.td-contract .td-contract-missing {
+  color: var(--color-muted);
+  font-style: italic;
+}
+
+.td-contract .td-contract-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* 项目符号用 ::before 而不是 list-style：圆点要跟正文首行对齐，不能像默认列表
+ * 那样把整段文字往右推一档，否则同列的 intent 段与 acceptance 条目左右错开。 */
+.td-contract .td-contract-item {
+  position: relative;
+  padding-left: 14px;
+  word-break: break-word;
+}
+
+.td-contract .td-contract-item::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: var(--color-muted);
+}
+
+/* 空数组（记了、且是空）只留一个空 ul：不补占位文字，否则与「未记录」混成一句
+ * 话的分身。这里给一点点高度，让「这格是空的，但有这一格」看得出来。 */
+.td-contract .td-contract-list:empty {
+  min-height: 22px;
+}
