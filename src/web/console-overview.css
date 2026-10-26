@@ -1,0 +1,443 @@
+/*
+ * 任务总览的局部样式（画板 .impeccable/reference/figma-2-47.txt 的 2:47）。
+ *
+ * 为什么单开一个文件而不是继续往 index.html 的 <style> 里堆：总览的五列宽度
+ * （400/194/290/144/100）、64px 记录、分组头 nav 底这些数值只属于这一页。
+ * 挤进全站样式里，任何一处手改都会顺带影响任务详情和资源页，而「这一列偏了
+ * 4px」在屏幕上不报错，只是越来越不像画板。
+ *
+ * 为什么要 `.console-overview` 作用域：这份文件由下一单挂到页面上，同一时刻
+ * 旧业务样式（ui.css 的 .card / table.tasks）还在。不限定作用域，一条
+ * `.co-row { height: 64px }` 之类的规则就会把别的页面的行一起改掉。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份十六进制，
+ * 改一处忘另一处之后，两个界面各走各的颜色而没人会当成 bug 报。
+ */
+
+/* ===== 页面 ===== */
+
+.console-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 固定页名 32px / 44px 的衬线来自 console-fonts.css 的 .fixed-page-title；
+ * 这里只补它和下面横幅之间的节奏，不重复字体族——两处都写，改一处之后
+ * 另一半还指着旧字体，而加载失败时页面上看不出来。 */
+.console-overview .co-title {
+  margin: 0;
+  color: var(--color-ink);
+}
+
+/* ===== 需要你处理的横幅（Console/Banner） ===== */
+
+.console-overview .co-banner {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-height: 56px;
+  padding: 6px 16px;
+  border-radius: var(--radius-output);
+  background: var(--color-amber-bg);
+  color: var(--color-amber);
+}
+
+.console-overview .co-banner-head {
+  margin: 0;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.console-overview .co-banner-note {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+/* ===== 工具栏：搜索 + 仅看已暂停（Console/Field、Console/Switch） ===== */
+
+.console-overview .co-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 42px;
+}
+
+.console-overview .co-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 360px;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control);
+  background: var(--color-white);
+}
+
+.console-overview .co-field-text {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-muted);
+}
+
+.console-overview .co-field-input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+  outline: none;
+}
+.console-overview .co-field-input::placeholder { color: var(--color-muted); }
+
+/* 图标是画板原样复制的 16x16 SVG：尺寸写在 CSS 里的是兜底，属性上的
+ * width/height 才是主值。不用字符代替——字符箭头在各平台的字宽和基线都
+ * 不一样，而画板上这个位置就是一张确定的图。 */
+.console-overview .co-field-icon,
+.console-overview .co-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.console-overview .co-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+}
+
+/* 开关轨道 34x20 与画板一致；两个状态是两张真实落盘的图
+ * （console-icon-switch.svg / console-icon-switch-on.svg），不靠 CSS 画。 */
+.console-overview .co-switch-track {
+  flex: none;
+  width: 34px;
+  height: 20px;
+}
+
+.console-overview .co-switch-label {
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+  white-space: nowrap;
+}
+
+/* ===== 六态页签（Console/Tab） ===== */
+
+.console-overview .co-tabs {
+  display: flex;
+  gap: 4px;
+  height: 40px;
+}
+
+.console-overview .co-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  /* 「全部」窄一点，「调查中」这类三项词宽一点：画板上就是 90 与 146。
+   * 用固定宽度而不是内容撑开，页签才不会随着计数从 1 变到 10 就整排横跳。 */
+  width: 146px;
+  border-bottom: 2px solid transparent;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.console-overview .co-tab:first-child { width: 90px; }
+
+/* 选中态由真实筛选条件决定（overview.js 写 data-selected），画板上的那个
+ * 高亮不是首屏事实：写死「全部已选中」而列表其实按别的条件过滤，人就会
+ * 以为自己看的是全部。 */
+.console-overview .co-tab[data-selected="1"] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ===== 表格：表头 + 三个分组 ===== */
+
+/* 白色数据底板从六状态页签开始、到最后分组结束（画板 82:4090 的范围），
+ * 所以页签、表头、分组是同一个 wrapper 里的三个孩子，间距 12px。
+ * 分开写会让页签落在白底之外：页签看起来像页面上的一排标签，
+ * 白底从表头才开始，两条边界在屏幕上是错开的。 */
+.console-overview .co-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--color-white);
+  /* 边线用不占位的 inset 阴影而不是 border：border 会从内容宽里再吃掉 2px，
+   * 五列合计 1176 就被挤成 1174，最后一列的右边缘比画板短一截，且和下面的
+   * 1176 断点判断对不上。阴影画在盒子内部，宽度还是 1176。 */
+  box-shadow: inset 0 0 0 1px var(--color-line);
+  border-radius: var(--radius-output);
+  /* 任何不足 1176 的宽度（含垂直滚动条占掉的那十几像素）都能横滚看全五列。
+   * 只写媒体查询断点不够：滚动条、缩放、窄侧栏都不会触发那个断点，
+   * 结果第二列之后被直接裁掉，而且看不出来被裁了。 */
+  overflow-x: auto;
+}
+
+/* 表头与三个分组是 co-table 的三个孩子，12px 间距必须写在 co-table 上：
+ * 只在 co-board 上写 gap，隔开的是「页签 vs 整张表」，表头还是紧贴第一组表头，
+ * 组与组之间也粘在一起，三组的 nav 底连成一条。
+ * min-width 与 head/row 的内容宽一致（1128 列 + 16 间距 + 32 内缩），不是 1176 时
+ * 窄屏下 flex 会把列压窄，省略号与 title 里的完整值就对不上了。 */
+.console-overview .co-table {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 1176px;
+  background: var(--color-white);
+}
+
+.console-overview .co-head {
+  display: flex;
+  gap: 4px;
+  height: 26px;
+  padding: 0 16px;
+  align-items: flex-start;
+}
+
+/* 表头格 26px 且文字贴顶：套用记录行的 44px 格会把 13px 表头文字垂直到中间，
+ * 比画板低 12px，并且溢出到第一组标题里。选择器多一级 `.co-head > `：
+ * 下面通用的 `.co-cell` 与 `.co-head .co-cell` 同权，同权就会被后写的那条赢走。 */
+.console-overview .co-head > .co-cell {
+  height: 26px;
+  justify-content: flex-start;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 五列宽度是画板 2:47 上的值：400 / 194 / 290 / 144 / 100，间距 4，左右内缩 16。
+ * 合计 1176 = 128 内容的整幅宽。改这里任何一个数和改画板是一回事。
+ *
+ * 行内每一格都是 44px 的两行盒（画板 h-44 items-start）。
+ */
+.console-overview .co-cell {
+  flex: none;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  /* 文字必须贴顶：只有一行内容的格子（费用、更新时间）垂直居中会比其他格子的
+   * 第一行低 12px，整行看过去数字不在一条基线上。 */
+  justify-content: flex-start;
+  height: 44px;
+  overflow: hidden;
+}
+
+.console-overview .co-identity { width: 400px; }
+.console-overview .co-status { width: 194px; }
+.console-overview .co-owner { width: 290px; }
+.console-overview .co-cost { width: 144px; }
+.console-overview .co-updated { width: 100px; }
+
+/* 分组头：nav 底、28px 高、与行共享 16px 内缩，这样标题和第一列的编号
+ * 在同一条左边线上。内缩不一致时两段文字差 16px，看起来像排版坏了。 */
+.console-overview .co-group-head {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 16px;
+  background: var(--color-nav);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  color: var(--color-ink);
+}
+
+/* 每组内容结束留 8px：画板上的组高是 228 = 28（标题）+ 3×64（行）+ 8。
+ * 不留这 8px，下一组标题会紧贴上一行，三组看起来像一组里换了底色。
+ * 行数是动态的，所以写 padding-bottom 而不是给组写死高度。 */
+.console-overview .co-group {
+  padding-bottom: 8px;
+}
+
+/* 记录行 64px：两行文字（20+20）加 44px 内容区，垂直居中留 10px 上下。
+ * 行是 <a>，所以链接的下划线要主动去掉，颜色继承正文——一条蓝下划线
+ * 会把「任务身份」画成「一个链接」。 */
+.console-overview .co-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  height: 64px;
+  padding: 0 16px;
+  text-decoration: none;
+  color: inherit;
+  background: var(--color-white);
+}
+
+.console-overview .co-row:hover { background: var(--color-select); }
+
+/* 选中行：浅 select 底 + 2px 左线（与左导航的选中同一套标记）。左侧线
+ * 用 border-left 会把内容整体右移 2px，所以未选中时预留一条透明线。 */
+.console-overview .co-row[data-selected="1"] {
+  background: var(--color-select);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* 每格两行，各 20px。行高写死而不是靠内容撑开：某一行没有第二行内容时
+ * （例如终态没有附标），行高会塌成 44 -> 24，整张表就参差不齐。 */
+.console-overview .co-cell > p {
+  margin: 0;
+  height: 20px;
+  line-height: 20px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 编号：13px 等宽。省略发生在上层（overview.js 的 middleEllipsis），这里只是
+ * 兜底——真实文本仍完整保留在 title 里，省略不改变事实。 */
+.console-overview .co-id {
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+  font-size: 13px;
+  color: var(--color-ink);
+}
+
+.console-overview .co-intent {
+  font-size: 13px;
+  color: var(--color-muted);
+  /* intent 只给一行：完整内容在 title 与任务详情里，不在这儿挤成三行把
+   * 64px 的行高撑开。 */
+  text-overflow: ellipsis;
+}
+
+.console-overview .co-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+}
+
+.console-overview .co-status-text {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 状态色：绿=完成、红=中止、琥珀=等人、蓝=真有活动 Agent、墨=其余。
+ * 颜色只协助扫描，事实全在文字里（DESIGN.md 的「状态双编码」）。 */
+.console-overview .co-status-text[data-tone="green"] { color: var(--color-green); }
+.console-overview .co-status-text[data-tone="red"] { color: var(--color-red); }
+.console-overview .co-status-text[data-tone="amber"] { color: var(--color-amber); }
+.console-overview .co-status-text[data-tone="running"] { color: var(--color-running); }
+.console-overview .co-status-text[data-tone="ink"] { color: var(--color-ink); }
+.console-overview .co-status-text[data-tone="muted"] { color: var(--color-muted); }
+
+.console-overview .co-marks {
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+.console-overview .co-owner-text {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.console-overview .co-owner-text[data-tone="amber"] { color: var(--color-amber); }
+.console-overview .co-owner-text[data-tone="red"] { color: var(--color-red); }
+.console-overview .co-owner-text[data-tone="ink"] { color: var(--color-ink); }
+
+.console-overview .co-next {
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+/* 费用与时间用等宽：数字要能按字符对齐比较，比例字体下同一列数字宽度不同，
+ * 肉眼对不齐也数不清位数。 */
+.console-overview .co-cost-text,
+.console-overview .co-updated p {
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+  font-size: 13px;
+}
+
+.console-overview .co-cost-text { color: var(--color-ink); }
+.console-overview .co-updated p { color: var(--color-muted); }
+
+/* ===== 分页 / 空态 ===== */
+
+/* 分页在白板外面、左边与内容（x=224）对齐：缩进 16 会让「显示 N / M」
+ * 比上面的分组标题多缩一格，看起来像掉进卡片内部。 */
+.console-overview .co-page {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 32px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+}
+
+/* 加载更早已是原生 button，样式仍用强调色，不用链接蓝。 */
+.console-overview .co-more {
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+.console-overview button.co-switch,
+.console-overview button.co-more {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.console-overview button.co-tab {
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.console-overview .co-empty {
+  padding: 36px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+/* 窄屏退化：只保证不横向溢出。本轮其它宽度未验收，所以不做另一套列宽，
+ * 改成让整张表横向滚动——把五列压窄会同时破坏省略和「完整值在 title 里」的可读性。
+ * 横滚与 min-width 已经无条件写在 .co-board / .co-table 上，这里不再重复：
+ * 依赖 1240 这个断点的话，带垂直滚动条的窗口宽度刚好卡在断点之上时五列仍被裁掉。 */
+@media (max-width: 1240px) {
+  .console-overview .co-field { width: 100%; max-width: 360px; }
+}
