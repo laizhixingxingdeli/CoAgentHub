@@ -166,3 +166,60 @@ test('自动改派环节显示平台徽章，不归协调者', () => {
   assert.equal((root.textContent || '').includes('协调者'), false);
   assert.equal((root.textContent || '').includes('外部主控'), false);
 });
+
+/**
+ * 结构事实（图审打回项）：选择器不在白板里、白板外只有一处芯片、定位与展开在标题带内。
+ *
+ * 14 张已验收单全铺出来会把标题带挤成一条收不住的线；选择器留在标题带里则会跟轮次、
+ * 展开按钮抢同一行——两处都「看着还行」，只是排版不再是画板那一个。
+ */
+test('选择器在白板外，已验收芯片只留相邻一项，定位当前与展开在标题带内', () => {
+  const many = {
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    workItems: [
+      ...Array.from({ length: 14 }, (_, i) => ({
+        id: 'W-' + (100 + i),
+        title: '已验收的工作项 ' + i,
+        status: 'accepted',
+        attemptIds: ['W-' + (100 + i) + '.exec-1'],
+      })),
+      { id: 'W-906', title: '选择环节事实概要', status: 'dispatched', attemptIds: ['W-906.exec-1'] },
+    ],
+  };
+  const events = [
+    { kind: 'attempt.started', attemptId: 'W-906.exec-1', workItemId: 'W-906', at: '2026-10-26T13:40:00.000Z', data: { kind: 'executor' } },
+  ];
+
+  const { root, q, all } = mount(many, events, { selectedWorkItemId: 'W-906' });
+
+  // 芯片最多一枚，且是所选工作项紧邻的上一项，不是全部已验收项的清单。
+  const accepted = all('.td-accepted');
+  assert.equal(accepted.length, 1, '已验收芯片应只留相邻一项，实际 ' + accepted.length + ' 枚');
+  assert.equal(accepted[0].getAttribute('data-work-item'), 'W-113');
+
+  // 选择器在白板之外：贴 .td-flow 挂在 .td-flow-board 的上一条。
+  const board = q('.td-flow-board');
+  assert.ok(board, '没有白板 .td-flow-board');
+  const select = q('select.td-work-item');
+  assert.ok(select, '没有工作项选择器');
+  assert.equal(board?.contains(select as unknown as Node), false, '选择器仍在白板里');
+  assert.ok(q('.td-flow-picker')?.contains(select as unknown as Node), '选择器不在 .td-flow-picker 里');
+
+  // 定位当前与展开都在标题带内，白板里没有别的入口。
+  const head = q('.td-flow-head');
+  assert.ok(head, '没有标题带');
+  assert.ok(head?.querySelector('[data-action="locate-current"]'), '定位当前不在标题带内');
+  assert.ok(head?.querySelector('[data-action="toggle-history"]'), '展开不在标题带内');
+
+  // 环节卡在标题带下面，且带身份与状态两行；时刻用事件 at 解析出的本地 HH:MM。
+  const card = q('.td-flow-stages .td-stage');
+  assert.ok(card, '没有渲染出环节卡');
+  const identity = card?.querySelector('.td-stage-identity')?.textContent || '';
+  // 这一跳没有记 profile：说「未知」，不编候选名，也不借别处的模型。
+  assert.ok(identity.startsWith('执行者'), identity);
+  assert.ok(identity.includes('未知'), identity);
+  const state = card?.querySelector('.td-stage-state')?.textContent || '';
+  assert.ok(state.startsWith('进行中'), state);
+  assert.ok(/· \d{2}:\d{2}$/.test(state), '状态行缺事件时刻：' + state);
+});

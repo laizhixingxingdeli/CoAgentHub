@@ -22,7 +22,7 @@ const HISTORY_COLLAPSED_LABEL = '展开纵向历史';
 const HISTORY_EXPANDED_LABEL = '收起纵向历史';
 
 /**
- * 一条环节里的文字节点：徽章、标题、明细、状态**各占一个节点**。
+ * 一条环节里的文字节点：徽章、标题、身份、明细、状态**各占一个节点**。
  *
  * 合成一句之后，「平台 · 自动退回执行者 · 验证没过 · 已记录」会被读成一件事，
  * 而人需要分清「谁动的手」「干了什么」「跑完没有」。徽章只在投影给出非空值时
@@ -37,9 +37,38 @@ function stageBody(stage) {
 
   return badgeNode
     + '<h3 class="td-stage-title">' + esc(stage.title) + '</h3>'
+    + '<p class="td-stage-identity">' + esc(identityOf(stage)) + '</p>'
     + '<p class="td-stage-detail">' + esc(stage.detail) + '</p>'
-    // 时刻不在这里格式化：本层不取「现在」，也不猜时区；resume/at 原样留在投影里。
-    + '<p class="td-stage-state">' + esc(stage.stateText) + '</p>';
+    + '<p class="td-stage-state">' + esc(stateLine(stage)) + '</p>';
+}
+
+/** 身份为空就写「未知」：「这条环节没记候选」与「这里忘了画」不能长得一样。 */
+function identityOf(stage) {
+  const identity = stage.identity === undefined || stage.identity === null ? '' : String(stage.identity).trim();
+  return identity === '' ? '未知' : identity;
+}
+
+/** 事件的 ISO → 本地 HH:MM；解析不出来就空串（不编一个时间，也不拿此刻顶上）。 */
+function clockOf(at) {
+  const raw = at === undefined || at === null ? '' : String(at).trim();
+  if (raw === '') return '';
+  const when = new Date(raw);
+  if (Number.isNaN(when.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return pad(when.getHours()) + ':' + pad(when.getMinutes());
+}
+
+/**
+ * 状态行 = 状态词 + （事件自带 at 能解析时）那一跳发生的本地时刻。
+ *
+ * **时斜只从事件 at 来，本层不取「现在」**：取了新时刻，盯一眼页面就会把两小时前
+ * 结束的一跳读成刚刚才完；而且同一条数据两次渲染会得出不同的字。状态词不拿时间
+ * 代替 —— 「12:30」回答不了「跑完没有」。
+ */
+function stateLine(stage) {
+  const state = stage.stateText === undefined || stage.stateText === null ? '' : String(stage.stateText).trim();
+  const clock = clockOf(stage.at);
+  return clock === '' ? state : state + ' · ' + clock;
 }
 
 /** 当前项标记只认投影给的 currentKey，不按「最后一条」另算一次。 */
@@ -95,7 +124,28 @@ function flowTitle(flow) {
 }
 
 /**
+ * 已验收的芯片：**只画所选工作项前面紧邻的那一项**。
+ *
+ * 不把全部已验收项都铺出来（14 张验收单会把标题带挤成一条收不住的线），也不只看
+ * 列表里最后一项：与当前项不相邻的那张已验收单跟眼前这件事没有关系，拿出来只是噪声。
+ */
+function acceptedChip(flow) {
+  const index = flow.items.findIndex((item) => item.id === flow.selectedId);
+  if (index <= 0) return '';
+  const previous = flow.items[index - 1];
+  if (previous.status !== 'accepted') return '';
+  return '<span class="td-accepted" data-work-item="' + esc(previous.id) + '">'
+    + esc(previous.id + ' 已验收') + '</span>';
+}
+
+/**
  * 环节区 HTML。根节点 section.td-flow。
+ *
+ * 结构分三层，每一层的位置都是排版事实：
+ *   - `.td-flow-picker` 在白板**外面**：选哪张单是在选“看什么”，不是白板里的一条环节；
+ *     它留在标题带里会跟轮次、展开按钮抢同一行，而标题带只说一件事——这版内容是什么。
+ *   - `.td-flow-board` 是白底那块：标题带 + 步骤卡 + 纵向历史，三样才是一组。
+ *   - 标题带里的展开与定位都在带内靠右：它们是这一块的两个动作，不是环节本身。
  *
  * **只渲染已经发生过的环节**：投影里没有未来环节，这里也就不可能铺出「下一步」
  * 「待执行」的占位。占位和真跑过的环节长得一模一样，人分不出哪些是真的。
@@ -111,25 +161,26 @@ export function taskFlowHtml(view, activity, options) {
   const expanded = opts.expanded === true;
   const currentKey = flow.currentKey;
 
-  const accepted = flow.acceptedOthers.map((id) => (
-    '<span class="td-accepted" data-work-item="' + esc(id) + '">' + esc(id + ' 已验收') + '</span>'
-  )).join('');
-
   const cards = flow.visibleStages.map((stage) => stageCard(stage, currentKey)).join('');
   const rows = flow.stages.map((stage) => historyRow(stage, currentKey)).join('');
 
   return '<section class="td-flow"'
     + ' data-selected-work-item="' + esc(flow.selectedId === null ? '' : flow.selectedId) + '"'
     + ' data-expanded="' + (expanded ? 'true' : 'false') + '">'
-    + '<div class="td-flow-head">'
+    + '<div class="td-flow-picker">'
     + workItemSelect(flow)
-    + accepted
+    + '</div>'
+    + '<div class="td-flow-board">'
+    + '<div class="td-flow-head">'
     + '<span class="td-flow-title">' + esc(flowTitle(flow)) + '</span>'
+    + acceptedChip(flow)
+    + '<button type="button" class="td-locate" data-action="locate-current">定位当前</button>'
     + '<button type="button" class="td-history-toggle" data-action="toggle-history">'
     + esc(expanded ? HISTORY_EXPANDED_LABEL : HISTORY_COLLAPSED_LABEL) + '</button>'
     + '</div>'
     + '<div class="td-flow-stages">' + cards + '</div>'
     + '<ol class="td-history">' + rows + '</ol>'
+    + '</div>'
     + '</section>';
 }
 

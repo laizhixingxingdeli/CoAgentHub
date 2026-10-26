@@ -106,3 +106,63 @@ test('work_item.auto_redispatched 归平台：badge 是平台，title/detail 不
   assert.equal(said.includes('外部主控'), false);
   assert.equal(said.includes('验证没过'), true);
 });
+
+/**
+ * 实测反例（cui3-visual-truth.json）：coord-7 已经 attempt.ended，但那一条没有
+ * workItemId、也不在工作项的 attemptIds 里。先按工单过滤再判结束，就会把 13:28:26
+ * 已经结束的协调者一直写成「进行中」，并把最后一条已记录的环节标成当前项。
+ *
+ * 另一条反例：没有 attemptId 的 L3 记录也不是一次「还在跑的尝试」。
+ */
+test('已结束的协调者与无 attemptId 的记录都不是进行中，全结束时当前键为 null', () => {
+  const v = {
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    workItems: [
+      // 工单只记了执行者那一跳：协调者 coord-7 没有任何 workItem 侧登记。
+      { id: 'W-906', title: '选择环节事实概要', status: 'dispatched', attemptIds: ['W-906.exec-1'] },
+    ],
+  };
+  const events = [
+    {
+      kind: 'attempt.started',
+      attemptId: 'coord-7',
+      workItemId: 'W-906',
+      at: '2026-10-26T13:26:16.780Z',
+      data: {
+        kind: 'coordinator',
+        profile: { profileId: 'coordinator-grok-4.7', facts: [{ key: 'model', value: 'grok-4.7' }] },
+      },
+    },
+    // 结束事件没有 workItemId：它只能靠 attemptId 与全量扫描对上。
+    { kind: 'attempt.ended', attemptId: 'coord-7', at: '2026-10-26T13:28:26.651Z', data: { endedBy: 'structured_submit' } },
+    // 没有 attemptId 的 L3 记录：不是一次尝试。
+    { kind: 'review.recorded', workItemId: 'W-906', at: '2026-10-26T13:30:00.000Z', data: { verdict: 'send_back' } },
+    { kind: 'attempt.started', attemptId: 'W-906.exec-1', workItemId: 'W-906', at: '2026-10-26T13:40:00.000Z', data: { kind: 'executor' } },
+    { kind: 'attempt.ended', attemptId: 'W-906.exec-1', workItemId: 'W-906', at: '2026-10-26T13:50:00.000Z', data: { endedBy: 'structured_submit' } },
+  ];
+
+  const flow = projectWorkflow(v, events, { selectedWorkItemId: 'W-906' });
+
+  const coord = flow.stages.find((stage) => stage.attemptId === 'coord-7');
+  assert.ok(coord, '协调者那一跳不在环节里');
+  assert.equal(coord.stateText, '已记录');
+  // 结束原因原样带出，不编一句「正常结束」。
+  assert.equal(coord.resultText, 'structured_submit');
+  // 身份只来自本组 started 的 profile，缺的段写未知。
+  assert.ok(coord.identity.includes('coordinator-grok-4.7'), coord.identity);
+  assert.ok(coord.identity.includes('grok-4.7'), coord.identity);
+
+  const orphan = flow.stages.find((stage) => stage.attemptId === '');
+  assert.ok(orphan, '没有 attemptId 的记录没有单独成行');
+  assert.equal(orphan.stateText, '已记录');
+  assert.equal(orphan.stateText === '进行中', false);
+
+  const exec = flow.stages.find((stage) => stage.attemptId === 'W-906.exec-1');
+  assert.equal(exec.stateText, '已记录');
+  // 执行者身份同样只取自己那一跳的 profile：没有记就写未知，不借协调者的。
+  assert.equal(exec.identity.includes('coordinator-grok-4.7'), false);
+
+  // 全部结束：没有当前项，不能回退到最后一条已记录的环节。
+  assert.equal(flow.currentKey, null);
+});

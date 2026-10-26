@@ -15,7 +15,7 @@
  * 就成环；浏览器原生 ES module 下成环不报错，只会让某一侧拿到 undefined，然后
  * 整页白掉。也不 import application：前端只走 `/api/*` 投影出来的 view。
  */
-import { PLATFORM_ROLE_LABEL, modelLabel, narrateEvent, stageName } from './narrate.js';
+import { PLATFORM_ROLE_LABEL, modelLabel, narrateEvent, roleOfAttempt, stageName } from './narrate.js';
 
 const text = (value) => (value === undefined || value === null ? '' : String(value)).trim();
 const list = (value) => (Array.isArray(value) ? value : []);
@@ -165,6 +165,74 @@ function profileOf(events) {
 }
 
 /**
+ * 全量 activity 里哪些 attemptId 已经 attempt.ended，以及那一条的 data.endedBy。
+ *
+ * **必须扫完整 activity，不能扫过滤后的那一组**：协调者这一跳的 attempt.ended 常常
+ * 既没有 workItemId、也不在 workItem.attemptIds 里（实测 coord-7 就是这样），按
+ * belongsToItem 先过滤就会把它丢掉，于是界面把已经 13:28:26 结束的协调者一直写成
+ * 「进行中」并标成当前项。这里只回答「这一跳结束了没有」，不把事件并进任何一组。
+ *
+ * 值是 endedBy 原样字符串；事件里没写就存空串（不编一个「正常结束」）。
+ */
+function endedAttempts(activity) {
+  const ended = new Map();
+  for (const event of list(activity)) {
+    const id = text(event && event.attemptId);
+    if (id === '') continue;
+    if (text(event && event.kind) !== 'attempt.ended') continue;
+    const by = text(object(event && event.data) && event.data.endedBy);
+    const known = ended.get(id);
+    // 同一跳重复记了 ended（重放 / 补写）时补上先到的空串，别让空串盖掉真原因。
+    if (known === undefined || (known === '' && by !== '')) ended.set(id, by);
+  }
+  return ended;
+}
+
+/** profile.facts 里的一条不透明键值；没有就空串（missing 由调用方翻成「未知」）。 */
+function factOf(profile, key) {
+  const facts = list(object(profile) && profile.facts);
+  const hit = facts.find((fact) => fact && text(fact.key) === key);
+  return hit ? text(hit.value) : '';
+}
+
+/**
+ * 一条环节的身份行：谁 + 真实候选 + 真实 provider/model + 真实思考档。
+ *
+ * 判据只取本组 attempt.started 的 data.profile，**不查当前候选池、也不借别的
+ * Attempt 的 profile**：候选表会被改，查今天配置等于给昨天那一跳换一个模型；借用
+ * 相邻那一跳的 profile 更糟——它长得完全像事实，而这一跳根本没跑过它。
+ *
+ * 缺哪一段就写「未知」，既不省略也不编候选名：省略会让人以为「这一跳没有候选」
+ * 与「界面没显示」是两回事，编一个名字则会去核对一个不存在的候选。
+ */
+function identityText(roleLabel, profile) {
+  const p = object(profile);
+  const profileId = text(p && p.profileId);
+  const provider = factOf(p, 'provider');
+  const model = factOf(p, 'model');
+  const reasoning = factOf(p, 'reasoning');
+  // provider/model 是一段：两个都没记就只写一个未知，只缺一半时把缺的那半写成未知——
+  // 写成“grok-4.7”会让人以为已确认的是 provider 也记过了。
+  const pair = provider === '' && model === ''
+    ? '未知'
+    : (provider || '未知') + '/' + (model || '未知');
+  return [roleLabel, profileId || '未知', pair, reasoning || '未知'].join(' · ');
+}
+
+/**
+ * 这一跳的结束依据：本组里那条 attempt.ended 的 endedBy，没有就用全局扫到的那条。
+ *
+ * 返回空串表示「结束了但没写原因」，与「还没结束」由调用方区分开。
+ */
+function endedByOf(events, attemptId, endedIds) {
+  const local = events.find((event) => text(event && event.kind) === 'attempt.ended');
+  const localBy = text(object(local && local.data) && local.data.endedBy);
+  if (localBy !== '') return localBy;
+  const known = attemptId === '' ? undefined : endedIds.get(attemptId);
+  return text(known);
+}
+
+/**
  * 一组事件 → 一条环节。
  *
  * 三种角色互斥，优先级是「谁最有资格说这条环节是什么」：
@@ -173,21 +241,36 @@ function profileOf(events) {
  *   2. 执行者（attemptId 带 `.exec-`，或发牌时 data.kind 就是 executor）。
  *   3. 协调者。direct 协作下没有 L2，主控在平台看不见的外面。
  */
-function projectStage(group, ctx, direct) {
+function projectStage(group, ctx, direct, endedIds) {
   const events = group.events;
   const first = events[0];
-  const ended = events.some((event) => text(event && event.kind) === 'attempt.ended');
   const started = events.find((event) => text(event && event.kind) === 'attempt.started');
   const startedData = object(started && started.data);
   const auto = events.find((event) => text(event && event.kind) === 'work_item.auto_redispatched');
+  const profile = profileOf(events);
+  const isOrphan = group.attemptId === '';
 
+  // 结束与否看两处：本组里有 attempt.ended，或**全量** activity 里这一跳已经 ended。
+  // 只看本组会把「ended 事件丢了 workItemId」的协调者一直写成进行中；只看全局又会
+  // 把没有任何 attemptId 的零散动作当成「还在跑的一跳」——那种记录根本不是一跳。
+  const ended = isOrphan
+    ? true
+    : events.some((event) => text(event && event.kind) === 'attempt.ended')
+      || endedIds.has(group.attemptId);
+  const endedBy = endedByOf(events, group.attemptId, endedIds);
+
+  const stateText = ended ? '已记录' : '进行中';
   const base = {
     key: group.key,
     attemptId: group.attemptId,
     // at 原样给出：格式化是渲染层的事，这里换一种写法就会与事件明细里的时刻对不上。
     at: first && first.at !== undefined && first.at !== null ? first.at : '',
-    // 没有 attempt.ended 就是还在跑。不能反过来把「旧那次被打回」写成当前这次在进行中。
-    stateText: ended ? '已记录' : '进行中',
+    // 没有 attempt.ended 的**真实 Attempt** 才是在跑。空 attemptId 的记录一律
+    // 「已记录」：它不是一次尝试，写成进行中等于让界面说某个东西正在跑，而其实没有。
+    stateText,
+    // 有结束原因就原样带上（structured_submit 这类机器值由渲染层决定怎么说），
+    // 没写原因就退回状态词——编一个「正常结束」会把「没记原因」显示成「记了原因」。
+    resultText: endedBy !== '' ? endedBy : stateText,
   };
 
   if (auto) {
@@ -201,6 +284,8 @@ function projectStage(group, ctx, direct) {
       title: told.action,
       detail: told.detail,
       model: null,
+      // 平台自己动的手没有候选也没有模型，这一行的身份就是平台。
+      identity: PLATFORM_ROLE_LABEL,
     };
   }
 
@@ -218,7 +303,8 @@ function projectStage(group, ctx, direct) {
       badge: null,
       title: matched ? `执行第 ${Number(matched[1])} 次` : '执行',
       detail: '',
-      model: modelLabel(profileOf(events)),
+      model: modelLabel(profile),
+      identity: identityText('执行者', profile),
     };
   }
 
@@ -231,25 +317,33 @@ function projectStage(group, ctx, direct) {
     title: direct ? '外部主控' : stageName(events, ctx),
     detail: '',
     // direct 时不许编一个 L2 profile：平台根本没看见主控用的模型。
-    model: direct ? null : modelLabel(profileOf(events)),
+    model: direct ? null : modelLabel(profile),
+    // 角色段跟 title 用同一个判据（narrate 的 roleOfAttempt 形状规则）：
+    // 没有 attemptId 的是 L3 自己的动作，写成「协调者」会让这一行的标题说检视者、
+    // 身份说协调者，两个字段相互矛盾。
+    // direct 且没记下 profile：说「外部主控 · 未知」，绝不编一个 L2 模型名。
+    identity: direct
+      ? (object(profile) === null ? '外部主控 · 未知' : identityText('外部主控', profile))
+      : identityText(roleOfAttempt(group.attemptId) === 'reviewer' ? 'L3 检视者' : '协调者', profile),
   };
 }
 
 /**
- * 当前环节的 key：从后往前找第一条还没结束的；全都结束了就是最后一条。
+ * 当前环节的 key：最后一个**真的还在跑**的 attempt 组；没有就 null。
  *
- * **只在 attempt 组里找，orphan 行不参与**：orphan 行是单独一条事件，不是一次
- * 「还在跑的尝试」。让它当当前项，界面会说某个东西正在进行中，而实际上什么都没跑
- * （典型形状：收尾的 auto_redispatched 挂在最后）。没有 attempt 组时回 null，
- * 由调用方说「还没有环节」。
+ * 两条都不能放宽：
+ *   - 只看 attempt 组，orphan 行不参与——那是一条零散事件，不是「还在跑的尝试」，
+ *     让它当当前项，界面会说某个东西正在进行中，而其实什么都没跑。
+ *   - 全部已结束就回 null，**不回退到「最后一条已结束」**：那正是实测到的错觉——
+ *     coord-7 在 13:28:26 已经 ended，界面仍把它标成当前并写「进行中」。没有当前项
+ *     时由渲染层什么都不标，而不是硬指一条已经跑完的。
  */
 function currentStageKey(stages) {
-  const attempts = stages.filter((stage) => stage.attemptId !== '');
-  if (attempts.length === 0) return null;
-  for (let i = attempts.length - 1; i >= 0; i -= 1) {
-    if (attempts[i].stateText !== '已记录') return attempts[i].key;
+  for (let i = stages.length - 1; i >= 0; i -= 1) {
+    if (stages[i].attemptId === '') continue;
+    if (stages[i].stateText === '进行中') return stages[i].key;
   }
-  return attempts[attempts.length - 1].key;
+  return null;
 }
 
 /* ============================ 投影 ============================ */
@@ -285,10 +379,14 @@ export function projectWorkflow(view, activity, options) {
   const executionCount = selected ? list(selected.attemptIds).length : 0;
   const direct = text(v.coordinationMode) === 'direct';
 
+  // 结束事实先按**全量** activity 扫一遍，再过滤分组：end 事件常常挂在没有
+  // workItemId、也不在 attemptIds 的那一侧，先过滤就等于看不见它已经结束。
+  const endedIds = endedAttempts(events);
+
   const stages = selectedId === null
     ? []
     : groupEvents(events.filter((event) => belongsToItem(event, selectedId, attemptIds)))
-      .map((group) => projectStage(group, { workItems: items }, direct));
+      .map((group) => projectStage(group, { workItems: items }, direct, endedIds));
 
   return {
     items,

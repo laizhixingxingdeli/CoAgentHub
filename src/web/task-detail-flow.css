@@ -14,19 +14,50 @@
  * 忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
  */
 
+/* 根只管纵向排列：白底与描边在 .td-flow-board 上，因为选择器在白板**外面**。
+ * 把框画在根上，选择器就落进了白板里，而它回答的是“看那张工单”，不是一条环节。 */
 .td-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 选择器那一排：白板之上、单独一行。不限定 300px 就会被选项文字拉成整行宽，
+ * 看起来像这一块的主标题而不是“换个工单看看”。 */
+.td-flow .td-flow-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.td-flow .td-work-item {
+  width: 300px;
+  height: 42px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--color-ink);
+  background: var(--color-white);
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+}
+
+/* 白板：标题带 + 步骤卡 + 纵向历史三样合成一块，overflow: clip 让圆角包住底色。 */
+.td-flow .td-flow-board {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--color-line);
   border-radius: 12px;
   background: var(--color-white);
-  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-  color: var(--color-ink);
   overflow: clip;
 }
 
-/* 标题带：工作项选择、已验收标记、轮次与次数、展开按钮在同一行。
- * 底色用 nav 令牌，让它与下面的步骤卡明显分层——它与环节不是一组。 */
+/* 标题带：轮次与次数、已验收标记、定位当前、展开。底色用 nav 令牌，
+ * 让它与下面的步骤卡明显分层——它与环节不是一组。
+ * 定位与展开靠 margin-left: auto 推到右侧：它们是这一带的附属动作，
+ * 摆在中间会跟标题抢第一眼。 */
 .td-flow .td-flow-head {
   display: flex;
   align-items: center;
@@ -36,17 +67,7 @@
   background: var(--color-nav);
 }
 
-.td-flow .td-work-item {
-  height: 28px;
-  font-family: inherit;
-  font-size: 14px;
-  color: var(--color-ink);
-  background: var(--color-white);
-  border: 1px solid var(--color-line);
-  border-radius: 5px;
-}
-
-/* 已验收的其它工作项只是标记，不是可选项：做成绿色文字而不是按钮，
+/* 已验收的相邻工作项只是标记，不是可选项：做成绿色文字而不是按钮，
  * 免得看起来像能点去切换。 */
 .td-flow .td-accepted {
   font-size: 13px;
@@ -60,10 +81,11 @@
   line-height: 22px;
 }
 
-/* 展开按钮靠右：它是这一带的附属动作，摆在中间会跟标题抢第一眼。 */
+/* 两个动作都是白底描边小按钮。定位当前与展开只差文案，样式必须一致：
+ * 长得不一样，人就会以为其中一个更“重要”而不敢点。 */
+.td-flow .td-locate,
 .td-flow .td-history-toggle {
-  margin-left: auto;
-  height: 36px;
+  height: 32px;
   padding: 0 12px;
   border: 1px solid var(--color-line);
   border-radius: 5px;
@@ -73,6 +95,10 @@
   line-height: 22px;
   color: var(--color-ink);
   cursor: pointer;
+}
+
+.td-flow .td-locate {
+  margin-left: auto;
 }
 
 /* 收起时的一排步骤卡。overflow-clip + 不换行：卡片宽度固定，超出的部分由
@@ -132,6 +158,18 @@
   overflow: hidden;
 }
 
+/* 身份行：这一跳是谁、用哪条候选、哪个模型。比标题小一号、比状态深一阶：
+ * 它回答“谁在干”，而人第一眼要的是“发生了什么”。 */
+.td-flow .td-stage-identity {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .td-flow .td-stage-state {
   margin: 0;
   font-size: 13px;
@@ -152,6 +190,10 @@
   margin: 0;
   padding: 0 0 12px;
   list-style: none;
+  /* 长历史自家滚：整页跟着历史长起来的话，实时输出与契约会被推到看不见的地方，
+   * 而人想比对的恰恰是“历史里那条”与“外面的现在”。 */
+  max-height: 420px;
+  overflow-y: auto;
 }
 
 .td-flow .td-history-row {
