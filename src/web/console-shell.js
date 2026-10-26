@@ -52,15 +52,17 @@ export function navKeyForRoute(name) {
 /**
  * 路由 → 项目控件的状态。
  *
- * 资源池是全局配置，不做项目私池：在资源页摆一个项目下拉，等于暗示「选个项目
- * 就只配它的资源」，而平台里没有这回事，选完也不会有什么不同。
+ * 项目控件在任务页和资源页都可见，默认「全部项目」。曾经在资源页返回
+ * `visible: false`，理由是「摆下拉等于暗示资源按项目存」；但池本来就没有项目
+ * 私池这回事，藏掉控件反而让人以为资源页没有项目这个维度（Figma 2:214 顶栏
+ * 也是有「项目：全部项目」的）。控件只说「你在看哪个项目的任务」，不改变池的
+ * 读取范围——`refresh` 无论在哪一页都只请求全局 `/api/projects`。
  *
- * 任务详情页的所属项目只有任务页自己拿得到（外壳不读业务数据），所以这里显示
+ * 任务列表页的当前项目只有它自己拿得到（外壳不读业务数据），所以其余页面显示
  * 「全部项目」；选中任一项目就跳到它的任务列表——换项目本来就是要换上下文。
  */
 export function projectSelectState(route) {
   const name = route && route.name;
-  if (POOL_ROUTES.has(name)) return { visible: false, value: ALL_PROJECTS };
   if (name === 'projects') return { visible: true, value: String((route && route.projectId) || ALL_PROJECTS) };
   return { visible: true, value: ALL_PROJECTS };
 }

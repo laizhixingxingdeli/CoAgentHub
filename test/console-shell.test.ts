@@ -6,7 +6,7 @@
  *   1. **外壳说的话与算的格。** 顶栏那句同步状态：写死一个时刻最省事，但那句话
  *      从此和平台无关；一次都没读成功时还显示「服务正常」，等于告诉人一切正常。
  *      一级入口与项目下拉同理——高亮一个不属于任何入口的页面，人就会以为自己在
- *      看任务列表；在资源页摆项目下拉，就是暗示"资源可以只属于某个项目"。
+ *      看任务列表；资源页藏掉项目下拉，人又会以为资源页没有项目这个维度。
  *   2. **请求的生命周期。** 换页时旧响应晚到会把项目名与同步时刻写进**新**页面，
  *      而屏幕上没有任何报错，只是顶栏显示的是上一页的事实。
  *
@@ -124,8 +124,9 @@ describe('外壳说什么、算哪一格', () => {
       assert.equal(navKeyForRoute(name), '', `${name} 不该占一级入口`);
     }
 
-    // 资源池是全局配置，不做项目私池：摆一个项目下拉就是暗示它只属于某个项目。
-    assert.deepEqual(projectSelectState({ name: 'pool' }), { visible: false, value: ALL_PROJECTS });
+    // 资源页的项目控件和任务页一样可见（Figma 2:214 顶栏就是「项目：全部项目」）。
+    // 池没有项目私池这回事，所以这里只看控件：它不改变池的读取范围。
+    assert.deepEqual(projectSelectState({ name: 'pool' }), { visible: true, value: ALL_PROJECTS });
     assert.deepEqual(projectSelectState({ name: 'projects', projectId: 'p1' }), { visible: true, value: 'p1' });
     // 任务详情页的所属项目只有任务页拿得到（外壳不读业务数据），所以显示「全部项目」。
     assert.deepEqual(projectSelectState({ name: 'mission', missionId: 'M1' }), {
@@ -174,7 +175,11 @@ describe('外壳的请求生命周期（真 DOM）', () => {
     // 第二轮：让第一次读取一直挂着，在它回来之前换页。旧响应晚到会把上一页的
     // 项目名写进新页面，而屏幕上没有任何报错。
     const pending: { resolve: (value: unknown) => void }[] = [];
-    const resolveLater = () => new Promise((resolve) => pending.push({ resolve }));
+    const paths: string[] = [];
+    const resolveLater = (path: string) => {
+      paths.push(path);
+      return new Promise((resolve) => pending.push({ resolve }));
+    };
     const second = mountShell(resolveLater);
     const first = second.shell.update({ name: 'projects', projectId: 'p1' });
     const swapped = second.shell.update({ name: 'pool' });
@@ -194,9 +199,11 @@ describe('外壳的请求生命周期（真 DOM）', () => {
       [ALL_PROJECTS, 'p1', 'p2'],
       '第一轮的 stale-project 晚到，绝不能写进下拉',
     );
-    // 资源页是全局配置：不显示项目下拉，也不把 p1 留在选中态。
-    assert.equal(second.document.getElementById('cs-project')!.hidden, true);
+    // 资源页也显示项目控件，且不把上一页的 p1 留在选中态；选中的项目走的是任务页。
+    assert.equal(second.document.getElementById('cs-project')!.hidden, false);
     assert.equal((next as unknown as { value: string }).value, ALL_PROJECTS);
+    // 池的读取仍是全局的：换到资源页后的请求不带任何项目维度。
+    assert.ok(paths.every((path) => !path.includes('projectId')), `池请求不该带项目：${paths.join(', ')}`);
     second.shell.dispose();
   });
 });

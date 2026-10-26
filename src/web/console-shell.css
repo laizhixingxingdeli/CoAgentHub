@@ -32,7 +32,7 @@
 
 /* hidden 属性在作者样式给了 display 之后会失效（UA 的 [hidden] 优先级最低）：
  * .cs-project 是 display:flex，会把 UA 的 [hidden] { display:none } 盖掉，
- * 于是"资源页不显示项目下拉"变成"它还在那儿"。
+ * 于是"收起"变成"它还在那儿"。
  *
  * 只点名外壳自己的两个锚点，**不**写全局 [hidden]：业务页面（任务页的侧栏面板、
  * 环节折叠）也在用 hidden，一条全局 !important 会把它们各自的显隐规则一起改掉。 */
