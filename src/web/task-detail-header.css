@@ -1,0 +1,159 @@
+/*
+ * 任务详情页头（画板 .impeccable/reference/figma-2-140.txt 的 2:140 页头与页签）。
+ *
+ * 为什么单开一个文件：页头的层级（身份 → 状态与附标 → 40px 事实带 → 页签）和
+ * 40px 这个数是这一块的排版事实。挤进全站样式里，任何一处手改都会顺带改到
+ * 任务总览和资源页，而「这一行高了 4px」在屏幕上不报错，只是越来越不像画板。
+ *
+ * 为什么全部挂在 .td-header 作用域下：这份文件与旧业务样式（ui.css 的 .card、
+ * .chip）同时在线，一条不限定作用域的 `.td-facts { height: 40px }` 会把别人的
+ * 信息行也压成 40px。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，
+ * 改一处忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ */
+
+.td-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  background: var(--color-white);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 编号用等宽：同一串编号在页头、总览行与确认弹窗里要能按字符对齐比较，
+ * 比例字体下同一个字符在不同位置宽窄不同，肉眼对不齐也数不清位数。等宽族
+ * 在本仓是功能性的，不是装饰。 */
+.td-header .td-mission-id {
+  margin: 0;
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 28px;
+  color: var(--color-ink);
+  /* 不省略：页头是身份的最后一道确认，截断过的编号复制出去对不上任何一条 Mission。 */
+  word-break: break-all;
+}
+
+.td-header .td-intent {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-muted);
+  /* 收起时两行；展开由 data-expanded 放开。行高 22px 与两行 44px 保持画板值。 */
+  max-height: 44px;
+  overflow: hidden;
+}
+
+.td-header .td-intent[data-expanded='true'] {
+  max-height: none;
+  overflow: visible;
+}
+
+/* 展开按钮做成文字链接形态：它是 intent 的附属动作，长成一个按钮会跟页签抢
+ * 视觉权重，人先看到的是「展开」而不是任务本身。 */
+.td-header .td-intent-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+.td-header .td-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.td-header .td-status-text {
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* 附标与状态词分两个节点：合成一句之后，「执行中 · 直接主控 · 补修」会被读成
+ * 一个不存在的第七种状态。这里给附标独立的小一号字与灰阶，视觉上也分开。 */
+.td-header .td-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+.td-header .td-owner {
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+.td-header .td-recovery {
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+/* ===== 40px 任务事实带 ===== */
+
+/* 单行四格：保障 / 协作 / 费用 / 时间。高度是画板值 40px，nav 底色与 16px 内缩进
+ * 让它和上面的身份、下面的页签明显分层——它与流程步骤不是一组。 */
+.td-header .td-facts {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--color-nav);
+  border: 1px solid var(--color-line);
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+}
+
+/* 时间右对齐：它是这一行的锚点，混在中间会让人以为它和费用是一组。
+ * margin-left:auto 而不是给前一格固定宽度，改文案时不用再调宽度。 */
+.td-header .td-time {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+/* ===== 页签 ===== */
+
+.td-header .td-tabs {
+  display: flex;
+  gap: 20px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.td-header .td-tab {
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+/* 选中态只靠下边框 + 墨色字：换成底色块会和事实带的 nav 底撞在一起，
+ * 人分不清哪一块是「当前页签」。 */
+.td-header .td-tab[aria-selected='true'] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-ink);
+}
