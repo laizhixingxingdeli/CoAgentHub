@@ -20,6 +20,7 @@ import { Window } from 'happy-dom';
 import { bindTaskHeader, taskHeaderHtml } from '../src/web/task-detail-header-view.js';
 
 const CSS = readFileSync(new URL('../src/web/task-detail-header.css', import.meta.url), 'utf8');
+const PAGE_CSS = readFileSync(new URL('../src/web/task-detail-page.css', import.meta.url), 'utf8');
 
 /** 一条 direct、还没结账的 Mission：契约里「不虚构 L2 模型或费用」说的就是它。 */
 function directView(): Record<string, unknown> {
@@ -143,4 +144,32 @@ test('点击展开 intent 并切页签；已完成残留 waitInfo 仍是已结�
   assert.equal(cost.includes('$2.11'), true);
   assert.equal(cost.includes('上限 $10.00'), true);
   assert.equal(cost.includes('≈'), false);
+});
+
+/** 取某条选择器的声明块正文；找不到就是空串，后面的断言会直接说出来。 */
+function rule(styles: string, selector: string): string {
+  const at = styles.indexOf(selector + ' {');
+  if (at < 0) return '';
+  const end = styles.indexOf('}', at);
+  return end < 0 ? '' : styles.slice(at + selector.length + 1, end);
+}
+
+test('页头有可用的返回链接，页头不再是内缩圆角白卡，页内不再自加 padding', () => {
+  const { q } = mount(directView());
+
+  // 返回链接必须真的指向任务总览：做成不跳转的按钮，人点了留在原地还以为坏了。
+  const back = q('a.td-back');
+  assert.ok(back, '页头没有 a.td-back 返回链接');
+  assert.equal(back.textContent, '返回任务列表');
+  assert.equal(back.getAttribute('href'), '#/projects');
+
+  // 页头自己不再画一张带内缩与圆角的卡：否则首字从画板 x224 内缩到 x256，
+  // 页签外面还多一层卡套。
+  const header = rule(CSS, '.td-header');
+  assert.ok(header.length > 0, '.td-header 规则不见了');
+  assert.equal(/border-radius/.test(header) && /padding:\s*16px/.test(header), false);
+  assert.ok(/padding:\s*0;/.test(header), '.td-header 没有归零 padding');
+
+  // 页内不自加 padding：外壳已有 40px gutter，叠一层就偏离画板列位置。
+  assert.ok(/padding:\s*0;/.test(rule(PAGE_CSS, '.td-page')), '.td-page 没有把 padding 归零');
 });

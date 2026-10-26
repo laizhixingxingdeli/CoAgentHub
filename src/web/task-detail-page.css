@@ -21,7 +21,9 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 16px;
+  /* 页内不再自加 16px 内缩：外壳 .cs-shell .main 已经给了左右 40px gutter，内容列
+   * 起点就是画板 x224。这里再叠一层，首字会偏到 x256，顶部也多出一块空白。 */
+  padding: 0;
   background: var(--color-paper);
   color: var(--color-ink);
   font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;

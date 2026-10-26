@@ -13,16 +13,29 @@
  * 改一处忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
  */
 
+/* 页头本身不画卡：画板 2:140 里它是页面上的一段留白内容，左边界就是内容列起点
+ * （外壳 .cs-shell .main 已有 40px gutter）。这里再加 padding + 圆角白底，首字会
+ * 从画板的 x224 内缩到 x256，且多出一层卡套在页签外面，人也读不出它是不是可点的容器。 */
 .td-header {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 16px;
-  border: 1px solid var(--color-line);
-  border-radius: 6px;
-  background: var(--color-white);
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
   font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   color: var(--color-ink);
+}
+
+/* 返回链接是页头最上一行（画板节点 41:419），字号 14/22，只占自己的宽度：
+ * 撑满整行的链接会让右侧空白也变成可点区域。 */
+.td-header .td-back {
+  align-self: flex-start;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-accent);
+  text-decoration: none;
 }
 
 /* 编号用等宽：同一串编号在页头、总览行与确认弹窗里要能按字符对齐比较，
@@ -39,12 +52,23 @@
   word-break: break-all;
 }
 
+/* intent 与展开按钮同行（画板 41:421 / 41:422）：按钮单独占一行会把身份块撑成
+ * 三行，短 intent 与长 intent 的页头高度也不一致，逐张截图看起来像两个页面。 */
+.td-header .td-intent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 16px;
+}
+
 .td-header .td-intent {
   margin: 0;
   font-size: 14px;
   line-height: 22px;
   color: var(--color-muted);
-  /* 收起时两行；展开由 data-expanded 放开。行高 22px 与两行 44px 保持画板值。 */
+  /* 收起时稳占两行（22 × 2 = 44）：只写 max-height 时短 intent 会把身份块压缩一行，
+   * 页头高度随文案变，截图逐张比对时对不上画板。展开由 data-expanded 放开。 */
+  min-height: 44px;
   max-height: 44px;
   overflow: hidden;
 }
@@ -57,7 +81,8 @@
 /* 展开按钮做成文字链接形态：它是 intent 的附属动作，长成一个按钮会跟页签抢
  * 视觉权重，人先看到的是「展开」而不是任务本身。 */
 .td-header .td-intent-toggle {
-  align-self: flex-start;
+  justify-self: end;
+  align-self: start;
   padding: 0;
   border: 0;
   background: none;
@@ -68,11 +93,15 @@
   cursor: pointer;
 }
 
+/* 分三区且不换行：状态 / 附标 / 处理人与恢复方式（画板 41:427 与 41:428 之间
+ * 有明显列位）。允许换行时一长句处理人就被挤到下一行，状态与附标跟着散开，
+ * 这一行读起来就是一段短文本而不是三个含义。处理人与恢复方式仍占两个节点，
+ * 同处第三区：合成一句话就分不清「谁该动」和「会不会自己好」。 */
 .td-header .td-status-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: max-content max-content max-content minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  column-gap: 16px;
   font-size: 14px;
   line-height: 22px;
 }
@@ -131,14 +160,18 @@
 
 /* ===== 页签 ===== */
 
+/* 页签带高 40px、间距 20px（画板 41:434 起三个 Console/Tab 的 top 同为 294）。 */
 .td-header .td-tabs {
   display: flex;
+  align-items: center;
   gap: 20px;
+  height: 40px;
   border-bottom: 1px solid var(--color-line);
 }
 
 .td-header .td-tab {
   height: 40px;
+  flex: 0 0 auto;
   padding: 0;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -149,6 +182,21 @@
   line-height: 22px;
   color: var(--color-muted);
   cursor: pointer;
+}
+
+/* 页签宽度按画板定值（41:434 = 110、41:436 = 150、41:438 = 100）、文字居中：
+ * 交给内容自适应时，「契约」这种两个字会比「交付与验证」窄一截，三个页签的
+ * 起始位置与画板对不上，选中下划线也跟着长短不一。 */
+.td-header .td-tab[data-tab='workflow'] {
+  width: 110px;
+}
+
+.td-header .td-tab[data-tab='delivery'] {
+  width: 150px;
+}
+
+.td-header .td-tab[data-tab='contract'] {
+  width: 100px;
 }
 
 /* 选中态只靠下边框 + 墨色字：换成底色块会和事实带的 nav 底撞在一起，

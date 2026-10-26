@@ -64,14 +64,20 @@ export function taskHeaderHtml(view, options) {
     + esc(item.label) + '</button>'
   )).join('');
 
+  // 返回链接是页头最上面一行（画板 2:140 节点 41:419）。做成真链接而不是按钮：
+  // 按钮要靠本页的点击处理器改 hash，处理器漏绑时它就是个不动的装饰。
   return '<section class="td-header" data-mission-id="' + esc(missionId)
     + '" data-tab="' + esc(tab) + '">'
+    + '<a class="td-back" href="#/projects">返回任务列表</a>'
     + '<div class="td-identity">'
     + '<h1 class="td-mission-id">' + esc(missionId) + '</h1>'
+    // intent 与展开按钮同一行：按钮单独占一行会把身份块撑成三行，页头比页签还高。
+    + '<div class="td-intent-row">'
     + '<p class="td-intent" data-expanded="' + (intentExpanded ? 'true' : 'false') + '">'
     + esc(header.intent) + '</p>'
     + '<button type="button" class="td-intent-toggle" data-action="toggle-intent">'
     + esc(intentExpanded ? INTENT_EXPANDED_LABEL : INTENT_COLLAPSED_LABEL) + '</button>'
+    + '</div>'
     + '</div>'
     + '<div class="td-status-row">'
     + '<span class="td-status-text">' + esc(header.statusText) + '</span>'
