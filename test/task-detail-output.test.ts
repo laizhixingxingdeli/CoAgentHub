@@ -1,0 +1,88 @@
+/**
+ * 当前输出与历史 Attempt 的绑定投影（src/web/task-detail-output.js）。
+ *
+ * 只写两条：这一层最容易出的错都不报错也不崩——选中历史时把实时行也换掉、历史正文
+ * 缺失时借实时行或任务累计用量顶上、拿任务级统计冒充单跳花费、已结束的环节还被说成
+ * 「疑似停滞」。每条断言对应工单里的一句验收。
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { LEASE_TOLERANCE_MS, projectOutputBinding } from '../src/web/task-detail-output.js';
+
+test('当前实时输出与历史选择各认各的 Attempt，历史缺失正文为未知且不借别的账', () => {
+  const binding = projectOutputBinding({
+    currentAttemptId: 'W-1.exec-2',
+    selectedAttemptId: 'W-1.exec-1',
+    nowIso: '2026-10-26T10:00:00.000Z',
+    currentAttempt: {
+      attemptId: 'W-1.exec-2',
+      status: 'in_progress',
+      heartbeatAt: '2026-10-26T09:59:50.000Z',
+    },
+    // 选中的历史这一跳详情没取到：正文与用量都只能「未知」。
+    selectedAttempt: null,
+    liveChunks: [
+      { attemptId: 'W-1.exec-2', text: '当前' },
+      { attemptId: 'W-1.exec-1', text: '旧行' },
+    ],
+    // 任务累计用量不能拿来冒充单跳用量。
+    missionUsage: { cost: 9, quality: 'reported' },
+    // 任务级的改动清单也不能挂到某一跳名下。
+    missionDiff: ['src/a.js'],
+    executionResult: { output: '任务级输出' },
+  });
+
+  // 选中历史不改变「实时输出属于谁」。
+  assert.equal(binding.liveAttemptId, 'W-1.exec-2');
+  assert.equal(binding.historyAttemptId, 'W-1.exec-1');
+  // 只拼当前这一跳的行：上一跳的行混进来会被读成这一跳正在跑的内容。
+  assert.equal(binding.liveText, '当前');
+
+  assert.equal(binding.historyOutput.output, null);
+  assert.ok(binding.historyOutput.note.includes('未知'));
+  assert.equal(binding.historyUsage, null);
+  // 没有按 Attempt 的文件清单就不给清单，不抄 missionDiff / executionResult。
+  assert.equal(binding.historyFiles.files, null);
+
+  // 容忍窗口与 reconcile 的租约一致，且是具名常量。
+  assert.equal(LEASE_TOLERANCE_MS, 90000);
+});
+
+test('已结束不谈停滞；进行中超过容忍窗口或没有心跳才算疑似停滞', () => {
+  const base = {
+    currentAttemptId: 'W-1.exec-3',
+    selectedAttemptId: 'W-1.exec-3',
+    nowIso: '2026-10-26T10:00:00.000Z',
+    liveChunks: [],
+  };
+  const beat = (status, heartbeatAt) => projectOutputBinding({
+    ...base,
+    currentAttempt: { attemptId: 'W-1.exec-3', status, heartbeatAt },
+  }).heartbeat;
+
+  // 已结束：心跳再旧也「不适用」，读成停滞会让人去重启一个已经交回结果的环节。
+  const done = beat('succeeded', '2026-10-26T08:00:00.000Z');
+  assert.equal(done.applicable, false);
+  assert.equal(done.stalled, false);
+  assert.equal(done.stateText, '心跳不适用');
+
+  // 进行中、心跳早 100 秒（> 90000ms）：疑似停滞。
+  const stale = beat('in_progress', '2026-10-26T09:58:20.000Z');
+  assert.equal(stale.applicable, true);
+  assert.equal(stale.stalled, true);
+  assert.equal(stale.stateText, '疑似停滞');
+
+  // 进行中、心跳早 10 秒：不算停滞，且原样带出 ISO。
+  const fresh = beat('in_progress', '2026-10-26T09:59:50.000Z');
+  assert.equal(fresh.applicable, true);
+  assert.equal(fresh.stalled, false);
+  assert.ok(fresh.stateText.includes('2026-10-26T09:59:50.000Z'));
+
+  // 进行中但没有心跳：和 kernel 的 isAbandoned 一样算没人管。
+  const missing = beat('in_progress', null);
+  assert.equal(missing.applicable, true);
+  assert.equal(missing.stalled, true);
+  assert.ok(missing.stateText.includes('疑似停滞'));
+});
