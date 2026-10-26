@@ -43,13 +43,8 @@ const STATE_TEXT = Object.freeze({
   unknown: '未知',
 });
 
-/** 逐条验收结论也只用上面那七个词，不另造一套「未验证」「不适用」混着用。 */
-const ACCEPTANCE_WORD = Object.freeze({
-  pass: '通过',
-  fail: '未通过',
-  unverified: '未知',
-  not_applicable: '不适用',
-});
+/** 时间与缺失字段统一说「未知」：空串在界面上会被读成「这一层没有这一栏」。 */
+const UNKNOWN = '未知';
 
 function layer(key, title, state, detail, attribution, extra) {
   return {
@@ -78,13 +73,6 @@ function acceptanceRowsOf(review) {
     const r = object(row) ?? {};
     return { criterion: text(r.criterion), status: text(r.status) };
   });
-}
-
-function withAcceptanceLines(base, rows) {
-  if (rows === null) return base;
-  if (rows.length === 0) return `${base}；逐条结论为空`;
-  const lines = rows.map((row) => `${ACCEPTANCE_WORD[row.status] ?? '未知'}：${row.criterion}`);
-  return `${base}；${lines.join('；')}`;
 }
 
 /* ============================ 1. 机器验证 ============================ */
@@ -162,11 +150,13 @@ function roleLayer(coordinationMode, item, currentReturned) {
   const rows = acceptanceRowsOf(review);
   const extra = rows === null ? undefined : { acceptanceResults: rows };
 
+  // 逐条结论只留在 acceptanceResults，由视图画一次。曾把逐条拼进 detail，于是同一句
+  // 验收在明细和列表里各出现一遍，读的人会以为那是两条不同的结论。
   if (status === 'accepted') {
-    return layer('role', title, 'passed', withAcceptanceLines('已交回，验收通过', rows), '当前提交的验收记录', extra);
+    return layer('role', title, 'passed', '已交回，验收通过', '当前提交的验收记录', extra);
   }
   if (status === 'rejected') {
-    return layer('role', title, 'failed', withAcceptanceLines('已交回，验收未通过', rows), '当前提交的验收记录', extra);
+    return layer('role', title, 'failed', '已交回，验收未通过', '当前提交的验收记录', extra);
   }
   // submitted：交回来了但还没结论。lastReview / validationReport 可能还留着上一轮的值，
   // 拿它们写成「通过」就是替还没做的验收先签字。
@@ -198,15 +188,36 @@ function independentLayer(view) {
 
 /* ============================ 4. 检视者终审 ============================ */
 
+/**
+ * 上一轮留下的终审结论：写 priorNote 而不是当前 state 的唯一判据。
+ *
+ * 三个 verdict 都算：merge 是上一轮通过了、send_back/abandon 是上一轮退回了，两种都
+ * 讲不出这一轮怎么样。只认 send_back 会把「上一轮 merge 过」画成这一轮已通过。
+ */
+const PRIOR_VERDICTS = new Set(['merge', 'send_back', 'abandon']);
+
 function finalLayer(view) {
   const finalReview = object(view.finalReview);
+  const verdict = finalReview === null ? '' : text(finalReview.verdict);
+
+  if (text(view.status) === 'awaiting_review') {
+    // 契约改版会重开 Mission，内核**不清** finalReview：这一格里留着的仍是上一轮的
+    // 结论。照它画「未通过」，屏幕上就成了「这一轮已经被检视者退回」——而这一轮连
+    // 终审都还没发生，人会去等一个永远不会来的重派。
+    const prior = PRIOR_VERDICTS.has(verdict) ? `上轮终审 ${verdict}，不作为当前结论` : '';
+    return layer(
+      'final',
+      '检视者终审',
+      'pending',
+      '任务已到待检视，还没有本轮终审结论',
+      prior === '' ? '任务状态 awaiting_review' : '上一轮终审记录',
+      { priorNote: prior },
+    );
+  }
+
   if (finalReview === null) {
-    if (text(view.status) === 'awaiting_review') {
-      return layer('final', '检视者终审', 'pending', '任务已到待检视，还没有终审结论', '任务状态 awaiting_review');
-    }
     return layer('final', '检视者终审', 'not_started', '还没有终审结论', '没有终审记录');
   }
-  const verdict = text(finalReview.verdict);
   if (verdict === 'merge') {
     return layer('final', '检视者终审', 'passed', '终审结论 merge', '本任务的终审记录');
   }
@@ -248,23 +259,51 @@ function masterLayer() {
 
 /* ============================ 交卷摘要 ============================ */
 
+/**
+ * 受评执行那一行：工作项 id，有报告再接报告号。
+ *
+ * 「这次交卷是被哪一份机器报告评的」是契约要求写清归属的那半句；只写工作项 id
+ * 时，界面把一个季度里同一张工单的十几份报告看成同一个。
+ */
+function reviewedExecutionOf(item) {
+  const id = text(item && item.id);
+  if (id === '') return '';
+  const reportId = reportIdOf(item);
+  return reportId === '' ? id : `${id} · 报告 ${reportId}`;
+}
+
+/** 当前这一跳的机器报告号；没有报告或没有 id 就是空串。 */
+function reportIdOf(item) {
+  const report = object(item && item.validationReport);
+  return report === null ? '' : text(report.reportId);
+}
+
 function projectSubmission(item, currentReturned) {
   const result = object(item && item.executionResult);
   const order = object(item && item.order);
   const commands = list(order && order.verification).map(text).filter((command) => command !== '');
 
+  const verification = {
+    fromOrder: true,
+    note: '工单 verification 命令，不是已跑结果',
+    commands,
+  };
+
   if (!currentReturned) {
     // 未交回时 executionResult 是上一跳的信：抄进 currentFiles 就成了「这一跳动了这些文件」。
+    // 提交时间与行数本来就没有字段可读；留 null 让渲染层写「未知」，绝不拿 updatedAt
+    // 或缺省 diff 现编一个数。
     return {
       current: false,
       changedFiles: null,
       currentFiles: null,
       summary: null,
-      verification: {
-        fromOrder: true,
-        note: '工单 verification 命令，不是已跑结果',
-        commands,
-      },
+      reviewedExecution: null,
+      fileCount: null,
+      reportAttribution: null,
+      submittedAtText: UNKNOWN,
+      lineDeltaText: UNKNOWN,
+      verification,
     };
   }
 
@@ -277,12 +316,44 @@ function projectSubmission(item, currentReturned) {
     changedFiles: files,
     currentFiles: files,
     summary: result === null ? null : text(result.summary),
-    verification: {
-      fromOrder: true,
-      note: '工单 verification 命令，不是已跑结果',
-      commands,
-    },
+    reviewedExecution: reviewedExecutionOf(item),
+    // 文件数只数这一跳真是这份清单的条数：清单缺失时给 null，写 0 就是「没改文件」。
+    fileCount: files === null ? null : files.length,
+    // 报告归属：这一跳的结论是哪一份机器报告给的。没有报告就不命名，交给视图写「未知」。
+    reportAttribution: reportIdOf(item) === '' ? null : `机器报告 ${reportIdOf(item)}`,
+    submittedAtText: UNKNOWN,
+    lineDeltaText: UNKNOWN,
+    verification,
   };
+}
+
+/* ============================== 各层时间 ============================== */
+
+/**
+ * 每层的时刻。只读已经投影出来的字符串字段，不取「现在」、不拿 updatedAt 顶替。
+ *
+ * 内核其实有更准的时间（ValidationReport.endedAt、ReviewRecord 没有落时刻），但视图里
+ * 没有这两格：这里补不出来，也不去后端补字段（工单禁止新增接口字段）。所以机器层与
+ * 角色层在没有该字段时就是「未知」——写一个看起来合理的钟点比留空更让人信错。
+ */
+function timeTextOf(key, item, view) {
+  const stringField = (source, field) => {
+    const value = source === null ? undefined : source[field];
+    return typeof value === 'string' ? value.trim() : '';
+  };
+
+  if (key === 'machine') return stringField(object(item && item.validationReport), 'finishedAt');
+  if (key === 'role') return stringField(object(item && item.lastReview), 'at');
+  if (key === 'final') {
+    // 待检视时这一轮根本没有终审时刻；上一轮的 mergedAt 挂在这里就成了这一轮的时刻。
+    if (text(view.status) === 'awaiting_review') return '';
+    const finalReview = object(view.finalReview);
+    if (finalReview === null || text(finalReview.verdict) !== 'merge') return '';
+    return stringField(finalReview, 'mergedAt');
+  }
+  // 独立复核记录的 recordedAt、合入与 master 的时刻：工单没有把它们归入这一格，
+  // 这里不借别的字段凑一个。
+  return '';
 }
 
 /* ============================ 出口 ============================ */
@@ -313,7 +384,7 @@ export function projectDelivery(view, options) {
     finalLayer(v),
     integrationLayer(v),
     masterLayer(),
-  ];
+  ].map((built) => ({ ...built, timeText: timeTextOf(built.key, item, v) || UNKNOWN }));
 
   return {
     selectedWorkItemId: item === null ? null : text(item.id),

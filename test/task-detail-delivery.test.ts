@@ -59,8 +59,7 @@ test('重派未交回：旧报告与旧交卷都不算当前结果', () => {
   assert.equal(delivery.submission.verification.note.includes('不是已跑结果'), true);
 });
 
-/** direct + 标准任务已交回：验收方是外部主控，独立复核不适用，master 只说未记录。 */
-test('direct 已交回：外部主控验收、独立复核不适用、master 未记录', () => {
+/** direct + 标准任务已交回：验收方是外部主控，独立复核不适用，master 只说未记录。 */test('direct 已交回：外部主控验收、独立复核不适用、master 未记录', () => {
   const delivery = projectDelivery({
     missionId: 'CUI3-task-detail-20261026',
     status: 'executing',
@@ -108,4 +107,53 @@ test('direct 已交回：外部主控验收、独立复核不适用、master 未
   assert.equal(byKey.master.detail.includes('未记录'), true);
   assert.equal(byKey.master.detail.includes('未合入'), false);
   assert.equal(byKey.master.detail.includes('已合入 master'), false);
+});
+
+/**
+ * 契约改版后回到待检视：内核不清 finalReview，上一轮的 send_back 还挂在那里。
+ * 那是上一轮的退回，不是这一轮终审未通过——这一轮的终审还没发生。
+ */
+test('awaiting_review 且残留上轮 send_back：终审是待处理，上轮退回只带出处另记', () => {
+  const delivery = projectDelivery({
+    missionId: 'CUI3-task-detail-20261026',
+    status: 'awaiting_review',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    // 契约更新留下的旧结论：reasons 是上一轮的打回理由，讲不出这一轮。
+    finalReview: { verdict: 'send_back', reasons: ['验收 4 未满足'], mergedInto: '' },
+    workItems: [
+      {
+        id: 'W-910',
+        title: '补修交付三栏',
+        status: 'submitted',
+        attemptIds: ['W-910.exec-1'],
+        validationReport: { reportId: 'VR-1182', passed: true, commands: [] },
+        executionResult: { outcome: 'completed', summary: '改完待检视', changedFiles: ['src/web/a.js', 'src/web/b.js'] },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+  }, { selectedWorkItemId: 'W-910' });
+
+  const byKey = Object.fromEntries(delivery.layers.map((l) => [l.key, l]));
+  const final = byKey.final;
+
+  // 当前这一层：待处理，不是拿上一轮的 send_back 画成未通过。
+  assert.equal(final.state, 'pending');
+  assert.equal(final.stateText, '待处理');
+  assert.notEqual(final.state, 'failed');
+  assert.equal(final.detail, '任务已到待检视，还没有本轮终审结论');
+
+  // 上轮退回要另记，且写明不算当前结论，并带出处。
+  assert.equal(final.priorNote.includes('send_back'), true);
+  assert.equal(final.priorNote.includes('不作为当前结论'), true);
+  assert.equal(final.attribution, '上一轮终审记录');
+  assert.equal(final.detail.includes('send_back'), false);
+
+  // 待检视时这一轮没有终审时刻；上轮的 mergedAt 不得拿来做这一层的时间。
+  assert.equal(final.timeText, '未知');
+  assert.equal(byKey.machine.timeText, '未知');
+
+  // 未合入/未记录仍分开说：残留终审不替平台断言合没合。
+  assert.equal(byKey.master.state, 'unknown');
+  assert.equal(byKey.integration.state, 'not_started');
 });

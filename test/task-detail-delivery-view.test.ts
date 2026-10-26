@@ -138,3 +138,62 @@ test('direct 已交回未验收：外部主控验收待处理、独立复核不�
   const whole = q('.td-delivery')?.textContent || '';
   assert.equal(whole.includes('未合入'), false, '交付区出现了未合入：' + whole);
 });
+
+/**
+ * 三栏与逐条验收只画一次。
+ *
+ * 以前把逐条拼进角色层 detail，同一个验收句在明细和列表里各出现一遍，读的人
+ * 会当成两条不同的结论；而六层全纵向堆起来时，六层加一起连视口都装不下。
+ */
+test('六层是标签、状态、时间三栏；逐条验收只画一次', () => {
+  const { q } = mount({
+    missionId: 'CUI3-task-detail-20261026',
+    status: 'executing',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    workItems: [
+      {
+        id: 'W-910',
+        title: '补修交付三栏',
+        status: 'accepted',
+        attemptIds: ['W-910.exec-1'],
+        validationReport: { reportId: 'VR-1182', passed: true },
+        executionResult: { outcome: 'completed', summary: '改完', changedFiles: ['src/web/a.js', 'src/web/b.js'] },
+        lastReview: {
+          verdict: 'accept',
+          acceptanceResults: [
+            { criterion: '索引恢复不丢条目', status: 'pass' },
+            { criterion: '更新中断不重复索引', status: 'pass' },
+          ],
+        },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+  }, { selectedWorkItemId: 'W-910' });
+
+  const machine = q('[data-layer="machine"]');
+  assert.ok(machine, '没有机器层');
+  // 三个子节点各占一栏：合成一句话时状态词与依据黏在一起，人分不清哪半是判断。
+  assert.ok(machine.querySelector(':scope > .td-layer-title'), '机器层缺直接子节点 .td-layer-title');
+  assert.ok(machine.querySelector(':scope > .td-layer-main > .td-layer-state'), '机器层缺 .td-layer-main 里的状态');
+  assert.ok(machine.querySelector(':scope > .td-layer-time'), '机器层缺 .td-layer-time');
+  assert.equal(machine.querySelector(':scope > .td-layer-state'), null, '状态还在网格一级，不在 main 里');
+
+  // 没有时间字段就是未知，不得编钟点。
+  assert.equal(machine.querySelector('.td-layer-time')?.textContent, '未知');
+
+  const role = q('[data-layer="role"]');
+  assert.ok(role, '没有角色层');
+  const criterion = '索引恢复不丢条目';
+  const occurrences = (role.textContent || '').split(criterion).length - 1;
+  assert.equal(occurrences, 1, '逐条验收在角色层出现 ' + occurrences + ' 次，应只画一次：' + (role.textContent || ''));
+  // 且它只能在列表里，不在 detail 里。
+  assert.equal((role.querySelector('.td-layer-detail')?.textContent || '').includes(criterion), false,
+    '角色层把逐条验收又拼进了 detail');
+
+  // 样式：一层的三栏由网格给出（150 / 1fr / 90），且颜色只从 --color-* 进来。
+  assert.ok(/\.td-delivery \.td-layer \{[^}]*display: grid/.test(CSS), '.td-layer 没用 grid 排三栏');
+  assert.ok(/\.td-delivery \.td-layer \{[^}]*grid-template-columns: 150px minmax\(0, 1fr\) 90px/.test(CSS),
+    '.td-layer 三栏列宽不是 150px / 1fr / 90px');
+  assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(CSS), false, 'CSS 里出现了十六进制色值');
+});

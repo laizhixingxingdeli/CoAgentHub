@@ -24,7 +24,7 @@
 }
 
 /* 六层纵向排列，层与层之间 12px：顺序本身就是「一件事怎么走到 master 的」，
- * 挤成 8px 或排成网格，这六格会看成六件并列的事。 */
+ * 挤成 8px 或让六格并排，它们会看成六件并列的事。 */
 .td-delivery .td-delivery-layers {
   display: flex;
   flex-direction: column;
@@ -32,12 +32,36 @@
   min-width: 0;
 }
 
+/* 一层 = 三栏：标签 150px / 状态与证据 minmax(0,1fr) / 时间 90px，对应画板 70:4250
+ * （150px 标题 + 450px 状态 + 90px 时刻，内缩 17/12px）。
+ *
+ * 为什么用 grid 而不是把六个字段纵向堆起来：堆成一条之后每层五六行，六层加起来
+ * 远超视口，人滚到底时已经忘了第一层是什么状态；而画板上状态词与标签本来就在
+ * 同一条基线上。同一行视觉由网格排出来，不需要另拼一句“机器验证 通过”。 */
 .td-delivery .td-layer {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 90px;
+  column-gap: 12px;
+  align-items: start;
   padding: 12px 16px;
   border: 1px solid var(--color-line);
   border-radius: 8px;
   background: var(--color-white);
   overflow: clip;
+}
+
+/* 三个子节点各自只占一栏；标签与状态同一行是网格给的，不再单独设 margin-top。 */
+.td-delivery .td-layer-title,
+.td-delivery .td-layer-main,
+.td-delivery .td-layer-time {
+  grid-row: 1;
+  min-width: 0;
+}
+
+.td-delivery .td-layer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .td-delivery .td-layer-title {
@@ -47,9 +71,8 @@
   line-height: 22px;
   color: var(--color-ink);
 }
-
-/* 状态词与标题同一行、字号相同、只换颜色：它回答「这一层现在是什么状态」，
- * 比明细高一级。颜色按 data-state 分档，判断不在这里重算。 */
+/* 状态词与标题同一行、字号相同、只换颜色（网格保证同一条基线）：它回答
+ * 「这一层现在是什么状态」，比明细高一级。颜色按 data-state 分档，判断不在这里重算。 */
 .td-delivery .td-layer-state {
   margin: 0;
   font-size: 14px;
@@ -74,16 +97,35 @@
 }
 
 .td-delivery .td-layer-detail {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 14px;
   line-height: 22px;
+  color: var(--color-muted);
+}
+
+/* 上轮结论另起一行、用等宽小字：它与当前明细同字号时会看成这一轮的第二句结论。 */
+.td-delivery .td-layer-prior {
+  margin: 0;
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+}
+
+/* 时间用等宽右对齐：这一栏是给人比较先后的，比例字体下 14:24 与 14:31 对不齐。 */
+.td-delivery .td-layer-time {
+  margin: 0;
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: right;
   color: var(--color-muted);
 }
 
 /* 归属只小一号、不换行：它是「这句话是从哪一份报告/记录来的」，
  * 与明细同字号会看成同一句话的后半段。 */
 .td-delivery .td-layer-attr {
-  margin: 4px 0 0;
+  margin: 0;
   font-family: 'IBM Plex Mono', Consolas, monospace;
   font-size: 13px;
   line-height: 20px;
@@ -91,7 +133,7 @@
 }
 
 .td-delivery .td-layer-criteria {
-  margin: 6px 0 0;
+  margin: 0;
   padding-left: 18px;
   font-size: 14px;
   line-height: 22px;
@@ -99,7 +141,7 @@
 }
 
 .td-delivery .td-layer-criterion-empty {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 13px;
   line-height: 20px;
   color: var(--color-muted);
@@ -177,7 +219,8 @@
 }
 
 .td-delivery .td-submission-files-empty,
-.td-delivery .td-submission-summary {
+.td-delivery .td-submission-summary,
+.td-delivery .td-submission-value {
   margin: 0;
   font-size: 14px;
   line-height: 22px;

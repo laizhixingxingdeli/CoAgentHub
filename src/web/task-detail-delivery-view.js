@@ -39,23 +39,35 @@ function acceptanceHtml(layer) {
 }
 
 /**
- * 一层 = article.td-layer。标题、状态、明细各占一个节点：合成一句之后，「机器验证
- * 当前未交回；残留报告 VR-616 不作为当前结果」会被读成一句正常结论，而人需要的
- * 恰恰是把状态词和依据分开看。
+ * 一层 = article.td-layer，横着三欄：标签 / 状态与证据 / 时间（画板 70:4250）。
+ *
+ * 三个节点分开而不是拼成一句：「机器验证 当前未交回；残留报告 VR-616 不作为当前结果」
+ * 会被读成一句正常结论，而人需要的恰恰是把状态词、依据和时刻分开看。三欄的列宽
+ * 由 CSS 网格给，状态与标题同一行也是网格排出来的，而不是靠把六个字段纵向堆成一条
+ * 超出视口的长条。
  *
  * data-layer / data-state 是接线与断言用的：state 是七个固定词之一，stateText 是它的
  * 中文，两者都来自投影，这里不重算。
  */
 function layerHtml(layer) {
   const attribution = text(layer.attribution);
+  const priorNote = text(layer.priorNote);
+  const timeText = text(layer.timeText);
   return '<article class="td-layer" data-layer="' + esc(layer.key) + '">'
     + '<h3 class="td-layer-title">' + esc(layer.title) + '</h3>'
+    + '<div class="td-layer-main">'
     + '<p class="td-layer-state" data-state="' + esc(layer.state) + '">'
     + esc(layer.stateText) + '</p>'
     + '<p class="td-layer-detail">' + esc(layer.detail) + '</p>'
+    // 逐条验收只在这里画一次（投影已经把逐条从 detail 里拿掉了）：两边各写一遍时，
+    // 同一条验收在同一层里出现两次，人分不清那是两条结论还是抄重了。
+    + acceptanceHtml(layer)
+    // 上轮结论另起一行带出处：混进 detail 会被读成这一轮的终审结果。
+    + (priorNote === '' ? '' : '<p class="td-layer-prior">' + esc(priorNote) + '</p>')
     // 归属只在投影给出非空值时画：空壳的「来源：」会被读成「来源不明」。
     + (attribution === '' ? '' : '<p class="td-layer-attr">' + esc(attribution) + '</p>')
-    + acceptanceHtml(layer)
+    + '</div>'
+    + '<p class="td-layer-time">' + esc(timeText) + '</p>'
     + '</article>';
 }
 
@@ -73,9 +85,19 @@ function filesHtml(current, files) {
 }
 
 /**
- * 交卷摘要（aside.td-submission）。
+ * 交卷摘要的字段行。缺失一律写「未知」：空白行会被读成「这一项不适用」。
+ */
+function fieldHtml(label, valueHtml) {
+  return '<div class="td-submission-field">'
+    + '<p class="td-submission-label">' + esc(label) + '</p>'
+    + valueHtml
+    + '</div>';
+}
+
+/**
+ * 交卷摘要（aside.td-submission，画板 70:4280）。
  *
- * 三件事分开写：这一跳有没有交回、交回了改了哪些文件、工单要求跑什么命令。
+ * 字段与画板一致：提交时间、受评执行、修改范围、文件、验证命令。
  * 尤其最后一件：verification 是**工单要求**，不是跑过的结果；把两者并排放且不带
  * 说明，人会把「要求跑 node --test」读成「已经跑过 node --test」。
  */
@@ -88,6 +110,15 @@ function submissionHtml(submission) {
     : [];
   const note = text(verification.note);
   const summary = current ? text(s.summary) : '';
+  // 未知的统一口径在投影里（submittedAtText / lineDeltaText 直接给「未知」），
+  // 这里不自己再写一份，也不再拿 updatedAt 或空串顶上。
+  const submittedAt = text(s.submittedAtText) || '未知';
+  const reviewedExecution = current ? (text(s.reviewedExecution) || '未知') : '未知';
+  const lineDelta = text(s.lineDeltaText) || '未知';
+  const fileCount = current && typeof s.fileCount === 'number' ? s.fileCount : null;
+  // 行数没有字段可读时，就只写文件数那一半；编一个「+0 / −0 行」比不写更糟。
+  const scopeText = fileCount === null ? '未知' : `${fileCount} 个文件 · ${lineDelta}`;
+  const reportAttribution = current ? (text(s.reportAttribution) || '未知') : '未知';
 
   const commandItems = commands.length === 0
     ? '<li class="td-submission-command" data-empty="true">工单没有列出验证命令</li>'
@@ -100,22 +131,20 @@ function submissionHtml(submission) {
     + '<p class="td-submission-current">'
     + esc(current ? '已交回，以下是这一跳的提交' : '当前未交回，以下只有工单要求')
     + '</p>'
-    + '<div class="td-submission-field">'
-    + '<p class="td-submission-label">文件</p>'
-    + filesHtml(current, s.currentFiles)
-    + '</div>'
-    + (summary === ''
-      ? ''
-      : '<div class="td-submission-field">'
-        + '<p class="td-submission-label">交卷说明</p>'
-        + '<p class="td-submission-summary">' + esc(summary) + '</p>'
-        + '</div>')
+    + fieldHtml('提交时间', '<p class="td-submission-value">' + esc(submittedAt) + '</p>')
+    + fieldHtml('受评执行', '<p class="td-submission-value">' + esc(reviewedExecution) + '</p>')
+    + fieldHtml('修改范围', '<p class="td-submission-value">' + esc(scopeText) + '</p>')
+    + fieldHtml('文件', filesHtml(current, s.currentFiles))
+    + fieldHtml('报告归属', '<p class="td-submission-value">' + esc(reportAttribution) + '</p>')
     + '<div class="td-submission-field">'
     + '<p class="td-submission-label">验证命令</p>'
     + '<ul class="td-submission-commands">' + commandItems + '</ul>'
     // 这行说明必须留在命令旁边：它决定上面那份清单是「跑过」还是「要求跑」。
     + (note === '' ? '' : '<p class="td-submission-note">' + esc(note) + '</p>')
     + '</div>'
+    + (summary === ''
+      ? ''
+      : fieldHtml('交卷说明', '<p class="td-submission-summary">' + esc(summary) + '</p>'))
     + '</aside>';
 }
 
