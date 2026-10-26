@@ -29,14 +29,19 @@ const MISSING_TEXT = '未记录';
 /**
  * 六格的固定顺序与标题。顺序本身就是契约的读法（意图 → 验收 → 约束 → 不做什么
  * → 护栏 → 允许范围），由这里定死，不从数据里推断。
+ *
+ * column 标的是画板 70:4092/70:4101 两列的归属，不是排序：左列 intent /
+ * acceptance / constraints，右列 nonGoals / guardrails / allowedScope。这一列不
+ * 靠 CSS 的流向推出来（早先用 grid-auto-flow:column + 三行推过一次，见下方
+ * columnHtml 的注释），因为流向一改，六格还在、只是被读成了错的顺序。
  */
 const CARDS = [
-  { field: 'intent', title: 'intent · 任务意图', kind: 'text' },
-  { field: 'acceptance', title: 'acceptance · 验收条件', kind: 'list' },
-  { field: 'constraints', title: 'constraints · 约束', kind: 'list' },
-  { field: 'nonGoals', title: 'nonGoals · 不做什么', kind: 'list' },
-  { field: 'guardrails', title: 'guardrails · 护栏', kind: 'list' },
-  { field: 'allowedScope', title: 'allowedScope · 允许范围', kind: 'list' },
+  { field: 'intent', title: 'intent · 任务意图', kind: 'text', column: 'left' },
+  { field: 'acceptance', title: 'acceptance · 验收条件', kind: 'list', column: 'left' },
+  { field: 'constraints', title: 'constraints · 约束', kind: 'list', column: 'left' },
+  { field: 'nonGoals', title: 'nonGoals · 不做什么', kind: 'list', column: 'right' },
+  { field: 'guardrails', title: 'guardrails · 护栏', kind: 'list', column: 'right' },
+  { field: 'allowedScope', title: 'allowedScope · 允许范围', kind: 'list', column: 'right' },
 ];
 
 /**
@@ -79,13 +84,30 @@ function cardHtml(card, page) {
 }
 
 /**
+ * 一列的 HTML。两列是**两个独立的纵向容器**，不是一张六格网格的两个行位。
+ *
+ * 为什么不用一张网格按列填（曾经的做法）：网格的三行共享行高，左列第二张卡离
+ * 第一张的距离于是被右列那张卡的高度顶开，源稿要的是各列自己的 16px。真 DOM
+ * 量出来是左 62px、右 264px 这种空档，卡片都在、只是腿上多出一段谁也解释不了的
+ * 空白；而这种错在没有布局的测试里完全看不出来。
+ */
+function columnHtml(side, page) {
+  const cards = CARDS
+    .filter((card) => card.column === side)
+    .map((card) => cardHtml(card, page))
+    .join('');
+  return '<div class="td-contract-column" data-column="' + esc(side) + '">' + cards + '</div>';
+}
+
+/**
  * 契约区 HTML。根节点 section.td-contract，data-readonly 恒为 true。
  *
  * data-readonly 写死而不是取 page.readOnly：投影里那个字段也是写死的 true，
  * 两处都取等于给「这一区可写」留了一条没人会去测的缝。
  *
  * 六卡一次性全画：只画有内容的几格，人就分不清「这份契约没写护栏」和「这个页面
- * 没做护栏这一格」。
+ * 没做护栏这一格」。分成两个列容器而不是一张网格，是为了让每列各按自己的卡片
+ * 高度堆叠（见 columnHtml）。
  */
 export function taskContractHtml(view, options) {
   const page = projectContractPage(view, options);
@@ -99,7 +121,10 @@ export function taskContractHtml(view, options) {
     + '<span class="td-contract-revision-value">' + esc(revisionText(page.contractRevision)) + '</span>'
     + '<span class="td-contract-readonly">只读</span>'
     + '</p>'
-    + '<div class="td-contract-grid">' + CARDS.map((card) => cardHtml(card, page)).join('') + '</div>'
+    + '<div class="td-contract-columns">'
+    + columnHtml('left', page)
+    + columnHtml('right', page)
+    + '</div>'
     + '</section>';
 }
 

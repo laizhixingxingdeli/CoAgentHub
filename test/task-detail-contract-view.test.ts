@@ -98,13 +98,31 @@ test('修订号与契约原文按原文出现，缺失的 nonGoals 说未记录�
   // 样式：颜色只从 --color-* 进来（写死十六进制会与 tokens.css 分叉），
   // 每条规则都挂在 .td-contract 下，否则会改到 ui.css 的 .card。
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(CSS), false, 'CSS 里出现了十六进制色值');
-  for (const selector of ['.td-contract-grid', '.td-contract-card', '.td-contract-card-title', '.td-contract-missing']) {
+  for (const selector of ['.td-contract-columns', '.td-contract-column', '.td-contract-card', '.td-contract-card-title', '.td-contract-missing']) {
     assert.ok(CSS.includes('.td-contract ' + selector), selector + ' 没有 .td-contract 作用域');
   }
 });
 
+/**
+ * 取一条规则的花括号内容。
+ *
+ * 不能直接 `CSS.indexOf(selector)`：`.td-contract-column` 是 `.td-contract-columns`
+ * 的前缀，先命中的会是外层那一行，于是读到的 gap 是列间距离而不是列内距离——
+ * 断言看着过了，验的却是另一条规则。这里只认后面不接标识符字符的那一次出现。
+ */
 function cssRuleBody(selector: string) {
-  const start = CSS.indexOf(selector);
+  let from = 0;
+  let start = -1;
+  for (;;) {
+    const at = CSS.indexOf(selector, from);
+    if (at < 0) break;
+    const next = CSS.charAt(at + selector.length);
+    if (!/[\w-]/.test(next)) {
+      start = at;
+      break;
+    }
+    from = at + selector.length;
+  }
   assert.ok(start >= 0, 'CSS 里没有 ' + selector);
   const open = CSS.indexOf('{', start);
   const close = CSS.indexOf('}', open);
@@ -112,19 +130,20 @@ function cssRuleBody(selector: string) {
 }
 
 /**
- * 列的顺序。格子顺序在 DOM 里是 CARDS 的固定顺序，怎么分成两列由 .td-contract-grid
- * 的流向决定：按列填时前 N 项进第一列（N 是声明了三行），剩下的进第二列。
- *
- * 只读声明、不读渲染结果：浏览器算出来的位置在 happy-dom 里没有布局，量不出来。
- * 这条错的时候页面六格都在、每格都有自己的标题，看上去完全正常，只有读的人把
- * 「不做什么」当成了验收条件的续句。
+ * 两列是 DOM 里两个独立的列容器，不是一张网格的两个行位：列归属写在 DOM 上，
+ * 不再靠 grid-auto-flow + 三行从全局顺序里推算。推出来的那一套曾经让每格的列
+ * 归在了对的卡上，但三行共享行高，两列各自的 16px 就变成了一列 62px、一列
+ * 264px 的空白。
  */
-function columnsFromGrid() {
-  const grid = cssRuleBody('.td-contract .td-contract-grid');
-  assert.match(grid, /grid-auto-flow:\s*column/, '六格不是按列堆叠，会是左 intent / 右 acceptance 的交错');
-  const rows = Number(/grid-template-rows:\s*repeat\(\s*(\d+)/.exec(grid)?.[1]);
-  assert.equal(rows, 3, '列高不是三行，六格分不成左三右三');
-  return rows;
+function columnDom(all: (selector: string) => HTMLElement[]) {
+  const side = (name: string) => all('[data-column="' + name + '"]');
+  const left = side('left');
+  const right = side('right');
+  assert.equal(left.length, 1, '左列容器不是恰好一个');
+  assert.equal(right.length, 1, '右列容器不是恰好一个');
+  const fieldsOf = (column: HTMLElement[]) => [...column[0].querySelectorAll('[data-field]')]
+    .map((el) => el.getAttribute('data-field') || '');
+  return { left: fieldsOf(left), right: fieldsOf(right) };
 }
 
 test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/guardrails/allowedScope', () => {
@@ -143,19 +162,17 @@ test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/g
     ],
   }, { selectedWorkItemId: 'W-1' });
 
-  const rows = columnsFromGrid();
-  const fields = all('[data-field]').map((el) => el.getAttribute('data-field') || '');
+  assert.deepEqual(columnDom(all), {
+    left: ['intent', 'acceptance', 'constraints'],
+    right: ['nonGoals', 'guardrails', 'allowedScope'],
+  }, '左右列不是左三右三');
 
-  const columns: string[][] = [];
-  fields.forEach((field, index) => {
-    const col = Math.floor(index / rows);
-    (columns[col] ||= []).push(field);
-  });
-
-  assert.deepEqual(columns, [
-    ['intent', 'acceptance', 'constraints'],
-    ['nonGoals', 'guardrails', 'allowedScope'],
-  ], '左右列不是左三右三：' + JSON.stringify(columns));
+  // 每列各自纵向堆叠、16px：间距写在一张共享的行高网格上时，量出来是左 62px、
+  // 右 264px，而卡片都在、看起来只像多了一点空白。
+  const column = cssRuleBody('.td-contract .td-contract-column');
+  assert.match(column, /flex-direction:\s*column/, '列不是独立纵向堆叠');
+  assert.match(column, /gap:\s*16px/, '列内间距不是 16px');
+  assert.equal(/grid-auto-flow/.test(CSS_RULES), false, 'CSS 又回到了按网格流向排两列');
 
   // 原文不因样式被截短：这两条一旦出现在正文规则里，被收起来的那半句在屏幕上
   // 再也看不到，而卡片看起来是满的。
