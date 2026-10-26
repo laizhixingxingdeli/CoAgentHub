@@ -1,0 +1,238 @@
+/*
+ * 双入口外壳的尺寸与配色（DESIGN.md「Layout」一节 + .impeccable/reference/figma-2-47.txt）。
+ *
+ * 为什么单独一个文件而不是继续往 index.html 的 <style> 里堆：外壳（导航 + 顶栏）
+ * 和业务页面是两层东西。挤在同一个 <style> 里，旧业务样式会按出现顺序盖掉外壳，
+ * 而"盖掉了"在浏览器里只是看起来不像设计稿——没有报错，也没有人会说得出是哪一条
+ * 规则赢的。这里用 `.cs-shell` 前缀 + 后加载，把胜出权明确写给外壳。
+ *
+ * 一个色值都不写死：107 行的 --color-* 是权威，复制一份到 CSS 里，改一处忘另一处
+ * 之后两个页面就开始各走各的颜色。
+ *
+ * 1440 宽的尺寸（左导航 184 + 内容左 224 / 右 40、顶栏控件 y18 h42、分隔线 y68、
+ * 内容起点 y96）在窄屏下退化为同一套宽度关系而不是另行一套设计：本轮其它宽度
+ * 未验收，退化只保证"不重叠、不横向溢出"。
+ */
+
+:root {
+  /* 导航条宽 184px：比它宽，内容区就挤不进 5 列 1176；比它窄，40px 的记录行距
+   * 排不下"编号/intent"那一列。这个数字是被内容反推出来的，不是随手定的。 */
+  --shell-nav-width: 184px;
+  --shell-nav-pad: 16px;
+  /* 内容左边界 224 = 184 + 40。右边也是 40，两边等宽是让白色数据区居中于内容列。 */
+  --shell-content-gutter: 40px;
+  /* 顶栏 68px：42px 的控件在 y18 起，剩 8px 落在分隔线上面。 */
+  --shell-topbar-height: 68px;
+  --shell-topbar-inset: 18px;
+  /* 内容起点 96 = 68 + 28。这 28px 是分隔线到页名的呼吸，压掉之后页名会贴住线。 */
+  --shell-view-inset: 28px;
+}
+
+* { box-sizing: border-box; }
+
+/* hidden 属性在作者样式给了 display 之后会失效（UA 的 [hidden] 优先级最低）：
+ * .cs-project 是 display:flex，会把 UA 的 [hidden] { display:none } 盖掉，
+ * 于是"资源页不显示项目下拉"变成"它还在那儿"。
+ *
+ * 只点名外壳自己的两个锚点，**不**写全局 [hidden]：业务页面（任务页的侧栏面板、
+ * 环节折叠）也在用 hidden，一条全局 !important 会把它们各自的显隐规则一起改掉。 */
+#cs-project[hidden], #cs-banner[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+/* 浅色是这一版的默认，且**不跟着系统暗色变**：画板只给了暖白纸面一套已批准值，
+ * 让 prefers-color-scheme 把整页翻黑等于把未经评审的配色推给人看。
+ * tokens.css 里那块 :root[data-theme="dark"] 是给旧页面留的兼容，外壳不接它。 */
+.cs-shell {
+  color-scheme: light;
+  display: grid;
+  grid-template-columns: var(--shell-nav-width) minmax(0, 1fr);
+  min-height: 100vh;
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+/* ===== 一级导航 =====
+ * ink 深墨底 + 白字；选中项是浅 select 底 + 2px 左侧 accent 线。
+ * 侧栏是导航面，不是内容面：它不接 --card / --foreground，那两个在亮色下会翻白。
+ */
+.cs-shell .nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: var(--shell-nav-pad);
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow: hidden;
+  background: var(--color-ink);
+  color: var(--color-white);
+}
+
+/* 品牌名是 18px / 500（画板的 Section 级，不是 Page 级）：它是导航的标题，
+ * 用 32px 的 Page 级会把整条导航压成人名的脚注。 */
+.cs-shell .brand {
+  margin: 0;
+  padding: 0;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 28px;
+  color: var(--color-white);
+}
+
+/* 42px 的留白是画板里品牌与第一个入口之间的固定间距。 */
+.cs-nav-gap { height: 42px; flex: none; }
+
+.cs-shell .nav .item {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px 0 16px;
+  /* 选中项的 2px 左线不能把文字挤动：两条边都按 border-box 预留，未选中时换成
+   * 透明线。否则点一下文字横跳 2px，看起来像点错了。 */
+  border-left: 2px solid transparent;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--color-white);
+  text-decoration: none;
+}
+
+.cs-shell .nav .item:hover { background: color-mix(in oklch, var(--color-white) 10%, transparent); }
+
+.cs-shell .nav .item[data-active="1"] {
+  background: var(--color-select);
+  border-left-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ===== 内容列 ===== */
+.cs-shell .main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 var(--shell-content-gutter);
+}
+
+/* 顶栏：项目控件贴内容左边界，同步信息贴右边界，中间留空。
+ * 控件按 y18 / h42 摆，分隔线是这一块的底边（y68）。 */
+.cs-shell .topbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  height: var(--shell-topbar-height);
+  padding-top: var(--shell-topbar-inset);
+  border-bottom: 1px solid var(--color-line);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* 项目下拉：外观要像画板里那个 42px 高的控件，但内核必须是原生 <select>。
+ * 自己画一个 div 下拉就得自己实现键盘、读屏和"点外面关闭"，而这三件事一旦
+ * 漏一件，不看屏幕的人就用不了项目切换。 */
+.cs-project {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 256px;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control);
+  background: var(--color-white);
+}
+
+.cs-project select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: 400 14px/22px 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  appearance: none;
+  cursor: pointer;
+}
+
+.cs-project select:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* 箭头用本地 SVG（console-icon-chevron.svg，从画板原样复制），不是 unicode 字符：
+ * 字符箭头在不同平台字宽、基线都不一样，而画板上这个位置就是一张 16px 的图。 */
+.cs-project .cs-caret {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-left: 8px;
+  background: url('./console-icon-chevron.svg') center / 16px 16px no-repeat;
+  pointer-events: none;
+}
+
+/* 同步状态贴右边界：margin-left:auto 而不是把中间塞一个空白 div —— 少一个只为
+ * 排版存在的空节点，读屏也不会念到它。 */
+.cs-sync {
+  margin-left: auto;
+  /* 顶栏用 flex-start + 18px 内缩摆项目控件，所以文字要自己对齐到 42px 控件的
+   * 中线：22px 行高落在 18 + 10 处。 */
+  margin-top: 10px;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-green);
+}
+
+/* 三种语气必须肉眼可分：正常是绿，过期是琥珀，读不到/离线是红。
+ * 颜色只是加粗语气，事实全在文字里（"最近同步 14:32:08 · 服务离线"）。 */
+.cs-sync[data-tone="unknown"] { color: var(--color-muted); }
+.cs-sync[data-tone="stale"] { color: var(--color-amber); }
+.cs-sync[data-tone="down"] { color: var(--color-red); }
+
+/* 页面级横幅：服务未运行 / 数据过期。贴着分隔线下面出现，不与业务内容抢位置。 */
+.cs-banner {
+  margin: 8px 0 0;
+  padding: 6px 16px;
+  border-radius: var(--radius-output);
+  background: var(--color-amber-bg);
+  color: var(--color-amber);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-word;
+}
+
+/* 内容起点 96px = 顶栏 68 + 28。 */
+.cs-shell .view {
+  padding: var(--shell-view-inset) 0 var(--shell-content-gutter);
+  min-width: 0;
+}
+
+/* 固定页名用衬线子集（console-fonts.css），动态内容仍走 sans/mono —— 这条分工
+ * 在 console-fonts.css 里定义，这里只把类挂上。 */
+.cs-shell .fixed-page-title { font-family: 'Noto Serif SC Fixed', 'Microsoft YaHei', sans-serif; }
+
+/* 窄屏退化：只保证不横向溢出。导航改为横排并吸顶，其它宽度未验收。 */
+@media (max-width: 1000px) {
+  .cs-shell { grid-template-columns: minmax(0, 1fr); }
+  .cs-shell .nav {
+    height: auto;
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .cs-nav-gap { display: none; }
+  .cs-shell .brand { flex-basis: 100%; }
+  .cs-shell .main { padding: 0 16px; }
+  .cs-shell .topbar { height: auto; padding: 12px 0; flex-wrap: wrap; }
+  .cs-sync { margin-left: 0; margin-top: 0; }
+  .cs-shell .view { padding-top: 16px; }
+}

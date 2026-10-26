@@ -13,6 +13,8 @@
   modulepreload 只预取不执行，正好。
 -->
 <link rel="stylesheet" href="/tokens.css" />
+<!-- 固定页名的衬线子集与字体分工（同源分发，不引在线字体）。 -->
+<link rel="stylesheet" href="/console-fonts.css" />
 <!-- narrate.js 也预取：它是三个页面共用的叙事层，projects.js 与 task.js 都要 import 它。
      同样**不能**写成会执行的 <script>：app.js 已经通过 import 链带到它了。 -->
 <link rel="modulepreload" href="/narrate.js" />
@@ -21,72 +23,40 @@
 <link rel="modulepreload" href="/pool.js" />
 <link rel="modulepreload" href="/plan-run.js" />
 <link rel="modulepreload" href="/platform.js" />
+<link rel="modulepreload" href="/console-shell.js" />
 <style>
 /* 外壳布局与组件。色彩只从 tokens.css 进来，这里不出现新的色值——
    多一个"顺手调的色"就和观测面分叉一处，而分叉是没人会主动去对齐的。 */
 * { box-sizing: border-box; }
 html, body { height: 100%; }
-body {
-  margin: 0;
-  background: var(--background);
-  color: var(--foreground);
-  font: 14px/1.55 "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-}
+/* body 的底色与字体在 console-shell.css：那里接的是 DESIGN.md 的 paper / ink。
+   在这里再写一份，两处的胜出者取决于文件顺序——那种"到底哪条赢了"没人查得出来。 */
+body { font-family: 'Noto Sans SC', "Segoe UI", "Microsoft YaHei", sans-serif; }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace; font-size: 12px; }
 .muted { color: var(--muted-foreground); }
 
-.shell { display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 100vh; }
-
-/* ===== 左侧固定导航 =====
- * 侧栏在明暗两个主题下都是深色的：它是导航面，不是内容面。所以不能接
- * --card（亮色主题下那是白的），也不能接 --foreground（同样会翻亮）。
- * 令牌值在 tokens.css（--sidebar / --sidebar-foreground / --sidebar-accent），
- * 这里只引用。正文区域一个 sidebar 令牌都不用——侧栏黑不等于整页黑。
+/* ===== 外壳的几何不在这里 =====
+ * 导航条宽、内容左右内缩、顶栏高与内容起点（1440 宽时的画板值：左导航 184、
+ * 内容左 224 / 右 40、顶栏 68、内容起点 96）全部由 console-shell.css 的
+ * --shell-* 变量定义。这一段只剩业务页面的排版——旧业务页面（项目页、任务页、
+ * 资源池……）仍然靠 .view / .card / .tasks 这些类，本轮不动它们的布局。
  */
-.nav {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 14px 10px; height: 100vh; position: sticky; top: 0;
-  background: var(--sidebar); border-right: 1px solid var(--sidebar);
-  color: var(--sidebar-foreground);
-}
-.brand { font-weight: 700; letter-spacing: .2px; padding: 2px 8px 12px; color: var(--sidebar-foreground); }
-.nav .item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px; font-size: 13px; text-decoration: none;
-  color: var(--sidebar-foreground); border-radius: calc(var(--radius) - 4px);
-}
-/* 图标跟文字走同一条颜色，不在这一层写死色：
-   导航面已经给定了前景色，图标自己配一个色就会在主题切换时留在旧色上。 */
-.nav .item .ico { width: 14px; height: 14px; flex: none; fill: currentColor; opacity: .9; }
-.nav .item:hover { background: color-mix(in oklch, var(--sidebar-foreground) 12%, transparent); }
-.nav .item[data-active="1"] {
-  background: var(--sidebar-accent); color: var(--sidebar);
-  font-weight: 600;
-}
-.nav .spacer { flex: 1; }
-.nav .foot {
-  display: grid; gap: 2px; padding-top: 9px;
-  border-top: 1px solid color-mix(in oklch, var(--sidebar-foreground) 22%, transparent);
-  font-size: 12px; color: color-mix(in oklch, var(--sidebar-foreground) 62%, transparent);
-}
 
-/* ===== 主区 ===== */
-.main { display: flex; flex-direction: column; min-width: 0; }
-.topbar {
-  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px;
-  font-size: 13px; background: var(--card); border-bottom: 1px solid var(--border);
-}
-.topbar a { color: var(--muted-foreground); text-decoration: none; }
-.topbar a:hover { color: var(--accent); }
-.topbar .sep { color: var(--muted-foreground); }
-.topbar .here { color: var(--foreground); }
-.view { padding: 20px; }
+/* ===== 兼容面包屑 =====
+ * #crumbs 还留在 DOM 里：task.js 与 plan-run.js 会 document.getElementById('crumbs')
+ * 并往里写片段，元素不在就是往 null 上写。一级入口收敛成两个之后它不该再显示，
+ * 但**不能删**——删了任务页的 return 分支会静默失效（找不到元素就直接 return，
+ * 不报错，只是那一段再也不会出现）。所以用视觉隐藏，不用 hidden 属性
+ * （hidden 会让某些脚本判 isConnected 时仍然拿到元素，但看起来完全没了）。
+ */
+.cs-breadcrumbs { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.cs-breadcrumbs a { color: inherit; text-decoration: none; }
+.cs-breadcrumbs .sep, .cs-breadcrumbs .here { color: inherit; }
 
 /* ===== 项目页 ===== */
 .page { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px; align-items: start; }
 @media (max-width: 1000px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
-  .nav { height: auto; position: static; }
+  /* 外壳的窄屏退化在 console-shell.css（它管几何）。这里只留业务页面的单列化。 */
   .page { grid-template-columns: minmax(0, 1fr); }
   .task-cols { grid-template-columns: minmax(0, 1fr); }
   .evt-list { max-height: none; }
@@ -375,20 +345,43 @@ pre.term .tool { color: var(--accent); font-weight: 600; }
 .dim-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
 </style>
 <link rel="stylesheet" href="/ui.css" />
+<!-- 双入口外壳的尺寸与配色。排在 ui.css **之后**：ui.css 是业务页面的排版层，
+     外壳的几何与配色只在 console-shell.css 里定义。靠在它后面是第二重保险
+     （第一重是 .cs-shell 前缀）。两处定义同一个选择器，谁赢只取决于文件顺序，
+     而"看起来不像画板"没人查得出是哪条规则干的。 -->
+<link rel="stylesheet" href="/console-shell.css" />
 </head>
 <body>
-<div class="shell">
-  <nav class="nav" aria-label="主导航">
-    <div class="brand">CoAgentHub</div>
-    <a class="item" href="#/" data-route="home"><span class="nav-glyph">⌂</span>首页</a>
-    <a class="item" href="#/projects" data-route="projects"><span class="nav-glyph">□</span>项目任务列表</a>
-    <a class="item" href="#/agents" data-route="agents"><span class="nav-glyph">◉</span>角色与模型</a>
-    <div class="spacer"></div>
-    <div class="foot">CoAgentHub</div>
+<div class="cs-shell">
+  <!-- 一级入口只有「任务」和「资源」（DESIGN.md Overview / surfaces/console.md）。
+       角色与模型、方案运行、平台、设置、收件箱这些页面仍然可达、旧深链接仍然能开，
+       但它们不再占一级入口：一排六个入口等于没有入口，人每次都还得先读一遍。 -->
+  <nav class="nav cs-nav" aria-label="主导航">
+    <p class="brand">CoAgentHub</p>
+    <div class="cs-nav-gap" aria-hidden="true"></div>
+    <!-- data-route 记的是这条链接指向的路由名（parseRoute 的返回值），
+         data-nav 记的是它属于哪个一级入口。两者不是同一个概念：任务入口下还挂着
+         项目列表、任务详情、项目规范这三个路由，它们都算「任务」这一项。 -->
+    <a class="item" href="#/" data-route="home" data-nav="tasks">任务</a>
+    <a class="item" href="#/pool" data-route="pool" data-nav="pool">资源</a>
   </nav>
 
   <div class="main">
-    <div class="topbar" id="crumbs" aria-label="面包屑"></div>
+    <div class="topbar">
+      <!-- 项目下拉的选项由 console-shell.js 从 GET /api/projects 真实读回来填。
+           这里只放一个空的 select：写死几个项目名，就是让人以为平台里只有那几个。 -->
+      <label class="cs-project" id="cs-project">
+        <select id="cs-project-select" aria-label="项目"></select>
+        <span class="cs-caret" aria-hidden="true"></span>
+      </label>
+      <!-- 同步状态由 console-shell.js 写：真实成功读取的时刻 + 服务状态。
+           这里**不**给初始文案——写一句「服务正常」当占位，首屏就是绿的，
+           而那时一次读取都还没成功。 -->
+      <span class="cs-sync" id="cs-sync" role="status" aria-live="polite"></span>
+    </div>
+    <p class="cs-banner" id="cs-banner" hidden></p>
+    <!-- 兼容锚点：task.js / plan-run.js 会往 #crumbs 里写面包屑片段。 -->
+    <div class="cs-breadcrumbs" id="crumbs" aria-label="面包屑" aria-hidden="true"></div>
     <div class="view" id="view"></div>
   </div>
 </div>
