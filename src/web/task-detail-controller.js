@@ -188,10 +188,42 @@ export function createTaskDetailController(deps = {}) {
   let inflightGen = -1;
   let timer = null;
   let liveTimer = null;
+  /** 有没有往 container 里画过这一页。没画过的容器谈不上「被别人换掉」。 */
+  let painted = false;
+  /** hashchange 只挂一次：同一条 Mission 重复 start 会走早退分支，再挂一次就会停两次。 */
+  let listening = false;
+
+  // 事件挂在 window 上而不是 document 上：hashchange 是 window 的事件，挂错对象就永远
+  // 收不到，离页后旧轮询会一直打接口，屏幕上看起来只是「返回了但请求还在」
+  const win = deps.win
+    || (doc && doc.defaultView)
+    || (typeof globalThis.window === 'undefined' ? null : globalThis.window);
 
   /* ---------------------------- 画 ---------------------------- */
 
+  /**
+   * 容器里画的还是不是我们这一页。
+   *
+   * 生产路径是 app.js 的 hashchange → render() 给同一个 #view 换 innerHTML：容器始终
+   * connected，所以 onTick 里那道 isConnected 一句话都不会说。只有「画出来的那页还带着
+   * 我写下的归属标记」能说明所有权，少了这一句，旧定时器与在途响应会把任务详情
+   * 画回资源页或总览。
+   */
+  function relinquished() {
+    if (!painted) return false;
+    if (typeof container.querySelector !== 'function') return false;
+    const root = container.querySelector('[data-td-owner]');
+    const owner = root && typeof root.getAttribute === 'function' ? text(root.getAttribute('data-td-owner')) : '';
+    return owner !== text(state.missionId);
+  }
+
   function paint() {
+    // 归属已经换人（或已经被 stop 过）：先停自己再走，一个字都不许写回容器。
+    // 在途响应晚到也是走这条路，所以只挡定时器是不够的。
+    if (stopped || relinquished()) {
+      stop();
+      return;
+    }
     const entry = liveEntry(text(state.missionId));
     container.innerHTML = taskDetailHtml({
       view: state.view,
@@ -210,7 +242,13 @@ export function createTaskDetailController(deps = {}) {
       liveChunks: entry.lines,
     });
     const root = typeof container.querySelector === 'function' ? container.querySelector('.td-page') : null;
-    if (root) bindTaskDetail(root, handlers);
+    if (root) {
+      // 写下归属：之后别的页面把同一个容器的 innerHTML 换掉，这一句就是 relinquished()
+      // 唯一能识破的方式。写在画完之后，写之前就查等于给自己判「还没画」。
+      if (typeof root.setAttribute === 'function') root.setAttribute('data-td-owner', text(state.missionId));
+      bindTaskDetail(root, handlers);
+    }
+    painted = true;
   }
 
   /* ---------------------------- 交互 ---------------------------- */
@@ -421,6 +459,11 @@ export function createTaskDetailController(deps = {}) {
   /** live 单独一轮：只追加行、只重绘，不重取任务事实。 */
   async function liveTick() {
     if (stopped || !running) return;
+    // 同样两道闸：resource 页可能先换掉容器、hashchange 还没跑到，先查归属再查代次。
+    if (relinquished()) {
+      stop();
+      return;
+    }
     if (!isVisible()) {
       stopTimers();
       return;
@@ -464,6 +507,12 @@ export function createTaskDetailController(deps = {}) {
 
   function onTick() {
     if (stopped) return;
+    // 容器被别的页面接管（innerHTML 被换掉、容器本身仍 connected）：停止并作废在途。
+    // 只判 isConnected 的话这一条永远不成立，#view 从来不会被摘掉。
+    if (relinquished()) {
+      stop();
+      return;
+    }
     // 节点已经离开文档（换页了、但这一页没被显式 stop）：定时器必须自己停。不停的话
     // 它会对着一个已经不在屏幕上的容器一直打接口，直到整个标签页关掉。
     if (typeof container.isConnected === 'boolean' && !container.isConnected) {
@@ -491,6 +540,22 @@ export function createTaskDetailController(deps = {}) {
     else if (timer === null) timer = setIntervalFn(onTick, plan.intervalMs);
     if (plan.liveIntervalMs === null) stopLiveTimer();
     else if (liveTimer === null) liveTimer = setIntervalFn(onLiveTick, plan.liveIntervalMs);
+  }
+
+  /**
+   * 路由离开本 Mission：停止轮询、作废在途响应。
+   *
+   * 直接读 location.hash 而不是用 app.js 的 parseRoute：那会把外壳的路由表拽进这一层，
+   * 而且这里只关心一件极窄的事——hash 还是不是本 Mission。hash 仍是本 Mission（含
+   * ?selectedStep= 这类查询）就不许停，否则人在详情页里点一下深链，轮询就自己没了。
+   */
+  function onHashLeave() {
+    if (stopped) return;
+    const location = win && win.location ? win.location : null;
+    const hash = location && typeof location.hash === 'string' ? location.hash : '';
+    const own = '#/missions/' + encodeURIComponent(text(state.missionId));
+    if (hash === own || hash.indexOf(own + '?') === 0) return;
+    stop();
   }
 
   function onVisibilityChange() {
@@ -546,6 +611,9 @@ export function createTaskDetailController(deps = {}) {
     const switched = next.missionId !== state.missionId;
     running = true;
     stopped = false;
+    // 走到这里就是自己重新立一次所有权（换任务 / stop 后再进）：容器里那份旧页是我们
+    // 画的不算「被抢」，否则换任务那一下会被自己的归属标记判成离页而直接停掉。
+    painted = false;
     cycleGen += 1;
     state.missionId = next.missionId;
     if (next.hasStep) {
@@ -569,6 +637,10 @@ export function createTaskDetailController(deps = {}) {
 
     ensureTaskDetailStylesheets(doc);
     if (typeof doc.addEventListener === 'function') doc.addEventListener('visibilitychange', onVisibilityChange);
+    if (!listening && win && typeof win.addEventListener === 'function') {
+      win.addEventListener('hashchange', onHashLeave);
+      listening = true;
+    }
     // 先画一帧：不画的话容器是空的，看起来像这一页坏了。
     paint();
     return refresh();
@@ -582,6 +654,11 @@ export function createTaskDetailController(deps = {}) {
     cycleGen += 1;
     stopTimers();
     if (typeof doc.removeEventListener === 'function') doc.removeEventListener('visibilitychange', onVisibilityChange);
+    // 停了还听着，下一次 hashchange 会对着已停的控制器再跑一遍判断，语义上像它还活着。
+    if (listening && win && typeof win.removeEventListener === 'function') {
+      win.removeEventListener('hashchange', onHashLeave);
+      listening = false;
+    }
     if (activeController === api) activeController = null;
   }
 

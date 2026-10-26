@@ -8,6 +8,8 @@
  *      没有 heartbeatAt 键的一跳只说「心跳未知」。
  *   2. 换任务时晚到的响应不写到新任务的页面上；隐藏的页面不发 live 请求；
  *      别的 Attempt 的行不进实时正文。
+ *   3. 路由离开（容器被资源页换掉 + hash 指向 #/pool）时不靠人调 stop：旧轮询与在途
+ *      响应都不再把详情画回同一个容器，也不再请求该 Mission。
  *
  * 这些错了浏览器都不报错：屏幕上只是「进度卡住了」「这条任务已经通过」「它又重跑了一遍」。
  *
@@ -307,4 +309,80 @@ test('换任务时晚到的 view 不写到新任务页；隐藏时不发 live；
   assertOnlyAllowedPaths(requested);
 
   controller.stop();
+});
+
+test('容器被资源页接管且 hash 指向 #/pool 后，不调用 stop 也不再画回也不请求该 Mission', async () => {
+  const h = harness();
+  const requested: string[] = [];
+  let missionGets = 0;
+  let releaseMission: (value: unknown) => void = () => {};
+  const hanging = new Promise<unknown>((resolve) => {
+    releaseMission = resolve;
+  });
+
+  async function fetchJson(path: string): Promise<unknown> {
+    requested.push(path);
+    if (path === '/api/missions/M-1') {
+      missionGets += 1;
+      // 第二轮起挂起：这一轮就是「在途响应」，它晚到的那一刻页面已经属于资源页了。
+      return missionGets > 1 ? hanging : missionView();
+    }
+    if (path === '/api/missions/M-1/activity') return missionActivity();
+    if (path === '/api/missions/M-1/attempts/W-1.exec-1') {
+      return { attemptId: 'W-1.exec-1', status: 'in_progress' };
+    }
+    if (path === '/api/missions/M-1/live?cursor=0') {
+      return {
+        cursor: 4,
+        chunks: [{ seq: 4, missionId: 'M-1', attemptId: 'W-1.exec-1', kind: 'text', text: '行甲' }],
+      };
+    }
+    if (path === '/api/missions/M-1/live?cursor=4') return { cursor: 4, chunks: [] };
+    throw new Error('unexpected ' + path);
+  }
+
+  const controller = createTaskDetailController({
+    doc: h.document,
+    container: h.container,
+    missionId: 'M-1',
+    fetchJson,
+    nowIso: () => NOW,
+    setInterval: h.setInterval,
+    clearInterval: h.clearInterval,
+  });
+
+  await controller.start();
+  await flush();
+  assert.equal(h.textOf('.td-mission-id'), 'M-1');
+  assert.equal(h.textOf('.td-intent').includes('原始意图'), true);
+
+  // stop 之后这些定时器必须一个都不再动作：停了的控制器还被指着打接口，等于没停。
+  const timersBeforeLeave = [...h.timers.values()];
+
+  // 第一道闸的场景：别的页面先把同一个容器换掉，hash 事件可能还没跑到。
+  void controller.refresh();
+  await flush();
+  assert.equal(requested.filter((path) => path === '/api/missions/M-1').length, 2);
+  const beforeLeave = requested.length;
+
+  h.container.innerHTML = '<section id="pool-body">资源池</section>';
+  h.window.location.hash = '#/pool';
+  h.window.dispatchEvent(new h.window.Event('hashchange'));
+
+  // 在途响应现在才回来，然后定时器再走一轮：两样都不许把详情画回去。
+  releaseMission(missionView());
+  await flush();
+  await flush();
+  for (const timer of timersBeforeLeave) timer.fn();
+  for (const timer of [...h.timers.values()]) timer.fn();
+  await flush();
+  await flush();
+
+  assert.ok(h.q('#pool-body'), '资源页被旧详情盖掉了');
+  assert.equal(h.q('.td-page'), null, '容器里又长出了 .td-page');
+  assert.equal(h.container.textContent?.includes('原始意图'), false, '旧详情把正文改回了 M-1');
+  assert.equal(h.window.location.hash, '#/pool');
+
+  const afterLeave = requested.slice(beforeLeave);
+  assert.deepEqual(afterLeave, [], '离页后仍在请求该 Mission：' + afterLeave.join(', '));
 });
