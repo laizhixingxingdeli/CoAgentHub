@@ -154,7 +154,7 @@ function rule(styles: string, selector: string): string {
   return end < 0 ? '' : styles.slice(at + selector.length + 1, end);
 }
 
-test('页头有可用的返回链接，页头不再是内缩圆角白卡，页内不再自加 padding', () => {
+test('页头是有返回链接的整幅白带，纵向基线落在画板上，页内不自加 padding', () => {
   const { q } = mount(directView());
 
   // 返回链接必须真的指向任务总览：做成不跳转的按钮，人点了留在原地还以为坏了。
@@ -163,12 +163,32 @@ test('页头有可用的返回链接，页头不再是内缩圆角白卡，页�
   assert.equal(back.textContent, '返回任务列表');
   assert.equal(back.getAttribute('href'), '#/projects');
 
-  // 页头自己不再画一张带内缩与圆角的卡：否则首字从画板 x224 内缩到 x256，
-  // 页签外面还多一层卡套。
+  // 页头是主栏上的白色平铺带（画板 82:4091 / 82:4092）：background:none 会让白带
+  // 整个消失，圆角卡会让首字从 x224 内缩到 x256，两种都不像画板，而且屏幕上不报错。
   const header = rule(CSS, '.td-header');
   assert.ok(header.length > 0, '.td-header 规则不见了');
-  assert.equal(/border-radius/.test(header) && /padding:\s*16px/.test(header), false);
-  assert.ok(/padding:\s*0;/.test(header), '.td-header 没有归零 padding');
+  assert.ok(header.includes('background: var(--color-white)'), '.td-header 不是白底平铺带');
+  assert.ok(header.includes('margin-top: calc(1px - var(--shell-view-inset))'), '白带顶边没拉到 y69');
+  assert.ok(header.includes('padding-top: 19px'), '返回链接顶边没落在 y88');
+  assert.ok(header.includes('border-bottom: 1px solid var(--color-line)'), '白带底部没有 1px 分界');
+  assert.equal(header.includes('background: none'), false, '白带被 background:none 抹掉了');
+  assert.equal(header.includes('border-radius: 6px'), false, '.td-header 不该是圆角卡');
+
+  // 纵向基线：69+19+22+12+28+12+44+8+28+6+40+6+40=334。间距写错时页签会漂到
+  // 白带外面，但浏览器只当合法的 CSS 收下，只有逐条对算式才看得出。
+  assert.ok(rule(CSS, '.td-header .td-mission-id').includes('margin: 12px 0 0'), '标题基线不是 y122');
+  assert.ok(rule(CSS, '.td-header .td-intent-row').includes('margin-top: 12px'), 'intent 行基线不是 y162');
+  assert.ok(rule(CSS, '.td-header .td-status-row').includes('margin-top: 8px'), '状态行基线不是 y214');
+  const facts = rule(CSS, '.td-header .td-facts');
+  assert.ok(facts.includes('margin-top: 6px'), '事实带基线不是 y248');
+  assert.ok(facts.includes('height: 40px'), '事实带高度不是 40px');
+  const tabs = rule(CSS, '.td-header .td-tabs');
+  assert.ok(tabs.includes('margin-top: 6px'), '页签基线不是 y294');
+  assert.ok(tabs.includes('height: 40px'), '页签带高度不是 40px');
+  assert.ok(rule(CSS, '.td-header .td-intent').includes('min-height: 44px'), '收起态 intent 不再稳占两行');
+  assert.ok(rule(CSS, ".td-header .td-tab[data-tab='workflow']").includes('width: 110px'));
+  assert.ok(rule(CSS, ".td-header .td-tab[data-tab='delivery']").includes('width: 150px'));
+  assert.ok(rule(CSS, ".td-header .td-tab[data-tab='contract']").includes('width: 100px'));
 
   // 页内不自加 padding：外壳已有 40px gutter，叠一层就偏离画板列位置。
   assert.ok(/padding:\s*0;/.test(rule(PAGE_CSS, '.td-page')), '.td-page 没有把 padding 归零');

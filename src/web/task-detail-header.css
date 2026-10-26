@@ -13,25 +13,48 @@
  * 改一处忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
  */
 
-/* 页头本身不画卡：画板 2:140 里它是页面上的一段留白内容，左边界就是内容列起点
- * （外壳 .cs-shell .main 已有 40px gutter）。这里再加 padding + 圆角白底，首字会
- * 从画板的 x224 内缩到 x256，且多出一层卡套在页签外面，人也读不出它是不是可点的容器。 */
+/* 页头是主栏上的一条整幅白色平铺带（画板 82:4091：left 184、top 69、1256 × 266），
+ * 底下压一条 1px 分界线（82:4092 的 top 334）。它不是浮在纸色上的圆角卡：以前写成
+ * background:none 时白带整个消失，页面变成一片纸色，页头的三段身份也就没有边界，
+ * 人分不清哪儿是页头、哪儿是下面那张白卡。
+ *
+ * 白带要铺到主栏两边（x184..1440），文字却仍在内容列起点 x224：外壳 .cs-shell .main
+ * 有 40px gutter，所以这里反向拉出 gutter 再补成 padding。直接加 padding 会从 x224
+ * 内缩到 x264；直接去掉 gutter 又会把整站列宽改掉。
+ *
+ * margin-top 用 1px - inset 而不是写死 -27px：外壳的 .view 有 padding-top 28px，
+ * 页头因此从 y96 起，而画板白带顶边是 y69。凭减法对齐，改外壳 inset 时差 1px 的
+ * 来源仍然一目了然；写死数字则下次调外壳就错位且没人知道为什么。 */
 .td-header {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  /* gap 归零：画板每一行的间距都不同（12 / 12 / 8 / 6 / 6），统一的 gap 会把后面
+   * 每一行都垫偏，最后页签落到白带外面。间距全部交给各块自己的 margin。 */
+  gap: 0;
+  margin-top: calc(1px - var(--shell-view-inset));
+  margin-right: calc(-1 * var(--shell-content-gutter));
+  margin-left: calc(-1 * var(--shell-content-gutter));
   padding: 0;
-  background: none;
+  /* 69 + 19 = 88：返回链接的顶边（画板 41:419）。 */
+  padding-top: 19px;
+  padding-right: var(--shell-content-gutter);
+  padding-left: var(--shell-content-gutter);
+  background: var(--color-white);
   border: 0;
+  /* 这一像素就是画板 82:4092 的底部分界（y334）。页签自己不再画整行下边框，
+   * 否则两条线隔着 6px 叠在一起，看着像一条粗的毛边。 */
+  border-bottom: 1px solid var(--color-line);
   border-radius: 0;
   font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   color: var(--color-ink);
 }
 
 /* 返回链接是页头最上一行（画板节点 41:419），字号 14/22，只占自己的宽度：
- * 撑满整行的链接会让右侧空白也变成可点区域。 */
+ * 撑满整行的链接会让右侧空白也变成可点区域。margin 归零：白带上边距只由
+ * .td-header 的 padding-top 19px 给出，这里再留一点就会把标题整体推下去。 */
 .td-header .td-back {
   align-self: flex-start;
+  margin: 0;
   font-size: 14px;
   line-height: 22px;
   color: var(--color-accent);
@@ -40,9 +63,10 @@
 
 /* 编号用等宽：同一串编号在页头、总览行与确认弹窗里要能按字符对齐比较，
  * 比例字体下同一个字符在不同位置宽窄不同，肉眼对不齐也数不清位数。等宽族
- * 在本仓是功能性的，不是装饰。 */
+ * 在本仓是功能性的，不是装饰。
+ * margin-top 12 = 画板标题 y122 减返回行底边 y110。 */
 .td-header .td-mission-id {
-  margin: 0;
+  margin: 12px 0 0;
   font-family: 'IBM Plex Mono', Consolas, monospace;
   font-size: 20px;
   font-weight: 500;
@@ -53,12 +77,14 @@
 }
 
 /* intent 与展开按钮同行（画板 41:421 / 41:422）：按钮单独占一行会把身份块撑成
- * 三行，短 intent 与长 intent 的页头高度也不一致，逐张截图看起来像两个页面。 */
+ * 三行，短 intent 与长 intent 的页头高度也不一致，逐张截图看起来像两个页面。
+ * margin-top 12 = 画板 intent y162 减标题行底边 y150。 */
 .td-header .td-intent-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 0 16px;
+  margin-top: 12px;
 }
 
 .td-header .td-intent {
@@ -96,12 +122,16 @@
 /* 分三区且不换行：状态 / 附标 / 处理人与恢复方式（画板 41:427 与 41:428 之间
  * 有明显列位）。允许换行时一长句处理人就被挤到下一行，状态与附标跟着散开，
  * 这一行读起来就是一段短文本而不是三个含义。处理人与恢复方式仍占两个节点，
- * 同处第三区：合成一句话就分不清「谁该动」和「会不会自己好」。 */
+ * 同处第三区：合成一句话就分不清「谁该动」和「会不会自己好」。
+ * margin-top 8 = 画板状态行 y214 减 intent 底边 y206；min-height 28 是 41:427
+ * 那一行的高度，不给的话这一行只有 22px，后面的 6px 间距会跟着往上缩。 */
 .td-header .td-status-row {
   display: grid;
   grid-template-columns: max-content max-content max-content minmax(0, 1fr);
   align-items: center;
   column-gap: 16px;
+  margin-top: 8px;
+  min-height: 28px;
   font-size: 14px;
   line-height: 22px;
 }
@@ -134,16 +164,19 @@
 /* ===== 40px 任务事实带 ===== */
 
 /* 单行四格：保障 / 协作 / 费用 / 时间。高度是画板值 40px，nav 底色与 16px 内缩进
- * 让它和上面的身份、下面的页签明显分层——它与流程步骤不是一组。 */
+ * 让它和上面的身份、下面的页签明显分层——它与流程步骤不是一组。
+ * margin-top 6 = 画板事实带 y248 减状态行底边 y242。左右 padding 16 让事实文字
+ * 从 x240 起，与画板一致；圆角取画板的 rounded-[6px]。 */
 .td-header .td-facts {
   height: 40px;
   display: flex;
   align-items: center;
   gap: 16px;
+  margin-top: 6px;
   padding: 0 16px;
   background: var(--color-nav);
   border: 1px solid var(--color-line);
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 14px;
   line-height: 22px;
   color: var(--color-ink);
@@ -160,13 +193,16 @@
 
 /* ===== 页签 ===== */
 
-/* 页签带高 40px、间距 20px（画板 41:434 起三个 Console/Tab 的 top 同为 294）。 */
+/* 页签带高 40px、间距 20px（画板 41:434 起三个 Console/Tab 的 top 同为 294），
+ * margin-top 6 = 294 减事实带底边 288。这里**不画**整行下边框：白带底边已经有
+ * 1px（y334），两条线只隔 6px，会在中间叠成一道脏边。选中页签自己的 2px
+ * 下边框照旧，它是页签的选中态，不是分隔线。 */
 .td-header .td-tabs {
   display: flex;
   align-items: center;
   gap: 20px;
+  margin-top: 6px;
   height: 40px;
-  border-bottom: 1px solid var(--color-line);
 }
 
 .td-header .td-tab {
