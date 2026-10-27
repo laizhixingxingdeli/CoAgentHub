@@ -6,10 +6,10 @@
  * 判断「这条候选还能用」。所以这里的每个格式化函数都把「未知」和「真实零」
  * 分成两条路走，宁可多一个字符串也不让 Number(null) 那种伪零流进来。
  *
- * 草稿的边界（本单）：启停/排序/改 endpoint/加参数/加候选**只改本地草稿**，
- * 一次下发是下一张单的事。所以这里一个 fetch/POST 都没有：一旦有人给某个
- * 控件接上「即时保存」，一次手滑就会把整个角色的调度顺序写到线上，而屏幕上看
- * 起来只是点了一下「下移」。saved 只在下发成功后才会变，本单不动它。
+ * 草稿的边界：启停/排序/改 endpoint/加参数/加候选**只改本地草稿**，整页只有
+ * 「保存整个角色」一个 POST，且只在人点它时才发。逐控件即时保存的后果是：一次
+ * 手滑就把整个角色的调度顺序写到线上，而屏幕上看起来只是点了一下「下移」。
+ * saved 只在保存成功后才会变；保存只影响以后的调度，不打断在途的 Attempt。
  *
  * 纯函数（喂数据 → 回字符串/新草稿）与 DOM 分开：浏览器不在测试里，纯函数能
  * 直接在 node 里喂假健康、假草稿断言那几格，而这几格恰恰是改一次就悄悄错一次
@@ -320,6 +320,72 @@ export function anyDraftDirty(saved, drafts) {
   return RESOURCE_ROLES.some(([role]) => draftDirty(saved, drafts, role));
 }
 
+/**
+ * 点击那一瞬间的保存请求：角色、修订、有序候选全部深拷贝冻结下来。
+ *
+ * 不冻结的后果不是报错，而是把**别的角色**的候选存到这个角色头上：POST 在路上时
+ * 人切了页签、又改了两行，响应回来写的就是新角色了。expectedRevision 只认字符串——
+ * Number() 会把 '007' 变成 7，而服务端 CAS 比的是字符串，两者永远不相等。
+ */
+export function captureSave(role, revision, candidates) {
+  return {
+    role,
+    expectedRevision: typeof revision === 'string' ? revision : '',
+    candidates: structuredClone(Array.isArray(candidates) ? candidates : []),
+  };
+}
+
+/**
+ * 只发一次 POST，body 只有 expectedRevision 与 candidates。
+ *
+ * 逐候选 POST 会在半路失败时留下一个「只改了一半」的角色，而那时它已经在调度了；
+ * 一次提交要么整角色换掉，要么一个字节都没动。
+ */
+export async function postConfigure(fetchImpl, captured, signal) {
+  const response = await fetchImpl('/api/pools/' + captured.role + '/configure', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: captured.expectedRevision,
+      candidates: captured.candidates,
+    }),
+    signal,
+  });
+  let body = {};
+  try { body = await response.json(); } catch { body = {}; }
+  return { ok: response.ok, status: response.status, body };
+}
+
+/**
+ * 成功响应带的是**全池快照**：四个角色一起换，revision 也换。
+ *
+ * 只把被保存的角色对齐快照是不够的：页签计数、别的角色的 diff 基线都来自 saved，
+ * 留着旧的那份，下一次保存就会拿着过期的基线算出「没改过」。同时**不能**把其他
+ * 角色的脏草稿一起覆盖掉——人手里那份改动还没交，快照只是服务端此刻的样子。
+ * 所以只有「被保存的角色」和「提交前本来就干净的角色」跟随快照，脏的保留原样。
+ */
+export function applyConfigureSuccess(saved, drafts, body, savedRole) {
+  const snapshot = body && typeof body === 'object' ? body : {};
+  const nextSaved = {};
+  const nextDrafts = { ...drafts };
+  for (const [role] of RESOURCE_ROLES) {
+    const rows = Array.isArray(snapshot[role]) ? snapshot[role].map(candidateConfig) : [];
+    const clean = JSON.stringify(roleRows(saved, role)) === JSON.stringify(roleRows(drafts, role));
+    nextSaved[role] = rows;
+    nextDrafts[role] = (role === savedRole || clean) ? structuredClone(rows) : roleRows(drafts, role);
+  }
+  return {
+    revision: typeof snapshot.revision === 'string' ? snapshot.revision : '',
+    saved: nextSaved,
+    drafts: nextDrafts,
+  };
+}
+
+/** 放弃草稿只还原本角色：把别的角色一起还原，等于替人丢掉他还没交的改动。 */
+export function discardRoleDraft(saved, drafts, role) {
+  return withRole(drafts, role, structuredClone(roleRows(saved, role)));
+}
+
 const COLUMNS = ['顺序', '候选 / endpoint', '启用', '熔断', '近 7 天', '额度', '占用'];
 
 function roleLabelOf(role) {
@@ -377,9 +443,22 @@ function rowHtml(row, index, selectedProfileId) {
     + '</div>';
 }
 
-function saveBarHtml(label, revision, dirty) {
-  // 脏了就如实说「有未保存修改」，但保存按钮**仍然禁用**：保存动作是下一张单。
-  // 文案不说「已保存，将打断进行中的 Attempt」——保存只影响以后调度，不打断在途的。
+/**
+ * 保存条。flags = { busy, conflict, message, latest }，缺省全空。
+ *
+ * 只有**修订冲突**（STALE_POOL）才禁用保存：那是「你不知道最新是什么，再提也是白提」。
+ * 其余失败（比如重复 profileId）是人自己能改的，禁掉保存反而把人卡在一个改不了
+ * 的地方。冲突时保存虽然禁用，但草稿一直留着、也一直显示着——不能因为一次冲突
+ * 就把人刚敲的东西抹掉，更不能拿到最新就自动写回。
+ */
+function saveBarHtml(label, revision, dirty, role, flags) {
+  const view = flags && typeof flags === 'object' ? flags : {};
+  const busy = view.busy === true;
+  const conflict = view.conflict === true;
+  const message = typeof view.message === 'string' ? view.message : '';
+  const latest = view.latest && typeof view.latest === 'object' ? view.latest : null;
+  const saveDisabled = busy || conflict || !dirty;
+  const discardDisabled = busy || !dirty;
   return '<div class="resource-savebar" data-resource-save'
     + (dirty ? ' data-dirty="1"' : '') + '>'
     + '<div class="resource-save-summary">'
@@ -388,11 +467,26 @@ function saveBarHtml(label, revision, dirty) {
     +   '<span class="resource-sub console-body">' + esc(label + ' · 修订 ' + (revision || '未知')) + '</span>'
     + '</div>'
     + '<div class="resource-save-actions">'
-    +   '<button type="button" class="resource-primary" data-resource-save-button disabled>'
-    +     '<span class="resource-primary-face console-body">保存整个角色</span>'
+    +   '<button type="button" class="resource-primary" data-resource-save-button'
+    +     (saveDisabled ? ' disabled' : '') + '>'
+    +     '<span class="resource-primary-face console-body">'
+    +       (busy ? '保存中…' : '保存整个角色') + '</span>'
     +   '</button>'
-    +   '<button type="button" class="resource-button" data-resource-discard disabled>放弃草稿</button>'
+    +   '<button type="button" class="resource-button" data-resource-discard'
+    +     (discardDisabled ? ' disabled' : '') + '>放弃草稿</button>'
+    +   (conflict
+      ? '<button type="button" class="resource-button" data-resource-compare>重新读取最新</button>'
+      : '')
     + '</div>'
+    + (message
+      ? '<p class="resource-sub console-body" data-resource-save-message>' + esc(message) + '</p>'
+      : '')
+    + (latest
+      ? '<pre class="resource-command" data-resource-latest>'
+      +   esc(JSON.stringify(latest[role] || [], null, 2)) + '</pre>'
+      + '<div><button type="button" class="resource-button" data-resource-rebase>'
+      +   '已比较，保留草稿重试</button></div>'
+      : '')
     + '</div>';
 }
 
@@ -504,10 +598,13 @@ function addFormHtml() {
 
 /**
  * 页面 HTML。vm = `{ role, revision, configError, healthError, counts, rows,
- * drafts, selected, selectedIndex, endpointOptions, dirty, adding }`。
+ * drafts, selected, selectedIndex, endpointOptions, dirty, adding, busy, conflict,
+ * message, latest }`。
  *
  * counts 用调用方给的数字：写死 8/4/0/0 会在接入真实池之后仍然显示样例值，
- * 而那种错没人会当成 bug 报（数字看起来总是合理的）。
+ * 而那种错没人会当成 bug 报（数字看起来总是合理的）。counts 来自**已保存**配置，
+ * 不是草稿长度：草稿里加了一条就说这个角色配了两条，页签会先于保存就变，
+ * 人以后每次看页签都得想「这数字到底是存下的还是手上的」。
  */
 export function resourcePageHtml(vm) {
   const state = vm && typeof vm === 'object' ? vm : {};
@@ -522,6 +619,11 @@ export function resourcePageHtml(vm) {
   const selectedIndex = Number.isInteger(state.selectedIndex) ? state.selectedIndex : -1;
   const selected = state.selected && typeof state.selected === 'object' ? state.selected : null;
   const dirty = state.dirty === true;
+  // 每角色的 busy/conflict/message/latest：保存中的那个角色禁用按钮，别的角色照常。
+  const busy = state.busy === true;
+  const conflict = state.conflict === true;
+  const message = typeof state.message === 'string' ? state.message : '';
+  const latest = state.latest && typeof state.latest === 'object' ? state.latest : null;
 
   const tabs = RESOURCE_ROLES.map(([id, name]) =>
     '<button type="button" class="resource-tab console-body" data-resource-role="' + esc(id) + '"'
@@ -556,7 +658,9 @@ export function resourcePageHtml(vm) {
     +   '<div class="resource-body">' + body + '</div>'
     + '</div>'
     // 空角色加了第一条草稿也要有保存条：否则那一条既在抽屉里、又没有「未保存」的提示。
-    + (rows.length || drafts.length ? saveBarHtml(label, revision, dirty) : '')
+    + (rows.length || drafts.length ? saveBarHtml(label, revision, dirty, role, {
+      busy, conflict, message, latest,
+    }) : '')
     + (selected ? drawerHtml(selected, state.endpointOptions, selectedIndex, drafts.length) : '')
     + '</section>';
 }
@@ -633,6 +737,26 @@ export async function renderResourcePage(container) {
     saved: {},
     drafts: {},
     adding: false,
+    // 每个角色一份保存状态：{ busy, conflict, message, latest }。
+    // 按角色存放而不是全局：保存执行者时切到分类，分类的保存按钮不能跟着被禁掉。
+    status: {},
+  };
+
+  /** 该角色的保存状态，缺省全空：没存过的角色不该带着别人的冲突或错误文案。 */
+  const statusOf = (role) => {
+    const entry = state.status && typeof state.status[role] === 'object' && state.status[role]
+      ? state.status[role]
+      : {};
+    return {
+      busy: entry.busy === true,
+      conflict: entry.conflict === true,
+      message: typeof entry.message === 'string' ? entry.message : '',
+      latest: entry.latest && typeof entry.latest === 'object' ? entry.latest : null,
+    };
+  };
+
+  const setStatus = (role, next) => {
+    state.status = { ...state.status, [role]: { ...statusOf(role), ...next } };
   };
 
   const currentConfigRows = () => (state.config && Array.isArray(state.config[state.role])
@@ -644,6 +768,7 @@ export async function renderResourcePage(container) {
     const configRows = currentConfigRows();
     const healthRows = state.health && Array.isArray(state.health[role]) ? state.health[role] : [];
     const drafts = Array.isArray(state.drafts[role]) ? state.drafts[role] : [];
+    const status = statusOf(role);
     const selectedIndex = state.selectedProfileId
       ? drafts.findIndex((row) => row && row.profileId === state.selectedProfileId)
       : -1;
@@ -660,7 +785,10 @@ export async function renderResourcePage(container) {
       configError: state.configError,
       healthError: state.healthError,
       counts: state.counts,
-      rows: joinRoleRows(configRows, healthRows),
+      // 表格画**草稿**（未保存的顺序/启停/新候选得看得见），健康按 profileId 关联。
+      // 只画已保存配置的话，加了一条候选、调了顺序，屏幕上什么都没变——而保存条
+      // 已经说「有未保存修改」，两处对不上，人就会去怀疑保存没生效。
+      rows: joinRoleRows(drafts, healthRows),
       selectedProfileId: state.selectedProfileId,
       drafts,
       selectedIndex,
@@ -670,6 +798,10 @@ export async function renderResourcePage(container) {
       endpointOptions: endpointOptions(configRows),
       dirty: draftDirty(state.saved, state.drafts, role),
       adding: state.adding,
+      busy: status.busy,
+      conflict: status.conflict,
+      message: status.message,
+      latest: status.latest,
     };
   };
   const paint = () => {
@@ -741,7 +873,9 @@ export async function renderResourcePage(container) {
   }
   paint();
 
-  // 草稿操作全部走这一条：只改本地草稿并重画。**这里不发任何请求**（保存是下一张单）。
+  // 草稿编辑全走这一条：只改本地草稿并重画。**这里不发任何请求**——启停、排序、
+  // 改 endpoint 都是即时生效的写操作，一跳过一个控就 POST 一次，一次手滑就把
+  // 整个角色的调度顺序写到线上。下发只有保存条上那一个按钮。
   const applyDraft = (nextDrafts) => {
     state.drafts = nextDrafts;
     paint();
@@ -778,6 +912,118 @@ export async function renderResourcePage(container) {
       return;
     }
 
+    // 下面四个按钮都在行选择之前处理：行选择会改 state.selectedProfileId 并重画，
+    // 保存分支落到那里就已经错过了本次点击该做的事。
+    //
+    // 保存：整个角色一次提交。role 在**点击时**就冻结进 captured，后面全部用
+    // captured.role 写回：POST 在路上时人切了页签，用 await 之后的 state.role
+    // 就会把协调者的结果写到执行者头上，而屏幕上看起来只是两次正常操作。
+    if (target.closest('[data-resource-save-button]')) {
+      const role = state.role;
+      const status = statusOf(role);
+      if (!draftDirty(state.saved, state.drafts, role) || status.busy || status.conflict) return;
+      const captured = captureSave(role, state.revision, state.drafts[role]);
+      setStatus(role, { busy: true, conflict: false, message: '保存中…', latest: null });
+      paint();
+      let result;
+      try {
+        result = await postConfigure(fetch, captured, controller.signal);
+      } catch (error) {
+        // 离页/切页导致的中断不是失败：报一句错会让人以为配置没存上。
+        if (controller.signal.aborted) return;
+        setStatus(captured.role, { busy: false, message: messageOf(error) });
+        paint();
+        return;
+      }
+      if (!result.ok && result.status === 409 && result.body.error === 'STALE_POOL') {
+        // 只有修订过期才禁用保存：drafts/saved/revision 全部不动，也不自动读最新。
+        // 自动读并覆盖等于替人丢掉手上的改动，而那正是他刚敲进去的东西。
+        setStatus(captured.role, {
+          busy: false,
+          conflict: true,
+          message: nonEmpty(result.body.message) || '修订已过期，请重新读取最新配置',
+        });
+        paint();
+        return;
+      }
+      if (!result.ok) {
+        // 其他 409（比如重复 profileId）是人能自己改的：说清原因，草稿与修订都不动，
+        // 保存保持可点。禁掉会把人卡在一个他改不了的地方。
+        setStatus(captured.role, {
+          busy: false,
+          conflict: false,
+          message: nonEmpty(result.body.message) || ('保存失败：HTTP ' + result.status),
+        });
+        paint();
+        return;
+      }
+      const next = applyConfigureSuccess(state.saved, state.drafts, result.body, captured.role);
+      const snapshot = result.body && typeof result.body === 'object' ? result.body : {};
+      state.revision = next.revision;
+      state.saved = next.saved;
+      state.drafts = next.drafts;
+      // config 只带新 revision：它是 endpoint 选项的来源，过期就会画出一份不存在的端点。
+      state.config = { ...snapshot, revision: next.revision };
+      // 页签计数来自**已保存**配置：草稿长度会让没存上的候选先占一格数。
+      state.counts = Object.fromEntries(RESOURCE_ROLES.map(
+        ([id]) => [id, Array.isArray(next.saved[id]) ? next.saved[id].length : 0],
+      ));
+      setStatus(captured.role, {
+        busy: false,
+        conflict: false,
+        latest: null,
+        message: '已保存，只影响以后的调度，不打断在途 Attempt',
+      });
+      paint();
+      return;
+    }
+
+    // 重新读取最新：只把响应当作对比材料存起来。**不**碰 revision、不碰 drafts，
+    // conflict 也不清：悄悄换上最新就等于自动替人决定了存什么。
+    if (target.closest('[data-resource-compare]')) {
+      const role = state.role;
+      if (statusOf(role).busy) return;
+      try {
+        const response = await fetch('/api/pools/config', {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const latest = await response.json();
+        setStatus(role, {
+          latest: latest && typeof latest === 'object' ? latest : {},
+          message: '已读取最新配置，草稿仍保留。比较后再重试。',
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setStatus(role, { message: '读取最新失败：' + messageOf(error) });
+      }
+      paint();
+      return;
+    }
+
+    // 已比较、保留草稿重试：只把 CAS 基线换成最新修订，**不发 POST**。
+    // 自动写回等于把一次冲突变成一次无人的覆盖，而人根本没看到差异。
+    if (target.closest('[data-resource-rebase]')) {
+      const role = state.role;
+      const latest = statusOf(role).latest;
+      if (!latest || typeof latest.revision !== 'string') return;
+      state.revision = latest.revision;
+      setStatus(role, { conflict: false, latest: null, message: '草稿保留，请重新保存。' });
+      paint();
+      return;
+    }
+
+    // 放弃草稿：只还原本角色。四个角色一起还原，等于替人丢掉他还没交的另外三份改动。
+    if (target.closest('[data-resource-discard]')) {
+      const role = state.role;
+      if (statusOf(role).busy) return;
+      state.drafts = discardRoleDraft(state.saved, state.drafts, role);
+      state.status = { ...state.status, [role]: {} };
+      paint();
+      return;
+    }
+
     // 添加候选：空角色也要能加第一条，所以表单不看当前行数。
     if (target.closest('[data-resource-add]')) {
       state.adding = true;
@@ -805,7 +1051,7 @@ export async function renderResourcePage(container) {
       }
       state.drafts = addDraftCandidate(state.drafts, state.role, { profileId, endpoint });
       state.adding = false;
-      // 加完就选中新的那条：否则人加了一条，屏幕上表格没变（表格只画服务端配置），
+      // 加完就选中新的那条：不选中的话，抽屉还停在上一条上，人刚填的 endpoint 就看不见了，
       // 看起来像没加上。
       state.selectedProfileId = profileId;
       paint();

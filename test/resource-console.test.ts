@@ -22,14 +22,18 @@ import {
   RESOURCE_ROLES,
   addDraftCandidate,
   anyDraftDirty,
+  applyConfigureSuccess,
+  captureSave,
   circuitLines,
   copyResetCommand,
+  discardRoleDraft,
   draftDirty,
   endpointOptions,
   failureDetail,
   finiteNumber,
   joinRoleRows,
   moveDraftCandidate,
+  postConfigure,
   resetCommandView,
   resourcePageHtml,
   toggleDraftCandidate,
@@ -197,7 +201,7 @@ test('草稿只改本角色且不原地改；patch 改不动 profileId/runtime�
   assert.deepEqual(drafts, baseline, '不能原地改传入的草稿');
 });
 
-test('endpoint 选项只来自真实配置且去重保序；脏判定按角色分开、保存条脏时仍禁用', () => {
+test('endpoint 选项只来自真实配置且去重保序；脏判定按角色分开、脏时保存可点', () => {
   assert.deepEqual(
     endpointOptions([{ endpoint: 'local' }, { endpoint: 'remote' }, { endpoint: 'local' }]),
     ['local', 'remote'],
@@ -221,7 +225,7 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.equal(draftDirty(saved, toggled, 'classifier'), false, '没有配置的角色不是脏');
   assert.equal(anyDraftDirty(saved, toggled), true, '离页保护按全局判断');
 
-  // 保存条：脏时说「有未保存修改」，但保存按钮仍禁用（保存是下一张单）。
+  // 保存条：脏时说「有未保存修改」，保存按钮**可点**（没有冲突就该能存）。
   // endpoint 不在选项里时只能保留并标「缺来源」，不能悄悄改成集合里的第一个。
   const vm = {
     role: 'coordinator',
@@ -236,11 +240,109 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   };
   const html = resourcePageHtml(vm);
   assert.ok(html.includes('有未保存修改'));
-  assert.ok(html.includes('data-resource-save-button disabled'), '保存按钮在脏时也必须禁用');
+  assert.equal(html.includes('data-resource-save-button disabled'), false,
+    '没冲突的脏草稿要能保存，否则整页只有一个能改不能存的表单');
   assert.ok(html.includes('gone（缺来源）'), '缺来源的当前值要保留并标出来');
   assert.ok(html.includes('runtime：pi'));
   assert.ok(html.includes('data-draft-profile'), 'profileId 是只读文本，不是输入框');
   assert.equal(html.includes('data-draft-profile value='), false);
 
   assert.ok(resourcePageHtml({ ...vm, dirty: false }).includes('没有未保存修改'));
+});
+
+test('保存冻结点击时的角色与有序候选；成功采用全池快照但保留其他角色脏草稿', async () => {
+  const saved = {
+    coordinator: [{ profileId: 'c1', endpoint: 'local' }],
+    executor: [{ profileId: 'e1', endpoint: 'local' }],
+    classifier: [{ profileId: 'k1', endpoint: 'local' }],
+    independent_reviewer: [],
+  };
+  const drafts = structuredClone(saved);
+  drafts.coordinator = [
+    { profileId: 'c2', endpoint: 'local', enabled: false },
+    { profileId: 'c1', endpoint: 'local' },
+  ];
+  // 执行者的脏草稿：保存别人的时候不能把它抹掉，那是人还没交的改动。
+  drafts.executor = [{ profileId: 'e1', endpoint: 'local' }, { profileId: 'e2', endpoint: 'new' }];
+
+  let role = 'coordinator';
+  const captured = captureSave(role, 'rev-1', drafts[role]);
+  // 捕获之后改原数组和当前角色：这次请求必须还是协调者的那两行。
+  drafts.coordinator.push({ profileId: 'c3', endpoint: 'x' });
+  role = 'executor';
+  assert.deepEqual(captured.candidates.map((row) => row.profileId), ['c2', 'c1']);
+  assert.equal(captured.expectedRevision, 'rev-1');
+  assert.equal(captured.role, 'coordinator');
+
+  const calls = [];
+  const result = await postConfigure(async (url, init) => {
+    calls.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        revision: 'rev-2',
+        coordinator: drafts.coordinator.slice(0, 2),
+        executor: [{ profileId: 'e1', endpoint: 'local' }],
+        classifier: [{ profileId: 'k1', endpoint: 'local' }],
+        independent_reviewer: [],
+      }),
+    };
+  }, captured, undefined);
+
+  assert.equal(calls.length, 1, '整个角色只发一次，不逐候选 POST');
+  assert.equal(calls[0].url, '/api/pools/coordinator/configure', 'URL 用捕获时的角色');
+  assert.deepEqual(Object.keys(JSON.parse(calls[0].init.body)).sort(), ['candidates', 'expectedRevision']);
+  assert.equal(JSON.parse(calls[0].init.body).expectedRevision, 'rev-1');
+
+  const next = applyConfigureSuccess(saved, drafts, result.body, captured.role);
+  assert.equal(next.revision, 'rev-2', 'revision 取响应字符串');
+  assert.deepEqual(next.drafts.coordinator, next.saved.coordinator, '被保存的角色草稿对齐快照');
+  assert.equal(next.saved.coordinator.length, 2);
+  assert.deepEqual(next.drafts.executor, drafts.executor, '别的角色脏草稿原样保留');
+  assert.equal(next.saved.executor.length, 1, 'saved 取响应快照');
+  assert.deepEqual(next.drafts.classifier, next.saved.classifier, '提交前干净的角色跟随快照');
+
+  // 放弃只还原这一个角色。
+  const discarded = discardRoleDraft(next.saved, next.drafts, 'coordinator');
+  assert.deepEqual(discarded.coordinator, next.saved.coordinator);
+  assert.deepEqual(discarded.executor, drafts.executor, '放弃协调者不能顺手丢掉执行者的草稿');
+});
+
+test('resourcePageHtml：冲突才禁用保存，冲突可重新读取，消息与空角色各自成立', () => {
+  const dirtyVm = {
+    role: 'coordinator',
+    revision: 'r-1',
+    counts: { coordinator: 1 },
+    rows: [{ profileId: 'c1', endpoint: 'local', enabled: true, health: null }],
+    drafts: [{ profileId: 'c1', endpoint: 'local' }],
+    dirty: true,
+  };
+  const plain = resourcePageHtml(dirtyVm);
+  assert.equal(plain.includes('data-resource-save-button disabled'), false, '脏且未冲突时可点');
+
+  const conflicted = resourcePageHtml({ ...dirtyVm, conflict: true });
+  assert.ok(conflicted.includes('data-resource-save-button disabled'), '冲突时禁用保存');
+  assert.ok(conflicted.includes('重新读取最新'));
+  assert.ok(conflicted.includes('放弃草稿'));
+
+  const messaged = resourcePageHtml({ ...dirtyVm, message: '保存失败：HTTP 500' });
+  assert.ok(messaged.includes('data-resource-save-message'));
+  assert.ok(messaged.includes('保存失败：HTTP 500'));
+
+  // 保存中：按钮文案换成「保存中…」且不能重复点。
+  const saving = resourcePageHtml({ ...dirtyVm, busy: true, message: '保存中…' });
+  assert.ok(saving.includes('保存中…'));
+  assert.ok(saving.includes('data-resource-save-button disabled'), '保存中不能再点一次');
+
+  // 成功文案不得声称打断在中途的尝试。
+  const done = resourcePageHtml({
+    ...dirtyVm, dirty: false, message: '已保存，只影响以后的调度，不打断在途 Attempt',
+  });
+  assert.ok(done.includes('已保存，只影响以后的调度，不打断在途 Attempt'));
+  assert.equal(done.includes('中止 Attempt'), false);
+
+  const empty = resourcePageHtml({ role: 'executor', revision: 'r-1', counts: {}, rows: [], drafts: [] });
+  assert.equal(empty.includes('data-resource-save'), false, '空角色仍无保存条');
+  assert.equal(empty.includes('data-resource-remove'), false, '不新增删除候选');
 });
