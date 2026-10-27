@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CoAgentHubClient } from "./coagenthub-client.js";
 import { registerMissionLaunchTools, consumeHostedRun } from "./mission-launch.js";
 import {
+ daemonPidPath,
  readActiveSessionId,
  readSessionBinding,
+ recordPollSuccess,
  setActiveSession,
  writeSessionBinding,
 } from "./l3-state.js";
@@ -178,6 +180,45 @@ describe("Mission launch adapter", () => {
   expect(readSessionBinding(startDir, V7).source).toBe("mission");
   expect(startSpawn).toHaveBeenCalledTimes(1);
   expect(started.open).toHaveBeenCalledTimes(1);
+ });
+ it("reports read-only delivery bridge health with at most 20 recipients", async () => {
+  const dataDir = tempDataDir();
+  const spawn = vi.fn(() => ({ unref: vi.fn() }));
+  const { request, tools } = launchWith(dataDir, spawn);
+
+  // 用当前进程 pid 冒充守护进程：进程一定活着，且绝不起真守护进程。
+  writeFileSync(daemonPidPath(dataDir), String(process.pid));
+  recordPollSuccess(dataDir, 1, { at: "2026-10-27T01:00:00.000Z" });
+  // 21 条绑定：第 21 条（最旧）必须被截掉，cwd 是绝不能漏出的哨兵值。
+  for (let i = 0; i <= 20; i += 1) {
+   const id = `s${String(i).padStart(2, "0")}`;
+   writeSessionBinding(dataDir, {
+    sessionId: id,
+    cwd: "SECRET-CWD-SHOULD-NOT-LEAK",
+    inboxScope: "recipient",
+    recipient: id,
+    updatedAt: `2026-10-27T00:${String(i).padStart(2, "0")}:00.000Z`,
+   });
+  }
+  request.mockResolvedValue({ store: "file", holdsMainLock: true });
+
+  const res = await tools.coagenthub_get_platform_status.handler({});
+  expect(res.isError).toBeUndefined();
+  expect(res.structuredContent.store).toBe("file");
+  expect(res.structuredContent.deliveryBridge).toEqual({
+   dataDir,
+   daemonAlive: true,
+   pid: process.pid,
+   lastPollSucceededAt: "2026-10-27T01:00:00.000Z",
+   consecutiveFailures: 0,
+   lastDeliveryAt: "2026-10-27T01:00:00.000Z",
+   recipients: Array.from({ length: 20 }, (_, i) => `s${String(20 - i).padStart(2, "0")}`),
+  });
+  expect(JSON.stringify(res.structuredContent)).not.toContain("SECRET-CWD-SHOULD-NOT-LEAK");
+  // 状态查询不得拉起守护进程，也只读一次平台状态。
+  expect(spawn).not.toHaveBeenCalled();
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(request.mock.calls[0][0]).toBe("/platform/status");
  });
  afterEach(() => {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });

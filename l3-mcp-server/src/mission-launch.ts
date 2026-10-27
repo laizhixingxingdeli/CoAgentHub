@@ -3,9 +3,11 @@ import { z } from "zod";
 import { CoAgentHubClient } from "./coagenthub-client.js";
 import { ensureBridge, type BridgeSpawn } from "./bridge-supervisor.js";
 import {
+  listSessionBindings,
   pidIsAlive,
   pluginDataDir,
   readBindingForRecipient,
+  readBridgeHealth,
   readDaemonPid,
   writeSessionBinding,
 } from "./l3-state.js";
@@ -20,6 +22,29 @@ const result = (value: Record<string, unknown>) => ({
 const errorResult = (error: unknown) => ({
   ...result({ error: error instanceof Error ? error.message : String(error) }), isError: true,
 });
+
+/**
+ * 状态查询只读插件本地文件：若在这里拉起守护进程或清掉死 pid，L3 看到的
+ * 就不是当前事实，而是这次查询自己刚改变过的状态。收件人只带 id，
+ * 不带 cwd 与投递正文，免得本地路径和消息内容随查询结果漏进日志。
+ */
+function deliveryBridgeStatus(env?: NodeJS.ProcessEnv): Record<string, unknown> {
+  const dataDir = pluginDataDir(env);
+  const pid = readDaemonPid(dataDir);
+  const health = readBridgeHealth(dataDir);
+  const recipients = listSessionBindings(dataDir)
+    .slice(0, 20)
+    .map((binding) => binding.recipient?.trim() || binding.sessionId);
+  return {
+    dataDir,
+    daemonAlive: pid !== undefined && pidIsAlive(pid),
+    pid: pid ?? null,
+    lastPollSucceededAt: health.lastPollSucceededAt ?? null,
+    consecutiveFailures: health.consecutiveFailures,
+    lastDeliveryAt: health.lastDeliveryAt ?? null,
+    recipients,
+  };
+}
 
 /**
  * direct 未确认时的固定说法：POST 已经发出去过，创建与否不知道；
@@ -141,8 +166,11 @@ export function registerMissionLaunchTools(
   server.registerTool("coagenthub_get_platform_status", {
     description: "Read service lock identity, queue occupancy and configured adapter; does not read state files.", inputSchema: {},
   }, async () => {
-    try { return result(await client.request<Record<string, unknown>>("/platform/status")); }
+    let platform: Record<string, unknown>;
+    try { platform = await client.request<Record<string, unknown>>("/platform/status"); }
     catch (error) { return errorResult(error); }
+    // 平台请求失败时整条结果就是错误：不能在失败结果里夹带本地状态冒充成功。
+    return result({ ...platform, deliveryBridge: deliveryBridgeStatus(deps.env) });
   });
   server.registerTool("coagenthub_create_mission", {
     description: "Create a Mission from a frozen Contract, without launching agents. recipient is required: pass this Codex session id (本会话号). There is no fallback to the active binding. coordinationMode: 'hierarchical' (default, Standard three-layer) or 'direct' (this session is the controller; see coagenthub_direct_control). Omit coordinationMode to keep the platform default.",
