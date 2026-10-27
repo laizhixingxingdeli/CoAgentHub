@@ -120,6 +120,43 @@ test('四角色计数取自数组长度；未知/未上报/真实零各自准确
   assert.equal(finiteNumber(''), null);
 });
 
+test('正式嵌套健康：熔断/真实零/未上报/额度都从 health 这一层读出', () => {
+  // 正式 GET /api/pools 的候选把健康放在 health 里，不在顶层。断言这一层的理由：
+  // 认错层不报错，整表会静默变成「未知 / 健康未返回」，一道开着的熔断看起来
+  // 跟平台没上报一样，人就不会去查那条候选为什么停。
+  const healthRows = [{
+    profileId: 'sample',
+    endpoint: 'local',
+    runtime: 'pi',
+    facts: [],
+    order: 0,
+    enabled: true,
+    health: {
+      circuit: { state: 'open' },
+      lastFailure: { failureClass: 'quota', at: '2026-10-27T00:00:00.000Z', source: 'pi' },
+      window7d: { attempts: 0, successes: 0, reportedCost: null },
+      runtime: { running: false },
+      quotaReason: '额度已用完',
+      resetCommand: 'node src/l3.ts candidate reset sample',
+    },
+  }];
+
+  const rows = joinRoleRows([{ profileId: 'sample', endpoint: 'local' }], healthRows);
+  const html = resourcePageHtml({
+    role: 'coordinator',
+    revision: 'r-2',
+    counts: { coordinator: 1 },
+    rows,
+  });
+  const segment = rowSegments(html).find((item) => item.startsWith('sample"'));
+  assert.ok(segment, '这一行要画出来');
+  assert.ok(segment.includes('熔断'), 'health.circuit.state=open 要画成熔断');
+  assert.ok(segment.includes('尝试 0'), '平台报的真实零是 0，不是未知');
+  assert.ok(segment.includes('费用未上报'), 'reportedCost=null 是未上报，不是 $0');
+  assert.ok(segment.includes('额度已用完'), 'quotaReason 原样来自接口');
+  assert.equal(segment.includes('健康未返回'), false, '嵌套健康不能画成健康未返回');
+});
+
 test('复位命令：无命令禁用、空命令不碰剪贴板、写失败不虚报成功', async () => {
   const missing = resetCommandView({ profileId: 'x' });
   assert.equal(missing.disabled, true);

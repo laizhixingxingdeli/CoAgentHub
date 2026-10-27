@@ -173,6 +173,31 @@ export function occupancyLine(health) {
  * 配置行 × 健康行。只遍历配置：健康里多出来的 profileId 不进表——
  * 那条候选不在这个角色的配置里，画出来等于它还能被调度。
  */
+/**
+ * 健康到底在哪一层。
+ *
+ * 正式 `GET /api/pools` 的候选把健康放在 `health` 里
+ * （`{ profileId, endpoint, runtime, facts, order, enabled, health:{ circuit, window7d, runtime, quotaReason, resetCommand } }`）；
+ * 测试夹具和历史调用则把 circuit / window7d 摊平在同一层。两种都要认。
+ *
+ * 只认这一处、再把归一化结果交给下面的显示函数，是因为显示函数若各自去猜
+ * `health.health`，正式页会把整表画成「未知 / 健康未返回」——真实存在的熔断
+ * 被画成未知，人以为平台没报，就不再去看那条候选为什么停了。
+ */
+function nestedOrFlatHealth(match) {
+  if (!match || typeof match !== 'object') return null;
+  const nested = match.health;
+  const hasNestedFields = nested && typeof nested === 'object' && (
+    'circuit' in nested || 'window7d' in nested || 'quotaReason' in nested || 'resetCommand' in nested
+  );
+  if (hasNestedFields) return nested;
+  // 摊平形状：匹配项自己带 circuit / window7d。
+  if ('circuit' in match || 'window7d' in match) return match;
+  // 认不出来的形状返回 null（画成未知），不把匹配项整条当健康：
+  // 那样 circuitLines 读到的是 {}，一道 open 的熔断会显示成「未知」。
+  return null;
+}
+
 export function joinRoleRows(configRows, healthRows) {
   const configs = Array.isArray(configRows) ? configRows : [];
   const healths = Array.isArray(healthRows) ? healthRows : [];
@@ -186,7 +211,7 @@ export function joinRoleRows(configRows, healthRows) {
       endpoint: candidate.endpoint,
       // 缺省即启用是服务端的默认语义，这里只照它显示，不改配置。
       enabled: candidate.enabled === false ? false : true,
-      health: match && typeof match === 'object' ? match : null,
+      health: nestedOrFlatHealth(match),
     };
   });
 }
