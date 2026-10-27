@@ -24,6 +24,12 @@ const HISTORY_EXPANDED_LABEL = '收起纵向历史';
 /**
  * 一条环节里的文字节点：徽章、标题、身份、明细、状态**各占一个节点**。
  *
+ * 身份行额外带 title，值与节点文字同一份：卡槽是写死的 136px 且 overflow: hidden，
+ * 再长的 profile/model 也只能在卡内折几行，超出部分被裁；不留 title 时那半截在这页
+ * 任何地方都查不到，而人核对「这一跳到底用了谁」靠的正是这一行。title 取同一个
+ * esc(identityOf(stage))，不另算一份，否则悬停看到的与卡片上写的可能不是一回事。
+ * 纵向历史行共用本函数，因此也带 title（那里不裁切，多一个 title 也无害）。
+ *
  * 合成一句之后，「平台 · 自动退回执行者 · 验证没过 · 已记录」会被读成一件事，
  * 而人需要分清「谁动的手」「干了什么」「跑完没有」。徽章只在投影给出非空值时
  * 才画：执行者 / 协调者的徽章按角色另出，这里凭空补一个空壳会被当成「有徽章但
@@ -37,7 +43,7 @@ function stageBody(stage) {
 
   return badgeNode
     + '<h3 class="td-stage-title">' + esc(stage.title) + '</h3>'
-    + '<p class="td-stage-identity">' + esc(identityOf(stage)) + '</p>'
+    + '<p class="td-stage-identity" title="' + esc(identityOf(stage)) + '">' + esc(identityOf(stage)) + '</p>'
     + '<p class="td-stage-detail">' + esc(stage.detail) + '</p>'
     + '<p class="td-stage-state">' + esc(stateLine(stage)) + '</p>';
 }

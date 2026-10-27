@@ -14,10 +14,12 @@
  * 忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
  */
 
+/* 修订号与两列之间 22px：源稿里修订号一行与列容器不是紧挨着的（卡片区顶部
+ * 在修订号之下多出一档空白）。和 12px 一样吞掉，两列卡片会骑到修订号那行上。 */
 .td-contract {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 22px;
   font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   color: var(--color-ink);
 }
@@ -51,7 +53,7 @@
   color: var(--color-muted);
 }
 
-/* 两列六格，按画板 572px 一列，列间 16px。
+/* 两列六格，列间 32px（源稿左列 x224 / 右列 x828，各 572px，中间 32px）。
  *
  * 两个容器而不是一张两列三行的网格：网格的三行是共享行高的，左列第二张卡离第一
  * 张的距离会被右列那张卡的高度顶开（真 DOM 里量出来是左 62px、右 264px），而源稿
@@ -62,7 +64,7 @@
 .td-contract .td-contract-columns {
   display: flex;
   align-items: flex-start;
-  gap: 16px;
+  gap: 32px;
 }
 
 .td-contract .td-contract-column {

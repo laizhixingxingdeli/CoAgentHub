@@ -168,6 +168,70 @@ test('未指定选择：选中未结束的工作项，近期环节只含它的�
     '身份行还是 nowrap，真 profile/model 被截掉：' + identityCss);
   assert.equal(/text-overflow:\s*ellipsis/.test(identityCss), false, '身份行还在用省略号：' + identityCss);
   assert.ok(/white-space:\s*normal/.test(identityCss), '身份行没有改回换行：' + identityCss);
+
+  // 身份行不再被 40px 封顶：卡槽本身 136px + overflow:hidden 已经在裁，再给身份行
+  // 加一层 max-height 只是多藏一段且看不出来。只对身份规则断言，不对整份 CSS 断言：
+  // 明细行 .td-stage-detail 仍该有 max-height:40px。
+  assert.equal(/max-height\s*:/.test(identityCss), false, '身份行又被 max-height 封顶：' + identityCss);
+  assert.equal(/overflow\s*:\s*hidden/.test(identityCss), false, '身份行又 overflow:hidden：' + identityCss);
+  assert.ok(/max-height:\s*40px;/.test(rule(CSS, '.td-flow .td-stage-detail')),
+    '明细行的 40px 封顶被当成身份行一起删了');
+
+  // 选择器与白板之间 14px：12px 贴得太紧，16px 又把白板与输出一起下沉。
+  assert.ok(/gap:\s*14px;/.test(rule(CSS, '.td-flow')), '.td-flow 的 gap 不是 14px');
+  // 一排卡之间的 16px 与这一块内部的纵向间距是两件事，不能被一起改走。
+  assert.ok(/gap:\s*16px;/.test(rule(CSS, '.td-flow .td-flow-stages')), '一排卡之间的 16px 被改了');
+});
+
+/**
+ * 长 profile/model 要被看得全：卡槽 136px 放不下时，至少有一条能读到全文的路，
+ * 且不能靠把卡撑高/撑宽——那会把后面的卡挤出可见区，而屏幕上看不出谁被挤走了。
+ */
+test('长身份可以看全：title 与节点文字相同，卡槽仍是 274×136', () => {
+  const v = {
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    workItems: [
+      { id: 'W-1', title: '长身份', status: 'dispatched', attemptIds: ['W-1.exec-1'] },
+    ],
+  };
+  // 身份来自 attempt.started 的 data.profile（不是随便一个字段）：长 profileId 与长
+  // provider/model 都会进身份行，这才是真会被 136px 卡槽裁掉的那种形状。
+  const events = [
+    {
+      kind: 'attempt.started',
+      attemptId: 'W-1.exec-1',
+      workItemId: 'W-1',
+      at: '2026-10-26T09:00:00.000Z',
+      data: {
+        kind: 'executor',
+        profile: {
+          profileId: 'executor-openrouter-qwen3-coder-plus-2026-10-26-long-live-profile-name',
+          facts: [
+            { key: 'provider', value: 'openrouter-long-provider-identifier' },
+            { key: 'model', value: 'anthropic/claude-sonnet-4-5-very-long-model-name-20261026' },
+            { key: 'reasoning', value: 'high' },
+          ],
+        },
+      },
+    },
+  ];
+
+  const { q, all } = mount(v, events, { selectedWorkItemId: 'W-1' });
+  const identity = q('.td-flow-stages .td-stage .td-stage-identity');
+  assert.ok(identity, '没有渲染出身份行');
+  const said = identity?.textContent || '';
+  assert.ok(said.length > 80, '夹具不够长，没覆盖到超过 40px 的情形：' + said);
+  // title 与节点文字同一份：悬停看到的必须就是卡上那句，不许另算一个缩写。
+  assert.equal(identity?.getAttribute('title'), said, '身份的 title 与节点文字不是同一句');
+  // 历史行共用 stageBody，同样带 title。
+  for (const row of all('.td-history .td-history-row .td-stage-identity')) {
+    assert.equal(row.getAttribute('title'), row.textContent, '历史行的身份缺 title');
+  }
+  // 看得全靠 title，不靠把卡改大。
+  const stage = rule(CSS, '.td-flow .td-stage');
+  assert.ok(/274px/.test(stage), '卡片宽度不再是 274px：' + stage);
+  assert.ok(/height:\s*136px;/.test(stage), '卡片高度不再是 136px：' + stage);
 });
 
 test('自动改派环节显示平台徽章，不归协调者', () => {

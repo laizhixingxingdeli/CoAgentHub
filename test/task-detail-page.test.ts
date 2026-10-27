@@ -251,6 +251,19 @@ test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-cu
   // 右卡页签是标题带里的文字页签（无边框、选中只一条下划线），不是一只只有边按钮。
   assert.ok(/margin-top:\s*26px;/.test(rule(PAGE_CSS, '.td-page .td-output')),
     '.td-page .td-output 没有 26px 上间距');
+
+  // 三个页签各自对准源稿起点：页头之下的 flex gap 16px 只把面板送到 y346 下面 5px，
+  // 三块内容在源稿里起于不同高度，所以间距写在各面板自己的 margin-top 上。
+  // 改回共用一个 gap 时只能让其中一个对，另两个各偏 5px 或 16px，而偏出来只像「高了
+  // 一点」，不会有人报。
+  assert.ok(/margin-top:\s*-5px;/.test(rule(PAGE_CSS, '.td-page .td-tab-panel[data-panel="workflow"]')),
+    '工作流面板没有抵掉那 5px');
+  assert.ok(/margin-top:\s*11px;/.test(rule(PAGE_CSS, '.td-page .td-tab-panel[data-panel="delivery"]')),
+    '交付面板没有 11px 上间距');
+  assert.ok(/margin-top:\s*11px;/.test(rule(PAGE_CSS, '.td-page .td-tab-panel[data-panel="contract"]')),
+    '契约面板没有 11px 上间距');
+  // 页头与页签之间的距离仍由 .td-page 的 gap 管，不许为了挪三页把它改掉。
+  assert.ok(/gap:\s*16px;/.test(rule(PAGE_CSS, '.td-page')), '.td-page 的 gap 不再是 16px');
   const side = rule(OUTPUT_CSS, '.td-output .td-side');
   assert.ok(/height:\s*40px;/.test(side), '页签不是 40px：' + side);
   assert.ok(/border-bottom:\s*2px solid transparent;/.test(side), '页签没有 2px 下划线位：' + side);

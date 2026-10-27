@@ -109,14 +109,17 @@ test('修订号与契约原文按原文出现，缺失的 nonGoals 说未记录�
  * 不能直接 `CSS.indexOf(selector)`：`.td-contract-column` 是 `.td-contract-columns`
  * 的前缀，先命中的会是外层那一行，于是读到的 gap 是列间距离而不是列内距离——
  * 断言看着过了，验的却是另一条规则。这里只认后面不接标识符字符的那一次出现。
+ *
+ * 也不直接搜原文件：注释里同样写着选择器名（`.td-contract-card { padding: 20px }`
+ * 这一句里连花括号都有），搜到的会是注释，读出一段根本不属于任何规则的声明。
  */
 function cssRuleBody(selector: string) {
   let from = 0;
   let start = -1;
   for (;;) {
-    const at = CSS.indexOf(selector, from);
+    const at = CSS_RULES.indexOf(selector, from);
     if (at < 0) break;
-    const next = CSS.charAt(at + selector.length);
+    const next = CSS_RULES.charAt(at + selector.length);
     if (!/[\w-]/.test(next)) {
       start = at;
       break;
@@ -124,9 +127,9 @@ function cssRuleBody(selector: string) {
     from = at + selector.length;
   }
   assert.ok(start >= 0, 'CSS 里没有 ' + selector);
-  const open = CSS.indexOf('{', start);
-  const close = CSS.indexOf('}', open);
-  return CSS.slice(open + 1, close);
+  const open = CSS_RULES.indexOf('{', start);
+  const close = CSS_RULES.indexOf('}', open);
+  return CSS_RULES.slice(open + 1, close);
 }
 
 /**
@@ -173,6 +176,12 @@ test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/g
   assert.match(column, /flex-direction:\s*column/, '列不是独立纵向堆叠');
   assert.match(column, /gap:\s*16px/, '列内间距不是 16px');
   assert.equal(/grid-auto-flow/.test(CSS_RULES), false, 'CSS 又回到了按网格流向排两列');
+
+  // 列容器与根两级的间距是另外两个数：列内 16px 管的是同列卡间距，列间 32px 管的是
+  // 左右两列的横向空白（源稿左列 x224 / 右列 x828、各 572px），根的 22px 管的是
+  // 修订号那一行到卡片区。三个值混成一个时，改一处会同时把另两处的版面拉走。
+  assert.match(cssRuleBody('.td-contract .td-contract-columns'), /gap:\s*32px/, '列间横间距不是 32px');
+  assert.match(cssRuleBody('.td-contract'), /gap:\s*22px/, '根间距不是 22px');
 
   // 原文不因样式被截短：这两条一旦出现在正文规则里，被收起来的那半句在屏幕上
   // 再也看不到，而卡片看起来是满的。

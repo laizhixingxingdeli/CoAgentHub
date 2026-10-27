@@ -53,6 +53,15 @@
   background: var(--color-select);
 }
 
+/* 三个页签各自对准源稿起点：页头底边之下的 flex gap 16px 只够把面板送到选择器
+ * （源稿 y346）下面 5px，而三个面板的第一块内容在源稿里起于不同高度——工作流要先
+ * 抵掉那 5px，交付与契约又要再让 11px。所以间距写在每个面板自己的 margin-top 上，
+ * 而不是改 .td-page 的那一个 gap：一个 gap 同时挪三处，只能让其中一个对，另外两个
+ * 各自偏 5px 或 16px，而偏出来的样子只是「这块好像高了一点」，没人会当 bug 报。 */
+.td-page .td-tab-panel[data-panel="workflow"] { margin-top: -5px; }
+.td-page .td-tab-panel[data-panel="delivery"] { margin-top: 11px; }
+.td-page .td-tab-panel[data-panel="contract"] { margin-top: 11px; }
+
 /* 输出区固定在最后一块，长满一屏宽：它在这一页里是唯一的「正在变化」的区域，
  * 窄一截会让人以为它是某个页签的附属内容。
  *

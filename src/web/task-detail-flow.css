@@ -19,7 +19,9 @@
 .td-flow {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  /* 选择器与白板之间 14px（源稿选择器底在 346、白板顶约 360）：12px 时白板贴上来
+   * 跟选择器像同一行。16px 又会让白板整体下沉 2px，下面的输出被连带推走。 */
+  gap: 14px;
   font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   color: var(--color-ink);
 }
@@ -178,15 +180,17 @@
  * 它回答“谁在干”，而人第一眼要的是“发生了什么”。
  *
  * 换行而不是省略号：真实的 profile/model 是核对「这一跳到底用了谁」的唯一凭据，
- * 截成 `executor-openrouter-qwe…` 之后两个不同的候选看起来一模一样。两行 40px
- * 封顶，多出的靠 min-width: 0 + overflow-wrap: anywhere 折行。 */
+ * 截成 `executor-openrouter-qwe…` 之后两个不同的候选看起来一模一样。
+ *
+ * **这一行不再封顶**（原先 max-height: 40px + overflow: hidden）：卡片本身是 136px
+ * 且 overflow: hidden，封顶并没有多保住什么，只是把超长的 profile/model 在卡内
+ * 裁掉——被裁掉的那半截在屏幕上再也看不到，而卡片看起来是满的。裁切只属于明细行
+ * （.td-stage-detail），它是「怎么发生的」的摘要；身份行是「谁在干」的凭据。 */
 .td-flow .td-stage-identity {
   margin: 0;
-  max-height: 40px;
   font-size: 13px;
   line-height: 20px;
   color: var(--color-ink);
-  overflow: hidden;
   overflow-wrap: anywhere;
   white-space: normal;
 }
