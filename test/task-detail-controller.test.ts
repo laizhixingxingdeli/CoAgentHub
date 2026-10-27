@@ -511,7 +511,7 @@ test('已验收：按 reportId 取完整报告，提交时间不再是未知，�
   assert.equal(submissionText.includes('coord-8'), false, '交卷摘要把评审者当成了受评执行：' + submissionText);
   // 已跑命令与计数来自完整报告。
   const ran = h.all('[data-ran-command="true"]').map((el) => el.textContent || '');
-  assert.deepEqual(ran, ['node --test']);
+  assert.deepEqual(ran, ['node --test · 全量 · tests 2033 · pass 2033']);
   assert.ok(submissionText.includes('tests 2033 · pass 2033'), '没写出计数：' + submissionText);
 
   // 机器层与角色层的时间也从事件对齐出来（换算成本地时刻，title 留原文）。
