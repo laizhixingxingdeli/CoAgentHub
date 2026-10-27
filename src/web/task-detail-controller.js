@@ -25,6 +25,7 @@ import {
   bindTaskDetail,
   currentLiveAttemptId,
   ensureTaskDetailStylesheets,
+  latestEndedAttemptId,
   taskDetailHtml,
 } from './task-detail-page.js';
 import { currentReportIdOf } from './task-detail-delivery.js';
@@ -185,6 +186,20 @@ export function createTaskDetailController(deps = {}) {
     currentAttempt: null,
     selectedAttempt: null,
     /**
+     * 没有实时那一跳时，同一条 Mission **最近一条已结束 Attempt** 的详情。
+     *
+     * 单独一格、不写进 currentAttempt / selectedAttempt：那两格各有一个含义（“正在跑的”
+     * 与“人点开的”），把已结束的一跳塞进去，左标题会把一次停了的执行写成当前，右栏
+     * 又会把人的浏览选择翻掉。
+     */
+    recentEndedAttempt: null,
+    /**
+     * recentEndedAttempt 取的是哪一个 id（拉过就记住，拉失败也算，“”= 还没取过）。
+     * 不记住就会每 3 秒重拉一次同一条已结束 Attempt：它永远不会变，而那些请求
+     * 在“这一页已经不动了”的时候仍然刷着接口。
+     */
+    recentEndedLoadedId: '',
+    /**
      * 当前选中那一跳的完整机器验证报告（已跑命令、计数、行数的唯一来源）。
      * 切工作项或报告对不上时必须先置 null 再 paint：留着上一份，屏幕上就会把
      * 别人的命令当成本跳跑过的。
@@ -250,6 +265,7 @@ export function createTaskDetailController(deps = {}) {
       selectedAttemptId: state.selectedAttemptId,
       currentAttempt: state.currentAttempt,
       selectedAttempt: state.selectedAttempt,
+      recentEndedAttempt: state.recentEndedAttempt,
       validationReportFull: state.validationReportFull,
       // 重绘时 live 正文用这份 lines：它不是「这一轮新到的」，而是这一任务至今收到的
       // 全部行——只传本轮新增的话，每次重绘屏幕上就只剩最新一段。
@@ -474,6 +490,26 @@ export function createTaskDetailController(deps = {}) {
       if (gen !== cycleGen || stopped || !isVisible()) return;
       state.currentAttempt = current;
 
+      // 已结束的那一路与实时那一路**只能有一边有值**：有 active 时再留着上一次的结尾，
+      // 左侧两块就同时有正文，而屏幕上它们长得一模一样，人分不出哪一块是现在的。
+      if (liveAttemptId !== null) {
+        state.recentEndedAttempt = null;
+        state.recentEndedLoadedId = '';
+      } else {
+        const endedId = latestEndedAttemptId(state.activity) ?? '';
+        if (endedId === '') {
+          state.recentEndedAttempt = null;
+          state.recentEndedLoadedId = '';
+        } else if (state.recentEndedLoadedId !== endedId) {
+          // 先记 id 再请求：拉回来的那一刻这一轮可能已经换代（换任务 / 隐藏），
+          // 那次 null 也算“试过了”，不记就每轮重拉同一条已结束 Attempt。
+          state.recentEndedLoadedId = endedId;
+          const recent = await loadAttempt(gen, missionId, endedId);
+          if (gen !== cycleGen || stopped || !isVisible()) return;
+          state.recentEndedAttempt = recent;
+        }
+      }
+
       const selectedId = text(state.selectedAttemptId);
       if (selectedId === '') {
         state.selectedAttempt = null;
@@ -679,6 +715,10 @@ export function createTaskDetailController(deps = {}) {
       state.nowIso = '';
       state.currentAttempt = null;
       state.selectedAttempt = null;
+      // 已结束那一跳也属于上一任务：留着它，新任务页面上会挂着一跳不存在于这条
+      // Mission 的 saved tail，而编号已经是新的。
+      state.recentEndedAttempt = null;
+      state.recentEndedLoadedId = '';
       state.selectedWorkItemId = '';
       state.selectedAttemptId = '';
     }

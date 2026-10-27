@@ -46,6 +46,11 @@ const DEFAULT_SIDE = 'summary';
  * 的形状（左标题写右卡那一跳，看起来还挺合理）。没有当前执行时就直说没有。
  */
 const LIVE_TITLE_PREFIX = '当前实时输出 · ';
+/**
+ * 已结束那一路的标题。它不能写「当前」：光标已经不动了，把一段保存的结尾写成
+ * 实时的，人就会坐等一个已经交回结果的环节。
+ */
+const RECENT_TITLE = '最近执行输出 · 会话已结束';
 /** 右卡的标题。它说的是「你在看的这一跳」，与左边「正在跑的那一跳」是两回事。 */
 const HISTORY_TITLE = '选中环节';
 /** 历史正文的标签：事实区答的是这一跳的身份与账，正文区答的才是它说过的原话。 */
@@ -293,10 +298,15 @@ function switchHtml(side) {
  * 的那一跳」看起来是同一块内容的两个子区，而它们的事实来源完全不同（左边只认
  * currentAttemptId，右边只认 selectedAttemptId）。
  *
- * 左 .td-live 只放当前这一跳（binding.liveAttemptId）的实时行与心跳；右 .td-history
- * 只放选中那一跳（binding.historyAttemptId）的概要/文件/用量。两边的 id 分别写在
- * data-live-attempt / data-history-attempt 上——它们**可以不同**，这正是这两个区
- * 互不串账的凭据；接线时也只改后者相关的页签，不动前者。
+ * 左 .td-live 只放当前这一跳（binding.liveAttemptId）的实时行与心跳；没有当前这一跳时
+ * 放同一条 Mission 最近一条已结束 Attempt 的保存尾部（binding.outputMode === 'recent-ended'），
+ * 标题直说是已结束的那一次。右 .td-history 只放选中那一跳（binding.historyAttemptId）的
+ * 概要/文件/用量。两边的 id 分别写在 data-live-attempt / data-history-attempt 上——它们
+ * **可以不同**，这正是这两个区互不串账的凭据；接线时也只改后者相关的页签，不动前者。
+ *
+ * 已结束那一路的 id 单独写在 data-recent-attempt 上，**不往 data-live-attempt 里写**：
+ * 那个属性说的是「此刻还在跑的是谁」，写进一个已结束的 id，任何按它判断“是否活跃”的
+ * 地方都会把这个页面认成还在跑。
  *
  * 心跳文本与 data-stalled 原样取自投影的 heartbeat：本层不判窗口、不取当前时间。
  * 实时行也只用投影给的 liveLines（已经按 currentAttemptId 过滤过）：本层再滤一遍
@@ -311,15 +321,31 @@ export function taskOutputHtml(input, options) {
   const historyAttempt = binding.historyAttemptId === null ? '' : text(binding.historyAttemptId);
   const heartbeat = binding.heartbeat && typeof binding.heartbeat === 'object' ? binding.heartbeat : {};
   const lines = Array.isArray(binding.liveLines) ? binding.liveLines : [];
+  const recent = binding.outputMode === 'recent-ended';
+  const recentAttempt = binding.recentEndedAttemptId === null ? '' : text(binding.recentEndedAttemptId);
+
+  // 三选一的模式由投影给定，本层不再判优先级：本层再判一份，两处迟早只改到一处，
+  // 而漏改的那边在屏幕上就是一块挂着别人正文的区域。
+  //   - live：实时行逐条成块（每行有自己的时刻）。
+  //   - recent-ended：一段已保存的尾部，**不能**带伪造的时刻——它没有逐行时刻，
+  //     把它画成一条带时钟的 live line，人就会把那行读成刚才发生的事。
+  //   - idle：保持现在的空实时。
+  const liveBody = recent
+    ? (text(binding.recentText) !== ''
+      ? '<pre class="td-live-text td-recent-text">' + esc(binding.recentText) + '</pre>'
+      : '<p class="td-live-note td-recent-note">' + esc(text(binding.recentNote) || UNKNOWN) + '</p>')
+    : '<pre class="td-live-text">' + lines.map(liveLineHtml).join('') + '</pre>';
 
   return '<section class="td-output" data-side="' + side + '">'
-    + '<div class="td-live" data-live-attempt="' + esc(liveAttempt) + '">'
+    + '<div class="td-live" data-output-mode="' + esc(text(binding.outputMode)) + '"'
+    + ' data-live-attempt="' + esc(liveAttempt) + '"'
+    + ' data-recent-attempt="' + esc(recentAttempt) + '">'
     + '<div class="td-live-head">'
-    + '<h2 class="td-live-title">' + esc(liveTitle(liveAttempt)) + '</h2>'
+    + '<h2 class="td-live-title">' + esc(recent ? RECENT_TITLE : liveTitle(liveAttempt)) + '</h2>'
     + '<p class="td-heartbeat" data-stalled="' + String(heartbeat.stalled === true) + '">'
     + esc(heartbeat.stateText) + '</p>'
     + '</div>'
-    + '<pre class="td-live-text">' + lines.map(liveLineHtml).join('') + '</pre>'
+    + liveBody
     + '</div>'
     + '<div class="td-history" data-history-attempt="' + esc(historyAttempt) + '">'
     + '<div class="td-history-head">'

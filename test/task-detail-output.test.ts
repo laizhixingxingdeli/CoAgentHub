@@ -251,3 +251,48 @@ test('已结束不谈停滞；只有进行中且真实心跳超过容忍窗口�
     assert.ok(!unknown.stateText.includes('疑似停滞'));
   }
 });
+
+test('无当前执行时左区用最近已结束那一跳的保存尾部，不冒充活跃也不借选中项正文', () => {
+  const endedTail = projectOutputBinding({
+    // 没有实时那一跳：光标已经不动了。
+    currentAttemptId: null,
+    recentEndedAttemptId: 'coord-22',
+    recentEndedAttempt: { attemptId: 'coord-22', status: 'succeeded', output: '保存尾部' },
+    // 右栏选的是另一条旧 Attempt：它的正文只属于右栏。
+    selectedAttemptId: 'W-1.exec-1',
+    selectedAttempt: { attemptId: 'W-1.exec-1', status: 'succeeded', output: '选中那条的正文' },
+    nowIso: '2026-10-26T10:00:00.000Z',
+    liveChunks: [],
+  });
+
+  assert.equal(endedTail.outputMode, 'recent-ended');
+  // 这一格说「此刻还在跑的是谁」：已结束的那一跳绝不能写进去。
+  assert.equal(endedTail.liveAttemptId, null);
+  assert.equal(endedTail.recentEndedAttemptId, 'coord-22');
+  assert.ok(endedTail.recentText.includes('保存尾部'));
+  // 选中项不等于最近一次：借用它就是把一条旧执行的结尾说成刚结束的那次。
+  assert.equal(endedTail.recentText.includes('选中那条的正文'), false);
+  assert.equal(endedTail.liveText.includes('选中那条的正文'), false);
+  // 已结束的两跳不谈停滞，也不冒充「还在跑」。
+  assert.equal(endedTail.heartbeat.stateText, '心跳不适用');
+  assert.equal(endedTail.heartbeat.stalled, false);
+  assert.equal(endedTail.heartbeat.applicable, false);
+
+  const live = projectOutputBinding({
+    currentAttemptId: 'W-1.exec-2',
+    // 有 active 时即便传了已结束那一组，也只能走实时：保存的结尾盖住正在跑的输出，
+    // 屏幕上两块长得一模一样，人分不出哪一块是现在的。
+    recentEndedAttemptId: 'coord-22',
+    recentEndedAttempt: { attemptId: 'coord-22', status: 'succeeded', output: '保存尾部' },
+    selectedAttemptId: 'W-1.exec-1',
+    currentAttempt: { attemptId: 'W-1.exec-2', status: 'in_progress' },
+    selectedAttempt: null,
+    nowIso: '2026-10-26T10:00:00.000Z',
+    liveChunks: [{ attemptId: 'W-1.exec-2', text: '当前' }],
+  });
+
+  assert.equal(live.outputMode, 'live');
+  assert.equal(live.liveAttemptId, 'W-1.exec-2');
+  assert.equal(live.recentEndedAttemptId, null);
+  assert.equal(live.recentText, '');
+});

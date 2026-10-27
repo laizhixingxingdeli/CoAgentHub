@@ -39,7 +39,7 @@
  * 零请求、不拼 HTML、不碰 DOM，函数内**不取当前时间**（nowIso 由调用方给）：两次
  * 渲染同一条数据必须得出同样的字，否则「疑似停滞」会随着刷新自己跳来跳去。
  */
-import { savedTailEligible } from './session-output.js';
+import { savedTailEligible, savedTailText } from './session-output.js';
 
 /**
  * 心跳多久没来就算疑似停滞。与 reconcile 的租约容忍窗口一致：
@@ -55,6 +55,9 @@ const HISTORY_FILES_UNKNOWN = '该尝试没有单独的文件清单';
 const HEARTBEAT_NOT_APPLICABLE = '心跳不适用';
 const HEARTBEAT_UNKNOWN = '心跳未知';
 const HEARTBEAT_STALLED = '疑似停滞';
+/** 已结束那一跳在左区的两句：区分“这一跳什么都没留下”与“详情没取到”。 */
+const RECENT_OUTPUT_UNKNOWN = '最近输出未知';
+const RECENT_OUTPUT_EMPTY = '这一跳没有保存输出';
 
 const text = (value) => (value === undefined || value === null ? '' : String(value)).trim();
 const object = (value) => (value && typeof value === 'object' ? value : null);
@@ -395,11 +398,46 @@ function projectHistoryFiles(selectedAttemptId, fileEvidence, selectedAttempt) {
 }
 
 /**
+ * 最近已结束那一跳的保存尾段。
+ *
+ * 只在**没有实时那一跳**时才被调用（调用方已经判过）：光标已经不动了，那块区域什么都
+ * 不写，人只能看到一片空白与一句「无当前执行」。
+ *
+ * 门禁仍然交给 `savedTailEligible`：id 得对得上、这一跳得已结束、输出得非空，三条
+ * 与历史正文完全一致。这里再写一份，“最近”那一条就会比右栏宽松，同一份数据在两块
+ * 里分别是“有正文”和“未知”而看不出谁对。
+ */
+function projectRecentOutput(recentAttemptId, recentAttempt) {
+  const id = text(recentAttemptId);
+  if (id === '') return { attemptId: null, text: '', note: '' };
+
+  const attempt = object(recentAttempt);
+  if (attempt === null || text(attempt.attemptId) !== id) {
+    // 详情没取到或 id 对不上：不能把另一条的 output 嵌给这个 id。
+    return { attemptId: id, text: '', note: RECENT_OUTPUT_UNKNOWN };
+  }
+
+  const output = iso(attempt.output);
+  const eligible = savedTailEligible({
+    groupAttemptId: id,
+    attemptId: text(attempt.attemptId),
+    attemptOutput: output,
+    attemptStatus: text(attempt.status),
+    groupEnded: true,
+  });
+  if (!eligible) {
+    // 空输出是“这一跑完了但什么都没留下”，与“根本不知道”是两件事。
+    return { attemptId: id, text: '', note: output.trim() === '' ? RECENT_OUTPUT_EMPTY : RECENT_OUTPUT_UNKNOWN };
+  }
+  return { attemptId: id, text: savedTailText(output), note: '' };
+}
+
+/**
  * 一条详情页数据 → 实时 / 历史 / 心跳三块互不串账的事实。
  *
  * input = { currentAttemptId, selectedAttemptId, nowIso, currentAttempt,
- *           selectedAttempt, liveChunks, selectedWorkItem, selectedActivity,
- *           fileEvidence }
+ *           selectedAttempt, recentEndedAttemptId, recentEndedAttempt, liveChunks,
+ *           selectedWorkItem, selectedActivity, fileEvidence }
  * 纯函数：不改入参、不读时钟、不发请求、不拼 HTML。
  */
 export function projectOutputBinding(input) {
@@ -425,18 +463,47 @@ export function projectOutputBinding(input) {
   const historyOutput = projectHistoryOutput(it.selectedAttempt, selectedAttemptId);
   const historyUsage = projectHistoryUsage(object(it.selectedAttempt), selectedAttemptId, historyOutput.matched);
 
+  // 三种模式互斥，由这里一次性定死，渲染层不再自己判优先级。
+  // “有 active 就一定是 live”必须排在最前：先看 recent 的话，一条还在跑的任务会
+  // 在左侧摆上一次的结尾，而心跳又写着“不适用”，人就会以为它已经停了。
+  let outputMode = 'idle';
+  let recentEndedAttemptId = null;
+  let recentText = '';
+  let recentNote = '';
+  // 心跳默认看当前这一跳；没有当前这一跳时就换看最近已结束那一跳（已结束 → 不适用）。
+  let heartbeatAttempt = it.currentAttempt;
+
+  if (liveAttemptId !== null) {
+    outputMode = 'live';
+  } else {
+    const recentId = text(it.recentEndedAttemptId);
+    if (recentId !== '') {
+      outputMode = 'recent-ended';
+      recentEndedAttemptId = recentId;
+      const recent = projectRecentOutput(recentId, it.recentEndedAttempt);
+      recentText = recent.text;
+      recentNote = recent.note;
+      heartbeatAttempt = it.recentEndedAttempt;
+    }
+  }
+
   return {
+    outputMode,
     liveAttemptId,
     historyAttemptId: selectedAttemptId === '' ? null : selectedAttemptId,
     liveText,
     liveLines,
+    // 左区在 recent-ended 模式下用的两个字段：正文只在这一跳自己的 id 对得上时才有值。
+    recentEndedAttemptId,
+    recentText,
+    recentNote,
     historyOutput,
     historyUsage,
     // 归属链齐了才用这一跳自己的清单；缺一环就明说未知，绝不拿 missionDiff /
     // executionResult / 上一跳顶上——那是把别人的改动记到这一跳名下。
     historyFiles: projectHistoryFiles(selectedAttemptId, it.fileEvidence, it.selectedAttempt),
-    // 心跳看当前这一跳，不看选中的历史那一跳。
-    heartbeat: projectHeartbeat(it.currentAttempt, it.nowIso),
+    // 心跳看当前这一跳，不看选中的历史那一跳；无当前时看最近已结束那一跳。
+    heartbeat: projectHeartbeat(heartbeatAttempt, it.nowIso),
     // 概况写在选中那一跳名下。整份 input 原样传进去：形状由 projectSelectedFacts
     // 自己挑，调用方不必知道它读哪几个键。
     facts: projectSelectedFacts(it),

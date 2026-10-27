@@ -527,3 +527,109 @@ test('已验收：按 reportId 取完整报告，提交时间不再是未知，�
 
   controller.stop();
 });
+
+/**
+ * 没有真实 active 时，左栏显示同一条 Mission 最近一条**已结束** Attempt 的保存尾部，
+ * 并标成会话已结束。
+ *
+ * 现场：Mission 已交回等检视，activity 最后是 attempt.ended（coord-22），没有未结束的
+ * started；右栏选的是另一条旧 Attempt。以前的实现到这里 `currentLiveAttemptId` 返回
+ * null，于是控制器根本不拉 Attempt、左标题写着「无当前执行」、终端一片空白——人看不到
+ * 上一次到底做到了哪一步，而数据其实就在只读接口里。
+ */
+test('无 active 时左栏显示最近已结束 Attempt 的保存尾部，心跳不适用、data-live-attempt 为空且同一 id 不重拉', async () => {
+  const h = harness();
+  const requested: string[] = [];
+
+  const view: Record<string, unknown> = {
+    missionId: 'M-5',
+    projectId: 'coagenthub-v5',
+    status: 'awaiting_review',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    contract: { intent: '等检视' },
+    usage: { quality: 'unknown', cost: 0 },
+    workItems: [
+      {
+        id: 'W-5',
+        title: '等检视的工单',
+        status: 'dispatched',
+        attemptIds: ['W-5.exec-1', 'coord-22'],
+      },
+    ],
+    updatedAt: '2026-10-26T09:58:00.000Z',
+  };
+
+  // 没有未结束的 started：三条 Attempt 都有对应的 ended，最后一条是 coord-22。
+  const activity: Array<Record<string, unknown>> = [
+    { kind: 'mission.created', at: '2026-10-26T09:00:00.000Z' },
+    { kind: 'attempt.started', attemptId: 'W-5.exec-1', workItemId: 'W-5', at: '2026-10-26T09:10:00.000Z' },
+    { kind: 'attempt.ended', attemptId: 'W-5.exec-1', workItemId: 'W-5', at: '2026-10-26T09:20:00.000Z' },
+    { kind: 'attempt.started', attemptId: 'coord-22', workItemId: 'W-5', at: '2026-10-26T09:30:00.000Z' },
+    { kind: 'attempt.ended', attemptId: 'coord-22', workItemId: 'W-5', at: '2026-10-26T09:40:00.000Z' },
+  ];
+
+  async function fetchJson(path: string): Promise<unknown> {
+    requested.push(path);
+    if (path === '/api/missions/M-5') return view;
+    if (path === '/api/missions/M-5/activity') return activity;
+    if (path === '/api/missions/M-5/attempts/coord-22') {
+      return { attemptId: 'coord-22', status: 'succeeded', output: 'coord-22 的保存正文' };
+    }
+    if (path === '/api/missions/M-5/attempts/W-5.exec-1') {
+      return { attemptId: 'W-5.exec-1', status: 'succeeded', output: '旧执行的正文' };
+    }
+    if (path === '/api/missions/M-5/live?cursor=0') {
+      return { cursor: 2, chunks: [{ seq: 2, missionId: 'M-5', attemptId: 'coord-22', kind: 'text', text: '已结束的实时行' }] };
+    }
+    if (path.startsWith('/api/missions/M-5/live?cursor=')) return { cursor: 2, chunks: [] };
+    throw new Error('unexpected ' + path);
+  }
+
+  const controller = createTaskDetailController({
+    doc: h.document,
+    container: h.container,
+    missionId: 'M-5',
+    // 右栏选的是另一条旧 Attempt：它的正文不许进左栏。
+    selectedStep: 'W-5.exec-1',
+    fetchJson,
+    nowIso: () => NOW,
+    setInterval: h.setInterval,
+    clearInterval: h.clearInterval,
+  });
+
+  await controller.start();
+  await flush();
+
+  assertOnlyAllowedPaths(requested);
+  const recentGets = () => requested.filter((path) => path === '/api/missions/M-5/attempts/coord-22').length;
+  assert.equal(recentGets(), 1, '没有去取最近已结束那一跳：' + requested.join(', '));
+
+  // 左标题明说这是已结束的会话，不是「无当前执行」。
+  assert.equal(h.textOf('.td-live-title'), '最近执行输出 · 会话已结束');
+  const liveText = h.textOf('.td-live');
+  assert.ok(liveText.includes('coord-22 的保存正文'), '左栏没显示最近已结束那一跳的保存正文：' + liveText);
+  assert.equal(liveText.includes('旧执行的正文'), false, '左栏借用了右栏选中那条的正文');
+  // 心跳不适用，且绝不判停滞：已结束的一跳被读成停滞，人会去重启一个已经交回的环节。
+  assert.equal(h.textOf('.td-heartbeat'), '心跳不适用');
+  assert.equal(h.q('.td-heartbeat')?.getAttribute('data-stalled'), 'false');
+
+  // 「此刻还在跑的是谁」这一格必须是空的：写进一个已结束的 id 就是冒充活跃。
+  assert.equal(h.q('.td-live')?.getAttribute('data-live-attempt'), '');
+  assert.equal(h.q('.td-live')?.getAttribute('data-recent-attempt'), 'coord-22');
+  assert.equal(h.q('.td-live')?.getAttribute('data-output-mode'), 'recent-ended');
+  // 右栏仍只认选中那条。
+  assert.equal(h.q('.td-output .td-history')?.getAttribute('data-history-attempt'), 'W-5.exec-1');
+
+  // 下一轮同一 id 不再 GET：已结束的 Attempt 永远不会变，每 3 秒重拉一次只是刷接口。
+  const round = [...h.timers.values()].find((timer) => timer.ms === 3000);
+  assert.ok(round, '没有 3 秒那一只刷新定时器');
+  round.fn();
+  await flush();
+  await flush();
+  assert.equal(recentGets(), 1, '同一已结束 id 在下一轮又被拉了一次：' + requested.join(', '));
+  assert.equal(h.textOf('.td-live-title'), '最近执行输出 · 会话已结束');
+  assert.ok(h.textOf('.td-live').includes('coord-22 的保存正文'));
+
+  controller.stop();
+});

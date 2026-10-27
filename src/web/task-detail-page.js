@@ -114,6 +114,27 @@ export function currentLiveAttemptId(activity) {
 }
 
 /**
+ * 最近**已结束**的那一跳：从 activity 末尾向前找第一条 attempt.ended，取它的 attemptId。
+ *
+ * 它只在没有实时那一跳时才被用上（那时光标已经不动了，屏幕上什么都不显示），把这一跳
+ * 保存下来的尾部摆出来，人至少能看见上一次到底做到了哪一步。**不拿 selectedAttemptId
+ * 顶上**：右栏选中谁是人的浏览动作，与「这条 Mission 最近跑完的是哪一次」是两件事；
+ * 用选中项冒充最近一次，屏幕上会把一条旧执行的结尾说成「刚刚结束的那次」。同样不读
+ * executionResult：那是任务级交卷，挂到某一跳名下就是别人的账。
+ */
+export function latestEndedAttemptId(activity) {
+  const events = Array.isArray(activity) ? activity : [];
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = object(events[i]);
+    if (event === null) continue;
+    if (text(event.kind) !== 'attempt.ended') continue;
+    const id = text(event.attemptId);
+    if (id !== '') return id;
+  }
+  return null;
+}
+
+/**
  * 一个页签的面板。三个面板一次性全画，非当前的带 hidden：点一下才拼内容，那片空白
  * 和「这一块没有内容」长得一模一样，人分不出是没做还是没数据。
  */
@@ -140,7 +161,10 @@ function panelHtml(key, inner, current) {
  *
  * model = { view, activity, nowIso, tab, intentExpanded, historyExpanded, outputSide,
  *           selectedWorkItemId, selectedAttemptId, currentAttempt, selectedAttempt,
- *           liveChunks, validationReportFull }
+ *           recentEndedAttempt, liveChunks, validationReportFull }
+ *
+ * recentEndedAttempt 是「同一条 Mission 最近一条已结束 Attempt」的详情，只由控制器按
+ * latestEndedAttemptId 取一次；本层不自己去挑，也不拿 selectedAttempt 顶替。
  *
  * validationReportFull 是 `GET /api/missions/:id/validation-reports/:reportId` 取回来的
  * 完整报告：它是「已跑命令 / 计数 / 行数」的唯一来源，没取到就是 null。
@@ -214,8 +238,13 @@ export function taskDetailHtml(model) {
     ? []
     : activity.filter((event) => text(event && event.attemptId) === selectedAttemptId);
 
+  // 没有实时那一跳时才把「最近已结束」这一组传下去：有 active 时再传，已结束的保存
+  // 正文就会盖住正在跑的输出，而屏幕上两块长得一模一样，人分不出哪一块是现在的。
+  const liveAttemptId = currentLiveAttemptId(activity);
   const output = taskOutputHtml({
-    currentAttemptId: currentLiveAttemptId(activity),
+    currentAttemptId: liveAttemptId,
+    recentEndedAttemptId: liveAttemptId === null ? latestEndedAttemptId(activity) : null,
+    recentEndedAttempt: liveAttemptId === null ? m.recentEndedAttempt : null,
     selectedAttemptId,
     nowIso,
     currentAttempt: m.currentAttempt,
