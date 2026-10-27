@@ -203,12 +203,29 @@ test('外部改池后保存得到 STALE_POOL 不自动写回；重复 profileId 
     // 重新读取只是对比材料：不换 revision、不动草稿、更不发 POST。
     await click('[data-resource-compare]');
     await waitFor(() => container.querySelector('[data-resource-latest]') !== null, '出现最新配置');
-    assert.ok(text('[data-resource-latest]').includes('e2'), '最新配置里看不到外部加的那条');
+    // 比较面板渲染的是**当前角色切片**（resource-console.js 只画 latest[role]），
+    // 停在 coordinator 页签时外部加的 executor 候选不该出现在这里。解析成 JSON 再断言，
+    // 否则一句空字符串也能「不含 e2」地蒙混过去。
+    const latestSlice = JSON.parse(text('[data-resource-latest]'));
+    assert.ok(Array.isArray(latestSlice), '比较面板不是候选数组，切片断言无从做起');
+    assert.ok(latestSlice.map((row: any) => row.profileId).includes('c1'), '比较面板没显示当前角色的候选');
+    assert.equal(latestSlice.map((row: any) => row.profileId).includes('e2'), false,
+      '比较面板混进了别的角色的候选：切片边界破了');
+
+    // 但服务端确实已经多了一条：重读只是没把它画进当前角色的切片，不是没读到、
+    // 更不是把它清掉了。页面修订也必须仍是旧的（重读不等于采用）。
+    const latestConfig = await (await fetch(base + '/api/pools/config')).json();
+    assert.ok(latestConfig.executor.map((row: any) => row.profileId).includes('e2'),
+      '服务端已经没有外部加的 executor 候选：重读路径把它清掉了');
     assert.ok(text('[data-resource-revision]').includes(revisionBefore), '重读最新不该改页面修订');
 
     const beforeRebase = posts.length;
     await click('[data-resource-rebase]');
     assert.equal(posts.length, beforeRebase, 'rebase 只换 CAS 基线，不许自动写回');
+    const revisionAfterRebase = revisionOnPage(text);
+    assert.notEqual(revisionAfterRebase, '', 'rebase 后页面没显示修订，下面的换基线断言就会空过');
+    assert.notEqual(revisionAfterRebase, revisionBefore,
+      'rebase 没把比较读到的 latest.revision 换成 CAS 基线，下一次保存还会再撞一次冲突');
     assert.equal(text('[data-resource-save-message]'), '草稿保留，请重新保存。');
     assert.equal(container.querySelector('[data-resource-save-button]').hasAttribute('disabled'), false);
 
