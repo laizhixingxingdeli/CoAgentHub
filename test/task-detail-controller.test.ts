@@ -633,3 +633,172 @@ test('无 active 时左栏显示最近已结束 Attempt 的保存尾部，心跳
 
   controller.stop();
 });
+
+/**
+ * 第一次拉取在「已隐藏」这一轮被作废：回到可见必须再拉一次。
+ *
+ * 现场与上一条相同（无 active、最近已结束是 coord-22、右栏选的是 W-5.exec-1），差别只在
+ * 时序：coord-22 的 GET 先挂着，人在这一瞬把页面藏起来，请求才落地。以前控制器在 await
+ * 之前就把 id 记成「已拉过」，隐藏那一下换代让这轮结果被丢掉，回到可见后 refresh 以为
+ * 拉过了不再 GET，左栏永远停在「最近输出未知」——数据就在接口里，人却看不到。
+ *
+ * 反过来，真正失败的 null（请求当场返回 null，这一轮没被作废）必须记住：已结束的 Attempt
+ * 永远不会变，下一轮再拉只是每 3 秒白打一次接口。
+ */
+test('第一次拉取被隐藏作废后回到可见再拉一次并显示尾部；当场返回 null 的 id 下一轮不再请求', async () => {
+  /* ---------------- 第一段：在途请求因隐藏被作废 ---------------- */
+
+  const h = harness();
+  const requested: string[] = [];
+  let visible = true;
+  let releaseRecent: (value: unknown) => void = () => {};
+  const hanging = new Promise<unknown>((resolve) => {
+    releaseRecent = resolve;
+  });
+
+  const view: Record<string, unknown> = {
+    missionId: 'M-5',
+    projectId: 'coagenthub-v5',
+    status: 'awaiting_review',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    contract: { intent: '等检视' },
+    usage: { quality: 'unknown', cost: 0 },
+    workItems: [
+      {
+        id: 'W-5',
+        title: '等检视的工单',
+        status: 'dispatched',
+        attemptIds: ['W-5.exec-1', 'coord-22'],
+      },
+    ],
+    updatedAt: '2026-10-26T09:58:00.000Z',
+  };
+
+  const activity: Array<Record<string, unknown>> = [
+    { kind: 'mission.created', at: '2026-10-26T09:00:00.000Z' },
+    { kind: 'attempt.started', attemptId: 'W-5.exec-1', workItemId: 'W-5', at: '2026-10-26T09:10:00.000Z' },
+    { kind: 'attempt.ended', attemptId: 'W-5.exec-1', workItemId: 'W-5', at: '2026-10-26T09:20:00.000Z' },
+    { kind: 'attempt.started', attemptId: 'coord-22', workItemId: 'W-5', at: '2026-10-26T09:30:00.000Z' },
+    { kind: 'attempt.ended', attemptId: 'coord-22', workItemId: 'W-5', at: '2026-10-26T09:40:00.000Z' },
+  ];
+
+  async function fetchJson(path: string): Promise<unknown> {
+    requested.push(path);
+    if (path === '/api/missions/M-5') return view;
+    if (path === '/api/missions/M-5/activity') return activity;
+    if (path === '/api/missions/M-5/attempts/coord-22') return hanging;
+    if (path === '/api/missions/M-5/attempts/W-5.exec-1') {
+      return { attemptId: 'W-5.exec-1', status: 'succeeded', output: '旧执行的正文' };
+    }
+    if (path === '/api/missions/M-5/live?cursor=0') {
+      return { cursor: 2, chunks: [{ seq: 2, missionId: 'M-5', attemptId: 'coord-22', kind: 'text', text: '已结束的实时行' }] };
+    }
+    if (path.startsWith('/api/missions/M-5/live?cursor=')) return { cursor: 2, chunks: [] };
+    throw new Error('unexpected ' + path);
+  }
+
+  const controller = createTaskDetailController({
+    doc: h.document,
+    container: h.container,
+    missionId: 'M-5',
+    selectedStep: 'W-5.exec-1',
+    fetchJson,
+    nowIso: () => NOW,
+    setInterval: h.setInterval,
+    clearInterval: h.clearInterval,
+    visible: () => visible,
+  });
+
+  // coord-22 的 GET 挂着，start() 的那条链也不会完成：不能 await 它。
+  void controller.start();
+  await flush();
+  await flush();
+
+  const recentGets = () => requested.filter((path) => path === '/api/missions/M-5/attempts/coord-22').length;
+  assert.equal(recentGets(), 1, '第一次没去取最近已结束那一跳：' + requested.join(', '));
+
+  // 请求还挂着时页面藏起来：这一轮换代作废。
+  visible = false;
+  h.document.dispatchEvent(new h.window.Event('visibilitychange') as unknown as Event);
+  await flush();
+  // 作废之后响应才落地：正文一个字都不许上屏。
+  releaseRecent({ attemptId: 'coord-22', status: 'succeeded', output: 'coord-22 的保存正文' });
+  await flush();
+  await flush();
+  assert.equal(h.textOf('.td-live').includes('coord-22 的保存正文'), false,
+    '隐藏时落地的响应用到了页面上：' + h.textOf('.td-live'));
+
+  // 回到可见：必须为同一个 id 再发一次。
+  visible = true;
+  h.document.dispatchEvent(new h.window.Event('visibilitychange') as unknown as Event);
+  await flush();
+  await flush();
+
+  assertOnlyAllowedPaths(requested);
+  assert.equal(recentGets(), 2, '回到可见后没有重拉最近已结束那一跳：' + requested.join(', '));
+  assert.equal(h.textOf('.td-live-title'), '最近执行输出 · 会话已结束');
+  const liveText = h.textOf('.td-live');
+  assert.ok(liveText.includes('coord-22 的保存正文'), '恢复可见后左栏仍未显示保存尾部：' + liveText);
+  assert.equal(liveText.includes('旧执行的正文'), false, '左栏借用了右栏选中那条的正文');
+  assert.equal(h.q('.td-live')?.getAttribute('data-live-attempt'), '');
+  assert.equal(h.q('.td-live')?.getAttribute('data-recent-attempt'), 'coord-22');
+
+  // 这一轮已经真正拿到正文：下一轮 3 秒刷新不许再请求。
+  const round = [...h.timers.values()].find((timer) => timer.ms === 3000);
+  assert.ok(round, '没有 3 秒那一只刷新定时器');
+  round.fn();
+  await flush();
+  await flush();
+  assert.equal(recentGets(), 2, '已经拉到的 id 在下一轮又被拉了一次：' + requested.join(', '));
+
+  controller.stop();
+
+  /* ---------------- 第二段：当场返回 null 的 id 也不重拉 ---------------- */
+
+  const h2 = harness();
+  const requested2: string[] = [];
+
+  async function fetchJsonNull(path: string): Promise<unknown> {
+    requested2.push(path);
+    if (path === '/api/missions/M-5') return view;
+    if (path === '/api/missions/M-5/activity') return activity;
+    if (path === '/api/missions/M-5/attempts/coord-22') return null;
+    if (path === '/api/missions/M-5/attempts/W-5.exec-1') {
+      return { attemptId: 'W-5.exec-1', status: 'succeeded', output: '旧执行的正文' };
+    }
+    if (path === '/api/missions/M-5/live?cursor=0') {
+      return { cursor: 2, chunks: [{ seq: 2, missionId: 'M-5', attemptId: 'coord-22', kind: 'text', text: '已结束的实时行' }] };
+    }
+    if (path.startsWith('/api/missions/M-5/live?cursor=')) return { cursor: 2, chunks: [] };
+    throw new Error('unexpected ' + path);
+  }
+
+  const controller2 = createTaskDetailController({
+    doc: h2.document,
+    container: h2.container,
+    missionId: 'M-5',
+    selectedStep: 'W-5.exec-1',
+    fetchJson: fetchJsonNull,
+    nowIso: () => NOW,
+    setInterval: h2.setInterval,
+    clearInterval: h2.clearInterval,
+  });
+
+  await controller2.start();
+  await flush();
+  await flush();
+
+  const nullGets = () => requested2.filter((path) => path === '/api/missions/M-5/attempts/coord-22').length;
+  assert.equal(nullGets(), 1, 'null 那一路第一次没发请求：' + requested2.join(', '));
+  assert.equal(h2.textOf('.td-live').includes('旧执行的正文'), false, 'null 时左栏借用了选中那条的正文');
+
+  const round2 = [...h2.timers.values()].find((timer) => timer.ms === 3000);
+  assert.ok(round2, '没有 3 秒那一只刷新定时器');
+  round2.fn();
+  await flush();
+  await flush();
+  assert.equal(nullGets(), 1, '返回 null 的已结束 id 在下一轮又被拉了一次：' + requested2.join(', '));
+
+  controller2.stop();
+});

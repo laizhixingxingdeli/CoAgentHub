@@ -501,11 +501,25 @@ export function createTaskDetailController(deps = {}) {
           state.recentEndedAttempt = null;
           state.recentEndedLoadedId = '';
         } else if (state.recentEndedLoadedId !== endedId) {
-          // 先记 id 再请求：拉回来的那一刻这一轮可能已经换代（换任务 / 隐藏），
-          // 那次 null 也算“试过了”，不记就每轮重拉同一条已结束 Attempt。
+          // 先记 id 再请求：同一轮里 refresh 可能被再调一次（深链换选中项、定时器），
+          // 不先记就会为同一条已结束 Attempt 并发发两条 GET。
           state.recentEndedLoadedId = endedId;
           const recent = await loadAttempt(gen, missionId, endedId);
-          if (gen !== cycleGen || stopped || !isVisible()) return;
+          if (gen !== cycleGen || stopped || !isVisible()) {
+            // 这一轮被作废（隐藏 / 换代 / stop）：拉回来的东西不许上屏，刚才记下的 id 也
+            // 必须撤回。留着的话，回到可见后的 refresh 以为已经拉过就不再 GET，左栏永远停在
+            // 「最近输出未知」——而那正是人最想看的上一次做到哪一步。
+            //
+            // 撤回只看调用方自己的 gen / stopped / isVisible，不看 recent 是不是 null：
+            // loadAttempt 在 gen 变化时也返回 null，把两者混成一个条件，真正失败的 null
+            // 就会被每 3 秒重拉一次。写在 recentEndedAttempt 上的 id 已经是这个 endedId 时
+            // 说明正文早就到过手，撤回只会白多一次请求。
+            const landed = object(state.recentEndedAttempt);
+            if (text(landed && landed.attemptId) !== endedId) state.recentEndedLoadedId = '';
+            return;
+          }
+          // 走到这里这一轮仍然生效：recent 为 null 也是「试过了」，照写并保留已记的 id，
+          // 下一轮看到同一个 loadedId 就不再 GET。
           state.recentEndedAttempt = recent;
         }
       }
