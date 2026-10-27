@@ -1,7 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CoAgentHubClient } from "./coagenthub-client.js";
-import { pluginDataDir, readBinding } from "./l3-state.js";
+import { ensureBridge, type BridgeSpawn } from "./bridge-supervisor.js";
+import {
+  listSessionBindings,
+  pidIsAlive,
+  pluginDataDir,
+  readBindingForRecipient,
+  readBridgeHealth,
+  readDaemonPid,
+  writeSessionBinding,
+} from "./l3-state.js";
 
 const contractSchema = z.object({
   intent: z.string().min(1), acceptance: z.array(z.string().min(1)).min(1),
@@ -15,6 +24,29 @@ const errorResult = (error: unknown) => ({
 });
 
 /**
+ * 状态查询只读插件本地文件：若在这里拉起守护进程或清掉死 pid，L3 看到的
+ * 就不是当前事实，而是这次查询自己刚改变过的状态。收件人只带 id，
+ * 不带 cwd 与投递正文，免得本地路径和消息内容随查询结果漏进日志。
+ */
+function deliveryBridgeStatus(env?: NodeJS.ProcessEnv): Record<string, unknown> {
+  const dataDir = pluginDataDir(env);
+  const pid = readDaemonPid(dataDir);
+  const health = readBridgeHealth(dataDir);
+  const recipients = listSessionBindings(dataDir)
+    .slice(0, 20)
+    .map((binding) => binding.recipient?.trim() || binding.sessionId);
+  return {
+    dataDir,
+    daemonAlive: pid !== undefined && pidIsAlive(pid),
+    pid: pid ?? null,
+    lastPollSucceededAt: health.lastPollSucceededAt ?? null,
+    consecutiveFailures: health.consecutiveFailures,
+    lastDeliveryAt: health.lastDeliveryAt ?? null,
+    recipients,
+  };
+}
+
+/**
  * direct 未确认时的固定说法：POST 已经发出去过，创建与否不知道；
  * 不重试、不删除、不启动、不假装回滚——把不确定性交给 caller 去读 Mission。
  */
@@ -22,6 +54,47 @@ const directUnconfirmed = (missionId: string, detail: string) =>
   `Mission ${missionId} 可能已经创建，但 direct 协调模式未确认（${detail}）。`
   + "请先读取该 Mission 视图确认 coordinationMode；不要盲目重试创建，也不要启动任何 agent。"
   + "本工具没有删除或回滚任何东西。";
+
+/**
+ * Only a v7 thread id can own a Delivery recipient. v4 ids and plain words come
+ * from callers that never had a bridge to route to, so registering them would
+ * fill the registry with sessions that can never receive.
+ */
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isCodexThreadId(value: string): boolean {
+  return UUID_V7.test(value);
+}
+
+/**
+ * Register a Mission recipient so its deliveries have somewhere to land, and
+ * make sure one bridge polls for it. Never moves the active default: the
+ * session already receiving must keep it, otherwise starting a Mission would
+ * silently steal another chat's deliveries.
+ */
+export function registerDeliveryRecipient(
+  dataDir: string,
+  recipient: string,
+  deps: { spawn?: BridgeSpawn; env?: NodeJS.ProcessEnv } = {},
+): { recipient: string; registered: boolean; bridgeAlive: boolean } | undefined {
+  if (!isCodexThreadId(recipient)) return undefined;
+  const existing = readBindingForRecipient(dataDir, recipient);
+  if (!existing) {
+    // cwd is unused for routing. The tool has no chat cwd; dataDir keeps the
+    // write inside the temp dir under test and never claims the active default.
+    writeSessionBinding(dataDir, {
+      sessionId: recipient,
+      cwd: dataDir,
+      inboxScope: "recipient",
+      recipient,
+      source: "mission",
+      updatedAt: new Date().toISOString(),
+    });
+    ensureBridge(dataDir, { spawn: deps.spawn, env: deps.env ?? process.env });
+  }
+  const pid = readDaemonPid(dataDir);
+  return { recipient, registered: !existing, bridgeAlive: Boolean(pid && pidIsAlive(pid)) };
+}
 
 type Run = {
   missionId: string; status: "requesting" | "accepted" | "running" | "ended" | "unknown" | "failed";
@@ -84,23 +157,33 @@ async function confirmDirect(client: CoAgentHubClient, missionId: string): Promi
   }
 }
 
-export function registerMissionLaunchTools(server: McpServer, client: CoAgentHubClient) {
+export function registerMissionLaunchTools(
+  server: McpServer,
+  client: CoAgentHubClient,
+  deps: { spawn?: BridgeSpawn; env?: NodeJS.ProcessEnv } = {},
+) {
   const runs = new Map<string, Run>();
   server.registerTool("coagenthub_get_platform_status", {
     description: "Read service lock identity, queue occupancy and configured adapter; does not read state files.", inputSchema: {},
   }, async () => {
-    try { return result(await client.request<Record<string, unknown>>("/platform/status")); }
+    let platform: Record<string, unknown>;
+    try { platform = await client.request<Record<string, unknown>>("/platform/status"); }
     catch (error) { return errorResult(error); }
+    // 平台请求失败时整条结果就是错误：不能在失败结果里夹带本地状态冒充成功。
+    return result({ ...platform, deliveryBridge: deliveryBridgeStatus(deps.env) });
   });
   server.registerTool("coagenthub_create_mission", {
-    description: "Create a Mission from a frozen Contract, without launching agents. Delivery recipient defaults to the real bound Codex session. coordinationMode: 'hierarchical' (default, Standard three-layer) or 'direct' (this session is the controller; see coagenthub_direct_control). Omit it to keep the platform default.",
+    description: "Create a Mission from a frozen Contract, without launching agents. recipient is required: pass this Codex session id (本会话号). There is no fallback to the active binding. coordinationMode: 'hierarchical' (default, Standard three-layer) or 'direct' (this session is the controller; see coagenthub_direct_control). Omit coordinationMode to keep the platform default.",
     inputSchema: { projectId: z.string().min(1), missionId: z.string().min(1), contract: contractSchema, recipient: z.string().min(1).optional(),
       coordinationMode: z.enum(["hierarchical", "direct"]).optional() },
   }, async ({ projectId, missionId, contract, recipient, coordinationMode }) => {
-    let target: string | undefined;
+    let target: string;
     try {
-      target = recipient ?? readBinding(pluginDataDir())?.recipient;
-      if (!target) throw new Error("No bound Delivery recipient; supply the actual recipient explicitly");
+      // No fallback to the active binding: guessing the recipient would route
+      // this Mission's deliveries into whichever chat happens to be active.
+      const trimmed = recipient?.trim();
+      if (!trimmed) throw new Error("No bound Delivery recipient; pass this session id (本会话号) as recipient");
+      target = trimmed;
     } catch (error) { return errorResult(error); }
     let created: Record<string, unknown>;
     try {
@@ -111,14 +194,19 @@ export function registerMissionLaunchTools(server: McpServer, client: CoAgentHub
           ...(coordinationMode === undefined ? {} : { coordinationMode }) }),
       });
     } catch (error) { return errorResult(error); }
+    // After the POST: the Mission exists, so its recipient must be registered
+    // even if the direct read-back below turns out to be unconfirmed.
+    const deliveryRoute = registerDeliveryRecipient(pluginDataDir(deps.env), target, deps);
     // 缺省与 hierarchical 保持原有单次 POST：没有 direct 的承诺，就不多读一次。
-    if (coordinationMode !== "direct") return result(created);
+    if (coordinationMode !== "direct") {
+      return result(deliveryRoute ? { ...created, deliveryRoute } : created);
+    }
     // 旧服务可能忽略 coordinationMode 却照旧返回 201。只有权威回读说 direct，
     // caller 才能当主控；否则它会对 hierarchical Mission 调 start，偷偷跑协调者。
     try {
       await confirmDirect(client, missionId);
     } catch (error) { return errorResult(error); }
-    return result({ ...created, coordinationMode: "direct" as const });
+    return result({ ...created, coordinationMode: "direct" as const, ...(deliveryRoute ? { deliveryRoute } : {}) });
   });
   server.registerTool("coagenthub_start_mission", {
     description: "Start an existing Mission through the single-writer hosted runner. Read current Contract, use explicit cwd/adapter, never auto-retry an uncertain launch. Candidate arguments are compatibility validation only; current platform role configuration determines dispatch. Check no other runner first; local tracking is not a distributed lock.",
@@ -140,6 +228,11 @@ export function registerMissionLaunchTools(server: McpServer, client: CoAgentHub
       if (platform.store !== "file" || platform.holdsMainLock !== true || typeof platform.statePath !== "string") {
         throw new Error("Hosted runner requires a confirmed file single-writer service");
       }
+      // A Mission created elsewhere still needs its recipient registered before
+      // the run starts, or nobody polls for its deliveries. An empty origin is
+      // not a reason to refuse the start.
+      const conversationRef = typeof mission.origin?.conversationRef === "string" ? mission.origin.conversationRef.trim() : "";
+      const deliveryRoute = conversationRef ? registerDeliveryRecipient(pluginDataDir(deps.env), conversationRef, deps) : undefined;
       const body = { spec: { projectId: mission.projectId, missionId, contract: mission.contract },
         cwd, adapter, state: platform.statePath, env: { COAGENT_AGENT_ENV_PASSTHROUGH: "-" },
         origin: mission.origin?.conversationRef, maxRounds, coordinator, executor };
@@ -150,7 +243,7 @@ export function registerMissionLaunchTools(server: McpServer, client: CoAgentHub
       void consumeHostedRun(response, run).catch(error => {
         run.status = "unknown"; run.error = error instanceof Error ? error.message : String(error);
       });
-      return result({ ...run, note: "HTTP acceptance is not agent completion; inspect hosted run, Mission and activity." });
+      return result({ ...run, ...(deliveryRoute ? { deliveryRoute } : {}), note: "HTTP acceptance is not agent completion; inspect hosted run, Mission and activity." });
     } catch (error) {
       run.status = submitted ? "unknown" : "failed";
       run.error = error instanceof Error ? error.message : String(error);

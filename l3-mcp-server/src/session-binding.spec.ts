@@ -83,6 +83,8 @@ describe("SessionStart binding", () => {
     expect(second.bound).toBe(true);
     expect(second.activated).toBe(false);
     expect(second.context).toContain("COAGENTHUB_BINDING_TAKEOVER=1");
+    expect(second.context).toContain("投给本会话（recipient session-B）的通知照常送达");
+    expect(second.context).toContain("默认收件人仍是");
 
     // Both are registered; nothing was lost.
     expect(readSessionBinding(dataDir, "session-A")).toMatchObject({

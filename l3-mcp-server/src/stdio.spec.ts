@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -12,12 +14,18 @@ function rpc(id: number, method: string, params: Record<string, unknown> = {}) {
 
 describe("MCP stdio protocol smoke", () => {
   it("initialize → tools/list → tools/call over stdio", async () => {
+    // A throwaway PLUGIN_DATA plus BRIDGE=0 keeps this smoke test from starting
+    // a real daemon against the operator's own data dir. The overrides must come
+    // after the spread, otherwise the inherited real environment wins.
+    const pluginData = mkdtempSync(join(tmpdir(), "coagenthub-stdio-"));
     const child = spawn("node", [serverEntry], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         COAGENTHUB_API_BASE:
           process.env.COAGENTHUB_API_BASE ?? "http://127.0.0.1:3101/api",
+        COAGENTHUB_L3_BRIDGE: "0",
+        PLUGIN_DATA: pluginData,
       },
     });
 
@@ -87,6 +95,7 @@ describe("MCP stdio protocol smoke", () => {
       expect(() => JSON.parse(content[0].text)).not.toThrow();
     } finally {
       child.kill();
+      rmSync(pluginData, { recursive: true, force: true });
     }
   }, 15_000);
 });
