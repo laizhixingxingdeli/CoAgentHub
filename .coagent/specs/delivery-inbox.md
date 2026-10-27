@@ -2,6 +2,14 @@
 
 Mission 的结果与升级要回到发起方：发起的会话可能已经关了，所以投递**留在收件箱里等**，Host 恢复后自己来取（`pending`）、取完确认（`acknowledge`）。只写进平台状态不算数——「进收件箱才叫升级」。
 
+## 还算不算数（stillOpen）
+
+`GET /api/inbox` 的每条 pending 多一个布尔 `stillOpen`，由平台按 Mission 当前状态现算，**只出现在响应里**：不写入 Delivery、不 ACK、不过滤、不读活动日志。`pending` 的条数与顺序不变。
+
+- 键 `escalated:<i>`：`mission.escalations[i]` 存在且尚无 `answeredAt` 时为 true，已答复为 false；下标不存在为 true。
+- 键以 `result:` 开头（含 `result:legacy:*`）：Mission 处于 `awaiting_review` 且该条是该 Mission 最新一条 result 投递（`createdAt` 降序，同刻按 id 的数字部分降序）时为 true，否则 false。
+- 其他键，或 Mission 找不到（含已归档）：true。
+
 ## 什么时候投
 
 | 平台命令 | outcome | 幂等键 |
@@ -81,5 +89,5 @@ ALTER TABLE deliveries ALTER COLUMN idempotency_key DROP NOT NULL;
 
 ## 权威源 / 测试
 
-- 源：`delivery.ts`、`file-store.ts`（含 `run` 事务）、`pg-store.ts`（含 `run` 事务）、`platform.ts`（三处建投递、`#tx`）、`ports.ts`（`CommandTransaction`）、`main.ts`（注入）
+- 源：`delivery.ts`、`delivery-status.ts`（只读 `stillOpen`）、`file-store.ts`（含 `run` 事务）、`pg-store.ts`（含 `run` 事务）、`platform.ts`（三处建投递、`#tx`、`annotateInboxStillOpen`）、`ports.ts`（`CommandTransaction`）、`main.ts`（注入）
 - 测：`delivery-idempotency.test.ts`（三个实现的去重语义、平台三条路径、文件旧数据、真 PG 迁移——独立库）、`pg-store.test.ts`、`command-transaction.test.ts`（事务语义；三条命令 × 四个写边界的崩溃注入：重开状态文件后全有或全无、重放恰好一条）、`pg-command-transaction.test.ts`（真库、独立库：同一套语义；崩溃点含提交时版本冲突；新开 store 读库全有或全无）、`command-transaction-checkpoints.test.ts`（全命令脚本 × 每一次记事件前后崩溃 × 两种存储的检查点比对；机器验收 authority 对不上时报告落盘）

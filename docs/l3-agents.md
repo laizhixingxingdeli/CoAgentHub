@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **Claude Code** | MCP + 技能 | 拉：后台跑 `watch`，命令一退出就唤醒会话 | [agents/claude-code](../agents/claude-code/) |
 | **Codex** | 插件（MCP + 会话绑定钩子） | 推：投递桥把新通知排进绑定的会话 | [agents/codex](../agents/codex/) |
-| **其他支持 MCP 的 agent**（Cursor、Cline、Gemini CLI、opencode……） | stdio MCP | 拉：`watch` 或周期读状态 | 同一个 MCP 服务器 |
+| **其他支持 MCP 的 agent**（Cursor、Cline、Gemini CLI、opencode……） | stdio MCP | 拉：`watch`，或每 5 分钟以上只读一次 `coagenthub_get_mission_live` | 同一个 MCP 服务器 |
 | **只有 shell 的 agent** | 命令行 + HTTP | 拉：`watch` | 什么都不用装 |
 
 不管哪种，**让它先读 [l3-guide.md](l3-guide.md)**——那是写给检视者 agent 的操作手册，装进它的指令或技能里。
@@ -69,6 +69,12 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
 - `hooks/hooks.json`：`SessionStart` 钩子，把当前 Codex 根会话绑定到本地投递桥；
 - 投递桥守护进程：以 1 秒为间隔轮询平台的收件箱 `/api/inbox`，把每条新投递用 `codex queue` 排进绑定的会话，**排队成功才 ACK**；排队失败投递留在原处，ACK 失败只重试 ACK，不会重复排队。
 
+`codex queue` 只在本轮结束后才开新一轮。在一轮里 sleep 等不到通报，所以开跑、答复、打回、批准之后，若 `coagenthub_get_platform_status` 的 `deliveryBridge` 正常，就要结束本轮，等通报开新一轮。
+
+MCP 服务器进程在跑时会看护投递桥守护进程：已有登记的会话且守护进程不在时把它拉起来（约每 60 秒检查一次）。环境变量 `COAGENTHUB_L3_BRIDGE=0` 时不拉起。只读 `deliveryBridge` 不会顺便拉起守护进程。
+
+建票时 `coagenthub_create_mission` 必须显式传 `recipient`（本会话号），没有活动绑定兜底。收件人是 UUID v7 时，建票会自动登记为投递收件人并确保桥在轮询；v4 或普通字符串不会登记。只有 v7 的返回里有 `deliveryRoute`（`recipient`、`registered`、`bridgeAlive`）。
+
 安装：构建 MCP 服务器（`setup` 已做），把 `agents/codex` 目录作为本地插件加进 Codex；首次会话 Codex 会请你**信任**钩子——钩子只写插件本地的绑定状态并拉起本地桥进程。插件的 `.mcp.json` 把 MCP 服务器指向仓库根的 `l3-mcp-server/dist/index.js`（插件包不再自带服务器），安装时把占位绝对路径改成真实路径。
 
 缺省只消费投递给**当前 Codex 会话**的通知（用会话 UUID 对 Mission 的 `conversationRef`），免得一个会话 ACK 了另一个宿主的投递。想让一个 Codex 会话当所有 Mission 的中央检视者，设 `COAGENTHUB_INBOX_SCOPE=all`；想绑定某个指定接收者，设 `COAGENTHUB_INBOX_RECIPIENT`。
@@ -102,7 +108,7 @@ env = { COAGENTHUB_API_BASE = "http://127.0.0.1:3101/api", COAGENTHUB_REVIEWER_I
 }
 ```
 
-唤醒走拉：让它后台跑 `node scripts/coagent.mjs watch <missionId>`，或者定期调 `coagenthub_get_mission`。
+唤醒走拉：让它后台跑 `node scripts/coagent.mjs watch <missionId>`，或者每 5 分钟以上只读一次 `coagenthub_get_mission_live`。不要 45 秒一查，也不要在一轮里 sleep 轮询。
 
 **更轻的一种：零依赖的 reviewer MCP。** `node scripts/reviewer-mcp.ts`（不需要 `setup`，不需要 npm）只暴露 11 个工作流工具：统一待办、值守租约与有界守候、待办确认、合 master 简报、文档提议的读/提/批/冲、候选熔断复位。**它没有创建 / 开跑 / 终审合入这些生命周期工具**，这些走命令行或 HTTP。适合想要最小依赖的场合，也可以和上面的 MCP 服务器并存。
 

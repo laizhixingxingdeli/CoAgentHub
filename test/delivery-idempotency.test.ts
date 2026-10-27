@@ -165,6 +165,54 @@ describe('平台：每一次升级、每一次交卷都进收件箱', () => {
     assert.equal(pending[0]!.summary, '第二版');
   });
 
+  test('收件箱补注 stillOpen：已答复的升级、被打回的旧结果都不再开放', async () => {
+    const { platform, deliveries } = buildPlatform(new InPlaceWorkspaceManager());
+    const start = (missionId: string) => platform.createMission({
+      projectId: 'P',
+      missionId,
+      contract: CONTRACT,
+      origin: { clientType: 'cli', conversationRef: 'me' },
+    });
+
+    // 升级流程：第一问已答复，第二问还开着。两条都不 ACK，否则旧投递就离开 pending 了。
+    await start('M-esc');
+    const { attemptId: escFirst } = await platform.startCoordinatorAttempt('M-esc');
+    await platform.escalateToL3('M-esc', escFirst, { question: '第一问？', why: 'w1', options: ['x', 'y'] });
+    await platform.answerEscalation('M-esc', { answer: 'x' });
+    await platform.finishAttempt('M-esc', escFirst, { endedBy: 'structured_submit' });
+    const { attemptId: escSecond } = await platform.startCoordinatorAttempt('M-esc');
+    await platform.escalateToL3('M-esc', escSecond, { question: '第二问？', why: 'w2', options: ['p', 'q'] });
+
+    // 交卷流程：第一版被打回，第二版在等终审。
+    await start('M-res');
+    const result = (summary: string) => ({
+      outcome: 'delivered' as const,
+      summary,
+      acceptanceEvidence: ['e'],
+      memoryDelta: [],
+      openRisks: [],
+    });
+    const { attemptId: resFirst } = await platform.startCoordinatorAttempt('M-res');
+    await platform.submitMissionResult('M-res', resFirst, result('第一版'));
+    await platform.finishAttempt('M-res', resFirst, { endedBy: 'structured_submit' });
+    await platform.finalizeMission('M-res', { verdict: 'send_back', reasons: ['边界说明不够'] });
+    const { attemptId: resSecond } = await platform.startCoordinatorAttempt('M-res');
+    await platform.submitMissionResult('M-res', resSecond, result('第二版'));
+
+    const pending = await deliveries.pending('me');
+    const annotated = await platform.annotateInboxStillOpen(pending);
+    assert.deepEqual(annotated.map((row) => row.id), pending.map((row) => row.id), '补注不过滤、不改顺序');
+    const open = (missionId: string, idempotencyKey: string) => annotated
+      .find((row) => row.missionId === missionId && row.idempotencyKey === idempotencyKey)?.stillOpen;
+    assert.equal(open('M-esc', 'escalated:0'), false, '已答复的升级不再开放');
+    assert.equal(open('M-esc', 'escalated:1'), true, '未答复的升级仍开放');
+    assert.equal(open('M-res', `result:${resFirst}`), false, '被打回的旧结果不再开放');
+    assert.equal(open('M-res', `result:${resSecond}`), true, '最新结果在等终审，仍开放');
+    // 判定是只读的：存储里的投递不该多出这个字段。
+    const stored = await deliveries.get(pending[0]!.id);
+    assert.equal(Object.prototype.hasOwnProperty.call(stored, 'stillOpen'), false, 'Delivery 存储字段不变');
+  });
+
   test('Lightweight 交卷：键是那份验收报告', async () => {
     const clock = new FixedClock();
     const ids = new SequentialIds();

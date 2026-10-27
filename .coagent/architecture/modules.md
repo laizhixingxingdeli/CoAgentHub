@@ -56,7 +56,7 @@
 | 等待与自动恢复 | `auto-resume`（托管启动参数、到期等待的筛选、上游网络中断判定）、`heartbeat-continuation`（接管旧锁后按上一服务心跳窗口选出要续跑的 Mission）、`probe-reclaim`（孤儿半开探测名额回收）、`wait-info`（等待状态统一投影：谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步；HTTP / MCP / 网页共用）、`model-policy`（Mission 级模型约束的事件存取） |
 | 升级 | `escalations`（升级、契约核对、诊断与答复；同一 Attempt 已有未答复的普通升级时拒绝第二张，`ESCALATION_ALREADY_OPEN`，平台门禁卡与诊断卡不算，COM7） |
 | 预算与用量 | `budget-usage`（用量聚合、权威预算）、`usage-helpers`（用量与时间纯辅助）、`ticket-budget`（单票费用上限与每 15 个工作项检查点的门禁） |
-| 视图与简报 | `views`（只读视图）、`agent-view-helpers`（agent 视图纯投影）、`startup-brief`（开跑简报与裁剪审计）、`context-metrics`（摘要净化） |
+| 视图与简报 | `views`（只读视图）、`agent-view-helpers`（agent 视图纯投影）、`startup-brief`（开跑简报与裁剪审计）、`context-metrics`（摘要净化）、`delivery-status`（收件箱每条 pending 的 `stillOpen` 只读补注：不写、不 ACK、不读活动日志，WAKE1） |
 | 活动 | `command-tracking`（命令活动事件） |
 
 ## 其他
@@ -83,3 +83,17 @@
 ## 后端队列与分类角色（2026-10-04）
 
 mission-queue.ts 负责项目执行配置、已确认 Mission 顺序/依赖的活动投影与启动配置固定；mission-queue-worker.ts 只负责调度和排空。main.ts 在持锁服务中复用 runHostedMission，不创建第二写者。run-queue.ts 只向本机服务提交清单；run-plan 入口已移除，`POST /api/control/run-plan` 返回 410。QueryRunner 使用 classifier 角色池，与 Mission 调度分开；字段、事实、熔断和健康视图沿用原候选仓储。
+
+## L3 MCP 服务器：`l3-mcp-server`
+
+Codex 插件与 Claude 工具（`agents/claude-code/tools/mcp.mjs`）共用的 stdio MCP 服务器，只经本机 HTTP 访问平台，不读平台状态文件。测试是 `*.spec.ts`（vitest），验证命令见 `project.md` 的「测试」一节。投递桥的行为见 `specs/l3-delivery-bridge.md`，平台侧收件箱语义见 `specs/delivery-inbox.md`。下表路径相对 `l3-mcp-server/`。
+
+| 文件 | 负责什么 |
+|---|---|
+| `src/index.ts` | stdio 入口；握手之后开投递桥看护（`startBridgeSupervision`） |
+| `src/tools.ts`、`src/widget-bridge.ts` | Mission / L3 的读写工具（读 Mission、答复升级、批准检查点、终审签字……）与 dashboard 小部件 |
+| `src/mission-launch.ts` | `get_platform_status`（附只读 `deliveryBridge`）、`create_mission` / `start_mission`（recipient 必须显式；UUID v7 收件人建票即登记）、托管运行观测 |
+| `src/reviewer-operations.ts`、`src/direct-control.ts` | Attempt / live、资源池、文档提议；direct 模式的主控操作 |
+| `src/l3-bridge.ts`、`src/l3-daemon.ts` | 投递一轮（按收件人拉收件箱 → `codex queue` → ACK；`stillOpen: false` 直接 ACK；单条排队失败不堵同轮其他人）与守护进程（pid 单例、每秒轮询、失败退避） |
+| `src/bridge-supervisor.ts`、`src/session-hook.ts`、`src/session-binding.ts` | 看护（钩子与 MCP 共用 `ensureBridge`，60 秒一查）、SessionStart 钩子（登记会话、写数据目录指针）、会话绑定与提示文案 |
+| `src/l3-state.ts`、`src/coagenthub-client.ts` | 插件本地状态（数据目录解析：PLUGIN_DATA → COAGENTHUB_PLUGIN_DATA → 指针 → 默认；绑定登记表；健康文件）与本机 HTTP 客户端 |
