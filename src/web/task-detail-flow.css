@@ -1,0 +1,352 @@
+/*
+ * 任务详情页「工作流环节」区（画板 .impeccable/reference/figma-2-140.txt 41:445 的
+ * 已发生环节带，与 figma-45-1388.txt 45:1457 的纵向历史列表）。
+ *
+ * 为什么单开一个文件：这一块的排版事实是「收起时一排横向步骤卡、展开后一份纵向
+ * 列表」这一对形状。挤进全站样式里，任何一处手改都会顺带改到任务总览与项目页，
+ * 而「卡片矮了 6px」在屏幕上不报错，只是越来越不像画板。
+ *
+ * 为什么全部挂在 .td-flow 作用域下：这份文件与 old 业务样式（ui.css 的 .card、
+ * .chip）同时在线，一条不限定作用域的 `.td-stage { padding: 16px }` 会把别人的
+ * 卡片也改了。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，改一处
+ * 忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ */
+
+/* 根只管纵向排列：白底与描边在 .td-flow-board 上，因为选择器在白板**外面**。
+ * 把框画在根上，选择器就落进了白板里，而它回答的是“看那张工单”，不是一条环节。 */
+.td-flow {
+  display: flex;
+  flex-direction: column;
+  /* 选择器与白板之间 14px（源稿选择器底在 346、白板顶约 360）：12px 时白板贴上来
+   * 跟选择器像同一行。16px 又会让白板整体下沉 2px，下面的输出被连带推走。 */
+  gap: 14px;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 选择器那一排：白板之上、单独一行。不限定 300px 就会被选项文字拉成整行宽，
+ * 看起来像这一块的主标题而不是“换个工单看看”。 */
+.td-flow .td-flow-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.td-flow .td-work-item {
+  width: 300px;
+  height: 42px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--color-ink);
+  background: var(--color-white);
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+}
+
+/* 白板：标题带 + 步骤卡 + 纵向历史三样合成一块，overflow: clip 让圆角包住底色。 */
+.td-flow .td-flow-board {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-white);
+  overflow: clip;
+}
+
+/* 收起时白板高度按画板写死 194px（figma-2-140.txt 41:445）。不锁的话白板随卡片
+ * 内容长高，下面的实时输出被一路往下推，人得滚动才能看见「现在跑到哪」——而画板
+ * 里这两块本来同屏可见。只在收起时锁：展开纵向历史时锁死会把历史剪掉一半，那时
+ * 由 .td-history 自家滚动（见本文件末尾）。 */
+.td-flow[data-expanded='false'] .td-flow-board {
+  box-sizing: border-box;
+  height: 194px;
+  overflow: clip;
+}
+
+/* 标题带：轮次与次数、已验收标记、定位当前、展开。底色用 nav 令牌，
+ * 让它与下面的步骤卡明显分层——它与环节不是一组。
+ * 定位与展开靠 margin-left: auto 推到右侧：它们是这一带的附属动作，
+ * 摆在中间会跟标题抢第一眼。 */
+.td-flow .td-flow-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--color-nav);
+}
+
+/* 已验收的相邻工作项只是标记，不是可选项：做成绿色文字而不是按钮，
+ * 免得看起来像能点去切换。 */
+.td-flow .td-accepted {
+  font-size: 13px;
+  color: var(--color-green);
+  white-space: nowrap;
+}
+
+.td-flow .td-flow-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+/* 两个动作都是白底描边小按钮。定位当前与展开只差文案，样式必须一致：
+ * 长得不一样，人就会以为其中一个更“重要”而不敢点。 */
+.td-flow .td-locate,
+.td-flow .td-history-toggle {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+.td-flow .td-locate {
+  margin-left: auto;
+}
+
+/* 收起时的一排步骤卡。overflow-clip + 不换行：卡片宽度固定，超出的部分由
+ * 展开纵向历史去看，而不是把这一排挤成一堆窄条。 */
+.td-flow .td-flow-stages {
+  display: flex;
+  gap: 16px;
+  padding: 12px 16px;
+  overflow: clip;
+}
+
+/* 卡片宽度与高度都写死（画板 274×136）。min-width: 0 是关键：flex 项默认
+ * min-width: auto，内容里有一个不断行的长 profile/model 就会被撑到比 274 宽，
+ * 后面的卡被挤出可见区，而溢出的部分只在别人屏幕上看得到。 */
+.td-flow .td-stage {
+  display: flex;
+  flex: 0 0 274px;
+  width: 274px;
+  min-width: 0;
+  height: 136px;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  padding: 12px 16px;
+  border-left: 2px solid transparent;
+  border-radius: 8px;
+  background: var(--color-white);
+  cursor: pointer;
+}
+
+/* 当前项：左侧 2px 强调色条 + 选中底。**只认 data-current**，不按「最后一个」
+ * 另算一次——两处判断迟早漂开，而漂开的样子是「当前」标在了已经跑完的那一条上。 */
+.td-flow [data-current='true'] {
+  border-left: 2px solid var(--color-accent);
+  background: var(--color-select);
+}
+
+.td-flow .td-badge {
+  align-self: flex-start;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--color-muted);
+  background: var(--color-nav);
+}
+
+.td-flow .td-stage-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+/* 明细与状态都小一号、灰一阶：它们回答「怎么发生的」，标题回答「发生了什么」。 */
+.td-flow .td-stage-detail {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  /* 收起时明细最多两行：再长会把同一排卡片的高度撑得不齐。 */
+  max-height: 40px;
+  overflow: hidden;
+}
+
+/* 身份行：这一跳是谁、用哪条候选、哪个模型。比标题小一号、比状态深一阶：
+ * 它回答“谁在干”，而人第一眼要的是“发生了什么”。
+ *
+ * 换行而不是省略号：真实的 profile/model 是核对「这一跳到底用了谁」的唯一凭据，
+ * 截成 `executor-openrouter-qwe…` 之后两个不同的候选看起来一模一样。
+ *
+ * **这一行不再封顶**（原先 max-height: 40px + overflow: hidden）：卡片本身是 136px
+ * 且 overflow: hidden，封顶并没有多保住什么，只是把超长的 profile/model 在卡内
+ * 裁掉——被裁掉的那半截在屏幕上再也看不到，而卡片看起来是满的。裁切只属于明细行
+ * （.td-stage-detail），它是「怎么发生的」的摘要；身份行是「谁在干」的凭据。 */
+.td-flow .td-stage-identity {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.td-flow .td-stage-state {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+}
+
+/* 纵向历史：展开后按发生顺序一行一条，旧在前。
+ *
+ * **收起时靠 CSS 隐藏，而不是不渲染**：bindTaskFlow 按契约只翻根上的
+ * data-expanded 与按钮文案、不重算环节。历史行若不预先在 DOM 里，点一下按钮就
+ * 永远什么都不出现，而那个样子和"这张工单确实没有历史"一模一样。 */
+.td-flow[data-expanded='false'] .td-history {
+  display: none;
+}
+
+.td-flow .td-history {
+  margin: 0;
+  padding: 0 0 12px;
+  list-style: none;
+  /* 长历史自家滚：整页跟着历史长起来的话，实时输出与契约会被推到看不见的地方，
+   * 而人想比对的恰恰是“历史里那条”与“外面的现在”。 */
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+/* 历史行：三列固定槽宽（标题 240 / 身份 400 / 时间剩余），与源稿 figma-45-1388.txt 一致。
+ *
+ * **为什么不再用 flex + gap**：flex 里列宽跟着内容走，一行里身份很短时时间列就左移，
+ * 下面一行身份很长时又跑到右边；人扫不动一整列“什么时候完成的”，只能每行重找一次。
+ * 固定列数一旦对不上（比如长身份把 400px 撞满），minmax(0, 1fr) 的那一列还能自己缩，
+ * 而 min-width:auto 的 flex 项会直接把行撑破。
+ *
+ * grid-template-columns 第三列用 minmax(0, 1fr) 而不是 472px：源稿 472 是那一档画板
+ * 的剩余空间，写死就会在窄屏上横向溢出。box-sizing 必须把 10px 上下 padding 算进去，
+ * 否则 46px 的行高变成 66px，与相邻行间距就不是 4px 了。 */
+.td-flow .td-history-row {
+  display: grid;
+  grid-template-columns: 240px 400px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 10px 16px;
+  height: 46px;
+  box-sizing: border-box;
+  border-left: 2px solid transparent;
+  border-top: 1px solid var(--color-line);
+  cursor: pointer;
+}
+
+/* 标题列与横卡标题同号同重：同一条环节在两种视图里应该长得像同一件事。 */
+.td-flow .td-history-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--color-ink);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 身份列裁切而不是换行：换成两行会把 46px 的行高撑破，行与行就不再成一行一行。
+ * 被裁掉的那半截必须靠 title 能看全（见 historyRow），否则它在这页上就没了。 */
+.td-flow .td-history-identity {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 时间列：本地日期时间 + 结果词。与身份同号同灰阶，它回答的是「什么时候、怎么结束」的备注。 */
+.td-flow .td-history-time {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------------------------- 展开纵向历史 ----------------------------
+ *
+ * 展开态**不再是一个白板里再套一份列表**（源稿 figma-45-1388.txt）：页头 + 三页签
+ * 之下直接就是真实的环节摘要与一列纵向历史行。这里用透明与去描边把白板“撤掉”，
+ * 而不是另拼一套 HTML：环节卡与历史行必须**同时**在 DOM 里（收起时靠 CSS 隐藏历史、
+ * 展开时靠 CSS 隐藏卡片），因为 bindTaskFlow 按契约只翻根上的 data-expanded 与按钮
+ * 文案、不重算环节。只拼其中一份的话，点一下按钮就永远不会有东西出现。
+ *
+ * 收起态那几条规则（白板 194px、卡片 274×136、历史 max-height:420px 自家滚）一条都
+ * 不改：它们与画板 figma-2-140.txt 41:445 对好，改一个数字就是整块位移。
+ */
+
+/* 展开后选择器、定位当前与已验收芯片都不再出现：它们都属于“收起时看最近几条”
+ * 那套用法。选择器留在页面上就会在历史顶上多一行控件，而那一行与下面的行看起来像
+ * 同一组。 */
+.td-flow[data-expanded='true'] .td-flow-picker,
+.td-flow[data-expanded='true'] .td-locate,
+.td-flow[data-expanded='true'] .td-accepted {
+  display: none;
+}
+
+/* 近期卡整排藏掉（而不是不渲染）：卡片与历史行必须同时存在于 DOM，因为 bindTaskFlow
+ * 只翻 data-expanded 而不重算环节。留着这一排的话，展开后就是“一排近期卡 + 下面
+ * 再从左铺一遭完整历史”，同一批环节在一屏里说两遍。 */
+.td-flow[data-expanded='true'] .td-flow-stages {
+  display: none;
+}
+
+/* 白板撤成透明无框：展开时那一层白底只能把一个横条和一整列历史套在一起，读起来像
+ * “一个卡片里装了全部历史”，而实际事实是页面本身就换成了纵向历史。overflow 归 visible，
+ * 否则收起态那句 overflow: clip 会把长历史剪掉。 */
+.td-flow[data-expanded='true'] .td-flow-board {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+}
+
+/* 标题带跟着透底、不再固定 44px：固定高度下换行后的标题会被裁掉一截，而裁掉的
+ * 恰好是“几个环节 / 几次执行”那半句。底部 12px 把它与历史行分开。
+ * 展开按钮靠 margin-left: auto 留在最右（定位当前已隐藏）：它成了带子里唯一的动作，
+ * 不推右就会贴着标题。 */
+.td-flow[data-expanded='true'] .td-flow-head {
+  background: transparent;
+  height: auto;
+  min-height: 36px;
+  padding: 0 0 12px;
+}
+
+.td-flow[data-expanded='true'] .td-history-toggle {
+  margin-left: auto;
+}
+
+/* 历史不再自家滚动、也不再压一层底：展开态它就是这一块的全部内容，内部开一个
+ * 420px 的滚动区会把“全部历史”又变成“一小段可滚的窗口”。 */
+.td-flow[data-expanded='true'] .td-history {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 行本身去底色、去分隔线：暖纸面上靠行距分段。（只改背景与竖线，不动
+ * border-left 的 2px 当前项强调条——那条说的是“当前在哪”，与分段无关。） */
+.td-flow[data-expanded='true'] .td-history-row {
+  background: transparent;
+  border-top: none;
+}
