@@ -8,7 +8,7 @@ pluginDataDir 的解析顺序是 PLUGIN_DATA、COAGENTHUB_PLUGIN_DATA、指针�
 
 ## 看护
 
-钩子与 MCP 共用 ensureBridge。MCP 启动后检查一次，之后每 60 秒一次。数据目录里已有绑定且守护进程 pid 不在时才 detached、unref 拉起；定时器也 unref。COAGENTHUB_L3_BRIDGE=0 时不看护。状态查询不得借机拉起或清掉死 pid。
+钩子与 MCP 共用 ensureBridge。MCP 启动后检查一次，之后每 60 秒一次。数据目录里已有绑定且守护进程 pid 不在时才 detached、unref 拉起；定时器也 unref。COAGENTHUB_L3_BRIDGE=0 时不看护。Claude Code 的 agents/claude-code/tools/mcp.mjs 起 MCP 时，调用方没设该变量就传 "0"（显式值原样保留）：Claude 宿主不用 Codex 投递桥，而从会随会话结束的 shell 拉起的守护进程若默认看护就会被反复拉起。状态查询不得借机拉起或清掉死 pid。
 
 ## 建票即登记
 

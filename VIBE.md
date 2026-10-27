@@ -101,7 +101,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 测试用 `node --test`：定向跑 `node --test test/<名字>.test.ts`，全量跑 `node --test`。不用 npm / npx。
 - 测试尽量少，只加在关键地方：只写验收点名的关键场景，每条验收一到两条；不为每个分支、每种写法、每种错误各写一条（用户 2026-09-30）。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
-- `adapters/pi`（pi 适配层）和 `l3-mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器先构建再测：`["node","node_modules/typescript/bin/tsc","-p","l3-mcp-server/tsconfig.json"]`，然后 `["node","node_modules/vitest/vitest.mjs","run","--root","l3-mcp-server"]`。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
+- `adapters/pi`（pi 适配层）和 `l3-mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器的验证命令是 `["node","scripts/l3-mcp-check.mjs"]`（先构建再跑全量 vitest，定向时在后面加 spec 路径；FIX2 新增）。脚本按 Node 模块解析从当前目录向上找 typescript 与 vitest，所以在没有 `node_modules` 的 Mission worktree 里也能用；`node node_modules/...` 的相对写法在那里找不到脚本，适配层那条的 `--import tsx` 走模块解析，不受影响。**验证命令里不要写主检出的绝对路径**：WAKE2 的执行者据此 `cd` 进主检出改了文件（2026-10-27 W-940），Mission 只在自己的 worktree 里读写。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
 
 ### 仓库
 
@@ -171,6 +171,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   文件存储下，`run-mission` 与 `run-plan` 保留原有命令前缀。正式运行在输入和环境前置校验、方案资格筛选/仓库预检之后探测同一 statePath 写者：经身份验证的 live 服务由回环 HTTP 启动，并在同一服务
 - **http-control-auth** — HTTP 控制面可选鉴权（SEC-002 / AUTH-002）
   `createApi` 可注入 `resolveControlPrincipal`。**不注入**时控制面保持历史免 control 凭据行为；注入后，敏感读与控制写在进入业务逻辑前按 Principal 门禁。**当前 `startSer
+- **l3-delivery-bridge** — L3 宿主投递桥看护与状态
+  Codex 宿主侧的投递桥与平台收件箱分开：平台只负责 pending / acknowledge / stillOpen；拉起守护进程、登记收件人、排队与 ACK 都在 l3-mcp-server。
 - **l3-main-writer-routing** — L3 主状态写者路由与回环控制
   文件存储下，`node src/l3.ts` 保留既有命令前缀和参数。`merge`、`send-back`、`abandon`、`answer`、`revise`、`cancel`、`pause`、`resume`、`retire`、`r
 - **lightweight-standard-promotion** — Lightweight → Standard 晋升（PROMO-001）
@@ -234,7 +236,7 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
 - **adr-0006-ha-release-authority** — HA 放行权威：人或显式配置的高保证 Principal
 - **adr-0007-three-layer-roles-and-handoffs** — 三层分工与交接：检视者管需求与架构，协调者管方案与验收，执行者只执行
 - **adr-0008-single-repo-release-layout** — 单仓发布布局：适配层与 L3 接入并入本仓，依赖走 npm workspaces
-- **adr-0009-state-slimming-telemetry-sidecar-and-archive** — 状态文件瘦身：遥测事件外置边车 + Mission 归档启用（提案，未实施）
+- **adr-0009-state-slimming-telemetry-sidecar-and-archive** — 状态文件瘦身：遥测事件外置边车 + Mission 归档启用（2026-10-26 已实施）
 
 ## 给 Agent 的规则
 
