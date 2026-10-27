@@ -74,9 +74,37 @@ function listBody(value) {
   return '<ul class="td-contract-list">' + items + '</ul>';
 }
 
+/**
+ * 验收条件单独编号「1. 2. 3.」，其余列表仍是圆点原文。
+ *
+ * 为什么不复用 listBody 再在 CSS 里数序号：CSS 计数器数的是这一份 DOM 的顺序，
+ * 看着一样、其实是第二个来源；投影数组一旦被谁在前面插一项，编号会跟着 DOM
+ * 重排，而契约页说的必须是「这份契约里第几条」。编号写在文本里，读屏器和复制
+ * 出去的文字也一致。
+ *
+ * 不复用 listBody 的另一个原因：验收项要按原下标从 1 起，其它四格**不**编号。
+ * 合成一个「带或不带编号」的参数，早晚有人给 constraints 传了 true，界面上就
+ * 冒出「约束第 1 条」这种契约里根本没有的东西。
+ *
+ * 三种状态与 listBody 对齐：非数组 → 未记录；[] → 空 ul（不补一条「1. 未记录」）；
+ * null/undefined 项按空串算，编号仍然占位，不 trim、不改写条文里已有的数字。
+ */
+function acceptanceBody(value) {
+  if (!Array.isArray(value)) return '<p class="td-contract-missing">' + esc(MISSING_TEXT) + '</p>';
+  const items = value
+    .map((entry, index) => {
+      const text = entry === null || entry === undefined ? '' : String(entry);
+      return `<li class="td-contract-item">${esc(String(index + 1) + '. ' + text)}</li>`;
+    })
+    .join('');
+  return '<ul class="td-contract-list">' + items + '</ul>';
+}
+
 function cardHtml(card, page) {
   const value = page[card.field];
-  const body = card.kind === 'text' ? textBody(value) : listBody(value);
+  const body = card.kind === 'text'
+    ? textBody(value)
+    : (card.field === 'acceptance' ? acceptanceBody(value) : listBody(value));
   return '<article class="td-contract-card" data-field="' + esc(card.field) + '">'
     + '<h2 class="td-contract-card-title">' + esc(card.title) + '</h2>'
     + body

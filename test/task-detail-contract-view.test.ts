@@ -78,9 +78,17 @@ test('修订号与契约原文按原文出现，缺失的 nonGoals 说未记录�
   // intent 整句都在，含句尾——被截断时恰恰是老实的开头还在、尾巴没了。
   assert.ok(card('intent').textContent?.includes(intent), 'intent 没有按原文出现（可能被截断）');
 
-  // acceptance 两条都在，且是两条 li，不是合成一段。
+  // acceptance 两条都在，且是两条 li，不是合成一段；按原数组顺序编成「1. 」「2. 」
+  // （画板 44:1676 就是这样），顺序一颠倒，人读到的验收条号就跟契约对不上了。
   const acceptance = all('[data-field="acceptance"] .td-contract-item').map((el) => el.textContent || '');
-  assert.deepEqual(acceptance, ['修订号、intent、acceptance 按原文出现在 HTML', '缺失的 nonGoals 显示未记录而不是空列表']);
+  assert.deepEqual(acceptance, ['1. 修订号、intent、acceptance 按原文出现在 HTML', '2. 缺失的 nonGoals 显示未记录而不是空列表']);
+
+  // 其余列表仍是原文、不加编号：验收编号是验收卡的事，溢出到 constraints 上
+  // 就是给契约凭空添了一个不存在的「约束第 1 条」。
+  const constraints = all('[data-field="constraints"] .td-contract-item').map((el) => el.textContent || '');
+  assert.equal(constraints.length > 0, true, 'constraints 卡没有条目');
+  assert.equal(constraints[0].startsWith('1. '), false, 'constraints 被加了「1. 」编号：' + constraints[0]);
+  assert.equal(constraints[0], '不截断原文', 'constraints 条目不是原文：' + constraints[0]);
 
   // 缺失的 nonGoals：正文是「未记录」，而不是一个空列表。
   const nonGoals = card('nonGoals');

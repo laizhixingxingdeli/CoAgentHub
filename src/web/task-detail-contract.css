@@ -135,6 +135,18 @@
   color: var(--color-muted);
 }
 
+/* 验收项的编号写在正文里（「1. 原文」），所以要把上面那条圆点和它让出来的
+ * 14px 缩进一起去掉：留着就是一个「• 1. 原文」，编号被又一条符号挡在前面，
+ * 也不跟同列 intent 正文的左缘对齐。只去掉 acceptance 这一格的，其余四格仍
+ * 靠圆点认条目——它们本来就没有编号，一并去掉就成了四段无区分的长文。 */
+.td-contract [data-field="acceptance"] .td-contract-item {
+  padding-left: 0;
+}
+
+.td-contract [data-field="acceptance"] .td-contract-item::before {
+  content: none;
+}
+
 /* 空数组（记了、且是空）只留一个空 ul：不补占位文字，否则与「未记录」混成一句
  * 话的分身。这里给一点点高度，让「这格是空的，但有这一格」看得出来。 */
 .td-contract .td-contract-list:empty {
