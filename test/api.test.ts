@@ -2479,8 +2479,10 @@ describe('L3 写路由与落盘后应答', () => {
 
       const inbox = await request(base, '/api/inbox');
       assert.equal(inbox.status, 200);
-      const pending = inbox.json.pending as Array<{ id: string }>;
+      const pending = inbox.json.pending as Array<{ id: string; idempotencyKey?: string; stillOpen?: boolean }>;
       assert.ok(pending.length >= 1);
+      // 这条流程只升级过一次且已答复：投递仍在 pending 里，但已不再等 L3。
+      assert.equal(pending.find((row) => row.idempotencyKey === 'escalated:0')?.stillOpen, false);
       const acked = await request(base, `/api/deliveries/${pending[0].id}/ack`, {});
       assert.equal(acked.status, 200);
       const ackMissing = await request(base, '/api/deliveries/no-such/ack', {});

@@ -981,7 +981,7 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 
 ### GET /api/inbox
 
-鉴权：控制面（可选resolver）。参数：查询recipient可选。只读持久Delivery；不读取就提前ACK。
+鉴权：控制面（可选resolver）。参数：查询recipient可选。只读持久Delivery；不读取就提前ACK。响应里每条pending多一个布尔`stillOpen`，由平台按Mission当前状态现算，不写入Delivery、不ACK、不过滤、不读活动日志：键`escalated:<i>`在`escalations[i]`存在且尚无`answeredAt`时为true、已答复为false；键以`result:`开头（含`result:legacy:*`）时，仅当Mission为`awaiting_review`且该条是该Mission最新result投递（createdAt降序，同刻id数字部分降序）为true，否则false；其他键、或Mission找不到（含已归档）时为true。
 
 请求示例及本机curl：
 
@@ -993,7 +993,14 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 
 ```json
 {
-  "pending": []
+  "pending": [
+    {
+      "id": "D-1",
+      "idempotencyKey": "escalated:0",
+      "status": "pending",
+      "stillOpen": false
+    }
+  ]
 }
 ```
 

@@ -2742,7 +2742,9 @@ export function createApi(deps: ApiDeps): Server {
     if (method === 'GET' && path === '/api/inbox') {
       await requireControl(req, POLICY_ACTION.inboxRead);
       const recipient = url.searchParams.get('recipient') ?? undefined;
-      return send(res, 200, { pending: await deliveries.pending(recipient) });
+      return send(res, 200, {
+        pending: await platform.annotateInboxStillOpen(await deliveries.pending(recipient)),
+      });
     }
 
     const ackMatch = /^\/api\/deliveries\/([^/]+)\/ack$/.exec(path);
