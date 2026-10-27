@@ -254,14 +254,17 @@ async function runTimedAdapter(
 
 describe('SpawnRuntime 命令执行中的静默宽限', () => {
   test('命令在跑时不按静默掐：超过 timeoutMs 仍无输出也能活着交卷', async () => {
-    // 200ms 静默超时连烧三轮，命令 600ms 才完成——宽限 1000ms 内，不许杀。
-    const outcome = await runTimedAdapter(timedCommandAdapter(600, true), 200, 1000);
+    // 静默 1000ms、命令 2500ms、宽限 8000ms：tool.started 之后仍会空等超过 timeoutMs
+    //（约 1000ms 与 2000ms 两次 checkIdle）且宽限未尽，必须 structured_submit。
+    // 1000ms 静默超时用来盖住全量并发下子进程启动，不靠重试或放宽断言。
+    const outcome = await runTimedAdapter(timedCommandAdapter(2500, true), 1000, 8000);
     assert.equal(outcome.endedBy, 'structured_submit');
   });
 
   test('命令挂死超过宽限上限仍判 killed_idle，失败消息带命令在执行的线索', async () => {
-    // 命令 3 秒不返回：宽限 1000ms 用尽后必须杀，且消息要说清还有命令在跑。
-    const outcome = await runTimedAdapter(timedCommandAdapter(3000, false), 200, 1000);
+    // 命令 20000ms 不返回：宽限 2000ms 在第二次静默检查（约 2000ms）用尽后必须杀，
+    // 且消息要说清还有命令在跑。静默超时同为 1000ms，避免命令还没开始就被掐。
+    const outcome = await runTimedAdapter(timedCommandAdapter(20000, false), 1000, 2000);
     assert.equal(outcome.endedBy, 'killed_idle');
     assert.match(outcome.failureMessage ?? '', /命令在执行/);
   });
