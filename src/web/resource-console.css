@@ -143,6 +143,14 @@
   line-height: 20px;
 }
 
+/* 表头与首行（或空态）之间的 16px 段间距，是画板上表头底到首行顶的距离。
+ * 不写这一段，两者会贴死，人一眼看不出哪一行是表头下的第一条数据。
+ * 间距加在表体上而不是给表整体上移：外壳起点本来就偏低，用负 margin 去抵
+ * 会把表头和外壳一起拖上来，页面上半截跟着错位。 */
+.resource-console .resource-body {
+  margin-top: 16px;
+}
+
 .resource-console .resource-row {
   height: 64px;
   background: var(--color-white);
