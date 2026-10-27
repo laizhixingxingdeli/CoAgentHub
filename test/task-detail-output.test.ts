@@ -51,6 +51,81 @@ test('当前实时输出与历史选择各认各的 Attempt，历史缺失正文
   assert.equal(LEASE_TOLERANCE_MS, 90000);
 });
 
+test('归属链齐全时文件页签列这一跳的真实路径，旧 Attempt / 旧修订 / 归属不全仍为未知', () => {
+  // 现场（W-906.exec-1 / r2 / VR-639）：提交、修订、机器报告与 lastReview 四环都指向
+  // 这一跳，文件清单就该是它自己报的那两条。内嵌夹具，不读仓库外的 JSON。
+  const fileEvidence = {
+    workItemId: 'W-906',
+    attemptIds: ['W-906.exec-0', 'W-906.exec-1'],
+    orderRevision: 'r2',
+    changedFiles: ['src/web/app.js', 'test/web-task.test.ts'],
+    reviewSubmittedAttemptId: 'W-906.exec-1',
+    reportId: 'VR-639',
+    events: [
+      {
+        kind: 'execution_result.submitted',
+        workItemId: 'W-906',
+        attemptId: 'W-906.exec-1',
+        // 事件里的 changedFiles 是**数量**：把它当路径就是一串编造的文件名。
+        data: { orderRevision: 'r2', changedFiles: 2 },
+      },
+      {
+        kind: 'validation.reported',
+        workItemId: 'W-906',
+        attemptId: 'W-906.exec-1',
+        data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+      },
+    ],
+  };
+  const bind = (selectedAttemptId: string, evidence: Record<string, unknown> | null) => projectOutputBinding({
+    currentAttemptId: 'W-906.exec-1',
+    selectedAttemptId,
+    nowIso: '2026-10-26T10:00:00.000Z',
+    currentAttempt: { attemptId: 'W-906.exec-1', status: 'succeeded' },
+    selectedAttempt: { attemptId: selectedAttemptId, status: 'succeeded' },
+    liveChunks: [],
+    selectedWorkItem: {
+      id: 'W-906',
+      status: 'accepted',
+      attemptIds: ['W-906.exec-0', 'W-906.exec-1'],
+      order: { allowedScope: ['src/web/task-detail-page.js'] },
+    },
+    fileEvidence: evidence,
+    // 任务级事实：一律不许出现在文件面板里。
+    missionDiff: ['src/other.js'],
+    executionResult: { changedFiles: ['src/stolen.js'] },
+  }).historyFiles;
+
+  const known = bind('W-906.exec-1', fileEvidence);
+  assert.deepEqual(known.files, ['src/web/app.js', 'test/web-task.test.ts']);
+  assert.equal(known.note, '');
+  assert.equal(known.attemptId, 'W-906.exec-1');
+  // 不编行数、不编正文：清单只有路径这一种字段。
+  assert.equal('lineDelta' in known, false);
+  assert.deepEqual(known.files, [...known.files]);
+  assert.equal(known.files.includes('src/other.js'), false);
+  assert.equal(known.files.includes('src/stolen.js'), false);
+
+  // 点的是上一跳：提交、报告、lastReview 都指向 exec-1，清单留给谁都不对。
+  const otherAttempt = bind('W-906.exec-0', fileEvidence);
+  assert.equal(otherAttempt.files, null);
+  assert.ok(otherAttempt.note.includes('该尝试没有单独的文件清单'));
+
+  // 工单改过版：r2 的清单贴在 r3 这一跳下面就是别的版本的路径。
+  const otherRevision = bind('W-906.exec-1', { ...fileEvidence, orderRevision: 'r3' });
+  assert.equal(otherRevision.files, null);
+  assert.ok(otherRevision.note.includes('该尝试没有单独的文件清单'));
+
+  // 归属证据缺失（页面找不到唯一那张工单时就是 null）：未知，不退回任务级事实。
+  const missing = bind('W-906.exec-1', null);
+  assert.equal(missing.files, null);
+  assert.ok(missing.note.includes('该尝试没有单独的文件清单'));
+
+  // 只在 lastReview 一环缺失：整条链断在这里，同样是未知。
+  const noReview = bind('W-906.exec-1', { ...fileEvidence, reviewSubmittedAttemptId: '' });
+  assert.equal(noReview.files, null);
+});
+
 test('概要展示选中那一跳自己的身份、允许范围、费用质量与交回结果，缺失为未知且不借任务级事实', () => {
   const facts = projectOutputBinding({
     currentAttemptId: 'W-1.exec-13',

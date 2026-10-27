@@ -15,9 +15,13 @@
  *     「看起来有内容、其实不是这一跳」的来源，且界面上看不出来。
  *   - 任务累计用量（missionUsage）**不参与**：它是一整条 Mission 的总数，拿它冒充
  *     单跳用量，人就会据此判断「这一跳花了多少」，而这个数字根本没被量过。
- *   - 文件清单：这个接口没有按 Attempt 的清单，所以恒为 null。调用方就算在 input
- *     里塞了 missionDiff / executionResult，也**故意忽略**——那是任务级的事实，
- *     挂到某一跳下面就是把两笔账合成一笔。
+ *   - 文件清单：不恒为 null，但**只在整条归属链齐了**时才用这一跳自己的清单
+ *     （工单 attemptIds 含它、最新一条 execution_result.submitted 的 orderRevision
+ *     与本跳都对得上、validation.reported 的 submittedAttemptId 就是它、lastReview
+ *     也指向它）。旧 Attempt、旧修订、重派残留一律还是「未知」：这些情况下清单
+ *     看起来同样具体，只是那是上一跳或上一版工单的文件，屏幕上没有任何东西能揭穿。
+ *     调用方就算在 input 里塞了 missionDiff / executionResult，本层也**故意忽略**——
+ *     那是任务级的事实，挂到某一跳下面就是把两笔账合成一笔。
  *
  * 心跳看的是**当前**这一跳（currentAttempt），不是选中的历史那一跳：选中历史时右侧
  * 显示的是已保存的结尾，用它的心跳去说「还在跑」或「疑似停滞」都答非所问。
@@ -316,11 +320,86 @@ export function projectSelectedFacts(input) {
   };
 }
 
+/* 数组末尾那条；空数组给 null（调用方一律按「缺一环」处理）。 */
+function lastOf(list) {
+  return list.length === 0 ? null : list[list.length - 1];
+}
+
+/**
+ * 历史文件清单。
+ *
+ * **只有整条归属链齐了才用这一跳自己的清单**，缺一环就明说未知：工单 id 与
+ * attemptIds 说明这一跳真属于这张工单、最新一条 `execution_result.submitted` 的
+ * orderRevision 与本跳对得上（旧修订的清单属于改版前那份工单）、机器报告的
+ * submittedAttemptId 与 lastReview 都指向这一跳。工单改过版、重派过之后的残留清单
+ * 看起来和新的一模一样，只是里面的路径是别的版本的；界面上没有任何东西能揭穿它，
+ * 所以宁可空着。
+ *
+ * `events` 里的 `data.changedFiles` 是**数量**，不是路径：当清单用就是编造文件名。
+ * 路径只取 fileEvidence.changedFiles。
+ */
+function projectHistoryFiles(selectedAttemptId, fileEvidence, selectedAttempt) {
+  const unknown = () => ({
+    attemptId: selectedAttemptId === '' ? null : selectedAttemptId,
+    files: null,
+    note: HISTORY_FILES_UNKNOWN,
+  });
+
+  if (selectedAttemptId === '') return unknown();
+  // 选中详情带 attemptId 且与之不符：屏幕上这两块说的是两次执行，清单留给谁都不对。
+  const selected = object(selectedAttempt);
+  if (selected !== null && text(selected.attemptId) !== '' && text(selected.attemptId) !== selectedAttemptId) {
+    return unknown();
+  }
+
+  const evidence = object(fileEvidence);
+  if (evidence === null) return unknown();
+
+  const workItemId = text(evidence.workItemId);
+  const attemptIds = Array.isArray(evidence.attemptIds) ? evidence.attemptIds.map(text) : [];
+  if (workItemId === '' || !attemptIds.includes(selectedAttemptId)) return unknown();
+
+  const events = Array.isArray(evidence.events) ? evidence.events : [];
+  // 同一种事件取**最后**一条：重跑、改版重提之后，正序第一条是上一轮的提交。
+  const kindEvents = (kind) => events.filter((event) => {
+    const e = object(event);
+    return e !== null && text(e.kind) === kind && text(e.workItemId) === workItemId;
+  });
+
+  const submitted = lastOf(kindEvents('execution_result.submitted'));
+  if (submitted === null) return unknown();
+  const submittedData = object(submitted.data) ?? {};
+  const orderRevision = text(evidence.orderRevision);
+  if (orderRevision === '' || text(submittedData.orderRevision) !== orderRevision) return unknown();
+  if (text(submitted.attemptId) !== selectedAttemptId) return unknown();
+
+  const reportId = text(evidence.reportId);
+  if (reportId === '') return unknown();
+  const reported = lastOf(kindEvents('validation.reported').filter((event) => {
+    const data = object(object(event).data);
+    return data !== null && text(data.reportId) === reportId;
+  }));
+  if (reported === null) return unknown();
+  if (text((object(reported.data) ?? {}).submittedAttemptId) !== selectedAttemptId) return unknown();
+
+  if (text(evidence.reviewSubmittedAttemptId) !== selectedAttemptId) return unknown();
+
+  // 只复制路径字符串：空串或非字符串扔掉，全扔光就相当于这一跳没报过清单。
+  const files = (Array.isArray(evidence.changedFiles) ? evidence.changedFiles : [])
+    .filter((file) => typeof file === 'string')
+    .map(text)
+    .filter((file) => file !== '');
+  if (files.length === 0) return unknown();
+
+  return { attemptId: selectedAttemptId, files, note: '' };
+}
+
 /**
  * 一条详情页数据 → 实时 / 历史 / 心跳三块互不串账的事实。
  *
  * input = { currentAttemptId, selectedAttemptId, nowIso, currentAttempt,
- *           selectedAttempt, liveChunks, selectedWorkItem, selectedActivity }
+ *           selectedAttempt, liveChunks, selectedWorkItem, selectedActivity,
+ *           fileEvidence }
  * 纯函数：不改入参、不读时钟、不发请求、不拼 HTML。
  */
 export function projectOutputBinding(input) {
@@ -353,13 +432,9 @@ export function projectOutputBinding(input) {
     liveLines,
     historyOutput,
     historyUsage,
-    // 本接口拿不到按 Attempt 的文件清单。恒为 null：拿 missionDiff / executionResult
-    // 顶替，就是把任务级的改动记到某一跳名下。
-    historyFiles: {
-      attemptId: historyOutput.matched ? selectedAttemptId : null,
-      files: null,
-      note: HISTORY_FILES_UNKNOWN,
-    },
+    // 归属链齐了才用这一跳自己的清单；缺一环就明说未知，绝不拿 missionDiff /
+    // executionResult / 上一跳顶上——那是把别人的改动记到这一跳名下。
+    historyFiles: projectHistoryFiles(selectedAttemptId, it.fileEvidence, it.selectedAttempt),
     // 心跳看当前这一跳，不看选中的历史那一跳。
     heartbeat: projectHeartbeat(it.currentAttempt, it.nowIso),
     // 概况写在选中那一跳名下。整份 input 原样传进去：形状由 projectSelectedFacts

@@ -184,9 +184,10 @@ function summaryBody(historyOutput, facts) {
 /**
  * 文件清单（文件页签）。
  *
- * 投影里 `files` 恒为 null（这个接口没有按 Attempt 的清单），此时显示它的 note。
- * **故意不读 input.missionDiff / input.executionResult**：那是任务级事实，列在某
- * 一跳下面就是「这一跳动了这些文件」，而这笔账谁也说不清。
+ * 投影里 `files` 是数组就逐条列路径，是 null 就显示它的 note（归属链没齐，
+ * 例如旧 Attempt、旧修订或重派残留——那种情况下清单看起来同样具体，只是里面的
+ * 路径是别人的）。**故意不读 input.missionDiff / input.executionResult**：那是任务级
+ * 事实，列在某一跳下面就是「这一跳动了这些文件」，而这笔账谁也说不清。
  */
 function filesBody(historyFiles) {
   const files = historyFiles && Array.isArray(historyFiles.files) ? historyFiles.files : null;

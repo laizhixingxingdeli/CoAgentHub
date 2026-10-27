@@ -174,6 +174,9 @@ export function taskDetailHtml(model) {
   //     与 attemptIds 都在这张工单上。整个 view.workItems 传下去，渲染层就会有一份
   //     完整清单可挑，写着写着就变成「只要是张工单的就列出来」。
   //   - selectedActivity：只传 attemptId 等于选中那一跳的事件（候选变更只在那里）。
+  //   - fileEvidence：只摘这一跳的归属链（见下方 fileEvidenceOf），**不整份**传
+  //     executionResult 或 missionDiff——一个是任务级清单、一个是任务级改动，传下去
+  //     迟早会被当成某一跳的，而那笔账谁也说不清。
   //   - **不传** missionDiff / executionResult / missionUsage：它们是任务级事实，
   //     一旦传下去就会被当成某一跳的，而那笔账谁也说不清。
   //
@@ -210,6 +213,7 @@ export function taskDetailHtml(model) {
     liveChunks: Array.isArray(m.liveChunks) ? m.liveChunks : [],
     selectedWorkItem,
     selectedActivity,
+    fileEvidence: fileEvidenceOf(rawWorkItems, activity, selectedAttemptId),
   }, { side: outputSide });
 
   const header = taskHeaderHtml(view, {
@@ -257,6 +261,69 @@ export function taskDetailHtml(model) {
     + deliveryPanel
     + contractPanel
     + '</div>';
+}
+
+/**
+ * 选中那一跳的文件归属链，只摘判断要用的几格。
+ *
+ * 按 attemptIds **找包含它的那一张工单**，找不到或找到不止一张就 null：两张都含它时
+ * 说不好这三格属于哪张，挑一张看着对的，屏幕上就成了一份看着精准、其实属于另一版
+ * 工单的清单。
+ *
+ * 事件只留 `execution_result.submitted` 与 `validation.reported`，且**不按 attemptId
+ * 过滤**：后者记的是「报告评的是哪一跳」（data.submittedAttemptId），事件自己的
+ * attemptId 是校验方那一跳，按它过滤会把要找的那条刚好滤掉。顺序也不排：
+ * 「最新一条」由投影按数组末项判，这里排一次就是两份不同的「最新」。
+ *
+ * 事件里的 `data.changedFiles` 是**数量**，投影不拿它当路径；这里也不摘它。
+ */
+function fileEvidenceOf(workItems, activity, selectedAttemptId) {
+  if (selectedAttemptId === '') return null;
+  const owners = workItems.filter((item) => object(item) !== null
+    && Array.isArray(item.attemptIds)
+    && item.attemptIds.map(text).includes(selectedAttemptId));
+  if (owners.length !== 1) return null;
+
+  const item = owners[0];
+  const workItemId = text(item.id);
+  if (workItemId === '') return null;
+
+  const order = object(item.order);
+  const executionResult = object(item.executionResult);
+  const review = object(item.lastReview);
+  const report = object(item.validationReport);
+
+  const events = [];
+  for (const event of activity) {
+    const e = object(event);
+    if (e === null || text(e.workItemId) !== workItemId) continue;
+    const kind = text(e.kind);
+    if (kind !== 'execution_result.submitted' && kind !== 'validation.reported') continue;
+    const data = object(e.data) ?? {};
+    // 只摘投影读的三格：整份 data 传下去，下一个人就会顺手在里面找路径。
+    events.push({
+      kind,
+      workItemId,
+      attemptId: text(e.attemptId),
+      data: {
+        orderRevision: data.orderRevision === undefined ? undefined : text(data.orderRevision),
+        reportId: data.reportId === undefined ? undefined : text(data.reportId),
+        submittedAttemptId: data.submittedAttemptId === undefined ? undefined : text(data.submittedAttemptId),
+      },
+    });
+  }
+
+  return {
+    workItemId,
+    attemptIds: item.attemptIds.map(text),
+    orderRevision: order === null ? '' : text(order.orderRevision),
+    changedFiles: executionResult !== null && Array.isArray(executionResult.changedFiles)
+      ? executionResult.changedFiles.filter((file) => typeof file === 'string')
+      : null,
+    reviewSubmittedAttemptId: review === null ? '' : text(review.submittedAttemptId),
+    reportId: report === null ? '' : text(report.reportId),
+    events,
+  };
 }
 
 /** hidden 用属性 + 属性反射一起写：只改其中一个，某些实现下面板会既不可见也不占位。 */

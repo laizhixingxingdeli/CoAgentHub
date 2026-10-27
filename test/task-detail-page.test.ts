@@ -123,6 +123,75 @@ function twoAttempts(): Array<Record<string, unknown>> {
   ];
 }
 
+/** 一条带完整归属链的工单：提交、机器报告、lastReview 都指向 exec-1。 */
+function attributedView(): Record<string, unknown> {
+  return {
+    missionId: 'CUI3-task-detail-20261026',
+    projectId: 'coagenthub-v5',
+    coordinationMode: 'direct',
+    executionMode: 'standard',
+    status: 'executing',
+    contract: { intent: '原始意图' },
+    usage: { cost: 0, quality: 'unknown' },
+    workItems: [
+      {
+        id: 'W-906',
+        title: '历史文件页签归属',
+        status: 'submitted',
+        attemptIds: ['W-906.exec-0', 'W-906.exec-1'],
+        order: { orderRevision: 'r2' },
+        executionResult: {
+          outcome: 'completed',
+          summary: '改完了',
+          changedFiles: ['src/web/app.js', 'test/web-task.test.ts'],
+          evidenceIds: [],
+          notes: '无',
+        },
+        lastReview: { verdict: 'accept', submittedAttemptId: 'W-906.exec-1' },
+        validationReport: { reportId: 'VR-639', passed: true, commands: [] },
+      },
+    ],
+    // 任务级改动：**不许**被当成这一跳的清单。
+    missionDiff: ['src/other.js'],
+  };
+}
+
+/** 与上面同一张工单的两条归属事件。 */
+function attributedActivity(): Array<Record<string, unknown>> {
+  return [
+    { kind: 'attempt.started', attemptId: 'W-906.exec-0', workItemId: 'W-906', at: '2026-10-26T08:00:00.000Z' },
+    { kind: 'attempt.ended', attemptId: 'W-906.exec-0', workItemId: 'W-906', at: '2026-10-26T08:10:00.000Z' },
+    { kind: 'attempt.started', attemptId: 'W-906.exec-1', workItemId: 'W-906', at: '2026-10-26T09:00:00.000Z' },
+    { kind: 'attempt.ended', attemptId: 'W-906.exec-1', workItemId: 'W-906', at: '2026-10-26T09:30:00.000Z' },
+    {
+      kind: 'execution_result.submitted',
+      attemptId: 'W-906.exec-1',
+      workItemId: 'W-906',
+      at: '2026-10-26T09:30:00.000Z',
+      // 数量，不是路径：把它当清单列出来就是一屏编造的文件名。
+      data: { orderRevision: 'r2', changedFiles: 2 },
+    },
+    {
+      kind: 'validation.reported',
+      // 事件自己的 attemptId 是校验方那一跳，评的是 data.submittedAttemptId。
+      attemptId: 'validator-1',
+      workItemId: 'W-906',
+      at: '2026-10-26T09:31:00.000Z',
+      data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+    },
+  ];
+}
+
+/** 点「文件」页签，返回面板文字。 */
+function filesText(root: HTMLElement): string {
+  const button = [...root.querySelectorAll('.td-output [data-side]')]
+    .find((el) => el.getAttribute('data-side') === 'files') as HTMLElement | undefined;
+  click(button ?? null);
+  const panel = root.querySelector('.td-output [data-panel="files"]') as HTMLElement | null;
+  assert.equal(shown(panel), true);
+  return panel?.textContent || '';
+}
+
 /* ============================ 用例 ============================ */
 
 test('三页签切换显隐对应面板，展开 intent 不改 mission id，direct 页头不出现编造的模型名', () => {
@@ -280,4 +349,32 @@ test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-cu
   assert.ok(/width:\s*456px;/.test(rule(OUTPUT_CSS, '.td-output .td-history')), '右卡宽度变了');
   assert.ok(/width:\s*656px;/.test(rule(OUTPUT_CSS, '.td-output .td-live-text')), '终端宽度变了');
   assert.ok(/height:\s*444px;/.test(rule(OUTPUT_CSS, '.td-output .td-live-text')), '终端高度变了');
+});
+
+test('归属链齐全时文件页签列出这一跳的真实路径；换成上一跳则仍是未知且不列出别人的路径', () => {
+  // W-906.exec-1：提交、修订 r2、VR-639、lastReview 四环都指向它，所以文件页签列它自己
+  // 报的两条路径；exec-0 上一跳则必须回到「该尝试没有单独的文件清单」。
+  const render = (selectedAttemptId: string) => mount({
+    view: attributedView(),
+    activity: attributedActivity(),
+    nowIso: '2026-10-26T10:00:00.000Z',
+    selectedAttemptId,
+    selectedAttempt: { attemptId: selectedAttemptId, status: 'succeeded' },
+    liveChunks: [],
+  });
+
+  const known = render('W-906.exec-1');
+  const knownText = filesText(known.root);
+  assert.equal(knownText.includes('src/web/app.js'), true, '文件页签没列出这一跳的路径：' + knownText);
+  assert.equal(knownText.includes('test/web-task.test.ts'), true, '文件页签少了第二条路径：' + knownText);
+  assert.equal(knownText.includes('该尝试没有单独的文件清单'), false, '归属齐全却还说没有清单：' + knownText);
+  // 任务级改动与事件里的数量都不能当路径列出来。
+  assert.equal(knownText.includes('src/other.js'), false, '任务级改动漏进了文件页签：' + knownText);
+  assert.equal((known.root.textContent || '').includes('src/other.js'), false, 'missionDiff 漏进了页面');
+
+  const unknown = render('W-906.exec-0');
+  const unknownText = filesText(unknown.root);
+  assert.equal(unknownText.includes('该尝试没有单独的文件清单'), true,
+    '上一跳没有归属却给出了清单：' + unknownText);
+  assert.equal(unknownText.includes('src/web/app.js'), false, '上一跳列了别的 Attempt 的路径：' + unknownText);
 });
