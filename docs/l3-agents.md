@@ -56,6 +56,8 @@ MCP 服务器读这些环境变量（在 MCP 配置的 `env` 里设）：
 
 4. **工具**：[agents/claude-code/tools/](../agents/claude-code/tools/) 提供命令行驱动与终审辅助（`mcp.mjs` 全工具调用＋`--out` 落盘、`review-brief.mjs` 终审简报、`vr-summary.mjs`、`models-of.mjs`、`hop-reads.mjs`），任何有 node 的会话可用，不限 Claude。
 
+   `mcp.mjs` 起 MCP 服务时，调用方没设置 `COAGENTHUB_L3_BRIDGE` 就传 `"0"`，**默认关掉投递桥看护**。原因：Claude 宿主不用 Codex 投递桥；从 Claude 会话 shell 拉起的守护进程会随会话结束，而 `mcp.mjs` 每调一次工具都会起一个 MCP 服务，看护若开着就会被反复拉起。显式设置的值（包括 `"1"`）原样保留。
+
 5. **大返回体**：单个 Mission 的详情可能有几十到上百 KB，活动日志更大，且没有裁剪参数。Claude Code 对单次 MCP 返回有 token 上限（环境变量 `MAX_MCP_OUTPUT_TOKENS` 可调）。真遇到截断，就改用 HTTP 只取需要的字段：
 
    ```bash
