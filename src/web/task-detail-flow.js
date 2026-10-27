@@ -117,14 +117,37 @@ function projectRound(item) {
  *
  * 两条判据缺一不可：只看 workItemId 会漏掉执行者事件（它挂的是 attemptId），
  * 只看 attemptId 会把协调者那条 `work_item.dispatched`（没有 attemptId）漏掉。
- * 别的工单的事件、以及没有 workItemId 的协调者事件一律不进这一项——混进来的
- * 那一刻，界面就在说「这张工单干了这些」，而它其实没干。
+ * 别的工单的事件不进这一项——混进来的那一刻，界面就在说「这张工单干了这些」，
+ * 而它其实没干。
+ *
+ * 没有 workItemId 的事件里，只有 `attempt.started` 能靠「这一跳已经由别的事件挂上
+ * 本工单」补进来（见 linkedAttemptIds）：协调者的 started 常常不带 workItemId，
+ * 硬滤掉会让这一跳的身份退化成「协调者 · 未知 · 未知 · 未知」，明明它发牌时选过
+ * 候选。其它没有 workItemId 的事件仍然不进——它们没有任何凭据说明属于这一项。
  */
 function belongsToItem(event, itemId, attemptIds) {
   const workItemId = text(event && event.workItemId);
   if (workItemId !== '' && workItemId === itemId) return true;
   const attemptId = text(event && event.attemptId);
   return attemptId !== '' && attemptIds.has(attemptId);
+}
+
+/**
+ * 已经凭本工单的事件挂上来的 attemptId。
+ *
+ * 用途只有一个：把那些**没有 workItemId 的 `attempt.started`** 补回它自己那一组。
+ * 这些 started 一旦被滤掉，本组就没有 profile，身份行变成三连「未知」——而这一跳
+ * 发牌时到底选了什么候选，事实是记着了的。关联只能靠 attemptId：按工单先过滤、
+ * 再从当前候选池推，两者都会把历史换成今天的样子。
+ */
+function linkedAttemptIds(events, itemId, attemptIds) {
+  const linked = new Set();
+  for (const event of events) {
+    if (!belongsToItem(event, itemId, attemptIds)) continue;
+    const attemptId = text(event && event.attemptId);
+    if (attemptId !== '') linked.add(attemptId);
+  }
+  return linked;
 }
 
 /**
@@ -383,9 +406,20 @@ export function projectWorkflow(view, activity, options) {
   // workItemId、也不在 attemptIds 的那一侧，先过滤就等于看不见它已经结束。
   const endedIds = endedAttempts(events);
 
+  // 先扫一遍定下「哪些 attemptId 已经凭本工单的事件挂上了」，再按 activity 原顺序过滤：
+  // 这样补回来的 started 落在它真实发生的位置上，而不是被追加到列表末尾——追加会让
+  // 一个 13:31 开始的环节排到 13:40 的事件后面，顺序错得看不出来。
+  const linkedIds = selectedId === null
+    ? new Set()
+    : linkedAttemptIds(events, selectedId, attemptIds);
+
   const stages = selectedId === null
     ? []
-    : groupEvents(events.filter((event) => belongsToItem(event, selectedId, attemptIds)))
+    : groupEvents(events.filter((event) => belongsToItem(event, selectedId, attemptIds)
+      // 只补 attempt.started：同一 attemptId 的其它全局事件（别的工单上的 dispatched、
+      // 没写 workItemId 的 attempt.ended）不属于本项，拉进来等于把它干的事算给本工单。
+      // 结束事实继续由 endedAttempts 全量扫描回答，不靠把 ended 并进组。
+      || (text(event && event.kind) === 'attempt.started' && linkedIds.has(text(event.attemptId)))))
       .map((group) => projectStage(group, { workItems: items }, direct, endedIds));
 
   return {

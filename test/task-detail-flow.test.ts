@@ -166,3 +166,70 @@ test('已结束的协调者与无 attemptId 的记录都不是进行中，全结
   // 全部结束：没有当前项，不能回退到最后一条已记录的环节。
   assert.equal(flow.currentKey, null);
 });
+
+/**
+ * 实测反例（coord-8）：协调者那一跳的 `attempt.started` 没有 workItemId、也不在
+ * 工单的 attemptIds 里，只有它的 `review.recorded` 挂了 W-906。先按工单过滤就会把
+ * started 滤掉，于是这一跳的身份退化成「协调者 · 未知 · 未知 · 未知」——而它发牌时
+ * 选过哪条候选是记着的。
+ *
+ * 补回来只靠 attemptId：不从当前候选池推，也不把同一 attemptId 的其它全局事件拉进
+ * 本组；没有 attemptId 的 L3 记录仍然是 orphan，不许给它编 profile。
+ */
+test('没有 workItemId 的协调者 started 按已挂上的 attemptId 补回本项，且顺序不变', () => {
+  const v = {
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    workItems: [
+      { id: 'W-906', title: '选择环节事实概要', status: 'dispatched', attemptIds: ['W-906.exec-1'] },
+    ],
+  };
+  const events = [
+    {
+      kind: 'attempt.started',
+      attemptId: 'coord-8',
+      at: '2026-10-26T13:31:29.290Z',
+      data: {
+        kind: 'coordinator',
+        profile: {
+          profileId: 'coordinator-grok-4.7',
+          facts: [
+            { key: 'provider', value: 'xai' },
+            { key: 'model', value: 'grok-4.7' },
+            { key: 'reasoning', value: 'medium' },
+          ],
+        },
+      },
+    },
+    { kind: 'review.recorded', attemptId: 'coord-8', workItemId: 'W-906', at: '2026-10-26T13:33:47.061Z', data: { verdict: 'accept' } },
+    // 没有 attemptId 的 L3 记录：不是一次尝试，也不带任何 profile。
+    { kind: 'review.recorded', workItemId: 'W-906', at: '2026-10-26T13:40:00.000Z', data: { verdict: 'send_back' } },
+    // 另一跳协调者，从没挂到 W-906 上：补 started 不能把它一起带进来。
+    { kind: 'attempt.started', attemptId: 'other-coord', at: '2026-10-26T13:45:00.000Z', data: { kind: 'coordinator', profile: { profileId: 'should-not-appear' } } },
+  ];
+
+  const flow = projectWorkflow(v, events, { selectedWorkItemId: 'W-906' });
+
+  const coord = flow.stages.find((stage) => stage.attemptId === 'coord-8');
+  assert.ok(coord, '协调者那一跳没有补进环节');
+  assert.ok(coord.identity.includes('协调者'), coord.identity);
+  assert.ok(coord.identity.includes('coordinator-grok-4.7'), coord.identity);
+  assert.ok(coord.identity.includes('xai/grok-4.7'), coord.identity);
+  assert.ok(coord.identity.includes('medium'), coord.identity);
+
+  const orphan = flow.stages.find((stage) => stage.attemptId === '');
+  assert.ok(orphan, '没有 attemptId 的记录没有单独成行');
+  assert.equal(orphan.identity.includes('coordinator-grok-4.7'), false, orphan.identity);
+  assert.equal(orphan.identity.includes('should-not-appear'), false, orphan.identity);
+
+  // 没挂到本项的协调者不出现；补回来的 started 也不许落到执行者那一跳上。
+  assert.equal(flow.stages.some((stage) => stage.attemptId === 'other-coord'), false);
+  assert.equal(flow.stages.some((stage) => stage.attemptId === 'W-906.exec-1'), false);
+
+  // started 在 activity 里更早，所以 coord-8 必须排在 orphan 之前（不是被追加到末尾）。
+  assert.ok(
+    flow.stages.findIndex((stage) => stage.attemptId === 'coord-8')
+      < flow.stages.findIndex((stage) => stage.attemptId === ''),
+    'coord-8 环节跑到了 orphan 之后',
+  );
+});
