@@ -54,7 +54,8 @@ function mount(view: Record<string, unknown>, opts: Record<string, unknown> = {}
   const root = container.querySelector('.td-header') as HTMLElement;
   bindTaskHeader(root);
   const q = (selector: string) => root.querySelector(selector) as HTMLElement | null;
-  return { container, root, q };
+  // view 一并交回去：重绘（刷新）要拿同一份数据再渲染一次，才能断言开合没丢。
+  return { container, root, q, view };
 }
 
 const click = (el: Element | null): void => {
@@ -192,4 +193,127 @@ test('页头是有返回链接的整幅白带，纵向基线落在画板上，�
 
   // 页内不自加 padding：外壳已有 40px gutter，叠一层就偏离画板列位置。
   assert.ok(/padding:\s*0;/.test(rule(PAGE_CSS, '.td-page')), '.td-page 没有把 padding 归零');
+});
+
+test('状态槽位、下一步与只读费用框：unknown 与真实 0、缺 cap 与 cap 0、主控未计、开合与离页即关', async () => {
+  // 等检视：waitInfo.action 是「核对交卷」，但它是**下一步**，不是状态词的一部分。
+  // 拼进 .td-status-text 就会读成一个不存在的第七种状态（「等你检视 · 核对交卷」）。
+  const review = mount({
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    status: 'awaiting_review',
+    usage: { cost: 0, quality: 'unknown' },
+    contract: { intent: '修设备边界' },
+    waitInfo: { owner: 'l3', autoResume: false, activeAgent: false, action: '核对交卷' },
+    openEscalations: [],
+    workItems: [],
+    updatedAt: '2026-10-26T10:00:00.000Z',
+    // 没有 costCap = 上限未知，不是「上限是 10」。
+  });
+
+  const statusNode = review.q('.td-status-text');
+  assert.equal(statusNode?.getAttribute('data-status-key'), 'awaiting_review');
+  const dot = statusNode?.querySelector('img') as HTMLImageElement | null;
+  assert.ok(dot, '状态节点前面没有 16×16 的图标');
+  assert.equal(dot?.getAttribute('src')?.includes('console-icon-review.svg'), true);
+  assert.equal(dot?.getAttribute('alt'), '');
+  assert.equal(dot?.getAttribute('width'), '16');
+  assert.equal(dot?.getAttribute('height'), '16');
+  assert.equal((statusNode?.textContent || '').includes('核对交卷'), false, '下一步被拼进了状态词');
+
+  // 下一步是独立节点，且有前缀；它不是 .td-status-text 的子节点。
+  const next = review.q('.td-next');
+  assert.equal(next?.textContent, '下一步：核对交卷');
+  assert.equal(statusNode?.contains(next ?? null), false, '下一步挂在了状态节点里');
+
+  // 再 mount 一次执行中：图标按 statusKey 换，不看中文。
+  const running = mount(directView());
+  const runningStatus = running.q('.td-status-text');
+  assert.equal(runningStatus?.getAttribute('data-status-key'), 'executing');
+  assert.equal(
+    runningStatus?.querySelector('img')?.getAttribute('src')?.includes('console-icon-running.svg'),
+    true,
+  );
+  // executing 也不许编一句下一步：没有 waitInfo.action 就写未知。
+  assert.equal(running.q('.td-next')?.textContent, '下一步：未知');
+
+  // 费用是按钮，可见文字仍是事实带那一句（已有的 $2.11 / 上限断言打在这里）。
+  const costButton = review.q('.td-cost') as HTMLButtonElement | null;
+  assert.equal(costButton?.tagName, 'BUTTON');
+  assert.equal(costButton?.getAttribute('type'), 'button');
+  assert.equal(costButton?.getAttribute('data-action'), 'open-cost');
+
+  const box = () => review.q('.td-cost-detail') as HTMLElement | null;
+  assert.equal(box()?.hasAttribute('hidden'), true, '没点开时费用框应当是隐藏的');
+
+  // 点开：框可见、页头带 data-cost-open；unknown + 0 说「费用未知」，不是 $0.00。
+  click(costButton);
+  assert.equal(box()?.hasAttribute('hidden'), false);
+  assert.equal(review.root.getAttribute('data-cost-open'), 'true');
+  const unknownText = box()?.textContent || '';
+  assert.ok(unknownText.includes('任务费用明细（标价折算）'));
+  assert.ok(unknownText.includes('费用未知'), 'unknown 质量没有说费用未知');
+  assert.equal(unknownText.includes('$0.00'), false, 'unknown 的 0 被印成了 $0.00');
+  assert.ok(unknownText.includes('预算上限未知'));
+  assert.equal(unknownText.includes('2.11'), false, '框里出现了写死的画板样例金额');
+  // 主控未计只属于 direct：这里是三层协作，不该出现。
+  assert.equal(unknownText.includes('主控未计'), false);
+
+  // 刷新重绘（同一个 missionId 再渲染一次）：框仍然开着。
+  const reopened = taskHeaderHtml(review.view, options);
+  assert.ok(reopened.includes('data-cost-open="true"'), '重绘后开合状态丢了');
+  assert.equal(/class="td-cost-detail"[^>]*hidden/.test(reopened), false, '重绘后框又被关上了');
+
+  // 已上报的真实 0 与 cap 0：$0.00 是结论，cap 0 也是真的 0，都不是「未知」。
+  const zero = mount({
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    status: 'completed',
+    usage: { cost: 0, quality: 'reported' },
+    costCap: 0,
+    contract: { intent: '修设备边界' },
+    workItems: [],
+    updatedAt: '2026-10-26T10:00:00.000Z',
+  });
+  click(zero.q('.td-cost'));
+  const zeroText = zero.q('.td-cost-detail')?.textContent || '';
+  assert.ok(zeroText.includes('费用（标价折算）$0.00'), 'reported 的真实 0 没有印成 $0.00');
+  assert.equal(zeroText.includes('≈'), false, 'reported 被降级成估算');
+  assert.equal(zeroText.includes('费用未知'), false);
+  assert.ok(zeroText.includes('预算上限 $0.00'), 'cap 0 被当成了上限未知');
+
+  // direct + estimated：带 ≈ 与「主控未计」，不能表述成完整总成本。
+  const direct = mount({
+    ...directView(),
+    usage: { cost: 1.25, quality: 'estimated' },
+    costCap: 10,
+  });
+  click(direct.q('.td-cost'));
+  const directText = direct.q('.td-cost-detail')?.textContent || '';
+  assert.ok(directText.includes('≈$1.25'), 'estimated 没有带 ≈');
+  assert.ok(directText.includes('主控未计'), 'direct 的费用框没标主控未计');
+  assert.ok(directText.includes('预算上限 $10.00'));
+
+  // 返回按钮关掉：框重新隐藏。
+  click(direct.q('[data-action="close-cost"]'));
+  assert.equal(direct.q('.td-cost-detail')?.hasAttribute('hidden'), true);
+  assert.equal(direct.root.getAttribute('data-cost-open'), null);
+
+  // 离页即关：hash 变成别的路由并 dispatch 之后，框不再开着。
+  click(direct.q('.td-cost'));
+  assert.equal(direct.q('.td-cost-detail')?.hasAttribute('hidden'), false);
+  window.location.hash = '#/projects';
+  window.dispatchEvent(new window.Event('hashchange') as unknown as Event);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(direct.q('.td-cost-detail')?.hasAttribute('hidden'), true, '离开详情页后费用框还开着');
+  assert.equal(direct.root.getAttribute('data-cost-open'), null);
+
+  // 收尾：把开合关掉，别把「开着」留给同文件后面的用例。
+  window.location.hash = '#/missions/CUI3-task-detail-20261026';
+  const cleanup = mount(directView());
+  click(cleanup.q('.td-cost'));
+  click(cleanup.q('[data-action="close-cost"]'));
+  assert.equal(cleanup.q('.td-cost-detail')?.hasAttribute('hidden'), true);
 });

@@ -119,26 +119,81 @@
   cursor: pointer;
 }
 
-/* 分三区且不换行：状态 / 附标 / 处理人与恢复方式（画板 41:427 与 41:428 之间
- * 有明显列位）。允许换行时一长句处理人就被挤到下一行，状态与附标跟着散开，
- * 这一行读起来就是一段短文本而不是三个含义。处理人与恢复方式仍占两个节点，
- * 同处第三区：合成一句话就分不清「谁该动」和「会不会自己好」。
+/* 分三区且不换行：状态 / 附标 / 三块决策信息（处理人、恢复方式、下一步）。
+ * 列宽取源槽的横向位置：状态 x224 起、附标 x380 起（需 156px）、第三槽 x604 起（需 224px）。
+ * 允许换行时一长句处理人就被挤到下一行，状态与附标跟着散开，这一行读起来就是
+ * 一段短文本而不是三个含义。处理人、恢复方式与下一步仍各占一个节点：合成一句话
+ * 就分不清「谁该动」「会不会自己好」和「下一步干什么」。
+ * column-gap 归零：间距已经由固定列宽（156px / 224px）表达，再加 gap 会把第三槽
+ * 从 x604 推到右边，三行一起错位。
  * margin-top 8 = 画板状态行 y214 减 intent 底边 y206；min-height 28 是 41:427
  * 那一行的高度，不给的话这一行只有 22px，后面的 6px 间距会跟着往上缩。 */
 .td-header .td-status-row {
   display: grid;
-  grid-template-columns: max-content max-content max-content minmax(0, 1fr);
+  grid-template-columns: 156px 224px minmax(0, 1fr);
   align-items: center;
-  column-gap: 16px;
+  column-gap: 0;
   margin-top: 8px;
   min-height: 28px;
   font-size: 14px;
   line-height: 22px;
 }
 
+/* 图标与状态词同一格、间隔 8px（画板 39:258 的 gap-[8px]）。inline-flex 而不是
+ * block：这格只占自己 156px 的列宽，多出来的空白不该把附标往后推。 */
 .td-header .td-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 500;
   color: var(--color-ink);
+}
+
+/* 圆点不参与拉伸：flex 子项默认允许被压窄，一窄就把 16×16 画成椭圆。 */
+.td-header .td-status-dot {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+/* 状态语义色按 data-status-key，不按中文也不按 statusText：文案改一个字颜色就
+ * 默默退回墨色，屏幕上只是「有点不一样」，没人会当 bug 报。
+ * 颜色只从 tokens.css 的 --color-* 来，写死十六进制会和设计令牌分叉。 */
+.td-header .td-status-text[data-status-key='executing'] {
+  color: var(--color-running);
+}
+
+.td-header .td-status-text[data-status-key='awaiting_review'] {
+  color: var(--color-amber);
+}
+
+.td-header .td-status-text[data-status-key='completed'] {
+  color: var(--color-green);
+}
+
+.td-header .td-status-text[data-status-key='blocked'] {
+  color: var(--color-red);
+}
+
+.td-header .td-status-text[data-status-key='investigating'],
+.td-header .td-status-text[data-status-key='planning'] {
+  color: var(--color-muted);
+}
+
+/* 落在上表之外的状态（unknown 等）显式写 ink：不给值会让颜色回退到继承，
+ * 而继承链上任何一层改了色都会静默改变这一格。 */
+.td-header .td-status-text[data-status-key='unknown'] {
+  color: var(--color-ink);
+}
+
+/* 第三槽：处理人、恢复、下一步三行。用 flex 纵向排列而不是让三个 span 自然流：
+ * 自然流会把它们挤在同一行末尾，第三块又读回一句长文本。gap 1px 只为让三个
+ * 节点保持可见的分行，不靠 margin 拼高度——改文案长度会重新分配高度。 */
+.td-header .td-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
 /* 附标与状态词分两个节点：合成一句之后，「执行中 · 直接主控 · 补修」会被读成
@@ -161,17 +216,33 @@
   color: var(--color-muted);
 }
 
+/* 下一步是「该干什么」，比「谁在管」更急，所以字号回到 14 而不是跟着恢复方式缩成 13；
+ * 没有下一步时会显示「下一步：未知」，不能用灰色把它抹成不存在。 */
+.td-header .td-next {
+  font-size: 14px;
+  color: var(--color-ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ===== 40px 任务事实带 ===== */
 
 /* 单行四格：保障 / 协作 / 费用 / 时间。高度是画板值 40px，nav 底色与 16px 内缩进
  * 让它和上面的身份、下面的页签明显分层——它与流程步骤不是一组。
  * margin-top 6 = 画板事实带 y248 减状态行底边 y242。左右 padding 16 让事实文字
- * 从 x240 起，与画板一致；圆角取画板的 rounded-[6px]。 */
+ * 从 x240 起，与画板一致；圆角取画板的 rounded-[6px]。
+ *
+ * 用 grid 而不是 flex：源槽的列位是固定几何（保障 x240、协作 x414、费用 x624、
+ * 时间靠右），flex + gap 会随文案长短把后面几格整体拖走，逐张截图对不上画板。
+ * gap:0 —— 间距全部由前两列定宽（174px / 210px）表达，再叠 gap 就重复计了一遍。 */
 .td-header .td-facts {
   height: 40px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 174px 210px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
+  gap: 0;
   margin-top: 6px;
   padding: 0 16px;
   background: var(--color-nav);
@@ -182,10 +253,11 @@
   color: var(--color-ink);
 }
 
-/* 时间右对齐：它是这一行的锚点，混在中间会让人以为它和费用是一组。
- * margin-left:auto 而不是给前一格固定宽度，改文案时不用再调宽度。 */
+/* 时间靠右：它是这一行的锚点，混在中间会让人以为它和费用是一组。
+ * 用 grid 的 justify-self 而不是 margin-left:auto —— 后者在网格里会让时间格先被
+ * 自动分配吃掉一份空间，费用那一格跟着被往左挤。 */
 .td-header .td-time {
-  margin-left: auto;
+  justify-self: end;
   font-size: 13px;
   color: var(--color-muted);
   white-space: nowrap;
@@ -211,6 +283,9 @@
   padding: 0;
   border: 0;
   border-bottom: 2px solid transparent;
+  /* 清除 ui.css 全局 button 的圆角与底色：不清的话页面里会出现三个带白底的
+   * 圆角小卡片，与画板的纯文字页签不是一个东西，hover 时还会变灰。 */
+  border-radius: 0;
   background: none;
   font-family: inherit;
   font-size: 14px;
@@ -218,6 +293,14 @@
   line-height: 22px;
   color: var(--color-muted);
   cursor: pointer;
+}
+
+/* hover 也只改颜色：ui.css 的 button:hover 会改边框与底色，不覆盖的话鼠标一过
+ * 页签底下就多出一块浅灰底，看着像被选中的是这个。 */
+.td-header .td-tab:hover {
+  border-radius: 0;
+  background: none;
+  color: var(--color-ink);
 }
 
 /* 页签宽度按画板定值（41:434 = 110、41:436 = 150、41:438 = 100）、文字居中：
@@ -235,9 +318,42 @@
   width: 100px;
 }
 
-/* 选中态只靠下边框 + 墨色字：换成底色块会和事实带的 nav 底撞在一起，
- * 人分不清哪一块是「当前页签」。 */
-.td-header .td-tab[aria-selected='true'] {
+/* 选中态只靠下边框 + 主色字：换成底色块会和事实带的 nav 底撞在一起，
+ * 人分不清哪一块是「当前页签」。border-radius 与 background 在这里再写一次：
+ * ui.css 的 button 规则不在本文件作用域内、优先级也不同，一遇上 hover 的
+ * 组合规则就可能把底又画回来。 */
+.td-header .td-tab[aria-selected='true'],
+.td-header .td-tab[aria-selected='true']:hover {
+  border-radius: 0;
+  background: none;
   border-bottom-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ===== 费用格：看起来是文字，实际是打开明细的按钮 ===== */
+
+/* 覆掉 ui.css 全局 button 的边框 / 圆角 / 白底 / 固定 36px 高：不覆就是事实带中间
+ * 坐着一颗白底圆角按钮，与画板完全不同，而且 hover 变灰时更像一个控件。
+ * 尺寸回到 14/22：固定高度会让 40px 事实带里这一格上下留白不均。 */
+.td-header .td-cost {
+  display: inline;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
   color: var(--color-ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.td-header .td-cost:hover {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--color-accent);
 }
