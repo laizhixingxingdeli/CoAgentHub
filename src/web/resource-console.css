@@ -196,9 +196,8 @@
 }
 
 /* ===== 保存条 =====
- * 本单没有草稿，但条要在：它是下一张单（保存）落地的地方，而现在先显示
- * 「没有未保存修改」，同时把两个按钮禁掉——给人一个能按的保存按钮，
- * 而它什么都不做，比没有按钮更糟。
+ * 保存动作是下一张单，但条要在：它先显示草稿的脏/净状态，两个按钮都禁掉——
+ * 给人一个能按的保存按钮而它什么都不做，比没有按钮更糟。
  */
 
 .resource-console .resource-savebar {
@@ -272,7 +271,7 @@
   color: var(--color-muted);
 }
 
-/* ===== 健康抽屉（只读） ===== */
+/* ===== 健康抽屉（只读详情 + 草稿编辑） ===== */
 
 .resource-console .resource-drawer {
   display: flex;
@@ -326,4 +325,99 @@
   background: var(--color-nav);
   color: var(--color-muted);
   border-color: var(--color-nav);
+}
+
+/* ===== 草稿编辑（抽屉里的可改控件 + 添加候选表单） =====
+ * 控件尺寸写死而不是靠内容撑：这几个格子（profileId / endpoint / key / value）
+ * 高度一致才对得上行，而 endpoint 的下拉和 facts 的输入框一旦高度不同，
+ * 一行里并排的控件就会错位——看起来像缺陷，但功能完全正常，最难被当成 bug 报。
+ */
+
+.resource-console .resource-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.resource-console .resource-input {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* profileId 只读：做成文本框的样子但不可编辑，人一眼看出它是身份而不是参数。 */
+.resource-console .resource-readonly {
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px dashed var(--color-line);
+  border-radius: 5px;
+  background: var(--color-nav);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-all;
+}
+
+.resource-console .resource-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.resource-console .resource-fact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* min-width: 0：输入框的默认宽度按 size 属性算，不加这句两个框会把
+ * 「删除本行」按钮挤出抽屉（抽屉 516 宽），而挤出之后它就不在视野里了。 */
+.resource-console .resource-fact .resource-input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.resource-console .resource-button-small {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.resource-console .resource-drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resource-console .resource-addform {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-white);
+}
+
+.resource-console .resource-addform .resource-field {
+  flex: 0 0 240px;
+  min-width: 0;
+}
+
+.resource-console .resource-addform .resource-input {
+  width: 100%;
+}
+
+.resource-console .resource-addform-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }

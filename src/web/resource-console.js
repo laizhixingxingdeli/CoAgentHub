@@ -1,17 +1,25 @@
 /**
- * 资源页（#/pool）：四角色候选的**只读**投影 + 只读健康抽屉。
+ * 资源页（#/pool）：四角色候选的投影 + 健康抽屉 + 本角色草稿编辑。
  *
- * 这一页只读，是本单的边界：添加/编辑/排序/保存是下一张单。先把读的那一半做对，
- * 是因为这一页最容易出的错都不报错——缺失的尝试次数被显示成 0、没有失败记录被
+ * 这一页最容易出的错都不报错——缺失的尝试次数被显示成 0、没有失败记录被
  * 画成失败、没有复位命令却给一个能按的按钮。屏幕上看起来完全正常，人却据此
  * 判断「这条候选还能用」。所以这里的每个格式化函数都把「未知」和「真实零」
  * 分成两条路走，宁可多一个字符串也不让 Number(null) 那种伪零流进来。
  *
- * 纯函数（喂数据 → 回字符串）与 DOM 分开：浏览器不在测试里，纯函数能直接在
- * node 里喂假健康断言那几格，而这几格恰恰是改一次就悄悄错一次的地方。
+ * 草稿的边界（本单）：启停/排序/改 endpoint/加参数/加候选**只改本地草稿**，
+ * 一次下发是下一张单的事。所以这里一个 fetch/POST 都没有：一旦有人给某个
+ * 控件接上「即时保存」，一次手滑就会把整个角色的调度顺序写到线上，而屏幕上看
+ * 起来只是点了一下「下移」。saved 只在下发成功后才会变，本单不动它。
+ *
+ * 纯函数（喂数据 → 回字符串/新草稿）与 DOM 分开：浏览器不在测试里，纯函数能
+ * 直接在 node 里喂假健康、假草稿断言那几格，而这几格恰恰是改一次就悄悄错一次
+ * 的地方。
  */
 
 import { esc } from './projects.js';
+// 候选形状与排序只在 model-priority.js 里定义一次：这两页写的是同一份配置，
+// 各抄一份「复制候选」和「交换两行」之后，两边迟早对同一行做出不同的事。
+import { candidateConfig, moveCandidate } from './model-priority.js';
 
 /** 四角色及其中文标签。顺序就是页签顺序，别处的顺序都从这里取。 */
 export const RESOURCE_ROLES = [
@@ -206,6 +214,112 @@ export async function copyResetCommand(command, writeText) {
   }
 }
 
+/* ===== 草稿（纯函数） =====
+ * 全部返回**新**草稿，不原地改。原地改的后果不是报错，而是「放弃草稿」再也还原
+ * 不回去：saved 和 drafts 指向同一个数组，撤销时两个都已经是改完的样子。
+ */
+
+function asDrafts(drafts) {
+  return drafts && typeof drafts === 'object' ? drafts : {};
+}
+
+/** 缺失的 role 一律当空数组：空角色也要能加第一条草稿。 */
+function roleRows(drafts, role) {
+  const rows = asDrafts(drafts)[role];
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** 只替换这一个 role 的数组，其余 role 的引用原样带过去（它们没被改）。 */
+function withRole(drafts, role, rows) {
+  return { ...asDrafts(drafts), [role]: rows };
+}
+
+/**
+ * 抽屉里 endpoint 下拉的选项：只取这个角色配置里**真实出现**的 endpoint。
+ *
+ * 不内置任何候选端点目录。编一个 'local' 或一份「常见端点表」出去，接口一改
+ * 人就会以为那条端点存在、存下去才发现调度永远失败；而屏幕上它和其他选项长得一样。
+ */
+export function endpointOptions(configRows) {
+  const rows = Array.isArray(configRows) ? configRows : [];
+  const options = [];
+  for (const row of rows) {
+    const endpoint = row && typeof row === 'object' ? nonEmpty(row.endpoint) : '';
+    if (endpoint && !options.includes(endpoint)) options.push(endpoint);
+  }
+  return options;
+}
+
+/** 停用/启用。缺省即启用（服务端默认语义），所以 undefined 先落到 false。 */
+export function toggleDraftCandidate(drafts, role, index) {
+  const rows = roleRows(drafts, role);
+  const target = rows[index];
+  if (!target || typeof target !== 'object') return withRole(drafts, role, rows);
+  const enabled = target.enabled !== false ? false : true;
+  return withRole(drafts, role, rows.map(
+    (row, i) => (i === index ? { ...row, enabled } : row),
+  ));
+}
+
+/** 上移/下移复用 moveCandidate：越界时它原样返回，不抛错。 */
+export function moveDraftCandidate(drafts, role, index, direction) {
+  return withRole(drafts, role, moveCandidate(roleRows(drafts, role), index, direction));
+}
+
+/**
+ * 只接受 endpoint 与 facts 两个字段。
+ *
+ * **白的而不是黑名单**：profileId 是候选的身份（健康、熔断、审计全按它匹配），
+ * runtime 由平台固定为 pi。允许从界面写这两个字段，等于让一次粘贴把配置指到另
+ * 一处运行时上，而列表里那条候选看起来没变。order 也不接受：顺序只由数组位置表达。
+ */
+export function updateDraftCandidate(drafts, role, index, patch) {
+  const rows = roleRows(drafts, role);
+  const target = rows[index];
+  if (!target || typeof target !== 'object') return withRole(drafts, role, rows);
+  const source = patch && typeof patch === 'object' ? patch : {};
+  const next = { ...target };
+  if (typeof source.endpoint === 'string') next.endpoint = source.endpoint;
+  // facts 只存字符串键值、原样保留：把它「整理」成已知字段，适配层后来新加的键就丢了。
+  if (Array.isArray(source.facts)) {
+    next.facts = source.facts.map((fact) => {
+      const entry = fact && typeof fact === 'object' ? fact : {};
+      return {
+        key: typeof entry.key === 'string' ? entry.key : '',
+        value: typeof entry.value === 'string' ? entry.value : '',
+      };
+    });
+  }
+  return withRole(drafts, role, rows.map((row, i) => (i === index ? next : row)));
+}
+
+/**
+ * 追加一条草稿。**只进草稿，不发任何请求**。
+ *
+ * endpoint 是调用方给的自由文本：新候选本来就可能引入新端点，而下拉里只有
+ * 配置里已有的端点——只给下拉就永远加不了第一条（空角色一个选项都没有）。
+ */
+export function addDraftCandidate(drafts, role, input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const candidate = {
+    profileId: typeof source.profileId === 'string' ? source.profileId : '',
+    endpoint: typeof source.endpoint === 'string' ? source.endpoint : '',
+    enabled: true,
+    facts: [],
+  };
+  return withRole(drafts, role, [...roleRows(drafts, role), candidate]);
+}
+
+/** 本角色草稿是否偏离已保存配置。JSON 比较够用：候选是小对象数组，没有循环引用。 */
+export function draftDirty(saved, drafts, role) {
+  return JSON.stringify(roleRows(saved, role)) !== JSON.stringify(roleRows(drafts, role));
+}
+
+/** 任一角色脏。离页保护按全局判断：切到别的页签再离开，那边的改动也不能悄悄丢。 */
+export function anyDraftDirty(saved, drafts) {
+  return RESOURCE_ROLES.some(([role]) => draftDirty(saved, drafts, role));
+}
+
 const COLUMNS = ['顺序', '候选 / endpoint', '启用', '熔断', '近 7 天', '额度', '占用'];
 
 function roleLabelOf(role) {
@@ -263,12 +377,14 @@ function rowHtml(row, index, selectedProfileId) {
     + '</div>';
 }
 
-function saveBarHtml(label, revision) {
-  // 本单没有草稿：摘要写「没有未保存修改」，按钮先禁用（保存是下一张单）。
+function saveBarHtml(label, revision, dirty) {
+  // 脏了就如实说「有未保存修改」，但保存按钮**仍然禁用**：保存动作是下一张单。
   // 文案不说「已保存，将打断进行中的 Attempt」——保存只影响以后调度，不打断在途的。
-  return '<div class="resource-savebar" data-resource-save>'
+  return '<div class="resource-savebar" data-resource-save'
+    + (dirty ? ' data-dirty="1"' : '') + '>'
     + '<div class="resource-save-summary">'
-    +   '<span class="resource-save-title console-body">没有未保存修改</span>'
+    +   '<span class="resource-save-title console-body" data-resource-save-title>'
+    +     (dirty ? '有未保存修改' : '没有未保存修改') + '</span>'
     +   '<span class="resource-sub console-body">' + esc(label + ' · 修订 ' + (revision || '未知')) + '</span>'
     + '</div>'
     + '<div class="resource-save-actions">'
@@ -280,16 +396,82 @@ function saveBarHtml(label, revision) {
     + '</div>';
 }
 
-function drawerHtml(row) {
+/** facts 的每一行：key + value + 删本行。删的是参数，不是候选。 */
+function factsHtml(facts) {
+  const rows = Array.isArray(facts) ? facts : [];
+  return rows.map((fact, index) => {
+    const entry = fact && typeof fact === 'object' ? fact : {};
+    const key = typeof entry.key === 'string' ? entry.key : '';
+    const value = typeof entry.value === 'string' ? entry.value : '';
+    return '<div class="resource-fact" data-fact-row="' + index + '">'
+      + '<input type="text" class="resource-input console-data" data-fact-key="' + index
+      +   '" value="' + esc(key) + '" placeholder="key" aria-label="参数名">'
+      + '<input type="text" class="resource-input console-data" data-fact-value="' + index
+      +   '" value="' + esc(value) + '" placeholder="value" aria-label="参数值">'
+      + '<button type="button" class="resource-button resource-button-small" data-fact-remove="'
+      +   index + '">删除本行</button>'
+      + '</div>';
+  }).join('');
+}
+
+/**
+ * endpoint 下拉。当前值不在选项里时**补一条带「（缺来源）」的**，而不是把它改写成
+ * 集合里的第一个：那会让人以为这条候选用的是别的端点，一保存就真换了端点。
+ * 补进来的那条只属于当前候选——它不进 endpointOptions，别的候选的下拉里看不到它。
+ */
+function endpointSelectHtml(endpoint, options) {
+  const current = typeof endpoint === 'string' ? endpoint : '';
+  const values = Array.isArray(options) ? options : [];
+  const items = values.map((value) => '<option value="' + esc(value) + '"'
+    + (value === current ? ' selected' : '') + '>' + esc(value) + '</option>').join('');
+  let extra = '';
+  if (current !== '' && !values.includes(current)) {
+    extra = '<option value="' + esc(current) + '" selected>' + esc(current) + '（缺来源）</option>';
+  } else if (current === '') {
+    extra = '<option value="" selected>（未设置）</option>';
+  }
+  return '<select class="resource-input console-data" data-draft-endpoint>' + items + extra + '</select>';
+}
+
+/**
+ * 候选抽屉：草稿编辑区 + 只读健康详情。
+ *
+ * candidate 是渲染副本：草稿对象本身不带 health（健康不属于草稿，带进去就会
+ * 让「草稿是否脏」跟着健康变化抖）。total 只用来判断上移/下移能不能按。
+ * 没有删除候选按钮：删一条候选会改变整角色的调度面，留到单独一单。
+ */
+function drawerHtml(candidate, options, index, total) {
+  const row = candidate && typeof candidate === 'object' ? candidate : {};
   const profileId = nonEmpty(row.profileId);
   const health = row.health;
   const circuit = circuitLines(health);
   const command = resetCommandView(health);
-  // 只读：没有删除按钮，也没有可改 profileId 的输入框——编辑是下一张单，
-  // 现在就给出控件等于让人以为改了会生效。
+  const enabled = row.enabled !== false;
   return '<aside class="resource-drawer" data-resource-drawer>'
     + '<div class="resource-drawer-title console-data">' + esc(profileId) + '</div>'
     + '<div class="resource-sub console-body">runtime：pi</div>'
+    + '<div class="resource-drawer-heading console-body">候选设置（草稿，未下发）</div>'
+    + '<div class="resource-field">'
+    +   '<span class="resource-sub console-body">profileId（只读）</span>'
+    +   '<div class="resource-readonly console-data" data-draft-profile>' + esc(profileId) + '</div>'
+    + '</div>'
+    + '<div class="resource-field">'
+    +   '<span class="resource-sub console-body">endpoint</span>'
+    +   endpointSelectHtml(row.endpoint, options)
+    + '</div>'
+    + '<div class="resource-field">'
+    +   '<span class="resource-sub console-body">参数（key / value）</span>'
+    +   '<div class="resource-facts">' + factsHtml(row.facts) + '</div>'
+    +   '<div><button type="button" class="resource-button" data-fact-add>添加参数</button></div>'
+    + '</div>'
+    + '<div class="resource-drawer-actions">'
+    +   '<button type="button" class="resource-button" data-draft-toggle>'
+    +     (enabled ? '停用' : '启用') + '</button>'
+    +   '<button type="button" class="resource-button" data-draft-move="-1"'
+    +     (index <= 0 ? ' disabled' : '') + '>上移</button>'
+    +   '<button type="button" class="resource-button" data-draft-move="1"'
+    +     (index >= total - 1 ? ' disabled' : '') + '>下移</button>'
+    + '</div>'
     + '<div class="resource-drawer-heading console-body">健康详情（只读）</div>'
     + '<div class="resource-drawer-line console-body resource-tone-' + esc(circuit.tone) + '">'
     +   esc(circuit.primary) + '</div>'
@@ -302,8 +484,27 @@ function drawerHtml(row) {
     + '</aside>';
 }
 
+/** 添加候选表单。endpoint 是自由输入：下拉里只有已有端点，空角色一个都没有。 */
+function addFormHtml() {
+  return '<div class="resource-addform" data-resource-add-form>'
+    + '<label class="resource-field">'
+    +   '<span class="resource-sub console-body">profileId</span>'
+    +   '<input type="text" class="resource-input console-data" data-add-profile value="">'
+    + '</label>'
+    + '<label class="resource-field">'
+    +   '<span class="resource-sub console-body">endpoint（自由填写）</span>'
+    +   '<input type="text" class="resource-input console-data" data-add-endpoint value="">'
+    + '</label>'
+    + '<div class="resource-addform-actions">'
+    +   '<button type="button" class="resource-button" data-add-confirm>确定</button>'
+    +   '<button type="button" class="resource-button" data-add-cancel>取消</button>'
+    + '</div>'
+    + '</div>';
+}
+
 /**
- * 页面 HTML。vm = `{ role, revision, configError, healthError, counts, rows, selectedProfileId }`。
+ * 页面 HTML。vm = `{ role, revision, configError, healthError, counts, rows,
+ * drafts, selected, selectedIndex, endpointOptions, dirty, adding }`。
  *
  * counts 用调用方给的数字：写死 8/4/0/0 会在接入真实池之后仍然显示样例值，
  * 而那种错没人会当成 bug 报（数字看起来总是合理的）。
@@ -316,10 +517,11 @@ export function resourcePageHtml(vm) {
   const configError = nonEmpty(state.configError);
   const healthError = nonEmpty(state.healthError);
   const rows = Array.isArray(state.rows) ? state.rows : [];
+  const drafts = Array.isArray(state.drafts) ? state.drafts : [];
   const selectedProfileId = nonEmpty(state.selectedProfileId);
-  const selectedRow = selectedProfileId
-    ? rows.find((row) => row && nonEmpty(row.profileId) === selectedProfileId)
-    : null;
+  const selectedIndex = Number.isInteger(state.selectedIndex) ? state.selectedIndex : -1;
+  const selected = state.selected && typeof state.selected === 'object' ? state.selected : null;
+  const dirty = state.dirty === true;
 
   const tabs = RESOURCE_ROLES.map(([id, name]) =>
     '<button type="button" class="resource-tab console-body" data-resource-role="' + esc(id) + '"'
@@ -338,7 +540,7 @@ export function resourcePageHtml(vm) {
     + '<h1 class="fixed-page-title">模型资源</h1>'
     + '<div class="resource-tabs">' + tabs + '</div>'
     + '<div class="resource-toolbar">'
-    +   '<button type="button" class="resource-button" data-resource-add disabled>添加候选</button>'
+    +   '<button type="button" class="resource-button" data-resource-add>添加候选</button>'
     +   '<span class="resource-sub console-body" data-resource-revision>'
     +     esc(revision ? '配置修订 ' + revision : '配置修订 未知') + '</span>'
     + '</div>'
@@ -348,12 +550,14 @@ export function resourcePageHtml(vm) {
     + (healthError
       ? '<p class="resource-error console-body" data-resource-health-error>' + esc(healthError) + '</p>'
       : '')
+    + (state.adding === true ? addFormHtml() : '')
     + '<div class="resource-table">'
     +   '<div class="resource-head console-body">' + head + '</div>'
     +   '<div class="resource-body">' + body + '</div>'
     + '</div>'
-    + (rows.length ? saveBarHtml(label, revision) : '')
-    + (selectedRow ? drawerHtml(selectedRow) : '')
+    // 空角色加了第一条草稿也要有保存条：否则那一条既在抽屉里、又没有「未保存」的提示。
+    + (rows.length || drafts.length ? saveBarHtml(label, revision, dirty) : '')
+    + (selected ? drawerHtml(selected, state.endpointOptions, selectedIndex, drafts.length) : '')
     + '</section>';
 }
 
@@ -381,8 +585,17 @@ function stopMounted() {
   }
 }
 
-/** 本单没有草稿：离开不需要确认。在飞请求要收掉，否则晚到的响应会画进别人的容器。 */
+/**
+ * 离开资源页。有脏草稿先问一句。
+ *
+ * 不问就直接走，是本页唯一会「不报错地丢东西」的路径：草稿只存在这个模块的闭包里，
+ * 页面一卸载就没了，而人刚在抽屉里改过 endpoint、调过顺序，屏幕上看起来什么都没发生。
+ * 签名不带参：app.js 不因为本单改动（确认取消就返回 false，路由就不会卸页）。
+ */
 export function leaveResourcePage() {
+  if (mounted && typeof mounted.isDirty === 'function' && mounted.isDirty()) {
+    if (!window.confirm('资源池有未保存修改，离开将放弃。确认离开？')) return false;
+  }
   stopMounted();
   return true;
 }
@@ -415,12 +628,32 @@ export async function renderResourcePage(container) {
     healthError: '',
     counts: {},
     selectedProfileId: '',
+    // 每角色一份草稿：-saved 是配置下来的原样，-drafts 是可改的那份。
+    // 只维护一份「当前值」就没有放弃草稿可言了。
+    saved: {},
+    drafts: {},
+    adding: false,
   };
+
+  const currentConfigRows = () => (state.config && Array.isArray(state.config[state.role])
+    ? state.config[state.role]
+    : []);
 
   const viewModel = () => {
     const role = state.role;
-    const configRows = state.config && Array.isArray(state.config[role]) ? state.config[role] : [];
+    const configRows = currentConfigRows();
     const healthRows = state.health && Array.isArray(state.health[role]) ? state.health[role] : [];
+    const drafts = Array.isArray(state.drafts[role]) ? state.drafts[role] : [];
+    const selectedIndex = state.selectedProfileId
+      ? drafts.findIndex((row) => row && row.profileId === state.selectedProfileId)
+      : -1;
+    const selectedDraft = selectedIndex >= 0 ? drafts[selectedIndex] : null;
+    // 草稿里没有健康：健康只属于服务端那一行。摊到草稿上，一次健康刷新就会让
+    // 「有未保存修改」自己跳出来。
+    const healthOf = (profileId) => {
+      const found = joinRoleRows([{ profileId }], healthRows).find((item) => item.health);
+      return found ? found.health : null;
+    };
     return {
       role,
       revision: state.revision,
@@ -429,6 +662,14 @@ export async function renderResourcePage(container) {
       counts: state.counts,
       rows: joinRoleRows(configRows, healthRows),
       selectedProfileId: state.selectedProfileId,
+      drafts,
+      selectedIndex,
+      selected: selectedDraft
+        ? { ...selectedDraft, health: healthOf(selectedDraft.profileId) }
+        : null,
+      endpointOptions: endpointOptions(configRows),
+      dirty: draftDirty(state.saved, state.drafts, role),
+      adding: state.adding,
     };
   };
   const paint = () => {
@@ -440,7 +681,24 @@ export async function renderResourcePage(container) {
     return response.json();
   };
 
-  mounted = { stop: () => controller.abort(), root };
+  // 浏览器关页/刷新走的是 beforeunload，不经过路由：只做 leaveResourcePage 的确认
+  // 等于把「直接关页签」这条最常见的丢草稿路径漏掉。与 model-priority.js 同一套写法。
+  const unload = (event) => {
+    if (!anyDraftDirty(state.saved, state.drafts)) return;
+    event.preventDefault();
+    event.returnValue = '';
+  };
+  window.addEventListener('beforeunload', unload);
+
+  // isDirty 挂在挂载对象上：leaveResourcePage 是模块级的，只能经由它问到草稿状态。
+  mounted = {
+    stop: () => {
+      window.removeEventListener('beforeunload', unload);
+      controller.abort();
+    },
+    isDirty: () => anyDraftDirty(state.saved, state.drafts),
+    root,
+  };
   root.innerHTML = '<div class="resource-console-loading console-body">加载中…</div>';
 
   const [configResult, healthResult] = await Promise.allSettled([
@@ -459,6 +717,16 @@ export async function renderResourcePage(container) {
     state.counts = Object.fromEntries(RESOURCE_ROLES.map(
       ([id]) => [id, Array.isArray(config[id]) ? config[id].length : 0],
     ));
+    // 四角色一次性都建好：切角色时才建草稿的话，先改协调者再切到执行者，
+    // 执行者的 saved 就只剩「空」——一比对就凭空多出一堆脏，离页提示跟着报错。
+    state.saved = {};
+    state.drafts = {};
+    for (const [id] of RESOURCE_ROLES) {
+      const rows = Array.isArray(config[id]) ? config[id] : [];
+      state.saved[id] = rows.map(candidateConfig);
+      // 深拷贝：省这一步，「放弃草稿」时 drafts 和 saved 是同一批对象，改了就回不去。
+      state.drafts[id] = structuredClone(state.saved[id]);
+    }
     state.configError = '';
   } else {
     // 不清 state.config：已经读到的配置比一句错误更有用，下次重画还在。
@@ -473,6 +741,27 @@ export async function renderResourcePage(container) {
   }
   paint();
 
+  // 草稿操作全部走这一条：只改本地草稿并重画。**这里不发任何请求**（保存是下一张单）。
+  const applyDraft = (nextDrafts) => {
+    state.drafts = nextDrafts;
+    paint();
+  };
+  const draftIndexOf = (profileId) => {
+    const drafts = Array.isArray(state.drafts[state.role]) ? state.drafts[state.role] : [];
+    return drafts.findIndex((row) => row && row.profileId === profileId);
+  };
+  const factsOfTarget = () => {
+    const drafts = Array.isArray(state.drafts[state.role]) ? state.drafts[state.role] : [];
+    const index = draftIndexOf(state.selectedProfileId);
+    const target = index >= 0 ? drafts[index] : null;
+    return Array.isArray(target && target.facts) ? target.facts : [];
+  };
+  const setFacts = (facts) => {
+    const index = draftIndexOf(state.selectedProfileId);
+    if (index < 0) return;
+    applyDraft(updateDraftCandidate(state.drafts, state.role, index, { facts }));
+  };
+
   root.addEventListener('click', async (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -483,8 +772,72 @@ export async function renderResourcePage(container) {
       if (RESOURCE_ROLES.some(([id]) => id === role)) {
         state.role = role;
         state.selectedProfileId = '';
+        state.adding = false;
         paint();
       }
+      return;
+    }
+
+    // 添加候选：空角色也要能加第一条，所以表单不看当前行数。
+    if (target.closest('[data-resource-add]')) {
+      state.adding = true;
+      paint();
+      return;
+    }
+    if (target.closest('[data-add-cancel]')) {
+      state.adding = false;
+      paint();
+      return;
+    }
+    const addConfirm = target.closest('[data-add-confirm]');
+    if (addConfirm) {
+      const form = addConfirm.closest('[data-resource-add-form]');
+      const profileId = form && form.querySelector('[data-add-profile]')
+        ? form.querySelector('[data-add-profile]').value.trim()
+        : '';
+      const endpoint = form && form.querySelector('[data-add-endpoint]')
+        ? form.querySelector('[data-add-endpoint]').value.trim()
+        : '';
+      // 空 profileId 加进去就是一条永远不会被调度、也无法在列表里认出来的行。
+      if (!profileId) {
+        addConfirm.textContent = '请填 profileId';
+        return;
+      }
+      state.drafts = addDraftCandidate(state.drafts, state.role, { profileId, endpoint });
+      state.adding = false;
+      // 加完就选中新的那条：否则人加了一条，屏幕上表格没变（表格只画服务端配置），
+      // 看起来像没加上。
+      state.selectedProfileId = profileId;
+      paint();
+      return;
+    }
+
+    if (target.closest('[data-draft-toggle]')) {
+      const index = draftIndexOf(state.selectedProfileId);
+      if (index >= 0) applyDraft(toggleDraftCandidate(state.drafts, state.role, index));
+      return;
+    }
+
+    const moveButton = target.closest('[data-draft-move]');
+    if (moveButton) {
+      if (moveButton.disabled) return;
+      const index = draftIndexOf(state.selectedProfileId);
+      const direction = Number(moveButton.getAttribute('data-draft-move'));
+      if (index >= 0 && Number.isFinite(direction)) {
+        applyDraft(moveDraftCandidate(state.drafts, state.role, index, direction));
+      }
+      return;
+    }
+
+    // 删的是参数行，不是候选：删候选会改变整个角色的调度面，本单不做。
+    const factRemove = target.closest('[data-fact-remove]');
+    if (factRemove) {
+      const index = Number(factRemove.getAttribute('data-fact-remove'));
+      setFacts(factsOfTarget().filter((_fact, i) => i !== index));
+      return;
+    }
+    if (target.closest('[data-fact-add]')) {
+      setFacts([...factsOfTarget(), { key: '', value: '' }]);
       return;
     }
 
@@ -509,6 +862,38 @@ export async function renderResourcePage(container) {
     if (rowElement) {
       state.selectedProfileId = rowElement.getAttribute('data-resource-row') || '';
       paint();
+    }
+  });
+
+  // 输入走 change 而不是 input：每敲一个字符就重画会把光标顶掉，
+  // 而 endpoint 是人从下拉里选、facts 是一格一格填，change 的粒度刚好。
+  root.addEventListener('change', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const index = draftIndexOf(state.selectedProfileId);
+    if (index < 0) return;
+
+    const endpointSelect = target.closest('[data-draft-endpoint]');
+    if (endpointSelect) {
+      applyDraft(updateDraftCandidate(state.drafts, state.role, index, {
+        endpoint: endpointSelect.value,
+      }));
+      return;
+    }
+
+    const factKey = target.closest('[data-fact-key]');
+    const factValue = target.closest('[data-fact-value]');
+    const field = factKey || factValue;
+    if (field) {
+      const which = factKey ? 'data-fact-key' : 'data-fact-value';
+      const factIndex = Number(field.getAttribute(which));
+      const next = factsOfTarget().map((fact, i) => {
+        if (i !== factIndex) return fact;
+        // 缺 key 的行从下拉里选不中、也认不出来，补成空串让它保持一行而不是消失。
+        const entry = { key: typeof fact.key === 'string' ? fact.key : '', value: typeof fact.value === 'string' ? fact.value : '' };
+        return factKey ? { ...entry, key: field.value } : { ...entry, value: field.value };
+      });
+      setFacts(next);
     }
   });
 }
