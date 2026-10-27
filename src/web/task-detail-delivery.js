@@ -421,10 +421,30 @@ function countsOf(outputTail) {
   return `tests ${tests} · pass ${pass}`;
 }
 
-/** 报告里真跑过的命令（argv 拼成一行）与它对得上的计数。 */
+/**
+ * 一条命令的定向/全量标签。
+ *
+ * 只看 argv，不从 argv 编数字：`node --test` 与带文件名的 `node --test x.test.ts` 跑的东西
+ * 完全不同，计数差两个数量级，标签贴错了人会把定向的 68 当成全量跑了。
+ */
+function labelOfArgv(argv) {
+  const line = argv.join(' ');
+  if (line === 'node --test') return '全量';
+  if (line.includes('.test.ts') || line.includes('.spec.ts')) return '定向';
+  return '';
+}
+
+/**
+ * 报告里真跑过的命令（argv 拼成一行）与它**各自**对得上的计数、标签。
+ *
+ * 三个数组等长同序。计数必须逐条取自己的 outputTail：共享一份计数时只有第一条有数，
+ * 第二条（往往是全量）要么空白，要么把定向的 68 当成全量的结果——这也是为什么
+ * 绝不把两条命令的数字相加，2033 与 68 是两个互不相干的运行。
+ */
 function ranCommandsOf(report) {
   const commands = [];
-  let counts = '';
+  const commandCounts = [];
+  const labels = [];
   for (const check of list(report.checks)) {
     const c = object(check);
     if (c === null || text(c.kind) !== 'command') continue;
@@ -433,9 +453,11 @@ function ranCommandsOf(report) {
     const argv = list(command.argv).map(text).filter((part) => part !== '');
     if (argv.length === 0) continue;
     commands.push(argv.join(' '));
-    if (counts === '' && typeof command.outputTail === 'string') counts = countsOf(command.outputTail);
+    // 提不到计数就是空串，不借别的命令的数顶上。
+    commandCounts.push(typeof command.outputTail === 'string' ? countsOf(command.outputTail) : '');
+    labels.push(labelOfArgv(argv));
   }
-  return { commands, counts };
+  return { commands, commandCounts, labels };
 }
 
 /**
@@ -485,7 +507,8 @@ function projectSubmission(item, currentReturned, attribution, opts) {
       submittedAtText: UNKNOWN,
       lineDeltaText: UNKNOWN,
       ranCommands: null,
-      ranCounts: null,
+      ranCommandCounts: null,
+      ranLabels: null,
       verification,
     };
   }
@@ -494,7 +517,7 @@ function projectSubmission(item, currentReturned, attribution, opts) {
     ? null
     : (Array.isArray(result.changedFiles) ? result.changedFiles.map(text) : null);
   const report = fullReportOf(item, opts, attribution);
-  const ran = report === null ? { commands: [], counts: '' } : ranCommandsOf(report);
+  const ran = report === null ? { commands: [], commandCounts: [], labels: [] } : ranCommandsOf(report);
   const lines = report === null ? null : changedLinesOf(report);
 
   return {
@@ -512,7 +535,9 @@ function projectSubmission(item, currentReturned, attribution, opts) {
     // 已跑命令只来自归属对得上的完整报告；取不到就是 null（视图写未知），
     // 工单 verification 那份清单一律不填进来冒充已跑。
     ranCommands: ran.commands.length === 0 ? null : ran.commands,
-    ranCounts: ran.counts === '' ? null : ran.counts,
+    // 计数与标签逐条对齐 ranCommands；没有命令时一起给 null，别给三个长度不一的空数组。
+    ranCommandCounts: ran.commands.length === 0 ? null : ran.commandCounts,
+    ranLabels: ran.commands.length === 0 ? null : ran.labels,
     verification,
   };
 }

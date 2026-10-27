@@ -140,7 +140,9 @@ function submissionHtml(submission, formatTimeFn) {
   const ranCommands = current && Array.isArray(s.ranCommands)
     ? s.ranCommands.map(text).filter((command) => command !== '')
     : [];
-  const ranCounts = current ? text(s.ranCounts) : '';
+  // 计数与标签按下标对齐 ranCommands：索引错位就会把第一条的 68 贴到第二条上。
+  const ranCommandCounts = current && Array.isArray(s.ranCommandCounts) ? s.ranCommandCounts : [];
+  const ranLabels = current && Array.isArray(s.ranLabels) ? s.ranLabels : [];
 
   const commandItems = commands.length === 0
     ? '<li class="td-submission-command" data-empty="true">工单没有列出验证命令</li>'
@@ -153,9 +155,18 @@ function submissionHtml(submission, formatTimeFn) {
   // 未知的那一行不带 data-ran-command：它不是一条跑过的命令，只是这个位置的说明。
   const ranItems = ranCommands.length === 0
     ? '<li class="td-submission-command" data-empty="true">未知：没有与这一跳归属对得上的完整机器报告</li>'
-    : ranCommands.map((command) => (
-      '<li class="td-submission-command" data-ran-command="true">' + esc(command) + '</li>'
-    )).join('');
+    : ranCommands.map((command, index) => {
+      const label = text(ranLabels[index]);
+      const counts = text(ranCommandCounts[index]);
+      // 没有计数也没有标签时明写「计数未知」：空白的行看起来像「跑了但没数」，
+      // 而实际是报告里提不到——这两件事处理方式不同。
+      const parts = [command];
+      if (label !== '') parts.push(label);
+      if (counts !== '') parts.push(counts);
+      if (label === '' && counts === '') parts.push('计数未知');
+      return '<li class="td-submission-command" data-ran-command="true">'
+        + esc(parts.join(' · ')) + '</li>';
+    }).join('');
 
   return '<aside class="td-submission" data-current="' + (current ? 'true' : 'false') + '">'
     + '<h2 class="td-submission-title">交卷摘要</h2>'
@@ -176,7 +187,6 @@ function submissionHtml(submission, formatTimeFn) {
     + '<div class="td-submission-field">'
     + '<p class="td-submission-label">已跑命令</p>'
     + '<ul class="td-submission-commands">' + ranItems + '</ul>'
-    + (ranCounts === '' ? '' : '<p class="td-submission-value">' + esc(ranCounts) + '</p>')
     + '</div>'
     + (summary === ''
       ? ''

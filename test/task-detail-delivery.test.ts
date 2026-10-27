@@ -196,10 +196,106 @@ test('已交回：提交 / 机器 / 角色三处时间来自对应事件，受�
 
   // 已跑命令与计数只从归属对得上的完整报告来。
   assert.deepEqual(delivery.submission.ranCommands, ['node --test']);
-  assert.equal(delivery.submission.ranCounts, 'tests 2033 · pass 2033');
+  assert.deepEqual(delivery.submission.ranCommandCounts, ['tests 2033 · pass 2033']);
+  assert.deepEqual(delivery.submission.ranLabels, ['全量']);
   // 工单要求那一份仍在，并标明不是已跑结果。
   assert.deepEqual(delivery.submission.verification.commands, ['node --test test/a.test.ts']);
   assert.equal(delivery.submission.verification.note.includes('不是已跑结果'), true);
+});
+
+/**
+ * 报告里两条 command（定向 68、全量 2033）：每行只带自己的计数与标签。
+ *
+ * 以前只把第一条 outputTail 放进共享计数，于是全量行下面写着定向的 68，或者两条
+ * 各写一遍 68。把两个数相加（2101）同样错：它们是两次互不相干的运行，不是一次的总和。
+ */
+test('两段 command：每行只带自己的 argv、定向/全量标签与计数，不相加不互借', () => {
+  const delivery = projectDelivery({
+    missionId: 'CUI3-task-detail-20261026',
+    status: 'executing',
+    coordinationMode: 'hierarchical',
+    executionMode: 'standard',
+    workItems: [
+      {
+        id: 'W-906',
+        title: '交卷证据时间',
+        status: 'accepted',
+        attemptIds: ['W-906.exec-1'],
+        lastReview: { verdict: 'accept', attemptId: 'coord-8' },
+        validationReport: { reportId: 'VR-639', passed: true },
+        executionResult: { outcome: 'completed', summary: '补齐时间', changedFiles: ['src/web/a.js'] },
+        order: { verification: ['node --test test/a.test.ts'] },
+      },
+    ],
+  }, {
+    selectedWorkItemId: 'W-906',
+    activity: [
+      {
+        kind: 'execution_result.submitted',
+        at: '2026-10-26T13:29:13.113Z',
+        attemptId: 'W-906.exec-1',
+        workItemId: 'W-906',
+      },
+      {
+        kind: 'validation.reported',
+        at: '2026-10-26T13:31:17.987Z',
+        workItemId: 'W-906',
+        data: { reportId: 'VR-639', submittedAttemptId: 'W-906.exec-1' },
+      },
+      {
+        kind: 'review.recorded',
+        at: '2026-10-26T13:33:47.061Z',
+        attemptId: 'coord-8',
+        workItemId: 'W-906',
+        data: { verdict: 'accept' },
+      },
+    ],
+    validationReport: {
+      id: 'VR-639',
+      missionId: 'CUI3-task-detail-20261026',
+      workItemId: 'W-906',
+      attemptId: 'W-906.exec-1',
+      passed: true,
+      checks: [
+        {
+          kind: 'command',
+          passed: true,
+          command: {
+            argv: ['node', '--test', '--test-timeout=10000', 'test/web-task.test.ts'],
+            cwd: '/repo',
+            exitCode: 0,
+            timedOut: false,
+            durationMs: 1000,
+            outputTail: '# tests 68\n# pass 68\n',
+          },
+        },
+        {
+          kind: 'command',
+          passed: true,
+          command: {
+            argv: ['node', '--test'],
+            cwd: '/repo',
+            exitCode: 0,
+            timedOut: false,
+            durationMs: 9000,
+            outputTail: '# tests 2033\n# pass 2033\n',
+          },
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(delivery.submission.ranCommands, [
+    'node --test --test-timeout=10000 test/web-task.test.ts',
+    'node --test',
+  ]);
+  assert.deepEqual(delivery.submission.ranCommandCounts, [
+    'tests 68 · pass 68',
+    'tests 2033 · pass 2033',
+  ]);
+  assert.deepEqual(delivery.submission.ranLabels, ['定向', '全量']);
+  const joined = JSON.stringify(delivery);
+  assert.equal(joined.includes('tests 2101'), false, '两条命令的计数被相加了：' + joined);
 });
 
 /**
@@ -271,7 +367,8 @@ test('未交回（dispatched）：三处时间与已跑命令仍未知，不采�
   assert.equal(delivery.submission.submittedAtText, '未知');
   assert.equal(delivery.submission.lineDeltaText, '未知');
   assert.equal(delivery.submission.ranCommands, null);
-  assert.equal(delivery.submission.ranCounts, null);
+  assert.equal(delivery.submission.ranCommandCounts, null);
+  assert.equal(delivery.submission.ranLabels, null);
   assert.equal(delivery.submission.reviewedExecution, null);
 });
 

@@ -200,6 +200,16 @@ test('已交回：时间显示为本地时刻且 title 保留原 ISO；已跑命
         {
           kind: 'command',
           passed: true,
+          command: {
+            argv: ['node', '--test', '--test-timeout=10000', 'test/web-task.test.ts'],
+            cwd: '/repo',
+            exitCode: 0,
+            outputTail: '# tests 68\n# pass 68\n',
+          },
+        },
+        {
+          kind: 'command',
+          passed: true,
           command: { argv: ['node', '--test'], cwd: '/repo', exitCode: 0, outputTail: '# tests 2033\n# pass 2033\n' },
         },
       ],
@@ -219,10 +229,13 @@ test('已交回：时间显示为本地时刻且 title 保留原 ISO；已跑命
   assert.ok(said.includes('W-906.exec-1'), '交卷摘要没写受评执行：' + said);
   assert.equal(said.includes('coord-8'), false, '交卷摘要把评审者当成了受评执行：' + said);
   // 已跑命令与计数单独一块，并带标记可供后续断言。
+  // 每行只带自己的 argv、定向/全量标签与计数：共享一份计数会把 68 贴到全量行上。
   const ran = [...(root.querySelectorAll('[data-ran-command="true"]') as unknown as HTMLElement[])]
     .map((el) => el.textContent || '');
-  assert.deepEqual(ran, ['node --test']);
-  assert.ok(said.includes('tests 2033 · pass 2033'), '交卷摘要没写计数：' + said);
+  assert.deepEqual(ran, [
+    'node --test --test-timeout=10000 test/web-task.test.ts · 定向 · tests 68 · pass 68',
+    'node --test · 全量 · tests 2033 · pass 2033',
+  ]);
   // 工单要求那一行仍标明不是已跑结果。
   assert.ok(said.includes('工单要求，不是已跑结果'), '交卷摘要没把要求与已跑分开：' + said);
 });
