@@ -81,15 +81,11 @@ export function bindSessionStart(
       bound: true,
       activated: false,
       context: [
-        "CoAgentHub v5 L3 registered this Codex root session, but the Delivery bridge stays bound to another active session.",
-        activeSessionId
-          ? `Active Delivery recipient: ${activeRecipientLabel(dataDir, activeSessionId)}.`
-          : undefined,
+        "CoAgentHub v5 L3 registered this Codex root session, but it is not the active default.",
+        `投给本会话（recipient ${recipient ?? sessionId}）的通知照常送达，默认收件人仍是 ${activeSessionId ? activeRecipientLabel(dataDir, activeSessionId) : "another session"}。`,
         "Set COAGENTHUB_BINDING_TAKEOVER=1 for this session to take the bridge over explicitly.",
         "Use the coagenthub-v5 Mission/L3 MCP tools; legacy group/task/participant tools do not apply.",
-      ]
-        .filter(Boolean)
-        .join(" "),
+      ].filter(Boolean).join(" "),
     };
   }
 
