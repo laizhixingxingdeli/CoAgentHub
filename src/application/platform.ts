@@ -1,5 +1,6 @@
 import * as mutationLane from './platform/mutation-lane.ts';
 import * as reviewerTodos from './platform/reviewer-todos.ts';
+import * as deliveryStatus from './platform/delivery-status.ts';
 import { getMasterMergeBrief } from './platform/master-brief.ts';
 import * as reviewerDuty from './platform/reviewer-duty.ts';
 import * as documentQueue from './platform/document-queue.ts';
@@ -152,7 +153,7 @@ import type {
   ProjectRepository,
 } from './ports.ts';
 import type { ClaimFence } from './durable-scheduler.ts';
-import type { DeliveryRepository } from './delivery.ts';
+import type { Delivery, DeliveryRepository } from './delivery.ts';
 import { escalationDeliveryKey, resultDeliveryKey } from './delivery.ts';
 import type { WorkspaceManager } from './workspace.ts';
 import type { ArtifactStore } from './artifact-store.ts';
@@ -303,6 +304,11 @@ export class Platform {
 
   async listReviewerTodos(projectId?: string): Promise<reviewerTodos.ReviewerTodo[]> {
     return reviewerTodos.listReviewerTodos(this.#context, projectId);
+  }
+
+  /** 收件箱的只读补注：不改存储、不 ACK，所以不包事务。 */
+  async annotateInboxStillOpen(pending: readonly Delivery[]): Promise<Array<Delivery & { stillOpen: boolean }>> {
+    return deliveryStatus.annotateDeliveriesStillOpen(this.#context, pending);
   }
 
   async getMasterMergeBrief(projectId: string) {
