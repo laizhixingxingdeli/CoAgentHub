@@ -126,15 +126,20 @@
  * 就分不清「谁该动」「会不会自己好」和「下一步干什么」。
  * column-gap 归零：间距已经由固定列宽（156px / 224px）表达，再加 gap 会把第三槽
  * 从 x604 推到右边，三行一起错位。
- * margin-top 8 = 画板状态行 y214 减 intent 底边 y206；min-height 28 是 41:427
- * 那一行的高度，不给的话这一行只有 22px，后面的 6px 间距会跟着往上缩。 */
+ * margin-top 8 = 画板状态行 y214 减 intent 底边 y206；28 是 41:427 那一行的高度，
+ * 不给的话这一行只有 22px，后面的 6px 间距会跟着往上缩。
+ * 这里写死 height / max-height 并 overflow:hidden，不留成 min-height：min-height 只是
+ * 地板不是天花板，第三槽里任何一个子节点一旦换行或被包进块级元素，整行就会自己长到
+ * 68px，事实带和页签被顶离 y248 / y294——屏幕上不报错，只是整幅页头不再是 266 高。 */
 .td-header .td-status-row {
   display: grid;
   grid-template-columns: 156px 224px minmax(0, 1fr);
   align-items: center;
   column-gap: 0;
   margin-top: 8px;
-  min-height: 28px;
+  height: 28px;
+  max-height: 28px;
+  overflow: hidden;
   font-size: 14px;
   line-height: 22px;
 }
@@ -186,14 +191,21 @@
   color: var(--color-ink);
 }
 
-/* 第三槽：处理人、恢复、下一步三行。用 flex 纵向排列而不是让三个 span 自然流：
- * 自然流会把它们挤在同一行末尾，第三块又读回一句长文本。gap 1px 只为让三个
- * 节点保持可见的分行，不靠 margin 拼高度——改文案长度会重新分配高度。 */
+/* 第三槽：处理人、恢复、下一步在同一行里横向排开。
+ * 必须横排而不是纵向堆叠：三行各自带着字号与行高，纵向排出来是 68px，把状态行撑过
+ * 画板的 28px，事实带与页签就跟着掉到 y248 / y294 以下，后面的 6px 间距不再对准画板。
+ * 用 flex 而不是让三个 span 自然流：自然流下它们会被挤成一句连读的长文本，读起来
+ * 分不清「谁该动」「会不会自己好」和「下一步干什么」。三个子节点仍各自独立，不合并。
+ * gap 12px 是三个子节点之间的最小可辨认间隔；min-width:0 让长文本在这行里被省略，
+ * 而不是把这一格顶宽、把右边界推出画板。 */
 .td-header .td-decision {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* 附标与状态词分两个节点：合成一句之后，「执行中 · 直接主控 · 补修」会被读成
@@ -206,14 +218,25 @@
   color: var(--color-muted);
 }
 
+/* 三个子节点都省略而不是换行：在 28px 的状态行里，任何一个换行都等于把事实带和
+ * 页签整体下推。min-width:0 是前提——flex 子项默认 min-width:auto，长处理人名会把
+ * 这一行顶宽，ellipsis 就永远轮不到。 */
 .td-header .td-owner {
   font-weight: 500;
   color: var(--color-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .td-header .td-recovery {
   font-size: 13px;
   color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* 下一步是「该干什么」，比「谁在管」更急，所以字号回到 14 而不是跟着恢复方式缩成 13；
