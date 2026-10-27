@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { CoAgentHubClient } from "./coagenthub-client.js";
 import {
+  bridgeLogPath,
   hasQueuedDelivery,
   listSessionBindings,
   readBinding,
@@ -24,6 +25,12 @@ export interface Delivery {
   summary: string;
   createdAt: string;
   status: "pending" | "acknowledged";
+  /**
+   * Whether the Mission behind this Delivery still needs L3 attention. The
+   * platform (WAKE1) reports it; absent means "unknown", which must be treated
+   * as still open so an older platform never silently drops work.
+   */
+  stillOpen?: boolean;
 }
 
 export interface InboxResponse {
@@ -66,8 +73,21 @@ export async function pollOnce(options: PollOptions): Promise<number> {
   const startedAt = new Date().toISOString();
   try {
     let handled = 0;
+    // One failing recipient must not starve the others in the same poll: the
+    // first error is held and rethrown after every route was attempted, so the
+    // daemon still backs off while the healthy chats keep receiving work.
+    let firstError: unknown;
+    const remember = (error: unknown) => {
+      if (firstError === undefined) firstError = error;
+    };
     for (const route of routes) {
-      const pending = await fetchInbox(options.client, route.recipient);
+      let pending: Delivery[];
+      try {
+        pending = await fetchInbox(options.client, route.recipient);
+      } catch (error) {
+        remember(error);
+        continue;
+      }
       for (const delivery of pending) {
         if (delivery.status !== "pending") continue;
         const target = route.recipient
@@ -80,24 +100,71 @@ export async function pollOnce(options: PollOptions): Promise<number> {
             );
         // Never take a delivery that belongs to another host session.
         if (!target) continue;
-        if (!hasQueuedDelivery(options.dataDir, delivery.id)) {
-          await queue(target.sessionId, formatDeliveryMessage(delivery));
-          rememberQueuedDelivery(options.dataDir, delivery.id);
+        try {
+          handled += await deliverOne({
+            options,
+            queue,
+            target,
+            delivery,
+          });
+        } catch (error) {
+          remember(error);
         }
-        // Queue success is required before ACK; a failure above leaves it pending.
-        await options.client.request(
-          `/deliveries/${encodeURIComponent(delivery.id)}/ack`,
-          { method: "POST", body: "{}" },
-        );
-        handled += 1;
       }
     }
+    if (firstError !== undefined) throw firstError;
     healthWrite(() => recordPollSuccess(options.dataDir, handled, { startedAt }));
     return handled;
   } catch (error) {
     healthWrite(() => recordPollFailure(options.dataDir, error, { startedAt }));
     throw error;
   }
+}
+
+/**
+ * Queue one delivery into its chat and acknowledge it, returning 1 when it was
+ * handled so the caller can keep counting. Errors propagate to the caller,
+ * which isolates them per delivery.
+ */
+async function deliverOne(input: {
+  options: PollOptions;
+  queue: QueueMessage;
+  target: L3SessionBinding;
+  delivery: Delivery;
+}): Promise<number> {
+  const { options, queue, target, delivery } = input;
+  const ack = () =>
+    options.client.request(
+      `/deliveries/${encodeURIComponent(delivery.id)}/ack`,
+      { method: "POST", body: "{}" },
+    );
+
+  // A delivery whose Mission is already handled wakes nobody. This is
+  // 「排队成功才 ACK」唯一的例外: the platform has told us the work is done, so
+  // queueing would only spend an agent turn on nothing.
+  // Missing stillOpen stays on the normal path so an older platform keeps
+  // working; a log failure must never block the ACK or it would loop forever.
+  if (delivery.stillOpen === false) {
+    try {
+      appendFileSync(
+        bridgeLogPath(options.dataDir),
+        `${new Date().toISOString()} skip wake ${delivery.id}\n`,
+        "utf8",
+      );
+    } catch {
+      // Losing the log line is cheaper than never acknowledging.
+    }
+    await ack();
+    return 1;
+  }
+
+  if (!hasQueuedDelivery(options.dataDir, delivery.id)) {
+    await queue(target.sessionId, formatDeliveryMessage(delivery));
+    rememberQueuedDelivery(options.dataDir, delivery.id);
+  }
+  // Queue success is required before ACK; a failure above leaves it pending.
+  await ack();
+  return 1;
 }
 
 /**
@@ -198,10 +265,12 @@ async function fetchInbox(
 }
 
 export function formatDeliveryMessage(delivery: Delivery): string {
+  // Read-only status check first: a delivery can reach the inbox after the work
+  // was already handled, and starting with the full contract review would burn
+  // a turn on stale work. The same instruction covers both outcomes because the
+  // envelope itself must not tell the model what to conclude.
   const next =
-    delivery.outcome === "escalated"
-      ? "Inspect the Mission and its openEscalations. Resolve it as L3; do not guess an answer."
-      : "Inspect the authoritative Mission, contract, result, work items, evidence and diff. If it is awaiting_review, perform the L3 final review.";
+    "先只读 coagenthub_get_mission_live（或 get_mission 的 status / openEscalations）确认仍待处理，已处理就结束本轮；仍待处理再读契约、结果、工作项、证据与 diff。";
 
   return [
     "<coagenthub-v5-delivery>",

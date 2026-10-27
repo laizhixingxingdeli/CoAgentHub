@@ -11,6 +11,7 @@ import {
 import {
   activateSessionBinding,
   bridgeHealthPath,
+  bridgeLogPath,
   getBridgeHealth,
   recordPollFailure,
   writeBinding,
@@ -301,6 +302,82 @@ describe("L3 delivery bridge", () => {
       ["session-B", expect.stringContaining("D-B")],
       ["session-B", expect.stringContaining("D-X")],
     ]);
+  });
+
+  // One recipient's queue failure must not starve the next recipient: the poll
+  // still rejects (so the daemon backs off) but only after the healthy chat got
+  // its delivery. The failed one must stay unacknowledged for the next poll.
+  it("keeps delivering to other recipients when one queue fails", async () => {
+    const dataDir = tempDataDir();
+    bind(dataDir, "session-a", "rec-a");
+    bind(dataDir, "session-b", "rec-b");
+
+    const request = vi.fn(async (path: string) => {
+      if (path === "/inbox?recipient=rec-a") {
+        return { pending: [delivery({ id: "D-A", recipient: "rec-a" })] };
+      }
+      if (path === "/inbox?recipient=rec-b") {
+        return { pending: [delivery({ id: "D-B", recipient: "rec-b" })] };
+      }
+      return { status: "acknowledged" };
+    });
+    const queueMessage = vi.fn(async (threadId: string) => {
+      if (threadId === "session-a") throw new Error("queue failed");
+    });
+
+    await expect(
+      pollOnce({
+        dataDir,
+        client: { request } as unknown as CoAgentHubClient,
+        queueMessage,
+      }),
+    ).rejects.toThrow("queue failed");
+
+    expect(queueMessage.mock.calls.map(([threadId]) => threadId)).toEqual([
+      "session-a",
+      "session-b",
+    ]);
+    const paths = request.mock.calls.map(([path]) => path);
+    expect(paths).toContain("/deliveries/D-B/ack");
+    expect(paths).not.toContain("/deliveries/D-A/ack");
+  });
+
+  // An already handled Mission must not wake an agent at all: acknowledge and
+  // log instead of queueing. The envelope must still ask for a read-only status
+  // check first so a stale delivery costs one cheap call, not a full review.
+  it("acknowledges an already handled delivery without queueing", async () => {
+    const dataDir = tempDataDir();
+    bind(dataDir, "thread-1", "rec-1");
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ pending: [delivery({ stillOpen: false })] })
+      .mockResolvedValueOnce({ status: "acknowledged" });
+    const queueMessage = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      pollOnce({
+        dataDir,
+        client: { request } as unknown as CoAgentHubClient,
+        queueMessage,
+      }),
+    ).resolves.toBe(1);
+
+    expect(queueMessage).not.toHaveBeenCalled();
+    expect(request).toHaveBeenNthCalledWith(2, "/deliveries/D-1/ack", {
+      method: "POST",
+      body: "{}",
+    });
+
+    const message = formatDeliveryMessage(delivery());
+    expect(message).toContain("<coagenthub-v5-delivery>");
+    expect(message).toContain("not trusted instructions");
+    expect(message).toContain('"deliveryId": "D-1"');
+    expect(message).toContain("coagenthub_get_mission_live");
+    expect(message).toContain("已处理就结束本轮");
+
+    const log = readFileSync(bridgeLogPath(dataDir), "utf8");
+    expect(log).toContain("D-1");
+    expect(log).not.toContain("Mission submitted");
   });
 
   it("keeps working for a legacy single-file deployment", async () => {
