@@ -16,6 +16,9 @@
   position: relative;
   /* 不再加左右内缩：外壳的 .view 已经有 gutter，再缩一次表头就和页名不在一条线上。
    * 画板上的「左右内缩 16」指的是行内的 padding（见 .resource-row）。 */
+  /* 保存条已脱离文档流贴在底边（见 .resource-savebar），不留这段空档时
+   * 最后一行候选会被它压住，而滚动到底也再没有可滚的余量。 */
+  padding-bottom: 100px;
   color: var(--color-ink);
 }
 
@@ -112,7 +115,10 @@
  */
 
 .resource-console .resource-table {
-  border: 1px solid var(--color-line);
+  /* 1px 线走内阴影不走 border：行内 1120 列宽 + 六个 4px gap + 左右 16 正好 1176，
+   * 也就是这张表的内容盒；真的给 1px border 会把内容盒挤成 1174，多出的 2px
+   * 让整张表在 1440 桌面上凭空多一条横向滚动条。窄屏仍靠下面的 overflow-x 滚。 */
+  box-shadow: inset 0 0 0 1px var(--color-line);
   border-radius: 8px;
   background: var(--color-white);
   overflow-x: auto;
@@ -201,10 +207,18 @@
  */
 
 .resource-console .resource-savebar {
+  /* 贴在内容列底边的固定条（画板 x224 / y1012 / 1176×84）：留在文档流里它会跟着
+   * 表一起被滚走，人改完草稿想保存时条已经不在视野里。左边界与内容左 224 对齐
+   * 而不是写 left:0，否则它会盖到左导航上。 */
+  position: fixed;
+  left: 224px;
+  bottom: 24px;
+  width: 1176px;
+  height: 84px;
+  z-index: 4;
   display: flex;
   align-items: center;
   gap: 16px;
-  height: 84px;
   padding: 16px;
   border: 1px solid var(--color-line);
   border-radius: 8px;
@@ -274,6 +288,13 @@
 /* ===== 健康抽屉（只读详情 + 草稿编辑） ===== */
 
 .resource-console .resource-drawer {
+  /* 画板上它是右侧覆盖层（x900 / y78 / 516×920、右距 24），不是表右边的一列：
+   * 留在文档流里抽屉会把表挤窄，滚动时还会被一起卷走。overflow:auto 让超长内容
+   * 在 920 内自己滚，而不是把底部两个按钮顶出可视区。 */
+  position: fixed;
+  top: 78px;
+  right: 24px;
+  z-index: 5;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -282,7 +303,8 @@
   max-width: 100%;
   /* 画板上的抽屉是整块 920 高：内容短时也要撑到那个尺寸，否则同一份数据在
    * 两条候选之间切换时抽屉会随内容伸缩，人每次都要重新找位置。 */
-  min-height: 920px;
+  height: 920px;
+  overflow: auto;
   padding: 16px;
   border: 1px solid var(--color-line);
   border-radius: 12px;
