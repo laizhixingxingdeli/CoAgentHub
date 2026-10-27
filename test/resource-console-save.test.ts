@@ -240,8 +240,9 @@ test('外部改池后保存得到 STALE_POOL 不自动写回；重复 profileId 
     // 重复 profileId：人能自己改的错，说清原因但别把保存锁死。
     await click('[data-resource-add]');
     container.querySelector('[data-add-profile]').value = 'c1';
+    // 端点是下拉，只受已返回过的端点：这条测试的池里已经有 'local'。
     container.querySelector('[data-add-endpoint]').value = 'local';
-    await click('[data-add-confirm]');
+    await click('[data-add-join]');
     await click('[data-resource-save-button]');
     await waitFor(() => text('[data-resource-save-message]').includes('profileId=c1'), '出现重复 profileId 文案');
 

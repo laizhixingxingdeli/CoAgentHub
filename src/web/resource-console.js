@@ -281,6 +281,23 @@ export function endpointOptions(configRows) {
   return options;
 }
 
+/**
+ * 全池的 endpoint 集合：四个角色**已保存**配置里的端点拼一起再交给 endpointOptions。
+ *
+ * 只看当前角色的后果是：空角色一个选项都没有，人加不了第一条；而别的角色明明
+ * 已经返回过这些端点。草稿也不看——草稿里刚敲的端点还没被平台确认过，把它当成
+ * 「已返回的来源」会让人以为那条端点存在。
+ */
+export function poolEndpointOptions(config) {
+  const pools = config && typeof config === 'object' ? config : {};
+  const rows = [];
+  for (const [role] of RESOURCE_ROLES) {
+    const savedRows = pools[role];
+    if (Array.isArray(savedRows)) rows.push(...savedRows);
+  }
+  return endpointOptions(rows);
+}
+
 /** 停用/启用。缺省即启用（服务端默认语义），所以 undefined 先落到 false。 */
 export function toggleDraftCandidate(drafts, role, index) {
   const rows = roleRows(drafts, role);
@@ -327,16 +344,27 @@ export function updateDraftCandidate(drafts, role, index, patch) {
 /**
  * 追加一条草稿。**只进草稿，不发任何请求**。
  *
- * endpoint 是调用方给的自由文本：新候选本来就可能引入新端点，而下拉里只有
- * 配置里已有的端点——只给下拉就永远加不了第一条（空角色一个选项都没有）。
+ * 端点只来自全池已返回的 config，全池没有来源才禁用加入；空角色可以用其他角色
+ * 已经返回的端点。所以这里不再接受「自由文本端点」——调用方给什么就存什么，会
+ * 让界面绕过下拉塞进一条平台从没返回过的端点，而列表里它和其他行长得一样。
  */
 export function addDraftCandidate(drafts, role, input) {
   const source = input && typeof input === 'object' ? input : {};
   const candidate = {
     profileId: typeof source.profileId === 'string' ? source.profileId : '',
     endpoint: typeof source.endpoint === 'string' ? source.endpoint : '',
-    enabled: true,
-    facts: [],
+    // 启停是人的选择（默认启用），照收；runtime 之类的未知键仍然不接受：
+    // runtime 由平台固定为 pi，从界面写它等于让一次粘贴把候选指到别的运行时上。
+    enabled: source.enabled !== false,
+    facts: Array.isArray(source.facts)
+      ? source.facts.map((fact) => {
+        const entry = fact && typeof fact === 'object' ? fact : {};
+        return {
+          key: typeof entry.key === 'string' ? entry.key : '',
+          value: typeof entry.value === 'string' ? entry.value : '',
+        };
+      })
+      : [],
   };
   return withRole(drafts, role, [...roleRows(drafts, role), candidate]);
 }
@@ -614,28 +642,85 @@ function drawerHtml(candidate, options, index, total) {
     + '</aside>';
 }
 
-/** 添加候选表单。endpoint 是自由输入：下拉里只有已有端点，空角色一个都没有。 */
-function addFormHtml() {
-  return '<div class="resource-addform" data-resource-add-form>'
-    + '<label class="resource-field">'
+/**
+ * 添加候选：**右侧抽屉**，和编辑共用同一份角色草稿。
+ *
+ * 之前是表上方一条横条：抽屉一开它就悬在表上方、和编辑抽屉并排，看起来像两个
+ * 不同的编辑面。实际上两者写的是同一份草稿，人很容易以为抽屉里的「行」和横条里
+ * 填的是两条不同候选。
+ *
+ * 控件属性一律用 data-add-*：编辑抽屉的 data-fact-* / data-draft-endpoint 改的是
+ * 「已选中的那条草稿」，添加抽屉里还没有那条草稿——用同一套属性会直接改到别人身上。
+ */
+function addDrawerHtml(role, options, form, draftCount) {
+  const values = Array.isArray(options) ? options : [];
+  const add = form && typeof form === 'object' ? form : {};
+  const empty = values.length === 0;
+  // 当前选中值不在选项里就不预选：预选第一个会让人以为默认就是它，而真正想选的
+  // 可能根本没有任何选项（全池没返回过）。
+  const current = typeof add.endpoint === 'string' ? add.endpoint : '';
+  const enabled = add.enabled !== false;
+  const facts = Array.isArray(add.facts) ? add.facts : [];
+  // 选项为空时不能给人一个空下拉：空下拉点「加入」会存下一条没有端点的候选，
+  // 而它在列表里看起来和别的行一样，直到调度永远失败。
+  const items = values.map((value) => '<option value="' + esc(value) + '"'
+    + (value === current ? ' selected' : '') + '>' + esc(value) + '</option>').join('');
+  return '<aside class="resource-drawer" data-resource-add-drawer>'
+    + '<div class="resource-drawer-heading console-body">添加' + esc(roleLabelOf(role)) + '候选</div>'
+    + '<div class="resource-sub console-body">候选设置（草稿，未下发）</div>'
+    + '<div class="resource-field">'
     +   '<span class="resource-sub console-body">profileId</span>'
-    +   '<input type="text" class="resource-input console-data" data-add-profile value="">'
-    + '</label>'
-    + '<label class="resource-field">'
-    +   '<span class="resource-sub console-body">endpoint（自由填写）</span>'
-    +   '<input type="text" class="resource-input console-data" data-add-endpoint value="">'
-    + '</label>'
-    + '<div class="resource-addform-actions">'
-    +   '<button type="button" class="resource-button" data-add-confirm>确定</button>'
-    +   '<button type="button" class="resource-button" data-add-cancel>取消</button>'
+    +   '<input type="text" class="resource-input console-data" data-add-profile value="'
+    +     esc(typeof add.profileId === 'string' ? add.profileId : '') + '">'
     + '</div>'
-    + '</div>';
+    + '<div class="resource-field">'
+    +   '<span class="resource-sub console-body">endpoint</span>'
+    +   '<select class="resource-input console-data" data-add-endpoint'
+    +     (empty ? ' disabled' : '') + '>' + items + '</select>'
+    +   (empty ? '<span class="resource-sub console-body">全池没有已返回的端点</span>' : '')
+    + '</div>'
+    + '<div class="resource-sub console-body">runtime：pi（固定）</div>'
+    + '<div class="resource-field">'
+    +   '<span class="resource-sub console-body">参数（key / value）</span>'
+    +   '<div class="resource-facts">'
+    +     facts.map((fact, index) => {
+      const entry = fact && typeof fact === 'object' ? fact : {};
+      return '<div class="resource-fact" data-add-fact-row="' + index + '">'
+        + '<input type="text" class="resource-input console-data" data-add-fact-key="' + index
+        +   '" value="' + esc(typeof entry.key === 'string' ? entry.key : '')
+        +   '" placeholder="key" aria-label="参数名">'
+        + '<input type="text" class="resource-input console-data" data-add-fact-value="' + index
+        +   '" value="' + esc(typeof entry.value === 'string' ? entry.value : '')
+        +   '" placeholder="value" aria-label="参数值">'
+        + '<button type="button" class="resource-button resource-button-small" data-add-fact-remove="'
+        +   index + '">删除本行</button>'
+        + '</div>';
+    }).join('')
+    +   '</div>'
+    +   '<div><button type="button" class="resource-button" data-add-fact-add>添加参数</button></div>'
+    + '</div>'
+    // 顺序只读：加入就是追加到本角色数组末尾。做成可编辑的数字框而不真的插入，
+    // 就是给人一个按了不生效的控件。
+    + '<div class="resource-sub console-body">顺序：加入后为第 '
+    +   esc(String(draftCount + 1)) + ' 行（追加到末尾）</div>'
+    + '<div class="resource-drawer-actions">'
+    +   '<button type="button" class="resource-button" data-add-enabled>'
+    +     (enabled ? '停用' : '启用') + '</button>'
+    + '</div>'
+    + '<div class="resource-drawer-actions">'
+    // 空选项时禁用：没有端点就存不出一条能被调度的候选，而它能存、能在列表里
+    // 长得和别的行一样，直到调度永远失败。
+    +   '<button type="button" class="resource-button" data-add-join'
+    +     (empty ? ' disabled' : '') + '>加入角色草稿</button>'
+    +   '<button type="button" class="resource-button" data-add-cancel>返回草稿</button>'
+    + '</div>'
+    + '</aside>';
 }
 
 /**
  * 页面 HTML。vm = `{ role, revision, configError, healthError, counts, rows,
- * drafts, selected, selectedIndex, endpointOptions, dirty, adding, busy, conflict,
- * message, latest }`。
+ * drafts, selected, selectedIndex, endpointOptions, dirty, adding, addForm, busy,
+ * conflict, message, latest }`。
  *
  * counts 用调用方给的数字：写死 8/4/0/0 会在接入真实池之后仍然显示样例值，
  * 而那种错没人会当成 bug 报（数字看起来总是合理的）。counts 来自**已保存**配置，
@@ -688,7 +773,6 @@ export function resourcePageHtml(vm) {
     + (healthError
       ? '<p class="resource-error console-body" data-resource-health-error>' + esc(healthError) + '</p>'
       : '')
-    + (state.adding === true ? addFormHtml() : '')
     + '<div class="resource-table">'
     +   '<div class="resource-head console-body">' + head + '</div>'
     +   '<div class="resource-body">' + body + '</div>'
@@ -697,7 +781,11 @@ export function resourcePageHtml(vm) {
     + (rows.length || drafts.length ? saveBarHtml(label, revision, dirty, role, {
       busy, conflict, message, latest,
     }) : '')
-    + (selected ? drawerHtml(selected, state.endpointOptions, selectedIndex, drafts.length) : '')
+    // 添加抽屉占的是**编辑抽屉的位置**：两个同时画出来就是两块并排的编辑面，
+    // 而它们写的是同一份草稿；且抽屉是 fixed 右侧层，同时开两块会直接重叠。
+    + (state.adding === true
+      ? addDrawerHtml(role, state.endpointOptions, state.addForm, drafts.length)
+      : (selected ? drawerHtml(selected, state.endpointOptions, selectedIndex, drafts.length) : ''))
     + '</section>';
 }
 
@@ -773,6 +861,9 @@ export async function renderResourcePage(container) {
     saved: {},
     drafts: {},
     adding: false,
+    // 添加抽屉的待填值。和候选草稿分开放：还没「加入」的 profileId 不是一条草稿，
+    // 把它提前写进 drafts 会让保存条、脏判定和页签计数全部提前变化。
+    addForm: null,
     // 每个角色一份保存状态：{ busy, conflict, message, latest }。
     // 按角色存放而不是全局：保存执行者时切到分类，分类的保存按钮不能跟着被禁掉。
     status: {},
@@ -795,13 +886,8 @@ export async function renderResourcePage(container) {
     state.status = { ...state.status, [role]: { ...statusOf(role), ...next } };
   };
 
-  const currentConfigRows = () => (state.config && Array.isArray(state.config[state.role])
-    ? state.config[state.role]
-    : []);
-
   const viewModel = () => {
     const role = state.role;
-    const configRows = currentConfigRows();
     const healthRows = state.health && Array.isArray(state.health[role]) ? state.health[role] : [];
     const drafts = Array.isArray(state.drafts[role]) ? state.drafts[role] : [];
     const status = statusOf(role);
@@ -831,9 +917,12 @@ export async function renderResourcePage(container) {
       selected: selectedDraft
         ? { ...selectedDraft, health: healthOf(selectedDraft.profileId) }
         : null,
-      endpointOptions: endpointOptions(configRows),
+      // 端点选项来自**全池已保存 config**：只看当前角色的话，空角色一个选项都没有，
+      // 而别的角色明明已经返回过这些端点。草稿不算：那是还没被平台确认的来源。
+      endpointOptions: poolEndpointOptions(state.config),
       dirty: draftDirty(state.saved, state.drafts, role),
       adding: state.adding,
+      addForm: state.addForm,
       busy: status.busy,
       conflict: status.conflict,
       message: status.message,
@@ -842,6 +931,38 @@ export async function renderResourcePage(container) {
   };
   const paint = () => {
     if (root.isConnected) root.innerHTML = resourcePageHtml(viewModel());
+  };
+  /**
+   * 把添加抽屉里当前的输入读回 state.addForm。
+   *
+   * 重画会整个换掉 DOM，而 change 要等失焦才发：人敲完 profileId 直接点「添加参数」，
+   * 不同步的话刚敲的字在重画里就没了，看起来像输入框自己清空了。
+   */
+  const syncAddFormFromDom = () => {
+    const base = state.addForm && typeof state.addForm === 'object'
+      ? state.addForm
+      : { profileId: '', endpoint: '', enabled: true, facts: [] };
+    const drawer = root.querySelector('[data-resource-add-drawer]');
+    const facts = Array.isArray(base.facts) ? base.facts.map((fact) => ({ ...fact })) : [];
+    if (!drawer) return { ...base, facts };
+    const profile = drawer.querySelector('[data-add-profile]');
+    const endpoint = drawer.querySelector('[data-add-endpoint]');
+    for (const keyInput of drawer.querySelectorAll('[data-add-fact-key]')) {
+      const index = Number(keyInput.getAttribute('data-add-fact-key'));
+      while (facts.length <= index) facts.push({ key: '', value: '' });
+      facts[index] = { ...(facts[index] || {}), key: keyInput.value };
+    }
+    for (const valueInput of drawer.querySelectorAll('[data-add-fact-value]')) {
+      const index = Number(valueInput.getAttribute('data-add-fact-value'));
+      while (facts.length <= index) facts.push({ key: '', value: '' });
+      facts[index] = { ...(facts[index] || {}), value: valueInput.value };
+    }
+    return {
+      ...base,
+      profileId: profile ? profile.value : base.profileId,
+      endpoint: endpoint ? endpoint.value : base.endpoint,
+      facts,
+    };
   };
   const readJson = async (path) => {
     const response = await fetch(path, { cache: 'no-store', signal: controller.signal });
@@ -943,6 +1064,9 @@ export async function renderResourcePage(container) {
         state.role = role;
         state.selectedProfileId = '';
         state.adding = false;
+        // 切角色就把待填值清掉：添加抽屉是按角色开的，留着上一个角色的半格输入，
+        // 切回来时抽屉里会出现一份人以为已经丢了的草稿。
+        state.addForm = null;
         paint();
       }
       return;
@@ -1060,33 +1184,69 @@ export async function renderResourcePage(container) {
       return;
     }
 
-    // 添加候选：空角色也要能加第一条，所以表单不看当前行数。
+    // 添加候选：空角色也要能加第一条，所以不看当前行数。
+    // 它和编辑抽屉抢同一个位置（右侧 fixed 层），所以打开时把选中项清掉：
+    // 留着的话抽屉里的选中行和列表里的高亮都还在，人以为在编辑已有那条。
     if (target.closest('[data-resource-add]')) {
+      const options = poolEndpointOptions(state.config);
       state.adding = true;
+      state.selectedProfileId = '';
+      // 默认选第一个真实端点：选项都来自已保存 config，不会凭空编出一个端点。
+      state.addForm = { profileId: '', endpoint: options[0] || '', enabled: true, facts: [] };
       paint();
       return;
     }
+    // 返回草稿：只关抽屉。不恢复不丢本角色已有草稿，更不发请求。
     if (target.closest('[data-add-cancel]')) {
       state.adding = false;
+      state.addForm = null;
       paint();
       return;
     }
-    const addConfirm = target.closest('[data-add-confirm]');
-    if (addConfirm) {
-      const form = addConfirm.closest('[data-resource-add-form]');
-      const profileId = form && form.querySelector('[data-add-profile]')
-        ? form.querySelector('[data-add-profile]').value.trim()
-        : '';
-      const endpoint = form && form.querySelector('[data-add-endpoint]')
-        ? form.querySelector('[data-add-endpoint]').value.trim()
-        : '';
+    // 启停/加删参数：只改 state.addForm，不 POST。这里先 sync 再改：
+    // 人敲完 profileId 直接去点这些按钮，change 还没触发，不同步就会丢字。
+    if (target.closest('[data-add-enabled]')) {
+      const form = syncAddFormFromDom();
+      state.addForm = { ...form, enabled: form.enabled === false };
+      paint();
+      return;
+    }
+    if (target.closest('[data-add-fact-add]')) {
+      const form = syncAddFormFromDom();
+      state.addForm = { ...form, facts: [...form.facts, { key: '', value: '' }] };
+      paint();
+      return;
+    }
+    const addFactRemove = target.closest('[data-add-fact-remove]');
+    if (addFactRemove) {
+      const form = syncAddFormFromDom();
+      const removeIndex = Number(addFactRemove.getAttribute('data-add-fact-remove'));
+      state.addForm = {
+        ...form,
+        facts: form.facts.filter((_fact, i) => i !== removeIndex),
+      };
+      paint();
+      return;
+    }
+    const addJoin = target.closest('[data-add-join]');
+    if (addJoin) {
+      const form = syncAddFormFromDom();
+      const profileId = form.profileId.trim();
       // 空 profileId 加进去就是一条永远不会被调度、也无法在列表里认出来的行。
+      // 只改按钮文字、不重画：重画会把这句提示擦掉。
       if (!profileId) {
-        addConfirm.textContent = '请填 profileId';
+        addJoin.textContent = '请填 profileId';
         return;
       }
-      state.drafts = addDraftCandidate(state.drafts, state.role, { profileId, endpoint });
+      // 只写本角色草稿。加入不是持久化：下发只有保存条上那一个按钮。
+      state.drafts = addDraftCandidate(state.drafts, state.role, {
+        profileId,
+        endpoint: form.endpoint,
+        enabled: form.enabled !== false,
+        facts: form.facts,
+      });
       state.adding = false;
+      state.addForm = null;
       // 加完就选中新的那条：不选中的话，抽屉还停在上一条上，人刚填的 endpoint 就看不见了，
       // 看起来像没加上。
       state.selectedProfileId = profileId;
@@ -1152,6 +1312,41 @@ export async function renderResourcePage(container) {
   root.addEventListener('change', (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+
+    // 添加抽屉的 change 必须写在下面 draftIndex < 0 的早退**之前**：添加时还没
+    // 有选中草稿，draftIndex 恒为 -1；放在早退之后这些输入就全部静默丢弃。
+    // 这里只改 state.addForm，不碰草稿、不重画（重画会把刚敲的字和光标一起换掉）。
+    if (target.closest('[data-resource-add-drawer]')) {
+      const base = state.addForm && typeof state.addForm === 'object'
+        ? state.addForm
+        : { profileId: '', endpoint: '', enabled: true, facts: [] };
+      const facts = Array.isArray(base.facts) ? base.facts.map((fact) => ({ ...fact })) : [];
+      const addEndpoint = target.closest('[data-add-endpoint]');
+      if (addEndpoint) {
+        state.addForm = { ...base, facts, endpoint: addEndpoint.value };
+        return;
+      }
+      const addProfile = target.closest('[data-add-profile]');
+      if (addProfile) {
+        state.addForm = { ...base, facts, profileId: addProfile.value };
+        return;
+      }
+      const addFactKey = target.closest('[data-add-fact-key]');
+      const addFactValue = target.closest('[data-add-fact-value]');
+      const addField = addFactKey || addFactValue;
+      if (addField) {
+        const which = addFactKey ? 'data-add-fact-key' : 'data-add-fact-value';
+        const factIndex = Number(addField.getAttribute(which));
+        while (facts.length <= factIndex) facts.push({ key: '', value: '' });
+        const entry = facts[factIndex] || { key: '', value: '' };
+        facts[factIndex] = addFactKey
+          ? { ...entry, key: addField.value }
+          : { ...entry, value: addField.value };
+        state.addForm = { ...base, profileId: base.profileId, endpoint: base.endpoint, facts };
+      }
+      return;
+    }
+
     const index = draftIndexOf(state.selectedProfileId);
     if (index < 0) return;
 

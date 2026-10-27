@@ -33,6 +33,7 @@ import {
   finiteNumber,
   joinRoleRows,
   moveDraftCandidate,
+  poolEndpointOptions,
   postConfigure,
   resetCommandView,
   resourcePageHtml,
@@ -178,7 +179,7 @@ test('复位命令：无命令禁用、空命令不碰剪贴板、写失败不�
   assert.equal(failed.ok, false);
 });
 
-test('草稿只改本角色且不原地改；patch 改不动 profileId/runtime；新候选启用且无参数', () => {
+test('草稿只改本角色且不原地改；patch 改不动 profileId/runtime；新候选采纳启停与参数', () => {
   const saved = {
     coordinator: [
       { profileId: 'c1', endpoint: 'local' },
@@ -217,20 +218,27 @@ test('草稿只改本角色且不原地改；patch 改不动 profileId/runtime�
   assert.equal(edited.endpoint, 'new');
   assert.deepEqual(edited.facts, [{ key: 'model', value: 'm' }], 'facts 只留字符串键值，原样保留');
 
-  // 添加：只进草稿、默认启用、无参数，且不吃 input 里多给的键。
+  // 添加：只进草稿；runtime 这类未知键仍不吃，但**启停和参数是人的选择，照收**。
+  // 忽略 enabled 的后果不是多一条启用行，而是人在抽屉里点了「停用」、屏幕上那条
+  // 也显示停用，存下去却是启用的——下次调度就从这条开始跑。
   next = addDraftCandidate(next, 'coordinator', {
     profileId: 'c3',
     endpoint: 'remote',
     runtime: 'x',
+    order: 9,
     enabled: false,
+    facts: [{ key: 'model', value: 'm', extra: 'ignored' }],
   });
   assert.equal(next.coordinator.length, 3);
   assert.deepEqual(next.coordinator[2], {
     profileId: 'c3',
     endpoint: 'remote',
-    enabled: true,
-    facts: [],
+    enabled: false,
+    facts: [{ key: 'model', value: 'm' }],
   });
+  assert.equal(next.coordinator[2].runtime, undefined, 'runtime 固定 pi，不从界面写');
+  assert.equal(next.coordinator[2].order, undefined, '顺序只由数组位置表达，不带 order 键');
+  assert.notEqual(next.coordinator[2].facts, undefined);
 
   // 全程：执行者草稿、saved 和传入的 drafts 都不能变。
   assert.deepEqual(next.executor, baseline.executor);
@@ -247,6 +255,21 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.deepEqual(endpointOptions([{ endpoint: 'custom-only' }]), ['custom-only']);
   assert.deepEqual(endpointOptions([{ profileId: 'x' }, { endpoint: '' }]), []);
   assert.deepEqual(endpointOptions(undefined), [], '配置读失败时不能编出选项');
+
+  // 全池：空角色也能用其他角色已返回的端点。只看当前角色的后果是空角色一条都加不了。
+  assert.deepEqual(poolEndpointOptions({
+    coordinator: [],
+    executor: [{ endpoint: 'local' }],
+  }), ['local']);
+  assert.deepEqual(poolEndpointOptions({
+    coordinator: [{ endpoint: 'a' }],
+    executor: [{ endpoint: '' }, { actual: 1 }],
+    independent_reviewer: 'not-an-array',
+    classifier: null,
+  }), ['a'], '不是数组的角色跳过，不编出选项');
+  assert.deepEqual(poolEndpointOptions({ coordinator: [], executor: [], independent_reviewer: [], classifier: [] }), [],
+    '四角色都没有端点时不能凭空给一个端点（包括内置 local）');
+  assert.deepEqual(poolEndpointOptions(undefined), [], '配置读失败时不能编出选项');
 
   const saved = {
     coordinator: [{ profileId: 'c1', endpoint: 'local' }],
@@ -285,6 +308,38 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.equal(html.includes('data-draft-profile value='), false);
 
   assert.ok(resourcePageHtml({ ...vm, dirty: false }).includes('没有未保存修改'));
+
+  // 添加候选是右侧抽屉，与编辑共享同一份草稿；空角色在加入前不能出现保存条。
+  const adding = resourcePageHtml({
+    role: 'classifier',
+    rows: [],
+    drafts: [],
+    adding: true,
+    addForm: { profileId: '', endpoint: 'local', enabled: true, facts: [] },
+    endpointOptions: ['local'],
+  });
+  assert.ok(adding.includes('data-resource-add-drawer'), '添加没有用抽屉画');
+  assert.ok(adding.includes('class="resource-drawer"'), '抽屉要复用已有 resource-drawer class，否则它不会落在右侧');
+  assert.ok(adding.includes('>加入角色草稿<'), '主按钮文案不对：加入不是保存');
+  assert.equal(adding.includes('data-resource-add-form'), false, '表上方的旧添加表单还在');
+  assert.equal(adding.includes('data-resource-save'), false, '添加抽屉里不能出现保存条/保存按钮');
+  assert.ok(adding.includes('data-add-endpoint'), '端点必须是下拉，不是自由文本');
+  assert.equal(adding.includes('data-draft-endpoint'), false,
+    '添加抽屉不能用编辑抽屉的端点属性：change 会被当成改已选草稿');
+  assert.equal(adding.includes('data-fact-add'), false,
+    '添加抽屉不能用编辑抽屉的 data-fact-add：它改的是已选草稿');
+
+  const noOptions = resourcePageHtml({
+    role: 'classifier',
+    rows: [],
+    drafts: [],
+    adding: true,
+    addForm: { profileId: '', endpoint: '', enabled: true, facts: [] },
+    endpointOptions: [],
+  });
+  assert.ok(/data-add-join disabled/.test(noOptions), '全池没有端点时加入按钮必须禁用');
+  assert.equal(noOptions.includes('endpoint（自由填写）'), false, '不能退回自由文本端点');
+  assert.ok(noOptions.includes('全池没有已返回的端点'));
 });
 
 test('保存冻结点击时的角色与有序候选；成功采用全池快照但保留其他角色脏草稿', async () => {
