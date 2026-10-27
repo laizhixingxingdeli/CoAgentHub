@@ -56,7 +56,7 @@
 | 等待与自动恢复 | `auto-resume`（托管启动参数、到期等待的筛选、上游网络中断判定）、`heartbeat-continuation`（接管旧锁后按上一服务心跳窗口选出要续跑的 Mission）、`probe-reclaim`（孤儿半开探测名额回收）、`wait-info`（等待状态统一投影：谁处理、会不会自动恢复、下次重试、有没有活动 Agent、下一步；HTTP / MCP / 网页共用）、`model-policy`（Mission 级模型约束的事件存取） |
 | 升级 | `escalations`（升级、契约核对、诊断与答复；同一 Attempt 已有未答复的普通升级时拒绝第二张，`ESCALATION_ALREADY_OPEN`，平台门禁卡与诊断卡不算，COM7） |
 | 预算与用量 | `budget-usage`（用量聚合、权威预算）、`usage-helpers`（用量与时间纯辅助）、`ticket-budget`（单票费用上限与每 15 个工作项检查点的门禁） |
-| 视图与简报 | `views`（只读视图）、`agent-view-helpers`（agent 视图纯投影）、`startup-brief`（开跑简报与裁剪审计）、`context-metrics`（摘要净化） |
+| 视图与简报 | `views`（只读视图）、`agent-view-helpers`（agent 视图纯投影）、`startup-brief`（开跑简报与裁剪审计）、`context-metrics`（摘要净化）、`delivery-status`（收件箱每条 pending 的 `stillOpen` 只读补注：不写、不 ACK、不读活动日志，WAKE1） |
 | 活动 | `command-tracking`（命令活动事件） |
 
 ## 其他
