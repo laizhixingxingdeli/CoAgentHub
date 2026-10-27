@@ -1,17 +1,12 @@
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import {
-  clearDeadDaemonPid,
-  pidIsAlive,
   pluginDataDir,
-  readDaemonPid,
   writePluginDataPointer,
 } from "./l3-state.js";
 import {
   bindSessionStart,
   type SessionStartInput,
 } from "./session-binding.js";
+import { ensureBridge } from "./bridge-supervisor.js";
 
 const input = await readStdin();
 const dataDir = pluginDataDir();
@@ -36,9 +31,10 @@ try {
     ...(recipient ? { recipient } : {}),
     ...(takeover ? { takeover: true } : {}),
   });
-  if (result.bound && process.env.COAGENTHUB_L3_BRIDGE !== "0") {
-    ensureBridge(dataDir);
-  }
+  // The BRIDGE=0 switch lives inside the shared ensureBridge, so the hook and
+  // the MCP supervision timer cannot drift apart on which switch applies.
+  // An unbound SessionStart still skips the call: there is no chat to deliver to.
+  if (result.bound) ensureBridge(dataDir);
   emitContext(result.context);
 } catch (error) {
   process.stdout.write(
@@ -46,25 +42,6 @@ try {
       systemMessage: `CoAgentHub v5 L3 binding failed: ${safeError(error)}`,
     }),
   );
-}
-
-function ensureBridge(dataDir: string): void {
-  clearDeadDaemonPid(dataDir);
-  const pid = readDaemonPid(dataDir);
-  if (pid && pidIsAlive(pid)) return;
-
-  const here = dirname(fileURLToPath(import.meta.url));
-  const daemon = join(here, "l3-daemon.js");
-  const child = spawn(process.execPath, [daemon], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-    env: {
-      ...process.env,
-      PLUGIN_DATA: dataDir,
-    },
-  });
-  child.unref();
 }
 
 async function readStdin(): Promise<SessionStartInput> {
