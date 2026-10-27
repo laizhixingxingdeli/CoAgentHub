@@ -98,7 +98,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 测试用 `node --test`：定向跑 `node --test test/<名字>.test.ts`，全量跑 `node --test`。不用 npm / npx。
 - 测试尽量少，只加在关键地方：只写验收点名的关键场景，每条验收一到两条；不为每个分支、每种写法、每种错误各写一条（用户 2026-09-30）。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
-- `adapters/pi`（pi 适配层）和 `l3-mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器先构建再测：`["node","node_modules/typescript/bin/tsc","-p","l3-mcp-server/tsconfig.json"]`，然后 `["node","node_modules/vitest/vitest.mjs","run","--root","l3-mcp-server"]`。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
+- `adapters/pi`（pi 适配层）和 `l3-mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器先构建再测：`["node","C:/program1/coagenthub-v5/node_modules/typescript/bin/tsc","-p","l3-mcp-server/tsconfig.json"]`，然后 `["node","C:/program1/coagenthub-v5/node_modules/vitest/vitest.mjs","run","--root","l3-mcp-server"]`。这两条用主检出 `node_modules` 的绝对路径：Mission worktree 里没有 `node_modules`，`node node_modules/...` 的相对写法会找不到脚本；适配层那条的 `--import tsx` 走模块解析、沿父目录能找到，不受影响（2026-10-27 WAKE2 实测）。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
 
 ### 仓库
 
