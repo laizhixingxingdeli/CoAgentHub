@@ -120,12 +120,19 @@ function workItemSelect(flow) {
  * 轮次为空就整段不写：老工单没有 orderRevision，补一句「第 1 轮」等于说这张单
  * 已经被派过一轮了。次数取投影给的 executionLabel，不按卡片条数另算——收起时
  * 只显示最近几条，按条数算会把「13 次」显示成「4 次」。
+ *
+ * **展开态写两个真实数字**：底下就是完整纵向历史，标题是唯一能核对「下面是不是
+ * 全部」的地方。两个数都取投影（stages / executionCount），本层不数 DOM 行——数行
+ * 等于给了第二份判断，收起时那行数又是被剪过的。轮次仍只用 round.label，不合成
+ * 「第 1–3 轮」：任务里没有这个区间事实，写了就是编。
  */
-function flowTitle(flow) {
+function flowTitle(flow, expanded) {
   if (!flow.selectedId) return '还没有工作项';
   const parts = [flow.selectedId];
   if (flow.round && flow.round.label) parts.push(flow.round.label);
-  parts.push(flow.executionLabel);
+  parts.push(expanded === true
+    ? flow.stages.length + ' 个已发生环节 / ' + flow.executionCount + ' 次执行'
+    : flow.executionLabel);
   return parts.join(' · ');
 }
 
@@ -178,7 +185,7 @@ export function taskFlowHtml(view, activity, options) {
     + '</div>'
     + '<div class="td-flow-board">'
     + '<div class="td-flow-head">'
-    + '<span class="td-flow-title">' + esc(flowTitle(flow)) + '</span>'
+    + '<span class="td-flow-title">' + esc(flowTitle(flow, expanded)) + '</span>'
     + acceptedChip(flow)
     + '<button type="button" class="td-locate" data-action="locate-current">定位当前</button>'
     + '<button type="button" class="td-history-toggle" data-action="toggle-history">'

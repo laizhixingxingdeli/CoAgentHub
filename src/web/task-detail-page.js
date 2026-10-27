@@ -49,6 +49,16 @@ const DEFAULT_OUTPUT_SIDE = 'summary';
 const HISTORY_EXPANDED_LABEL = '收起纵向历史';
 
 /**
+ * 点一条历史行时把标题带上的按钮文案改成「展开纵向历史」。
+ *
+ * 文案与子视图那份（task-detail-flow-view.js 的 HISTORY_COLLAPSED_LABEL）必须是同一句：
+ * 两处各写一份字面量，改一处忘另一处之后，按钮在展开态会写着“展开”而点了收起。
+ * 不改那两个常量本身（子视图与它的测试都在用），这里只把同一个字再写一遍，
+ * 并靠 task-detail-page.test.ts 的点击用例钉住。
+ */
+const HISTORY_COLLAPSED_LABEL = '展开纵向历史';
+
+/**
  * 未知页签退回工作流：留一个不是页签的 key，三个按钮全不选中，页头看起来像坏了；
  * 而三个面板也全 hidden，整页只剩页头。
  */
@@ -227,10 +237,14 @@ export function taskDetailHtml(model) {
   const workflowPanel = panelHtml(
     'workflow',
     taskFlowHtml(view, activity, { selectedWorkItemId, expanded: historyExpanded })
-      // 输出区**只放在工作流面板里**：它是这一页唯一会自己变的东西，两边各挂一份就是
-      // 两个游标、两种刷新节奏，其中一份会停在旧数据上而看起来完全正常。放在面板内部
-      // 而不是外面，切到交付/契约页签时它跟着 hidden——人不会以为它还在追这一跳。
-      + output,
+      // 输出区只放在工作流面板里，且**展开纵向历史时连这一份也不拼**（原项 W-899/
+      // W-904/W-909 的缺口）：展开后这一块只该有完整纵向历史一份事实。两张卡堆在
+      // 历史下面，同一批环节在一屏里被说两遍；右边那张讲的还是“选中的那一跳”，与
+      // 上面整列历史行混读起来像历史的续表。收起时输出仍在，且只在工作流面板里：它是
+      // 这一页唯一会自己变的东西，两边各挂一份就是两个游标、两种刷新节奏，其中一份会
+      // 停在旧数据上而看起来完全正常。放在面板内部而不是外面，切到交付/契约页签时它
+      // 跟着 hidden——人不会以为它还在追这一跳。
+      + (historyExpanded ? '' : output),
     tab === 'workflow',
   );
 
@@ -255,7 +269,11 @@ export function taskDetailHtml(model) {
 
   return '<div class="td-page"'
     + ' data-mission-id="' + esc(iso(view.missionId)) + '"'
-    + ' data-tab="' + esc(tab) + '">'
+    + ' data-tab="' + esc(tab) + '"'
+    // 展开态写在根上：输出双卡拼不拼由上面那处决定，这里把同一个判断落成一个可读的
+    // 事实，测试与后续样式就不必靠“页面上有没有 .td-output”去反推。
+    + ' data-history-expanded="' + (historyExpanded ? 'true' : 'false') + '"'
+    + '>'
     + header
     + workflowPanel
     + deliveryPanel
@@ -384,10 +402,13 @@ export function bindTaskDetail(root, handlers) {
   // 换，而页头自己看着像是切过去了。
   const headerRoot = root.querySelector('.td-header') || root;
   const flowRoot = root.querySelector('.td-flow') || root;
-  const outputRoot = root.querySelector('.td-output') || root;
+  // **输出区可能根本不在**（展开纵向历史时本层不拼它，见 taskDetailHtml），而且这里
+  // **不许退回 root**：把整页根传给 bindTaskOutput，它会翻页里所有 [data-side]，把
+  // 页签与面板的 hidden 当成自己的面板去切；屏幕上只是“点了没反应”，实际页头被写坏了。
+  const outputRoot = root.querySelector('.td-output');
   bindTaskHeader(headerRoot);
   bindTaskFlow(flowRoot);
-  bindTaskOutput(outputRoot);
+  if (outputRoot !== null) bindTaskOutput(outputRoot);
 
   for (const button of root.querySelectorAll('button[data-tab]')) {
     after(button, 'onclick', () => {
@@ -425,6 +446,27 @@ export function bindTaskDetail(root, handlers) {
 
   for (const row of root.querySelectorAll('.td-stage, .td-history-row')) {
     after(row, 'onclick', () => {
+      // 点一条**已经展开的**历史行 = “回到常规工作流，看这一跳”（源稿 figma-49-3990.txt）。
+      // 不收起来的话，展开态本来就没有输出区，人点完历史只剩一列历史，看不到自己
+      // 刚选的那一跳——而屏幕上并不报错，只像是“点了没反应”。
+      //
+      // 只动展开态与按钮文案，**不动 .td-live 的 data-live-attempt，也不重算当前
+      // Attempt**：那是这一页存在的理由，改它一次，人就会把上一跳的结尾当成正在跑
+      // 的进度。data-expanded 由本层自己设，因为这一步是“点行”而不是“点按钮”，
+      // 子视图的 toggle 处理器不会跑。
+      const flow = root.querySelector('.td-flow');
+      // 用 classList 而不是 className 字符串：SVG 元素的 className 不是字符串。
+      const isHistoryRow = row.classList !== undefined && row.classList !== null
+        ? row.classList.contains('td-history-row')
+        : String(row.getAttribute('class')).split(/\s+/).includes('td-history-row');
+      if (flow !== null
+        && isHistoryRow
+        && flow.getAttribute('data-expanded') === 'true') {
+        flow.setAttribute('data-expanded', 'false');
+        const toggle = flow.querySelector('[data-action="toggle-history"]');
+        if (toggle !== null) toggle.textContent = HISTORY_COLLAPSED_LABEL;
+        callUi(handlers, { historyExpanded: false });
+      }
       // data-attempt 可能是空串（平台 / L3 的零散动作不是一次「一跳」），原样报出去：
       // 调用方看到空串就知道这一行没有 Attempt 可选，比这里悄悄吞掉一次点击更好排查。
       call(handlers, 'onSelectAttempt', text(row.getAttribute('data-attempt')));

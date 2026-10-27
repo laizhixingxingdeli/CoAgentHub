@@ -23,6 +23,8 @@ import { Window } from 'happy-dom';
 import { bindTaskFlow, taskFlowHtml } from '../src/web/task-detail-flow-view.js';
 
 const CSS = readFileSync(new URL('../src/web/task-detail-flow.css', import.meta.url), 'utf8');
+/** 渲染层源码：标题里的数字必须从投影来，不能是写进源码的字面量。 */
+const VIEW_SRC = readFileSync(new URL('../src/web/task-detail-flow-view.js', import.meta.url), 'utf8');
 
 /** 取一条规则的声明块。CSS 里同名选择器只该有一条，取到的就是那一条。 */
 function rule(styles: string, selector: string): string {
@@ -181,6 +183,52 @@ test('未指定选择：选中未结束的工作项，近期环节只含它的�
   assert.ok(/gap:\s*14px;/.test(rule(CSS, '.td-flow')), '.td-flow 的 gap 不是 14px');
   // 一排卡之间的 16px 与这一块内部的纵向间距是两件事，不能被一起改走。
   assert.ok(/gap:\s*16px;/.test(rule(CSS, '.td-flow .td-flow-stages')), '一排卡之间的 16px 被改了');
+});
+
+/**
+ * 展开纵向历史时，标题说的是**完整历史的事实**（原项 W-899/W-904/W-909 的补修）。
+ *
+ * 两个数字必须是投影给的真值：夹具里 W-B 只有两次执行、两条环节。写死成样板里那对
+ * 「15 个已发生环节 / 13 次执行」在屏幕上完全合理，而本单的事一条都对不上。
+ */
+test('展开时标题写真实的环节数与执行次数，近期卡与白底白框都由 CSS 撤掉', () => {
+  const { root, q, all } = mount(view(), activity(), { expanded: true });
+
+  assert.equal(root.getAttribute('data-expanded'), 'true');
+  const title = q('.td-flow-title')?.textContent || '';
+  assert.ok(title.includes('2 个已发生环节'), '展开标题缺真实环节数：' + title);
+  assert.ok(title.includes('2 次执行'), '展开标题缺真实执行次数：' + title);
+  assert.equal(title.includes('15 个已发生环节'), false, '展开标题出现了写死的环节数：' + title);
+  assert.equal(title.includes('13 次执行'), false, '展开标题出现了写死的次数：' + title);
+  // 整区渲染都不能出现那对样板数字：只查标题的话，写死的“15 个已发生环节”跑到
+  // 行尾或徽章里就漏过去了。
+  const wholeText = root.textContent || '';
+  assert.equal(wholeText.includes('15 个已发生环节'), false, '展开渲染里出现了写死的环节数');
+  assert.equal(wholeText.includes('13 次执行'), false, '展开渲染里出现了写死的次数');
+  // 源码里也不能有那对字面量：把它们写进模板串后，夹具里那两条断言还是能过（夹具
+  // 恰好不是 15/13），而真实任务上就会把样板数字当事实端上来。
+  assert.equal(VIEW_SRC.includes('15 个已发生环节'), false, '渲染层源码里写死了环节数');
+  assert.equal(VIEW_SRC.includes('13 次执行'), false, '渲染层源码里写死了次数');
+  // 轮次仍只用已有的 round.label，不合成区间。
+  assert.ok(title.includes('第 3 轮'), '展开标题丢了轮次：' + title);
+  assert.equal(/第 1[-–]3 轮/.test(title), false, '轮次被合成成了区间：' + title);
+
+  // 卡片与历史行**都还在 DOM 里**，隐藏只靠 CSS（bindTaskFlow 只翻 data-expanded）。
+  assert.equal(all('.td-flow-stages .td-stage').length, 2, '展开时近期卡不应被从 DOM 里删掉');
+  assert.equal(all('.td-history .td-history-row').length, 2, '展开时历史行不在 DOM 里');
+
+  // CSS：展开态近期卡整排 display:none，白底与描边撤掉（不把横条与全历史套在一个白框里）。
+  const hidden = rule(CSS, ".td-flow[data-expanded='true'] .td-flow-stages");
+  assert.ok(/display:\s*none;/.test(hidden), '展开态近期卡没有被 CSS 隐藏：' + hidden);
+  const board = rule(CSS, ".td-flow[data-expanded='true'] .td-flow-board");
+  assert.ok(/background:\s*transparent;/.test(board), '展开态白底没有撤成透明：' + board);
+  assert.ok(/border:\s*none;/.test(board), '展开态描边没有撤掉：' + board);
+
+  // 收起态标题仍用原来那句（投影给的 executionLabel），不受展开态分支影响。
+  const collapsed = mount(view(), activity());
+  const collapsedTitle = collapsed.q('.td-flow-title')?.textContent || '';
+  assert.ok(collapsedTitle.includes('已记录 2 次执行'), '收起标题没改用回原文案：' + collapsedTitle);
+  assert.equal(collapsedTitle.includes('个已发生环节'), false, '收起标题用了展开态的写法：' + collapsedTitle);
 });
 
 /**

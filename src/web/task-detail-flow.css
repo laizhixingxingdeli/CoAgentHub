@@ -235,3 +235,75 @@
   flex: 1 1 auto;
   max-height: none;
 }
+
+/* ---------------------------- 展开纵向历史 ----------------------------
+ *
+ * 展开态**不再是一个白板里再套一份列表**（源稿 figma-45-1388.txt）：页头 + 三页签
+ * 之下直接就是真实的环节摘要与一列纵向历史行。这里用透明与去描边把白板“撤掉”，
+ * 而不是另拼一套 HTML：环节卡与历史行必须**同时**在 DOM 里（收起时靠 CSS 隐藏历史、
+ * 展开时靠 CSS 隐藏卡片），因为 bindTaskFlow 按契约只翻根上的 data-expanded 与按钮
+ * 文案、不重算环节。只拼其中一份的话，点一下按钮就永远不会有东西出现。
+ *
+ * 收起态那几条规则（白板 194px、卡片 274×136、历史 max-height:420px 自家滚）一条都
+ * 不改：它们与画板 figma-2-140.txt 41:445 对好，改一个数字就是整块位移。
+ */
+
+/* 展开后选择器、定位当前与已验收芯片都不再出现：它们都属于“收起时看最近几条”
+ * 那套用法。选择器留在页面上就会在历史顶上多一行控件，而那一行与下面的行看起来像
+ * 同一组。 */
+.td-flow[data-expanded='true'] .td-flow-picker,
+.td-flow[data-expanded='true'] .td-locate,
+.td-flow[data-expanded='true'] .td-accepted {
+  display: none;
+}
+
+/* 近期卡整排藏掉（而不是不渲染）：卡片与历史行必须同时存在于 DOM，因为 bindTaskFlow
+ * 只翻 data-expanded 而不重算环节。留着这一排的话，展开后就是“一排近期卡 + 下面
+ * 再从左铺一遭完整历史”，同一批环节在一屏里说两遍。 */
+.td-flow[data-expanded='true'] .td-flow-stages {
+  display: none;
+}
+
+/* 白板撤成透明无框：展开时那一层白底只能把一个横条和一整列历史套在一起，读起来像
+ * “一个卡片里装了全部历史”，而实际事实是页面本身就换成了纵向历史。overflow 归 visible，
+ * 否则收起态那句 overflow: clip 会把长历史剪掉。 */
+.td-flow[data-expanded='true'] .td-flow-board {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+}
+
+/* 标题带跟着透底、不再固定 44px：固定高度下换行后的标题会被裁掉一截，而裁掉的
+ * 恰好是“几个环节 / 几次执行”那半句。底部 12px 把它与历史行分开。
+ * 展开按钮靠 margin-left: auto 留在最右（定位当前已隐藏）：它成了带子里唯一的动作，
+ * 不推右就会贴着标题。 */
+.td-flow[data-expanded='true'] .td-flow-head {
+  background: transparent;
+  height: auto;
+  min-height: 36px;
+  padding: 0 0 12px;
+}
+
+.td-flow[data-expanded='true'] .td-history-toggle {
+  margin-left: auto;
+}
+
+/* 历史不再自家滚动、也不再压一层底：展开态它就是这一块的全部内容，内部开一个
+ * 420px 的滚动区会把“全部历史”又变成“一小段可滚的窗口”。 */
+.td-flow[data-expanded='true'] .td-history {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 行本身去底色、去分隔线：暖纸面上靠行距分段。（只改背景与竖线，不动
+ * border-left 的 2px 当前项强调条——那条说的是“当前在哪”，与分段无关。） */
+.td-flow[data-expanded='true'] .td-history-row {
+  background: transparent;
+  border-top: none;
+}

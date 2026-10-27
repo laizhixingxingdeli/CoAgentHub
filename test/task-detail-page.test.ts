@@ -378,3 +378,63 @@ test('归属链齐全时文件页签列出这一跳的真实路径；换成上�
     '上一跳没有归属却给出了清单：' + unknownText);
   assert.equal(unknownText.includes('src/web/app.js'), false, '上一跳列了别的 Attempt 的路径：' + unknownText);
 });
+
+/**
+ * 展开纵向历史：这一页换成完整历史，且点历史行能回到常规工作流（原项 W-899/W-904/W-909
+ * 的补修，源稿 figma-45-1388.txt / figma-49-3990.txt）。
+ *
+ * 两条都是「看着对、其实在说谎」的形状：保留输出双卡时，同一批环节在一屏里说两遍；
+ * 点完历史不收起时，人看不到自己刚选的那一跳，而屏幕上并不报错。第三条钉的是
+ * 左侧实时那一跳不随历史选择而变（收起态才看得到它）。
+ */
+test('展开纵向历史时页面没有输出双卡，点历史行回到常规工作流并只上报该行 attempt', () => {
+  const onSelectAttempt: string[] = [];
+  const onUi: Array<Record<string, unknown>> = [];
+  const { root, q } = mount({
+    view: attemptView(),
+    activity: twoAttempts(),
+    nowIso: '2026-10-26T09:30:00.000Z',
+    historyExpanded: true,
+    liveChunks: [],
+  }, {
+    onSelectAttempt: (attemptId: string) => onSelectAttempt.push(attemptId),
+    onUi: (patch: Record<string, unknown>) => onUi.push(patch),
+  });
+
+  // 展开态写在根与环节区两处，取值一致；输出双卡根本不在 DOM 里。
+  assert.equal(root.getAttribute('data-history-expanded'), 'true');
+  assert.equal(q('.td-flow')?.getAttribute('data-expanded'), 'true');
+  assert.equal(q('.td-output'), null, '展开纵向历史时仍挂着了输出双卡');
+
+  // 点第一条历史行：先收起（上报 historyExpanded:false），再把该行 attempt 报出去。
+  const rows = [...root.querySelectorAll('.td-flow .td-history-row')] as HTMLElement[];
+  assert.ok(rows.length >= 2, '历史行不够两条，测不到“点第一条”');
+  const first = rows[0];
+  const firstAttempt = first.getAttribute('data-attempt');
+  click(first);
+  assert.deepEqual(onUi.at(-1), { historyExpanded: false }, '点历史行没有收起纵向历史');
+  assert.equal(onSelectAttempt.at(-1), firstAttempt, '点历史行没上报该行的 attempt');
+  assert.equal(q('.td-flow')?.getAttribute('data-expanded'), 'false');
+  assert.equal(q('[data-action="toggle-history"]')?.textContent, '展开纵向历史');
+
+  // 展开态本来就没有 .td-live：点完后也不许凭空冒出一份，更不许把选中的历史 id 写进
+  // 任何 data-live-attempt（那正是「左侧变成上一跳」的来源）。
+  const liveNodes = [...root.querySelectorAll('[data-live-attempt]')] as HTMLElement[];
+  assert.equal(liveNodes.length, 0, '展开态点完历史行后冒出了实时行');
+  assert.equal(firstAttempt === '', false, '夹具的行没有 attempt，测不到串账');
+
+  // 收起态：左侧实时 id 仍是当前未结束的那一跳，不是刚点的历史那一跳。
+  const collapsed = mount({
+    view: attemptView(),
+    activity: twoAttempts(),
+    nowIso: '2026-10-26T09:30:00.000Z',
+    historyExpanded: false,
+    selectedAttemptId: firstAttempt ?? '',
+    liveChunks: [],
+  });
+  assert.equal(collapsed.root.getAttribute('data-history-expanded'), 'false');
+  assert.ok(collapsed.q('.td-output'), '收起态没有输出双卡');
+  assert.equal(collapsed.q('.td-output .td-live')?.getAttribute('data-live-attempt'), 'W-1.exec-2',
+    '选中历史 Attempt 把左侧实时那一跳改成旧的了');
+  assert.equal(collapsed.q('.td-output .td-history')?.getAttribute('data-history-attempt'), firstAttempt);
+});
