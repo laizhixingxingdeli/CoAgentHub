@@ -143,6 +143,8 @@ AC4 实现已在 master d4f39c8；独立普通 Mission AC4-platform-closeout-202
   入口把**结构化 facts / assessment** 交给确定性 classifier，再按推荐路由创建 Mission（或拒绝）。caller **不得**自填 route。
 - **code-metrics** — 代码度量告警
   `src/application/code-metrics.ts` 接收源码路径与文本，近似报告文件超过 400 行、函数超过 40 行、参数超过 4 个、嵌套超过 3 层、复杂度达到 15 及 src 相对依赖环。复杂签名、表达式箭头、读
+- **console-overview** — 控制台任务总览
+  只读总览。不新增分页协议或内核字段，不在 Web 上做审批、终审、暂停、取消或合入。
 - **context-attribution-report** — 离线只读上下文归因报告
   在启用任何默认简报裁剪前，先从已持久化的文件状态量出可归因的逐 Attempt 信号及历史缺口。运行 `node src/context-attribution-report.ts --input <state.json> [--archi
 - **context-builder** — 角色 Context Bundle 与开跑简报来源
