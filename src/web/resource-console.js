@@ -68,7 +68,13 @@ export function weekLines(window7d) {
       '尝试 ' + (attempts === null ? '未知' : String(attempts))
       + ' · 成功 ' + (successes === null ? '未知' : String(successes)),
     // 真实的 0 是「这周确实没花钱」，要显示 $0；只有拿不到数字才是「未上报」。
-    costLine: cost === null ? '费用未上报' : '$' + String(cost),
+    // 显示值用两位小数：原值是浮点累加的结果（102.63400399999996），原样铺在
+    // 格子上既难读又像是坏数据。四舍五入只落在这一条显示字符串上，绝不写回
+    // window7d / health——那是「真实费用」，下游算账要用它的完整精度。
+    costLine: cost === null ? '费用未上报' : '$' + cost.toFixed(2),
+    // 原值另外带出去，供单元格的 data-* / title 展示：把 toFixed 的结果当成唯一
+    // 出口，人就再也看不到平台到底报了多少，怀疑对不上账时无从核对。
+    costExact: cost === null ? null : String(cost),
   };
 }
 
@@ -457,7 +463,12 @@ function rowHtml(row, index, selectedProfileId) {
     + '</span>'
     + '<span class="resource-col" data-col="5">'
     +   '<span class="resource-cell console-body">' + esc(week.attemptsLine) + '</span>'
-    +   '<span class="resource-sub console-body">' + esc(week.costLine) + '</span>'
+    // 费用：可见文本是可读精度，原值挂在 data-reported-cost / title 上。未上报时
+    // 这两个属性都不加——挂了空串等于宣布「平台报了空值」，和「没报」不是一回事。
+    +   (week.costExact === null
+      ? '<span class="resource-sub console-body">' + esc(week.costLine) + '</span>'
+      : '<span class="resource-sub console-body" data-reported-cost="' + esc(week.costExact)
+        + '" title="费用原值 ' + esc(week.costExact) + '">' + esc(week.costLine) + '</span>')
     + '</span>'
     + '<span class="resource-col" data-col="6">'
     +   '<span class="resource-cell console-body">' + esc(quotaCellText(candidate.health)) + '</span>'

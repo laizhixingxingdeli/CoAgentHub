@@ -383,3 +383,40 @@ test('resourcePageHtml：冲突才禁用保存，冲突可重新读取，消息�
   assert.equal(empty.includes('data-resource-save'), false, '空角色仍无保存条');
   assert.equal(empty.includes('data-resource-remove'), false, '不新增删除候选');
 });
+
+test('费用：可见文本两位小数，原值在 data-reported-cost 与 title 上，且不改传入对象', () => {
+  // 真实费用是浮点累加出来的长小数，原样画在格子上既难读又像坏数据；但只把它
+  // toFixed 掉人就再也查不到平台到底报了多少。所以显示两精度、原值另挂在属性上。
+  const exact = 102.63400399999996;
+  // 把 window7d 单独拿一份引用，就能在渲染之后直接检查它没被 toFixed 覆写。
+  const paidWindow = { attempts: 7, successes: 6, reportedCost: exact };
+  const paid = healthRow('paid', { window7d: paidWindow });
+  // 同一页另一行平台没报费用：必须仍是「费用未上报」，不能借上一条的格式化成 $0.00。
+  const silent = healthRow('silent', { window7d: { attempts: 3, successes: 3, reportedCost: null } });
+
+  const rows = joinRoleRows(
+    [{ profileId: 'paid', endpoint: 'local' }, { profileId: 'silent', endpoint: 'local' }],
+    [paid, silent],
+  );
+  const html = resourcePageHtml({
+    role: 'coordinator',
+    revision: 'r-cost',
+    counts: { coordinator: 2 },
+    rows,
+  });
+
+  const paidRow = rowSegments(html).find((segment) => segment.startsWith('paid"'));
+  const silentRow = rowSegments(html).find((segment) => segment.startsWith('silent"'));
+  assert.ok(paidRow && silentRow, '两行都要画出来');
+
+  assert.ok(paidRow.includes('$102.63'), '有限费用按两位小数显示');
+  assert.ok(paidRow.includes('data-reported-cost="' + String(exact) + '"'), '原值要可查');
+  assert.ok(paidRow.includes('title="费用原值 ' + String(exact) + '"'), '悬停也要看到原值');
+  assert.equal(paidRow.includes('$102.63400399999996'), false, '格子上的可见文本不能是原值');
+  // 格式化只能落在显示字符串上：写回健康就等于改掉真实费用，下游算账全错。
+  assert.equal(paidWindow.reportedCost, exact, '调用后传入对象的 reportedCost 不变');
+
+  assert.ok(silentRow.includes('费用未上报'));
+  assert.equal(silentRow.includes('data-reported-cost'), false, '未上报不挂原值属性');
+  assert.equal(silentRow.includes('$0'), false, '未知不能显示成 0');
+});
