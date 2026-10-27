@@ -85,7 +85,51 @@ const HEALTH_FILENAME = "l3-bridge-health.json";
 export function pluginDataDir(env: NodeJS.ProcessEnv = process.env): string {
   const configured =
     env.PLUGIN_DATA?.trim() || env.COAGENTHUB_PLUGIN_DATA?.trim();
-  return resolve(configured || join(homedir(), ".codex", "coagenthub-v5"));
+  if (configured) return resolve(configured);
+  return readPluginDataPointer(env) ?? resolve(join(homedir(), ".codex", "coagenthub-v5"));
+}
+
+/**
+ * Where the SessionStart hook records the plugin data dir. Codex passes
+ * PLUGIN_DATA to the hook but not necessarily to the MCP process, so this file
+ * is the only location both sides can agree on without extra configuration.
+ */
+export function pluginDataPointerPath(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.CODEX_HOME?.trim();
+  const codexHome = home ? resolve(home) : join(homedir(), ".codex");
+  return join(codexHome, "coagenthub-v5", "plugin-data-dir.json");
+}
+
+/**
+ * Overwrite the pointer with the directory only. Storing a bare JSON string
+ * keeps bindings and credentials out of a file that MCP reads without any
+ * authentication of its own.
+ */
+export function writePluginDataPointer(
+  dataDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const path = pluginDataPointerPath(env);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(dataDir)}\n`, "utf8");
+}
+
+/**
+ * Unreadable or malformed pointers fall back to the default instead of
+ * throwing: a hook-written file must never turn into a hard MCP startup
+ * failure on a half-written or hand-edited file.
+ */
+function readPluginDataPointer(env: NodeJS.ProcessEnv): string | undefined {
+  try {
+    const raw = readFileSync(pluginDataPointerPath(env), "utf8").trim();
+    if (!raw) return undefined;
+    const parsed = raw.startsWith("\"") ? JSON.parse(raw) : raw;
+    return typeof parsed === "string" && parsed.trim() !== ""
+      ? resolve(parsed)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Legacy single-file binding. Still read for compatibility with old installs. */

@@ -6,6 +6,7 @@ import {
   pidIsAlive,
   pluginDataDir,
   readDaemonPid,
+  writePluginDataPointer,
 } from "./l3-state.js";
 import {
   bindSessionStart,
@@ -14,6 +15,10 @@ import {
 
 const input = await readStdin();
 const dataDir = pluginDataDir();
+
+// Overwrite on every SessionStart so an MCP process that only sees the pointer
+// cannot keep pointing at a data dir that PLUGIN_DATA has since moved away from.
+if (process.env.PLUGIN_DATA?.trim()) writePluginDataPointer(dataDir);
 
 try {
   const scope =
