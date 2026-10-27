@@ -54,6 +54,16 @@
   overflow: clip;
 }
 
+/* 收起时白板高度按画板写死 194px（figma-2-140.txt 41:445）。不锁的话白板随卡片
+ * 内容长高，下面的实时输出被一路往下推，人得滚动才能看见「现在跑到哪」——而画板
+ * 里这两块本来同屏可见。只在收起时锁：展开纵向历史时锁死会把历史剪掉一半，那时
+ * 由 .td-history 自家滚动（见本文件末尾）。 */
+.td-flow[data-expanded='false'] .td-flow-board {
+  box-sizing: border-box;
+  height: 194px;
+  overflow: clip;
+}
+
 /* 标题带：轮次与次数、已验收标记、定位当前、展开。底色用 nav 令牌，
  * 让它与下面的步骤卡明显分层——它与环节不是一组。
  * 定位与展开靠 margin-left: auto 推到右侧：它们是这一带的附属动作，
@@ -110,12 +120,18 @@
   overflow: clip;
 }
 
+/* 卡片宽度与高度都写死（画板 274×136）。min-width: 0 是关键：flex 项默认
+ * min-width: auto，内容里有一个不断行的长 profile/model 就会被撑到比 274 宽，
+ * 后面的卡被挤出可见区，而溢出的部分只在别人屏幕上看得到。 */
 .td-flow .td-stage {
   display: flex;
   flex: 0 0 274px;
+  width: 274px;
+  min-width: 0;
+  height: 136px;
   flex-direction: column;
   gap: 6px;
-  min-height: 136px;
+  overflow: hidden;
   padding: 12px 16px;
   border-left: 2px solid transparent;
   border-radius: 8px;
@@ -159,15 +175,20 @@
 }
 
 /* 身份行：这一跳是谁、用哪条候选、哪个模型。比标题小一号、比状态深一阶：
- * 它回答“谁在干”，而人第一眼要的是“发生了什么”。 */
+ * 它回答“谁在干”，而人第一眼要的是“发生了什么”。
+ *
+ * 换行而不是省略号：真实的 profile/model 是核对「这一跳到底用了谁」的唯一凭据，
+ * 截成 `executor-openrouter-qwe…` 之后两个不同的候选看起来一模一样。两行 40px
+ * 封顶，多出的靠 min-width: 0 + overflow-wrap: anywhere 折行。 */
 .td-flow .td-stage-identity {
   margin: 0;
+  max-height: 40px;
   font-size: 13px;
   line-height: 20px;
   color: var(--color-ink);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .td-flow .td-stage-state {

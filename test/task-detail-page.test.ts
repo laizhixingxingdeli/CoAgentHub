@@ -19,10 +19,23 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { Window } from 'happy-dom';
 
 import { bindTaskDetail, taskDetailHtml } from '../src/web/task-detail-page.js';
+
+const PAGE_CSS = readFileSync(new URL('../src/web/task-detail-page.css', import.meta.url), 'utf8');
+const OUTPUT_CSS = readFileSync(new URL('../src/web/task-detail-output.css', import.meta.url), 'utf8');
+
+/** 取一条规则的声明块。取**最后一处**：.td-history 同时出现在合并选择器和它自己的
+ * 尺寸规则里，indexOf 会取到前者，那里的宽高是共享声明。 */
+function rule(styles: string, selector: string): string {
+  const at = styles.lastIndexOf(selector + ' {');
+  if (at < 0) return '';
+  const end = styles.indexOf('}', at);
+  return end < 0 ? '' : styles.slice(at + selector.length + 1, end);
+}
 
 const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
 const document = window.document as unknown as Document;
@@ -233,4 +246,25 @@ test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-cu
   select.dispatchEvent(new window.Event('change', { bubbles: true }) as unknown as Event);
   assert.equal(onWorkItem.at(-1), 'W-2');
   assert.equal(q('.td-output .td-live')?.getAttribute('data-live-attempt'), 'W-1.exec-2');
+
+  // 排版事实（画板 figma-2-140.txt）：白板底到输出顶隔 26px，不隔就把两块读成一块；
+  // 右卡页签是标题带里的文字页签（无边框、选中只一条下划线），不是一只只有边按钮。
+  assert.ok(/margin-top:\s*26px;/.test(rule(PAGE_CSS, '.td-page .td-output')),
+    '.td-page .td-output 没有 26px 上间距');
+  const side = rule(OUTPUT_CSS, '.td-output .td-side');
+  assert.ok(/height:\s*40px;/.test(side), '页签不是 40px：' + side);
+  assert.ok(/border-bottom:\s*2px solid transparent;/.test(side), '页签没有 2px 下划线位：' + side);
+  assert.equal(/border:\s*1px/.test(side), false, '页签仍是有边按钮：' + side);
+  assert.ok(/background:\s*transparent;/.test(side), '页签不是透底的文字页签：' + side);
+  const selected = rule(OUTPUT_CSS, ".td-output .td-side[aria-selected='true']");
+  assert.equal(/border:\s*1px/.test(selected), false, '选中页签仍带描边：' + selected);
+  assert.ok(/border-bottom-color:\s*var\(--color-accent\);/.test(selected), '选中页签没有强调色下划线：' + selected);
+  assert.ok(/background:\s*transparent;/.test(selected), '选中页签改用色底了：' + selected);
+
+  // 双卡与终端尺寸不能被这次排版改动带走。
+  assert.ok(/width:\s*704px;/.test(rule(OUTPUT_CSS, '.td-output .td-live')), '左卡宽度变了');
+  assert.ok(/height:\s*566px;/.test(rule(OUTPUT_CSS, '.td-output .td-live')), '左卡高度变了');
+  assert.ok(/width:\s*456px;/.test(rule(OUTPUT_CSS, '.td-output .td-history')), '右卡宽度变了');
+  assert.ok(/width:\s*656px;/.test(rule(OUTPUT_CSS, '.td-output .td-live-text')), '终端宽度变了');
+  assert.ok(/height:\s*444px;/.test(rule(OUTPUT_CSS, '.td-output .td-live-text')), '终端高度变了');
 });

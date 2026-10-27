@@ -147,29 +147,37 @@
   font-weight: 500;
 }
 
+/* 页签行。负的左外边距抵消页签自身的水平内边距，让首个页签的文字与上方的标题左缘
+ * 对齐（画板里标题与页签文字都从 x23 起）：不对齐时标题缩进、页签不缩进，两块看着
+ * 像两个层级。 */
 .td-output .td-side-switch {
   display: flex;
   gap: var(--space-sm);
+  margin-left: -12px;
 }
 
-/* 未选中的页签是透底带线；选中的用 select 浅底 + 强调色下边，与「当前」的读法一致
- * （见 task-detail-flow.css 的 data-current）。 */
+/* 页签是标题带里的 40px 文字页签（figma-2-140.txt 41:474），不是一只只按钮：
+ * 给它描边+白底之后，三个页签看起来像三个可以「执行」的动作，而它们只是切换
+ * 同一块内容的看法。所以背景透底、无边框，只有选中那一项带 2px 下划线。 */
 .td-output .td-side {
-  height: 32px;
+  box-sizing: border-box;
+  height: 40px;
   padding: 0 var(--space-md);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-control);
-  background: var(--color-white);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  border-radius: 0;
   font-family: inherit;
   font-size: var(--type-body-size);
   line-height: var(--type-body-line);
-  color: var(--color-ink);
+  color: var(--color-muted);
   cursor: pointer;
 }
 
+/* 选中只靠颜色与下划线：背景仍透明，不然标题带里会多出一块与标题抢眼的色斑。 */
 .td-output .td-side[aria-selected='true'] {
-  background: var(--color-select);
-  border-color: var(--color-accent);
+  background: transparent;
+  border-bottom-color: var(--color-accent);
   color: var(--color-accent);
   font-weight: 500;
 }

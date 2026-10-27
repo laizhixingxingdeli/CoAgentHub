@@ -17,11 +17,12 @@
  * `new Date()` 重判一次，两次渲染同一条数据就可能得出不同的字，「疑似停滞」会随着
  * 刷新自己跳来跳去，而人只会以为任务真的在反复卡住。
  *
- * **不 import task.js、也不 import src/application**：前者是详情页的渲染模块，它要
- * import 本模块来接线；互相 import 在浏览器原生 ES module 下不成环报错，只会让某一侧
- * 拿到 undefined，然后整页白掉。后者是服务端层，拉进来会把整条服务端依赖拽到前端。
+ * **不 import src/application**：那是服务端层，拉进来会把整条服务端依赖拽到前端。
+ * 从 task.js 只拿 formatClock 一个纯函数——时间在界面上只有一种读法，自己再写一份
+ * pad + slice 也会在改格式时漏掉一处；而 task.js **不** import 本模块，不成环。
  */
 import { esc } from './projects.js';
+import { formatClock } from './task.js';
 import { projectOutputBinding } from './task-detail-output.js';
 
 /**
@@ -36,9 +37,15 @@ const SIDES = [
 
 const DEFAULT_SIDE = 'summary';
 
-/** 标题是这一区的身份。不写「第 N 次执行」之类的次数：那边的次数属于工作流历史， */
-/** 抄过来就会在实时框上方写一个与本区无关的数字。 */
-const LIVE_TITLE = '当前实时输出';
+/**
+ * 标题是这一区的身份：写的是「正在跑的那一跳是谁」。
+ *
+ * 不写死一句「当前实时输出」：选了历史之后左标题与左正文都在，但标题只说「实时」，
+ * 人看不出屏幕上这几行到底属于哪一次执行——而右下角恰好是另一次执行的概要。
+ * 身份只认投影给的 liveAttemptId，**绝不拿 historyAttemptId 顶上**：那正是两边串账
+ * 的形状（左标题写右卡那一跳，看起来还挺合理）。没有当前执行时就直说没有。
+ */
+const LIVE_TITLE_PREFIX = '当前实时输出 · ';
 /** 右卡的标题。它说的是「你在看的这一跳」，与左边「正在跑的那一跳」是两回事。 */
 const HISTORY_TITLE = '选中环节';
 /** 历史正文的标签：事实区答的是这一跳的身份与账，正文区答的才是它说过的原话。 */
@@ -84,6 +91,10 @@ const USAGE_LABELS = {
 
 const text = (value) => (value === undefined || value === null ? '' : String(value)).trim();
 
+/** formatClock 解析不了时回 task.js 的 DASH（未导出，这里照抄那个字）：
+ * 用它与「空串」区分，否则占位符会被当成一个钟点原样上屏。 */
+const DASH = '—';
+
 /** 只认白名单里的三个值：别的值落回「概要」，页面上不会出现一个什么都不显示的空面板。 */
 function normalizeSide(value) {
   const side = text(value);
@@ -116,12 +127,17 @@ function scopeValueHtml(scope) {
     + '</ul>';
 }
 
-/** 本环节费用：只拼投影给的原值。cost 为 0 也当值显示——「报过 0」不是「没报」。 */
+/**
+ * 本环节费用：只拼投影给的 text（`$0.18 · 上报` / `≈$0.01 · 估算` / `未知`）。
+ *
+ * 本层不自己把 cost 与 quality 拼成字：质量该不该带 ≈、0 算不算真报了，那是投影
+ * 的判断（见 task-detail-output.js 的 projectCost）。这里再判一次，两处迟早只改到
+ * 一处，而漏改的那边在界面上只是一句看起来同样合理的金额。
+ */
 function costValueHtml(cost) {
   const c = cost && typeof cost === 'object' ? cost : null;
   if (c === null) return esc(UNKNOWN);
-  const parts = [text(c.cost), text(c.quality)].filter((part) => part !== '' && part !== UNKNOWN);
-  return esc(parts.length === 0 ? UNKNOWN : parts.join(' · '));
+  return esc(text(c.text) || UNKNOWN);
 }
 
 /**
@@ -212,20 +228,38 @@ function usageBody(historyUsage) {
 }
 
 /**
+ * 左标题全文。次数只从 id 尾巴的 `exec-N` 解析，不另外数一次——两处数法迟早漂开，
+ * 而漂开的样子是标题上写着「第 3 次」、正文其实是第 4 次。
+ */
+function liveTitle(liveAttempt) {
+  if (liveAttempt === '') return LIVE_TITLE_PREFIX + '无当前执行';
+  const matched = /\.exec-(\d+)$/.exec(liveAttempt);
+  const times = matched === null ? '' : '（第 ' + matched[1] + ' 次）';
+  return LIVE_TITLE_PREFIX + liveAttempt + times;
+}
+
+/**
  * 一条实时行。
  *
  * 每条一个**块级** `.td-live-line`，而不是把整段 liveText 塞进一个 pre：黏成一段之后
  * 「这条是哪一秒、谁说的」只能靠肉眼在长串里找，而相邻两条正文之间往往没有换行符。
  *
- * at 与 kind 都只认行上真实存在的值：没有 at 就不编时间（编一个「刚刚」会让人以为
- * 这一行是新的）；kind 不在白名单里就不编角色。
+ * 正文里的时刻只写到秒的本地时刻（与环节卡、纵向历史同一读法）：满屏 ISO 会把每行
+ * 正文挤到右边、把「这一行说了什么」淹没在日期里。原值**不丢**：行上有的 at 一律
+ * 挂到该行 title，解析失败时正文不编时间但原值仍可查——抹掉它，那行就永远回不到
+ * 真正发生过的那一刻了。
+ *
+ * at 与 kind 都只认行上真实存在的值；kind 不在白名单里就不编角色。
  */
 function liveLineHtml(line) {
   const source = line && typeof line === 'object' ? line : {};
   const at = text(source.at);
+  const clock = at === '' ? '' : formatClock(at);
+  const shown = clock === DASH ? '' : clock;
   const role = LIVE_ROLE_LABELS[text(source.kind)] || '';
-  const head = (at === '' ? '' : '[' + at + '] ') + (role === '' ? '' : '[' + role + '] ');
-  return '<span class="td-live-line">' + esc(head + text(source.text)) + '</span>';
+  const head = (shown === '' ? '' : '[' + shown + '] ') + (role === '' ? '' : '[' + role + '] ');
+  const title = at === '' ? '' : ' title="' + esc(at) + '"';
+  return '<span class="td-live-line"' + title + '>' + esc(head + text(source.text)) + '</span>';
 }
 
 /**
@@ -280,7 +314,7 @@ export function taskOutputHtml(input, options) {
   return '<section class="td-output" data-side="' + side + '">'
     + '<div class="td-live" data-live-attempt="' + esc(liveAttempt) + '">'
     + '<div class="td-live-head">'
-    + '<h2 class="td-live-title">' + esc(LIVE_TITLE) + '</h2>'
+    + '<h2 class="td-live-title">' + esc(liveTitle(liveAttempt)) + '</h2>'
     + '<p class="td-heartbeat" data-stalled="' + String(heartbeat.stalled === true) + '">'
     + esc(heartbeat.stateText) + '</p>'
     + '</div>'

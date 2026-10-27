@@ -24,6 +24,14 @@ import { bindTaskFlow, taskFlowHtml } from '../src/web/task-detail-flow-view.js'
 
 const CSS = readFileSync(new URL('../src/web/task-detail-flow.css', import.meta.url), 'utf8');
 
+/** 取一条规则的声明块。CSS 里同名选择器只该有一条，取到的就是那一条。 */
+function rule(styles: string, selector: string): string {
+  const at = styles.indexOf(selector + ' {');
+  if (at < 0) return '';
+  const end = styles.indexOf('}', at);
+  return end < 0 ? '' : styles.slice(at + selector.length + 1, end);
+}
+
 /** 两个工作项：W-A 已验收，W-B 还在跑、派过两轮。 */
 function view(): Record<string, unknown> {
   return {
@@ -138,6 +146,28 @@ test('未指定选择：选中未结束的工作项，近期环节只含它的�
   for (const selector of ['.td-flow-stages', '.td-stage', '.td-history', '.td-history-row', '.td-badge']) {
     assert.ok(CSS.includes('.td-flow ' + selector), selector + ' 没有 .td-flow 作用域');
   }
+
+  // 收起时白板按画板锁 194px（figma-2-140.txt 41:445）：不锁就随卡片内容长高，
+  // 下面的实时输出被一路推下去。锁死只许发生在收起态，展开历史时锁住会剪掉历史。
+  const collapsedBoard = rule(CSS, ".td-flow[data-expanded='false'] .td-flow-board");
+  assert.ok(/height:\s*194px;/.test(collapsedBoard), '收起白板没有 194px 高度：' + collapsedBoard);
+  assert.equal(/height:/.test(rule(CSS, '.td-flow .td-flow-board')), false,
+    '展开态的白板也被锁了高度，历史会被剪掉');
+  assert.ok(/max-height:/.test(rule(CSS, '.td-flow .td-history')), '纵向历史没有自家的滚动高度');
+
+  // 卡片 274×136 且 min-width: 0：flex 项默认 min-width:auto，长 profile/model
+  // 会把卡撑宽、把后面的卡挤出可见区。
+  const stage = rule(CSS, '.td-flow .td-stage');
+  assert.ok(/274px/.test(stage), '卡片宽度不是 274px：' + stage);
+  assert.ok(/height:\s*136px;/.test(stage), '卡片高度不是 136px：' + stage);
+  assert.ok(/min-width:\s*0;/.test(stage), '卡片缺 min-width: 0，长身份会把卡撑宽：' + stage);
+
+  // 身份行换行、不截省略号：截过的 `executor-openrouter-qwe…` 让两个不同候选看起来一样。
+  const identityCss = rule(CSS, '.td-flow .td-stage-identity');
+  assert.equal(/white-space:\s*nowrap/.test(identityCss), false,
+    '身份行还是 nowrap，真 profile/model 被截掉：' + identityCss);
+  assert.equal(/text-overflow:\s*ellipsis/.test(identityCss), false, '身份行还在用省略号：' + identityCss);
+  assert.ok(/white-space:\s*normal/.test(identityCss), '身份行没有改回换行：' + identityCss);
 });
 
 test('自动改派环节显示平台徽章，不归协调者', () => {

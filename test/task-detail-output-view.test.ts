@@ -79,7 +79,18 @@ test('实时输出认当前 Attempt、历史选择认选中的那跳：缺失正
   const liveText = q('.td-live-text')?.textContent || '';
   assert.ok(liveText.includes('当前'), '实时正文缺当前这一跳的内容：' + liveText);
   assert.equal(liveText.includes('旧行'), false, '实时正文混进了别的 Attempt 的行：' + liveText);
-  assert.equal(q('.td-live-title')?.textContent, '当前实时输出');
+  // 左标题就是这一区的身份：写「当前」这个词不够，得看得见正在跑的是哪一次执行。
+  // 只写死一句「当前实时输出」时，选了历史之后左正文在、人却分不出它是哪一跳的。
+  const liveTitle = q('.td-live-title')?.textContent || '';
+  assert.ok(liveTitle.includes('W-1.exec-2'), '左标题没写出当前这一跳：' + liveTitle);
+  assert.ok(liveTitle.includes('第 2 次'), '左标题缺执行次数：' + liveTitle);
+  assert.equal(liveTitle.includes('W-1.exec-1'), false, '左标题把所选历史当成了当前：' + liveTitle);
+
+  // 没有当前执行时直说没有，不编一个活跃身份，也不把历史那一跳写成当前。
+  const idle = mount({ currentAttemptId: null, selectedAttemptId: 'W-1.exec-1', nowIso: '2026-10-26T10:00:00.000Z', selectedAttempt: null, liveChunks: [] });
+  assert.equal(idle.q('.td-live-title')?.textContent, '当前实时输出 · 无当前执行');
+  assert.equal((idle.q('.td-live-title')?.textContent || '').includes('W-1.exec-1'), false,
+    '没有当前执行时左标题借用了所选历史');
 
   // 默认在概要：历史正文缺失必须明说未知，且不能改显示实时行或任务级输出。
   assert.equal(root.getAttribute('data-side'), 'summary');
@@ -173,8 +184,14 @@ test('概要写这一跳自己的身份、范围、费用与交回结果，实�
   assert.ok(lines[0].textContent?.includes('第一行'));
   assert.ok(lines[1].textContent?.includes('第二行'));
   // 认得出的角色才前缀，认不出的（这里是空 kind）不能编一个。
-  assert.ok(lines[0].textContent?.startsWith('[2026-10-26T09:59:48.000Z] [执行者]'));
-  assert.ok(lines[1].textContent?.startsWith('[2026-10-26T09:59:49.000Z] [工具]'));
+  // 正文里的时刻只到秒的本地时分秒，原 ISO 挂在该行 title 上可查：满屏 ISO 会把每行
+  // 正文挤到右边。具体钟点随机器时区变，所以断言形状 + title 原值，不写死时刻。
+  assert.ok(/^\[\d{2}:\d{2}:\d{2}\] \[执行者\] 第一行$/.test(lines[0].textContent || ''),
+    '第一行不是本地时分秒：' + lines[0].textContent);
+  assert.ok(/^\[\d{2}:\d{2}:\d{2}\] \[工具\] 第二行$/.test(lines[1].textContent || ''),
+    '第二行不是本地时分秒：' + lines[1].textContent);
+  assert.equal((lines[0].textContent || '').includes('2026-10-26'), false, '正文仍印了完整 ISO');
+  assert.equal(lines[0].getAttribute('title'), '2026-10-26T09:59:48.000Z', '原 ISO 没留在 title 上');
   assert.equal((q('.td-live-text')?.textContent || '').includes('旧行'), false, '实时区混进了别的 Attempt 的行');
 
   // 概要的六格事实来自这一跳自己。
@@ -186,9 +203,8 @@ test('概要写这一跳自己的身份、范围、费用与交回结果，实�
   assert.ok(summaryText.includes('medium'), '概要缺思考档：' + summaryText);
   assert.ok(summaryText.includes('src/web/app.js'), '概要不准允诺范围：' + summaryText);
   assert.ok(summaryText.includes('test/web-task.test.ts'), '概要不准允诺范围：' + summaryText);
-  // cost 0 必须当值显示，不能当成缺失。
-  assert.ok((q('[data-fact="cost"]')?.textContent || '').includes('0'), '费用 0 被当成了未知');
-  assert.ok((q('[data-fact="cost"]')?.textContent || '').includes('reported'), '质量没显示原值');
+  // 上报 0 是真报过了 0：写 $0.00 · 上报，不是「未知」也不是 `0 · reported` 两列原值。
+  assert.equal(q('[data-fact="cost"]')?.textContent, '本环节费用$0.00 · 上报');
   assert.ok(summaryText.includes('已交回'), '概要缺交回结果：' + summaryText);
   // 历史正文单独一块，事实区不替代它。
   assert.ok(summaryText.includes('历史正文'), '概要缺历史正文标签：' + summaryText);

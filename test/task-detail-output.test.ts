@@ -91,9 +91,9 @@ test('概要展示选中那一跳自己的身份、允许范围、费用质量�
   assert.ok(facts.identity.includes('codebuddy/deepseek-v4.1-flash'));
   assert.ok(facts.identity.includes('medium'));
   assert.deepEqual(facts.scope, ['src/web/app.js', 'test/web-task.test.ts']);
-  // cost 为 0 就写 0：报过 0 不等于没报。
-  assert.equal(facts.cost.cost, '0');
+  // 报过 0 就是真的花了 $0.00：不是未知，也不能停在 `0 · reported` 两列原值上。
   assert.equal(facts.cost.quality, 'reported');
+  assert.equal(facts.cost.text, '$0.00 · 上报');
   assert.equal(facts.result, '已交回');
   // 没有这一跳的改派事件就是未知，不编故事。
   assert.equal(facts.candidateChange, '未知');
@@ -117,6 +117,22 @@ test('概要展示选中那一跳自己的身份、允许范围、费用质量�
   }
   assert.equal(mismatched.scope, null);
   assert.equal(mismatched.cost, null);
+
+  // 估算带 ≈ 与「估算」，不冒充精确；质量认不出来时即使 cost 是 0 也不能印 $0.00——
+  // 那个 0 只是结构默认值，印出来就成了「这一跳不要钱」。
+  const cost = (usage) => projectOutputBinding({
+    currentAttemptId: 'W-1.exec-13',
+    selectedAttemptId: 'W-1.exec-13',
+    nowIso: '2026-10-26T10:00:00.000Z',
+    currentAttempt: { attemptId: 'W-1.exec-13', status: 'in_progress' },
+    selectedAttempt: { attemptId: 'W-1.exec-13', kind: 'executor', status: 'succeeded', usage },
+    liveChunks: [],
+  }).facts.cost;
+  assert.equal(cost({ cost: 0.184, quality: 'estimated' }).text, '≈$0.18 · 估算');
+  assert.equal(cost({ cost: 0, quality: 'unknown' }).text, '未知');
+  assert.equal(cost({ cost: 'not-a-number', quality: 'reported' }).text, '未知');
+  // usage 整块缺失时不编一个 cost 对象，交给视图说「未知」。
+  assert.equal(cost(undefined), null);
 });
 
 test('已结束不谈停滞；只有进行中且真实心跳超过容忍窗口才算疑似停滞，心跳缺失只是未知', () => {

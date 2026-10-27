@@ -249,17 +249,28 @@ function projectCandidateChange(selectedActivity, selectedAttemptId, matched) {
 /**
  * 本环节费用与质量：只取这一跳自己的 usage。
  *
- * cost 为 0 就写 0——「报过 0」和「没报过」在预算判断上是两件事，把 0 当成缺失会让
- * 人以为这一跳的花费还没回来。**不读 missionUsage**：那是整条 Mission 的累计数。
+ * quality 是平台对「这组数字能不能信」的结论：`reported` 才算真报了（真实 0 也照算，
+ * 写出 `$0.00 · 上报`）；`estimated` 必须带 ≈，不许冒充精确；其余（含 `unknown`）一律
+ * 未知——此时 usage.cost 上的 0 只是结构里的默认值，印成 $0.00 会被读成「这一跳不要钱」。
+ *
+ * 为什么自己拼这份 text 而不返回裸 cost：两列原值（`0 · reported`）在界面上既不
+ * 是金额也不是人话，人得自己在脑子里把它换成钱和可信度，而这一步很容易被漏掉。
+ * **不读 missionUsage**：那是整条 Mission 的累计数，摆在这一跳名下就是两笔账合一。
  */
 function projectCost(selectedAttempt, matched) {
   if (!matched) return null;
   const usage = object(selectedAttempt.usage);
   if (usage === null) return null;
-  return {
-    cost: usage.cost === undefined || usage.cost === null ? UNKNOWN : String(usage.cost),
-    quality: usage.quality === undefined || usage.quality === null ? UNKNOWN : String(usage.quality),
-  };
+  const quality = text(usage.quality);
+  const amount = Number(usage.cost);
+  const known = (quality === 'reported' || quality === 'estimated')
+    && usage.cost !== undefined && usage.cost !== null
+    && Number.isFinite(amount);
+
+  if (!known) return { quality: quality === '' ? UNKNOWN : quality, text: UNKNOWN };
+  return quality === 'estimated'
+    ? { quality, text: '≈$' + amount.toFixed(2) + ' · 估算' }
+    : { quality, text: '$' + amount.toFixed(2) + ' · 上报' };
 }
 
 /**
