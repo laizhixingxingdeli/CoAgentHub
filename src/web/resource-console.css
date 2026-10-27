@@ -1,0 +1,329 @@
+/*
+ * 资源页（#/pool）的几何与配色。
+ *
+ * 选择器全部以 `.resource-console` 开头：这份文件只在资源页挂载时注入，
+ * 但选择器一旦裸写（`.resource-row`）就会漏到别的页面去——哪天任务详情页
+ * 也叫 row，改这里会静悄悄改坏那一页的外观。
+ *
+ * 颜色只用 tokens.css 的令牌，不写死色值：硬编码的白色/灰色在换主题或改基调时
+ * 会变成页面里唯一一块没跟上的色块，而那种错没人会当成 bug 报。
+ */
+
+.resource-console {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+  /* 不再加左右内缩：外壳的 .view 已经有 gutter，再缩一次表头就和页名不在一条线上。
+   * 画板上的「左右内缩 16」指的是行内的 padding（见 .resource-row）。 */
+  color: var(--color-ink);
+}
+
+.resource-console-loading {
+  padding: 16px;
+  color: var(--color-muted);
+}
+
+/* ===== 页签 ===== */
+
+.resource-console .resource-tabs {
+  display: flex;
+  gap: 12px;
+  height: 40px;
+  background: var(--color-nav);
+  /* 窄屏让页签条自己横向滚：把四个页签压窄比页面滚动更难看出还有第 4 个角色。 */
+  overflow-x: auto;
+}
+
+.resource-console .resource-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* flex: 0 0 180px：只写 width 会被 flex 压窄（默认 flex-shrink:1），
+   * 四个页签就不再是画板上那四个等宽格。 */
+  flex: 0 0 180px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.resource-console .resource-tab[data-active='1'] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ===== 工具栏 ===== */
+
+.resource-console .resource-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 36px;
+}
+
+.resource-console .resource-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+  color: var(--color-ink);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.resource-console .resource-button[disabled] {
+  background: var(--color-nav);
+  color: var(--color-muted);
+  cursor: not-allowed;
+}
+
+.resource-console .resource-sub {
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.resource-console .resource-error {
+  padding: 8px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-red-bg);
+  color: var(--color-red);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* ===== 候选表 =====
+ * 七列宽按画板写死：这七格是固定的语义槽位，用 flex:1 分配会让
+ * 「近 7 天」这种两行文字最长的列在最窄的屏幕上先被挤断句。
+ * 宽度加起来超过视口时横向滚，不写一套移动端布局。
+ */
+
+.resource-console .resource-table {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-white);
+  overflow-x: auto;
+}
+
+.resource-console .resource-head,
+.resource-console .resource-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 16px;
+  /* 七列 1120 + 六个 4px 间隙 + 左右 16 = 1176（画板宽度）。写成 min-width 而不是
+   * width：视口比它宽时行跟着拉满，比它窄时整表横向滚，列宽不会被压变形。 */
+  min-width: 1176px;
+}
+
+.resource-console .resource-head {
+  height: 30px;
+  background: var(--color-nav);
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.resource-console .resource-row {
+  height: 64px;
+  background: var(--color-white);
+  cursor: pointer;
+}
+
+.resource-console .resource-row[data-selected='1'] {
+  background: var(--color-select);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.resource-console .resource-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* flex: 0 0 <宽>：只写 width 会被 flex 布局压窄（默认 flex-shrink:1），
+ * 七列宽就不再是画板上的那七个值，最窄的那一列先被折成两行。 */
+.resource-console .resource-col[data-col='1'] { flex: 0 0 32px; }
+.resource-console .resource-col[data-col='2'] { flex: 0 0 248px; }
+.resource-console .resource-col[data-col='3'] { flex: 0 0 64px; }
+.resource-console .resource-col[data-col='4'] { flex: 0 0 128px; }
+.resource-console .resource-col[data-col='5'] { flex: 0 0 232px; }
+.resource-console .resource-col[data-col='6'] { flex: 0 0 184px; }
+.resource-console .resource-col[data-col='7'] { flex: 0 0 232px; }
+
+.resource-console .resource-cell,
+.resource-console .resource-head .resource-col {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.resource-console .resource-head .resource-col {
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* 熔断那一格的字色只表达状态，不改行底色：整行变红会让人以为这条候选
+ * 已经不可用，而熔断中的候选仍然在配置里、仍然会被复位。 */
+.resource-console .resource-tone-green { color: var(--color-green); font-weight: 500; }
+.resource-console .resource-tone-amber { color: var(--color-amber); font-weight: 500; }
+.resource-console .resource-tone-red { color: var(--color-red); font-weight: 500; }
+.resource-console .resource-tone-unknown { color: var(--color-muted); font-weight: 500; }
+
+.resource-console .resource-empty {
+  margin: 0;
+  padding: 16px;
+  color: var(--color-muted);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* ===== 保存条 =====
+ * 本单没有草稿，但条要在：它是下一张单（保存）落地的地方，而现在先显示
+ * 「没有未保存修改」，同时把两个按钮禁掉——给人一个能按的保存按钮，
+ * 而它什么都不做，比没有按钮更糟。
+ */
+
+.resource-console .resource-savebar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 84px;
+  padding: 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-white);
+}
+
+.resource-console .resource-save-summary {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.resource-console .resource-save-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.resource-console .resource-save-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  /* 保存条上两个按钮不会缩：窄屏时让摘要那一列被挤，而不是把按钮压成按不准的宽度。 */
+  flex: 0 0 auto;
+}
+
+/* 主按钮是「槽 156 + face 128」：画板上按钮比字宽，靠的是外槽留出的那圈边，
+ * 直接把按钮做成 128 会让它在保存条里贴着右边的次按钮。 */
+.resource-console .resource-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 0 0 156px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.resource-console .resource-primary-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 128px;
+  height: 36px;
+  border-radius: 5px;
+  background: var(--color-accent);
+  color: var(--color-white);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.resource-console .resource-primary[disabled] {
+  cursor: not-allowed;
+}
+
+.resource-console .resource-primary[disabled] .resource-primary-face {
+  background: var(--color-nav);
+  color: var(--color-muted);
+}
+
+/* ===== 健康抽屉（只读） ===== */
+
+.resource-console .resource-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 516 是画板宽度。窄屏时只缩到容器内，不再写一套移动端布局。 */
+  width: 516px;
+  max-width: 100%;
+  /* 画板上的抽屉是整块 920 高：内容短时也要撑到那个尺寸，否则同一份数据在
+   * 两条候选之间切换时抽屉会随内容伸缩，人每次都要重新找位置。 */
+  min-height: 920px;
+  padding: 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-white);
+}
+
+.resource-console .resource-drawer-title {
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-all;
+}
+
+.resource-console .resource-drawer-heading {
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.resource-console .resource-drawer-line {
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.resource-console .resource-command {
+  max-height: 96px;
+  padding: 12px;
+  border-radius: 5px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 20px;
+  overflow: auto;
+  word-break: break-all;
+}
+
+/* 复制禁用：底与字都退到不可用那一档。只改 opacity 会让它在深色纸上
+ * 依然看着能按，而按下去什么都不发生时人以为是页面坏了。 */
+.resource-console .resource-button[data-copy-reset][disabled] {
+  background: var(--color-nav);
+  color: var(--color-muted);
+  border-color: var(--color-nav);
+}

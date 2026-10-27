@@ -19,7 +19,7 @@ import { renderInboxPage } from './inbox.js';
 import { renderTaskDetailPage } from './task-detail-controller.js';
 import { renderAgentsPage } from './agents.js';
 import { renderSettingsPage } from './settings.js';
-import { renderPoolPage } from './pool.js';
+import { renderResourcePage, leaveResourcePage } from './resource-console.js';
 import { renderPlanRunListPage, renderPlanRunPage } from './plan-run.js';
 import { renderPlatformPage } from './platform.js';
 import { createShell } from './console-shell.js';
@@ -206,6 +206,11 @@ function render() {
   if (!(route.name === 'agents' && !route.agentId) && !leaveModelPriorityPage()) {
     history.replaceState(null, '', lastHash || '#/'); return;
   }
+  // 资源页本单没有草稿，leaveResourcePage 永远放行；仍然照同一模式调一次：
+  // 下一张单（保存草稿）要在这里拦人，留好这个位置比事后再插回滚少一次改动。
+  if (route.name !== 'pool' && !leaveResourcePage()) {
+    history.replaceState(null, '', lastHash || '#/'); return;
+  }
   lastHash = location.hash;
 
 
@@ -237,7 +242,7 @@ function render() {
   }
 
   if (route.name === 'pool') {
-    void renderPoolPage(view);
+    void renderResourcePage(view);
     return;
   }
 
