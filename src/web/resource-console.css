@@ -22,6 +22,14 @@
   color: var(--color-ink);
 }
 
+/* 页名归零：h1 自带 UA 外边距（上下各约 21px，合计约 43px），不清掉的话页签、
+ * 工具栏、表头会一起被顶下去，整页比外壳基线低约 43px。外壳的内容起点已经按
+ * 顶栏 68 + inset 28 对准了 y96（见 console-shell.css），所以只能在这里把这块
+ * 外边距归零；靠改外壳或负 margin 去抵会连页签和外壳一起拖上来。 */
+.resource-console > .fixed-page-title {
+  margin: 0;
+}
+
 .resource-console-loading {
   padding: 16px;
   color: var(--color-muted);
@@ -217,12 +225,19 @@
 .resource-console .resource-savebar {
   /* 贴在内容列底边的固定条（画板 x224 / y1012 / 1176×84）：留在文档流里它会跟着
    * 表一起被滚走，人改完草稿想保存时条已经不在视野里。左边界与内容左 224 对齐
-   * 而不是写 left:0，否则它会盖到左导航上。 */
+   * 而不是写 left:0，否则它会盖到左导航上。
+   * 宽度靠 left/right 撑出来、再用 max-width 封顶：1440 视口下 1440-224-40 正好
+   * 是画板的 1176，而窄一点的桌面上写死 1176 会把右边的保存/放弃顶出屏幕，
+   * 那两个按钮就再也点不到了。 */
   position: fixed;
   left: 224px;
+  right: 40px;
   bottom: 24px;
-  width: 1176px;
+  width: auto;
+  max-width: 1176px;
   height: 84px;
+  /* 极窄时条内自己横向滚：被裁掉的按钮只看得见一半等于不可达。 */
+  overflow-x: auto;
   z-index: 4;
   display: flex;
   align-items: center;
@@ -306,12 +321,15 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* 516 是画板宽度。窄屏时只缩到容器内，不再写一套移动端布局。 */
-  width: 516px;
-  max-width: 100%;
+  /* 516 是画板宽度；视口更窄时按 min() 缩到「视口 - 48」内（右距 24 + 左侧留 24），
+   * 不另写一套移动端布局。不能改用百分比封顶：它按包含块算，会把 right:24px
+   * 一起顶掉，抽屉贴到视口边、左边内容被裁。 */
+  width: min(516px, calc(100vw - 48px));
   /* 画板上的抽屉是整块 920 高：内容短时也要撑到那个尺寸，否则同一份数据在
-   * 两条候选之间切换时抽屉会随内容伸缩，人每次都要重新找位置。 */
-  height: 920px;
+   * 两条候选之间切换时抽屉会随内容伸缩，人每次都要重新找位置。
+   * 视口比画板矮时缩到 100vh-78（上边距）-120（底部保存条 84 + 下边距 24 + 间隙
+   * 12）之内：写死 920 会让抽屉底边压在保存条上，抽屉里的按钮和保存条互相盖住。 */
+  height: min(920px, calc(100vh - 78px - 120px));
   overflow: auto;
   padding: 16px;
   border: 1px solid var(--color-line);

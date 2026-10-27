@@ -17,6 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   RESOURCE_ROLES,
@@ -474,4 +475,46 @@ test('费用：可见文本两位小数，原值在 data-reported-cost 与 title
   assert.ok(silentRow.includes('费用未上报'));
   assert.equal(silentRow.includes('data-reported-cost'), false, '未上报不挂原值属性');
   assert.equal(silentRow.includes('$0'), false, '未知不能显示成 0');
+});
+
+// 资源页的几何只能靠读 CSS 原文断言：这层错不报错，只在真浏览器里表现成
+// 「标题把整页顶下去 43px」「窄一点的桌面上保存按钮在屏幕外点不到」。
+// 读文件而不是起浏览器，是因为零依赖仓库里没有浏览器可起。
+const resourceCss = readFileSync(
+  new URL('../src/web/resource-console.css', import.meta.url), 'utf8',
+).replace(/\r\n/g, '\n');
+
+/** 取某个选择器完整规则的花括号内容（空白归一，好写单行断言）。 */
+const cssRule = (selector: string): string => {
+  const start = resourceCss.indexOf(selector + ' {');
+  assert.ok(start >= 0, `resource-console.css 里找不到规则 ${selector}`);
+  const open = resourceCss.indexOf('{', start);
+  const close = resourceCss.indexOf('}', open);
+  return resourceCss.slice(open + 1, close).replace(/\s+/g, ' ');
+};
+
+test('资源页 CSS：页名外边距归零，保存条与抽屉按视口收缩且不盖住彼此', () => {
+  // h1 的 UA 外边距不清掉，页签/工具栏/表头会跟着下移约 43px；外壳起点已是 y96，
+  // 不能靠改外壳或负 margin 去抵，所以这里只针对资源页局部归零。
+  assert.match(cssRule('.resource-console > .fixed-page-title'), /(?:^|[\s;])margin: 0;?/,
+    '资源页页名没有归零外边距');
+
+  // 1440 下 right:40 + left:224 仍等价于画板的 1176 宽；写死 width:1176px
+  // 会让更窄桌面上的保存/放弃被顶出视口，按钮不可达。
+  const savebar = cssRule('.resource-console .resource-savebar');
+  assert.ok(savebar.includes('right: 40px'), '保存条要用右距 40 收进视口');
+  assert.ok(savebar.includes('max-width: 1176px'), '1440 下宽度仍是画板的 1176');
+  assert.equal(/(?:^|[\s;])width: 1176px/.test(savebar), false, '保存条不能再写死 width:1176px');
+
+  // 抽屉同理：min() 让 516 宽 / 920 高只在视口够大时成立；max-width:100%
+  // 会单独顶掉右距，把人往视口边上贴。
+  const drawer = cssRule('.resource-console .resource-drawer');
+  assert.ok(drawer.includes('min(516px, calc(100vw - 48px))'), '抽屉宽度要按视口收缩');
+  assert.equal(drawer.includes('max-width: 100%'), false, '抽屉不能再留 max-width:100%');
+  assert.ok(drawer.includes('min(920px, calc(100vh - 78px - 120px))'),
+    '抽屉高度要在矮视口下让开底部保存条');
+
+  // W-956 验收过的 16px 段间距不归本单改，丢了表头会和首行贴死。
+  assert.ok(cssRule('.resource-console .resource-body').includes('margin-top: 16px'),
+    '表头与首行之间的 16px 段间距被删了');
 });
