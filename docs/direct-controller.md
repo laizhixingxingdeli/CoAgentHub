@@ -16,10 +16,10 @@ direct 也不会启动可选影响监督中的协调者模型；这类协调判�
 
 ## MCP 操作顺序
 
-1. 当前会话分析需求，冻结 Contract，通过 `coagenthub_create_mission` 创建任务，显式传 `coordinationMode: "direct"`。投递目标仍使用真实绑定的会话。
+1. 当前会话分析需求，冻结 Contract，通过 `coagenthub_create_mission` 创建任务，显式传 `coordinationMode: "direct"`，并显式传本会话号作 `recipient`（必填，没有活动绑定兜底）。
 2. 使用 `coagenthub_direct_control` 写入 Plan、契约核对和 Frozen WorkOrder，再派发工单。工单应包含非空 `validation.commands`（结构化的 `argv` 与 `timeoutMs`）；只有 `verification` 文字说明不能作为机器验证依据。
 3. 使用现有 `coagenthub_start_mission` 启动执行者。HTTP 受理不表示执行完成，应继续读取 hosted run、Mission、活动和验证报告。
-4. 执行和机器验证后，平台以 `waiting_l3` 等待当前主控，不自动另起协调者或自动安排返工。
+4. 执行和机器验证后，平台以 `waiting_l3` 等待当前主控，不自动另起协调者或自动安排返工。这一等**不发通报**（升级和交卷仍会进收件箱）。派发并开跑之后：Claude 用 Bash 后台模式跑 `node scripts/coagent.mjs watch <missionId>`；其他宿主每 5 分钟以上只读一次 `coagenthub_get_mission_live`。不要 45 秒一查，不要在一轮里 sleep 再轮询。
 5. 主控阅读当前提交、差异、证据及对应验证报告，逐条给出 accept / reject。reject 必须说明 requiredChanges；需要返工时由主控修订、派发并再次启动。
 6. 所有目标完成后，主控提交 Mission Result，任务进入既有最终检视流程。提交结果不等于合入，更不等于合入 master。
 
@@ -29,6 +29,7 @@ direct 也不会启动可选影响监督中的协调者模型；这类协调判�
 {
   "projectId": "your-project",
   "missionId": "your-direct-mission",
+  "recipient": "<本会话号>",
   "coordinationMode": "direct",
   "contract": {
     "intent": "修复已定位的问题",
