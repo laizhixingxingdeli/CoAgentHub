@@ -46,7 +46,7 @@ const DEFAULT_OUTPUT_SIDE = 'summary';
  * 必须留着，否则本层是唯一知道「定位」还要同时改展开状态的地方，删掉就等于按钮
  * 点了只选中不展开。
  */
-const HISTORY_EXPANDED_LABEL = '收起纵向历史';
+const HISTORY_EXPANDED_LABEL = '收起历史';
 
 /**
  * 点一条历史行时把标题带上的按钮文案改成「展开纵向历史」。

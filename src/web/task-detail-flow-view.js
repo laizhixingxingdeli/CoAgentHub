@@ -19,7 +19,7 @@ import { projectWorkflow } from './task-detail-flow.js';
 
 /** 展开 / 收起的文案就是按钮的全部信息，两处（渲染与点击）必须同一份。 */
 const HISTORY_COLLAPSED_LABEL = '展开纵向历史';
-const HISTORY_EXPANDED_LABEL = '收起纵向历史';
+const HISTORY_EXPANDED_LABEL = '收起历史';
 
 /**
  * 一条环节里的文字节点：徽章、标题、身份、明细、状态**各占一个节点**。
@@ -65,6 +65,24 @@ function clockOf(at) {
 }
 
 /**
+ * 历史行的时间列：本地「MM-DD HH:mm」，**日期与时刻一起给**。
+ *
+ * 只写 HH:MM 在横向卡里够用（那里看的是最近几条、都在今天），一整列历史却会跨天：
+ * 三条都写着「09:02」时人无法分辩哪条是今天、哪条是昨天的。也不写死源稿里的示例
+ * 时刻：那是一个具体日子的字面量，抄进代码后先在夹具上看着对，到真实数据上就全错。
+ * 解析不出来回「未知」，比留空强：空白看起来像这一行没有发生时间。
+ */
+function stampOf(at) {
+  const raw = at === undefined || at === null ? '' : String(at).trim();
+  if (raw === '') return '未知';
+  const when = new Date(raw);
+  if (Number.isNaN(when.getTime())) return '未知';
+  const pad = (n) => String(n).padStart(2, '0');
+  return pad(when.getMonth() + 1) + '-' + pad(when.getDate())
+    + ' ' + pad(when.getHours()) + ':' + pad(when.getMinutes());
+}
+
+/**
  * 状态行 = 状态词 + （事件自带 at 能解析时）那一跳发生的本地时刻。
  *
  * **时斜只从事件 at 来，本层不取「现在」**：取了新时刻，盯一眼页面就会把两小时前
@@ -90,11 +108,32 @@ function stageCard(stage, currentKey) {
     + '</article>';
 }
 
-/** 展开后的纵向历史：一行 li，字段与卡片同源，顺序由调用方保证（旧在前）。 */
+/**
+ * 展开后的纵向历史：一行 li，三列（标题 / 身份 / 时间+结果），顺序由调用方保证（旧在前）。
+ *
+ * **不复用 stageBody**：那是横向卡的排版（徽章 + 标题 + 身份 + 明细 + 状态五行堆在
+ * 136px 里）。把它搬进纵向列表，展开后就是「同一批环节在一屏里说两遍，第二种说法还是
+ * 横卡形状」，而屏幕上看着一点也不错。三列各有固定槽宽（240 / 400 / 剩余），所以列与
+ * 列在各行之间对齐——读到「时间」那一列时人是在扫一列，不是每行重找一次位置。
+ *
+ * 身份与标题都带 title＝全文：身份列 overflow:hidden 裁长 profile/model，裁掉的那半截
+ * 若不留在 title 里，这页就再也查不到「这一跳到底用了谁」。时间列 title 只放原始 at
+ * ISO：它是核对本地时间对不对的唯一凭据；没有 at 就不编一个 title。
+ */
 function historyRow(stage, currentKey) {
+  const title = stage.title === undefined || stage.title === null ? '' : String(stage.title);
+  const identity = identityOf(stage);
+  const rawAt = stage.at === undefined || stage.at === null ? '' : String(stage.at).trim();
+  const result = stage.resultLabel === undefined || stage.resultLabel === null || String(stage.resultLabel).trim() === ''
+    ? (stage.stateText === undefined || stage.stateText === null ? '' : String(stage.stateText).trim())
+    : String(stage.resultLabel).trim();
+
   return '<li class="td-history-row" data-key="' + esc(stage.key)
     + '" data-attempt="' + esc(stage.attemptId) + '"' + currentAttr(stage, currentKey) + '>'
-    + stageBody(stage)
+    + '<h3 class="td-history-title" title="' + esc(title) + '">' + esc(title) + '</h3>'
+    + '<p class="td-history-identity" title="' + esc(identity) + '">' + esc(identity) + '</p>'
+    + '<p class="td-history-time"' + (rawAt === '' ? '' : ' title="' + esc(rawAt) + '"')
+    + '>' + esc(stampOf(rawAt) + ' · ' + result) + '</p>'
     + '</li>';
 }
 

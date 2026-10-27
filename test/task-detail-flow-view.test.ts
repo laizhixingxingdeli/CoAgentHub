@@ -133,7 +133,7 @@ test('未指定选择：选中未结束的工作项，近期环节只含它的�
 
   click(q('[data-action="toggle-history"]'));
   assert.equal(root.getAttribute('data-expanded'), 'true');
-  assert.equal(q('[data-action="toggle-history"]')?.textContent, '收起纵向历史');
+  assert.equal(q('[data-action="toggle-history"]')?.textContent, '收起历史');
   assert.deepEqual(
     all('.td-history .td-history-row').map((row) => row.getAttribute('data-attempt')),
     ['W-B.exec-1', 'W-B.exec-2'],
@@ -272,8 +272,8 @@ test('长身份可以看全：title 与节点文字相同，卡槽仍是 274×13
   assert.ok(said.length > 80, '夹具不够长，没覆盖到超过 40px 的情形：' + said);
   // title 与节点文字同一份：悬停看到的必须就是卡上那句，不许另算一个缩写。
   assert.equal(identity?.getAttribute('title'), said, '身份的 title 与节点文字不是同一句');
-  // 历史行共用 stageBody，同样带 title。
-  for (const row of all('.td-history .td-history-row .td-stage-identity')) {
+  // 历史行共用同一份身份来源（.td-history-identity），title 仍是全文。
+  for (const row of all('.td-history .td-history-row .td-history-identity')) {
     assert.equal(row.getAttribute('title'), row.textContent, '历史行的身份缺 title');
   }
   // 看得全靠 title，不靠把卡改大。
@@ -364,4 +364,74 @@ test('选择器在白板外，已验收芯片只留相邻一项，定位当前�
   const state = card?.querySelector('.td-stage-state')?.textContent || '';
   assert.ok(state.startsWith('进行中'), state);
   assert.ok(/· \d{2}:\d{2}$/.test(state), '状态行缺事件时刻：' + state);
+});
+
+/**
+ * 展开后的历史行是**三列**（标题 / 身份 / 时间+结果），不是把横向卡搬一遁。
+ *
+ * 三件错在浏览器里都不报错：复用 stageBody 时行里出现 徽章/明细/状态 一整套，看起来
+ * 像“卡片变小了一点”；时刻只写 HH:MM 时跨天的历史全是同一个时刻；结果词写回状态词时
+ * 「上游调用失败」就变成「已记录」。
+ */
+test('历史行是标题/身份/时间三列，时间是本地 MM-DD HH:mm，结果与全文都可在 title 查看', () => {
+  const v = {
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    workItems: [
+      { id: 'W-930', title: '补修历史三列', status: 'dispatched', attemptIds: ['W-930.exec-1'] },
+    ],
+  };
+  const iso = '2026-10-25T09:02:00.000Z';
+  const events = [
+    {
+      kind: 'attempt.started',
+      attemptId: 'W-930.exec-1',
+      workItemId: 'W-930',
+      at: iso,
+      data: {
+        kind: 'executor',
+        profile: {
+          profileId: 'executor-openrouter-qwen3-coder-plus-2026-10-25-long-live-profile-name',
+          facts: [{ key: 'model', value: 'anthropic/claude-sonnet-4-5-very-long-model-name-20261025' }],
+        },
+      },
+    },
+    {
+      kind: 'attempt.ended',
+      attemptId: 'W-930.exec-1',
+      workItemId: 'W-930',
+      at: '2026-10-25T09:30:00.000Z',
+      data: { endedBy: 'upstream_failure' },
+    },
+  ];
+
+  const { q, all } = mount(v, events, { selectedWorkItemId: 'W-930', expanded: true });
+  const row = all('.td-history .td-history-row')[0];
+  assert.ok(row, '没有渲染出历史行');
+
+  // 三列各一个节点，横向卡那一套（.td-stage-detail）不得出现在历史行里。
+  const title = row.querySelector('.td-history-title') as HTMLElement | null;
+  const identity = row.querySelector('.td-history-identity') as HTMLElement | null;
+  const time = row.querySelector('.td-history-time') as HTMLElement | null;
+  assert.ok(title, '历史行缺标题列 .td-history-title');
+  assert.ok(identity, '历史行缺身份列 .td-history-identity');
+  assert.ok(time, '历史行缺时间列 .td-history-time');
+  assert.equal(row.querySelector('.td-stage-detail'), null, '历史行仍在复用横向卡的 .td-stage-detail');
+
+  // 时间用同一 ISO 在测试里算成本地 MM-DD HH:mm，不比对写死的字面量（写死的是时区依赖的假值）。
+  const when = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const local = pad(when.getMonth() + 1) + '-' + pad(when.getDate()) + ' ' + pad(when.getHours()) + ':' + pad(when.getMinutes());
+  assert.equal(time?.textContent, local + ' · 上游调用失败');
+  // 原始 ISO 留在 title：本地时间对不对只能靠它核。
+  assert.equal(time?.getAttribute('title'), iso);
+
+  // 身份列裁切，全文只能在 title 里看到；标题列同样 title = 全文。
+  assert.equal(identity?.getAttribute('title'), identity?.textContent);
+  assert.ok((identity?.textContent || '').length > 80, '夹具不够长，没覆盖到会被裁的身份：' + identity?.textContent);
+  assert.equal(title?.getAttribute('title'), title?.textContent);
+
+  // 展开按钮这句是本单的新文案，与 task-detail-page 那一份必须同一句话。
+  assert.equal(q('[data-action="toggle-history"]')?.textContent, '收起历史');
+  assert.equal((row.textContent || '').includes('验收通过'), false, '历史行里凭空出现了验收通过');
 });

@@ -80,6 +80,49 @@ test('未指定选择：选当前未结束的工作项，环节只含它的已�
   assert.deepEqual(flow.acceptedOthers, ['W-A']);
 });
 
+/**
+ * 结束原因要变成人话，且**不许推成「验收通过」**：`已记录` 说的是这一跳落没落账，
+ * 不是它成没成。把 upstream_failure 也写成「已记录」，人会把一次上游炸掉读成正常
+ * 收尾；反过来从 executionResult / validationReport.passed / status === 'succeeded'
+ * 推一句「验收通过」，则是拿机器跑绿冒充 L3 已验收——两者屏幕上都不报错。
+ */
+test('结束原因映射成人话结果词，无 endedBy 仍是已记录，且不出现验收通过', () => {
+  const v = {
+    missionId: 'CUI3-task-detail-20261026',
+    coordinationMode: 'hierarchical',
+    workItems: [
+      {
+        id: 'W-930',
+        title: '补修历史三列',
+        // 机器里看着全绿：这不该成为「验收通过」的来源。
+        status: 'succeeded',
+        validationReport: { passed: true, failures: [] },
+        executionResult: { verdict: 'accepted' },
+        attemptIds: ['W-930.exec-1', 'W-930.exec-2', 'W-930.exec-3'],
+      },
+    ],
+  };
+  const events = [
+    { kind: 'attempt.started', attemptId: 'W-930.exec-1', workItemId: 'W-930', at: '2026-10-25T09:02:00.000Z', data: { kind: 'executor' } },
+    { kind: 'attempt.ended', attemptId: 'W-930.exec-1', workItemId: 'W-930', at: '2026-10-25T09:30:00.000Z', data: { endedBy: 'upstream_failure' } },
+    { kind: 'attempt.started', attemptId: 'W-930.exec-2', workItemId: 'W-930', at: '2026-10-25T10:00:00.000Z', data: { kind: 'executor' } },
+    { kind: 'attempt.ended', attemptId: 'W-930.exec-2', workItemId: 'W-930', at: '2026-10-25T10:40:00.000Z', data: { endedBy: 'structured_submit' } },
+    { kind: 'attempt.started', attemptId: 'W-930.exec-3', workItemId: 'W-930', at: '2026-10-25T11:00:00.000Z', data: { kind: 'executor' } },
+    // 结束事件没有写 endedBy：只知道它结束了，不知道为什么。
+    { kind: 'attempt.ended', attemptId: 'W-930.exec-3', workItemId: 'W-930', at: '2026-10-25T11:20:00.000Z' },
+  ];
+
+  const flow = projectWorkflow(v, events, { selectedWorkItemId: 'W-930' });
+  assert.deepEqual(flow.stages.map((stage) => stage.resultLabel), [
+    '上游调用失败',
+    '正常交了结果',
+    '已记录',
+  ]);
+  for (const stage of flow.stages) {
+    assert.equal(stage.resultLabel.includes('验收通过'), false, '结果词里凭空出现了验收通过：' + stage.resultLabel);
+  }
+});
+
 test('work_item.auto_redispatched 归平台：badge 是平台，title/detail 不提协调者', () => {
   const only = [
     {

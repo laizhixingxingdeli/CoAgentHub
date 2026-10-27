@@ -15,7 +15,7 @@
  * 就成环；浏览器原生 ES module 下成环不报错，只会让某一侧拿到 undefined，然后
  * 整页白掉。也不 import application：前端只走 `/api/*` 投影出来的 view。
  */
-import { PLATFORM_ROLE_LABEL, modelLabel, narrateEvent, roleOfAttempt, stageName } from './narrate.js';
+import { PLATFORM_ROLE_LABEL, endReasonText, modelLabel, narrateEvent, roleOfAttempt, stageName } from './narrate.js';
 
 const text = (value) => (value === undefined || value === null ? '' : String(value)).trim();
 const list = (value) => (Array.isArray(value) ? value : []);
@@ -283,6 +283,11 @@ function projectStage(group, ctx, direct, endedIds) {
   const endedBy = endedByOf(events, group.attemptId, endedIds);
 
   const stateText = ended ? '已记录' : '进行中';
+  // **结果词只从 endedBy 来**：`已记录` 是「这一跳有没有落账」，不是「它成没成」。
+  // 没有 endedBy 时才退回状态词——把 upstream_failure 也写成「已记录」，人会把一次
+  // 上游炸掉读成一次正常收尾；反过来从 executionResult / validationReport.passed /
+  // status === 'succeeded' 推一句「验收通过」，则是拿机器跑绿冒充 L3 已验收。
+  const resultLabel = endedBy !== '' ? endReasonText(endedBy) : stateText;
   const base = {
     key: group.key,
     attemptId: group.attemptId,
@@ -294,6 +299,9 @@ function projectStage(group, ctx, direct, endedIds) {
     // 有结束原因就原样带上（structured_submit 这类机器值由渲染层决定怎么说），
     // 没写原因就退回状态词——编一个「正常结束」会把「没记原因」显示成「记了原因」。
     resultText: endedBy !== '' ? endedBy : stateText,
+    // 与 resultText 同一份来源，只是换成界面上的说法：resultText 留机器值给别处核对，
+    // resultLabel 才是给人看的；两处各判一次迟早一处改了一处没改。
+    resultLabel,
   };
 
   if (auto) {

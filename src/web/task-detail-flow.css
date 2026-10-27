@@ -221,19 +221,62 @@
   overflow-y: auto;
 }
 
+/* 历史行：三列固定槽宽（标题 240 / 身份 400 / 时间剩余），与源稿 figma-45-1388.txt 一致。
+ *
+ * **为什么不再用 flex + gap**：flex 里列宽跟着内容走，一行里身份很短时时间列就左移，
+ * 下面一行身份很长时又跑到右边；人扫不动一整列“什么时候完成的”，只能每行重找一次。
+ * 固定列数一旦对不上（比如长身份把 400px 撞满），minmax(0, 1fr) 的那一列还能自己缩，
+ * 而 min-width:auto 的 flex 项会直接把行撑破。
+ *
+ * grid-template-columns 第三列用 minmax(0, 1fr) 而不是 472px：源稿 472 是那一档画板
+ * 的剩余空间，写死就会在窄屏上横向溢出。box-sizing 必须把 10px 上下 padding 算进去，
+ * 否则 46px 的行高变成 66px，与相邻行间距就不是 4px 了。 */
 .td-flow .td-history-row {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 240px 400px minmax(0, 1fr);
   gap: 16px;
+  align-items: center;
   padding: 10px 16px;
+  height: 46px;
+  box-sizing: border-box;
   border-left: 2px solid transparent;
   border-top: 1px solid var(--color-line);
   cursor: pointer;
 }
 
-.td-flow .td-history-row .td-stage-detail {
-  flex: 1 1 auto;
-  max-height: none;
+/* 标题列与横卡标题同号同重：同一条环节在两种视图里应该长得像同一件事。 */
+.td-flow .td-history-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--color-ink);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 身份列裁切而不是换行：换成两行会把 46px 的行高撑破，行与行就不再成一行一行。
+ * 被裁掉的那半截必须靠 title 能看全（见 historyRow），否则它在这页上就没了。 */
+.td-flow .td-history-identity {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 时间列：本地日期时间 + 结果词。与身份同号同灰阶，它回答的是「什么时候、怎么结束」的备注。 */
+.td-flow .td-history-time {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--color-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* ---------------------------- 展开纵向历史 ----------------------------
