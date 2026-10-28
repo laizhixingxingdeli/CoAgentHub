@@ -100,6 +100,7 @@ CoAgentHub 是 agent-first 的软件工程 harness：把用户目标转成可追
 - 测试用 `node --test`：定向跑 `node --test test/<名字>.test.ts`，全量跑 `node --test`。不用 npm / npx。
 - 测试尽量少，只加在关键地方：只写验收点名的关键场景，每条验收一到两条；不为每个分支、每种写法、每种错误各写一条（用户 2026-09-30）。
 - 「已修复 / 已完成」必须有可验证证据；没跑过的命令不要写成跑过。
+- 用 happy-dom 的 DOM 测试（2026-10-28，DOMT1）：从 `test/helpers/happy-dom.ts` 导入 `Window` 与 `noHappyDom`，每个顶层 `test(` / `describe(` 带 `{ skip: noHappyDom }`，模块顶层的 `new Window()` 要判空——没装依赖的检出里整文件跳过，零依赖全量照样绿；CI 的 `platform-dom` 任务（Windows、`npm ci`）逐个列出这些文件来跑，**新增 DOM 测试要同时加进 `.github/workflows/ci.yml` 那一步的列表**。Mission worktree 能向上找到主检出的 `node_modules`，所以「没装」那条路只能在仓库外的干净检出里验。
 - `adapters/pi`（pi 适配层）和 `l3-mcp-server`（L3 MCP 服务器）有自己的第三方依赖，经根 `package.json` 的 npm workspaces 装在根 `node_modules`（ADR-0008）。**它们的测试文件叫 `*.spec.ts`，不叫 `*.test.ts`**：根目录的 `node --test` 会捡走任何位置的 `*.test.ts`，而这两个包的测试需要 tsx / vitest，混进平台的零依赖全量就会红。适配层的验证命令是 `["node","--import","tsx","--test","adapters/pi/src/*.spec.ts"]`，MCP 服务器的验证命令是 `["node","scripts/l3-mcp-check.mjs"]`（先构建再跑全量 vitest，定向时在后面加 spec 路径；FIX2 新增）。脚本按 Node 模块解析从当前目录向上找 typescript 与 vitest，所以在没有 `node_modules` 的 Mission worktree 里也能用；`node node_modules/...` 的相对写法在那里找不到脚本，适配层那条的 `--import tsx` 走模块解析，不受影响。**验证命令里不要写主检出的绝对路径**：WAKE2 的执行者据此 `cd` 进主检出改了文件（2026-10-27 W-940），Mission 只在自己的 worktree 里读写。验证命令都写成不经 shell 的 argv，不要写 npm / npx。
 
 ### 仓库
