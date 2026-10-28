@@ -307,6 +307,20 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.ok(html.includes('runtime：pi'));
   assert.ok(html.includes('data-draft-profile'), 'profileId 是只读文本，不是输入框');
   assert.equal(html.includes('data-draft-profile value='), false);
+  // 编辑抽屉的结构就是「顶部完整身份 + 右上返回草稿」，没有另起一段设置说明
+  // 或第二个只读身份框：那两个会把端点/facts/健康整体下推，与原稿排布不符。
+  assert.ok(html.includes('data-draft-close'), '编辑抽屉缺右上「返回草稿」');
+  assert.ok(html.includes('返回草稿'));
+  assert.equal(html.includes('候选设置（草稿，未下发）'), false, '抽屉里不该多出这段设置标题');
+  assert.equal(html.includes('profileId（只读）'), false, '身份已写在抽屉顶部，不再另画只读框');
+  // 启停必须是 34×20 的开关图 + 状态文字；矩形按钮与画板的开关槽不同形。
+  assert.ok(html.includes('/console-icon-switch-on.svg'), '启用态要引用开关 track SVG');
+  assert.ok(html.includes('width="34" height="20"'), '开关 track 尺寸要是 34×20');
+  assert.ok(html.includes('已启用'));
+  // 端点下拉要自己画箭头：原生箭头去不掉，双箭头或缺失都是视觉偏差。
+  assert.ok(html.includes('resource-caret'), '端点下拉缺 resource-caret');
+  assert.ok(html.includes('端点'));
+  assert.ok(html.includes('适配层参数'));
 
   assert.ok(resourcePageHtml({ ...vm, dirty: false }).includes('没有未保存修改'));
 
@@ -325,6 +339,16 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.equal(adding.includes('data-resource-add-form'), false, '表上方的旧添加表单还在');
   assert.equal(adding.includes('data-resource-save'), false, '添加抽屉里不能出现保存条/保存按钮');
   assert.ok(adding.includes('data-add-endpoint'), '端点必须是下拉，不是自由文本');
+  // 添加态标题 18px 用 resource-add-title；套 resource-drawer-title（13px 身份）
+  // 会把标题缩成小字。返回按钮从底部挪到右上，底部只留「加入角色草稿」。
+  assert.ok(adding.includes('resource-add-title'));
+  assert.equal(adding.includes('resource-drawer-title'), false);
+  assert.ok(adding.includes('data-add-profile'));
+  assert.ok(adding.includes('data-add-cancel'));
+  assert.equal(adding.split('data-add-cancel').length - 1, 1, '返回草稿只该有一个');
+  assert.equal(adding.includes('data-draft-profile'), false, '添加态不是编辑态');
+  assert.equal(adding.includes('data-draft-close'), false);
+  assert.equal(adding.includes('候选设置（草稿，未下发）'), false);
   assert.equal(adding.includes('data-draft-endpoint'), false,
     '添加抽屉不能用编辑抽屉的端点属性：change 会被当成改已选草稿');
   assert.equal(adding.includes('data-fact-add'), false,
@@ -341,6 +365,21 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.ok(/data-add-join disabled/.test(noOptions), '全池没有端点时加入按钮必须禁用');
   assert.equal(noOptions.includes('endpoint（自由填写）'), false, '不能退回自由文本端点');
   assert.ok(noOptions.includes('全池没有已返回的端点'));
+});
+
+test('长 profileId 在列表里中间省略：首尾都看得见，完整值仍在 title 上', () => {
+  const long = 'coordinator-antigravity-claude-opus-4-6-thinking';
+  const html = resourcePageHtml({
+    role: 'coordinator',
+    revision: 'r-1',
+    counts: { coordinator: 1 },
+    rows: [{ profileId: long, endpoint: 'local', enabled: true }],
+  });
+  // 尾部省略会把 "-6-thinking" 这类真正区分候选的后缀吃掉：同一家族的几条候选
+  // 在列表里就长得一模一样。所以只断言可见文本是中间省略的那个形状。
+  assert.ok(html.includes('coordinator-antigra…-6-thinking'), '可见文本要中间省略');
+  assert.ok(html.includes('title="' + long + '"'), '完整值必须能查到');
+  assert.equal(html.includes('>' + long + '<'), false, '可见文本不能是全文');
 });
 
 test('保存冻结点击时的角色与有序候选；成功采用全池快照但保留其他角色脏草稿', async () => {
@@ -517,4 +556,38 @@ test('资源页 CSS：页名外边距归零，保存条与抽屉按视口收缩�
   // W-956 验收过的 16px 段间距不归本单改，丢了表头会和首行贴死。
   assert.ok(cssRule('.resource-console .resource-body').includes('margin-top: 16px'),
     '表头与首行之间的 16px 段间距被删了');
+
+  // 按钮槽：1440 下实测添加 86.22（源 128）、放弃 86.22（源 140），两个都窄了
+  // 就把主保存按钮往右推 53。这两个宽度是画板给的槽，不是内容的自然宽。
+  const addBtn = cssRule('.resource-console .resource-toolbar [data-resource-add]');
+  assert.ok(addBtn.includes('width: 128px'), '添加按钮槽要是 128');
+  assert.ok(addBtn.includes('flex: 0 0 128px'), '只写 width 会被 flex 压回内容宽');
+  const discard = cssRule('.resource-console .resource-save-actions [data-resource-discard]');
+  assert.ok(discard.includes('width: 140px'), '放弃草稿槽要是 140');
+  assert.ok(discard.includes('flex: 0 0 140px'));
+  // 主保存：外槽 156、内部 face 128。两个数不能混：把槽写成 128 会让按钮
+  // 贴着右边的次按钮，把 face 写成 156 会看出字没居中。
+  const primary = cssRule('.resource-console .resource-primary');
+  assert.ok(primary.includes('flex: 0 0 156px'));
+  assert.ok(primary.includes('justify-content: center'));
+  assert.ok(cssRule('.resource-console .resource-primary-face').includes('width: 128px'));
+
+  // 白底从工具栏上方开始：只从表体开始，工具栏和修订号就落在纸色画布上。
+  const panel = cssRule('.resource-console .resource-panel');
+  assert.ok(panel.includes('margin-top: -8px'), '负 margin 只把白底往上拉 8px');
+  assert.ok(panel.includes('background: var(--color-white)'));
+  const table = cssRule('.resource-console .resource-table');
+  assert.ok(table.includes('background: transparent'), '表不再自己画白底，否则白底上再套一个框');
+
+  // 身份格：中间省略已由 shortId 做完，这里再用 14px + ellipsis 会把尾巴再截一次。
+  const idRule = cssRule('.resource-console .resource-id');
+  assert.ok(idRule.includes('font-size: 13px'));
+  assert.ok(idRule.includes('text-overflow: clip'));
+
+  // 端点箭头是 16×16 的现有 SVG，尺寸/位置写死在 CSS 里。
+  const caret = cssRule('.resource-console .resource-caret');
+  assert.ok(caret.includes('console-icon-chevron.svg'));
+  assert.ok(caret.includes('16px 16px'));
+  // appearance:none 是去掉原生箭头，否则框里会出现两只箭头。
+  assert.ok(cssRule('.resource-console .resource-select select').includes('appearance: none'));
 });

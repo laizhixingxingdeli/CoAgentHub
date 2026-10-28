@@ -457,9 +457,18 @@ function countOf(counts, id) {
   return Number.isFinite(value) ? value : 0;
 }
 
-/** 长 profileId 中间省略：头尾是分辨两条同前缀候选的唯一线索。 */
+/**
+ * 长 profileId 中间省略：头尾是分辨两条同前缀候选的唯一线索。
+ *
+ * 尾部省略（slice(0,n) + '…'）会把 “-6-thinking” 这类真正区分候选的后缀一起吃掉，
+ * 同一家族的几条候选在列表里长得一模一样；而把整串塞进 248px 的列里，浏览器
+ * 又会替我们再截一次，中间省略等于没做。所以这里自己截中段，并把列宽从
+ * .resource-cell 的 ellipsis 里摘出来（见 .resource-id），保证尾巴真的看得见。
+ */
 function shortId(id) {
-  return id.length > 48 ? id.slice(0, 20) + '…' + id.slice(-12) : id;
+  if (!id) return '';
+  if (id.length <= 31) return id;
+  return id.slice(0, 19) + '…' + id.slice(-11);
 }
 
 function quotaCellText(health) {
@@ -481,7 +490,8 @@ function rowHtml(row, index, selectedProfileId) {
     + (selectedProfileId && selectedProfileId === profileId ? ' data-selected="1"' : '') + '>'
     + '<span class="resource-col" data-col="1">' + esc(String(index + 1)) + '</span>'
     + '<span class="resource-col" data-col="2">'
-    +   '<span class="resource-cell console-data" title="' + esc(profileId) + '">' + esc(shortId(profileId)) + '</span>'
+    +   '<span class="resource-cell console-data resource-id" title="' + esc(profileId) + '">'
+    +     esc(shortId(profileId)) + '</span>'
     +   '<span class="resource-sub console-body">' + esc(endpoint) + '</span>'
     + '</span>'
     + '<span class="resource-col" data-col="3">' + (candidate.enabled === false ? '停用' : '启用') + '</span>'
@@ -573,6 +583,26 @@ function factsHtml(facts) {
 }
 
 /**
+ * 启停开关。两个抽屉共用同一个形状，只是属性名不同（一个是改已选草稿，
+ * 一个是改待加入的表单）。
+ *
+ * 轨道是一张 34×20 的现成 SVG（/console-icon-switch-on.svg 与不带 -on 的
+ * 关闭态），不是自绘矩形：开关的圆角、描边、滑块位置都在图里，用 CSS 重画
+ * 一份就得跟着画板逐像素对，且改一次要改两处。
+ *
+ * 状态**不能**靠 textContent 表达：按钮文字被改掉时 img 会跟着被擦，开关
+ * 就只剩一段文字，看着像两套不同的控件。
+ */
+function switchHtml(attribute, enabled) {
+  return '<button type="button" class="resource-switch" ' + attribute + '>'
+    + '<img class="resource-switch-track" src="'
+    +   (enabled ? '/console-icon-switch-on.svg' : '/console-icon-switch.svg')
+    +   '" width="34" height="20" alt="">'
+    + '<span class="resource-switch-label">' + (enabled ? '已启用' : '已停用') + '</span>'
+    + '</button>';
+}
+
+/**
  * endpoint 下拉。当前值不在选项里时**补一条带「（缺来源）」的**，而不是把它改写成
  * 集合里的第一个：那会让人以为这条候选用的是别的端点，一保存就真换了端点。
  * 补进来的那条只属于当前候选——它不进 endpointOptions，别的候选的下拉里看不到它。
@@ -592,6 +622,21 @@ function endpointSelectHtml(endpoint, options) {
 }
 
 /**
+ * 原生 select 的箭头由浏览器画，颜色和间距都跟不了 token，只能盖掉再换成
+ * 画板里那支 16×16 chevron（与 console-shell.css 用的同一份资产）。
+ * 箭头的 span 必须写出 aria-hidden：它是一个装饰，读屏读到一串空 span 只会困惑。
+ */
+function endpointFieldHtml(content, hint) {
+  return '<div class="resource-field">'
+    + '<span class="resource-sub console-body">端点</span>'
+    + '<div class="resource-select">' + content
+    +   '<span class="resource-caret" aria-hidden="true"></span>'
+    + '</div>'
+    + (hint || '')
+    + '</div>';
+}
+
+/**
  * 候选抽屉：草稿编辑区 + 只读健康详情。
  *
  * candidate 是渲染副本：草稿对象本身不带 health（健康不属于草稿，带进去就会
@@ -606,25 +651,22 @@ function drawerHtml(candidate, options, index, total) {
   const command = resetCommandView(health);
   const enabled = row.enabled !== false;
   return '<aside class="resource-drawer" data-resource-drawer>'
-    + '<div class="resource-drawer-title console-data">' + esc(profileId) + '</div>'
+    // 身份直接写在抽屉顶上、并占满左侧：原稿里它就是「我在改哪一条」的唯一
+    // 标识。另起一个「profileId（只读）」表单框会把端点、facts、健康整体下推，
+    // 而那个框的边框让人以为身份字段可改。
+    + '<div class="resource-drawer-head">'
+    +   '<div class="resource-drawer-title console-data" data-draft-profile>' + esc(profileId) + '</div>'
+    +   '<button type="button" class="resource-button" data-draft-close>返回草稿</button>'
+    + '</div>'
     + '<div class="resource-sub console-body">runtime：pi</div>'
-    + '<div class="resource-drawer-heading console-body">候选设置（草稿，未下发）</div>'
+    + endpointFieldHtml(endpointSelectHtml(row.endpoint, options))
     + '<div class="resource-field">'
-    +   '<span class="resource-sub console-body">profileId（只读）</span>'
-    +   '<div class="resource-readonly console-data" data-draft-profile>' + esc(profileId) + '</div>'
-    + '</div>'
-    + '<div class="resource-field">'
-    +   '<span class="resource-sub console-body">endpoint</span>'
-    +   endpointSelectHtml(row.endpoint, options)
-    + '</div>'
-    + '<div class="resource-field">'
-    +   '<span class="resource-sub console-body">参数（key / value）</span>'
+    +   '<span class="resource-sub console-body">适配层参数</span>'
     +   '<div class="resource-facts">' + factsHtml(row.facts) + '</div>'
     +   '<div><button type="button" class="resource-button" data-fact-add>添加参数</button></div>'
     + '</div>'
     + '<div class="resource-drawer-actions">'
-    +   '<button type="button" class="resource-button" data-draft-toggle>'
-    +     (enabled ? '停用' : '启用') + '</button>'
+    +   switchHtml('data-draft-toggle', enabled)
     +   '<button type="button" class="resource-button" data-draft-move="-1"'
     +     (index <= 0 ? ' disabled' : '') + '>上移</button>'
     +   '<button type="button" class="resource-button" data-draft-move="1"'
@@ -666,22 +708,25 @@ function addDrawerHtml(role, options, form, draftCount) {
   const items = values.map((value) => '<option value="' + esc(value) + '"'
     + (value === current ? ' selected' : '') + '>' + esc(value) + '</option>').join('');
   return '<aside class="resource-drawer" data-resource-add-drawer>'
-    + '<div class="resource-drawer-heading console-body">添加' + esc(roleLabelOf(role)) + '候选</div>'
-    + '<div class="resource-sub console-body">候选设置（草稿，未下发）</div>'
+    // 标题用 resource-add-title，不复用 resource-drawer-title：后者是 13px/20px 的
+    // 可换行身份样式，把 18px/28px 的抽屉标题套进它会把标题缩成一段小字。
+    + '<div class="resource-drawer-head">'
+    +   '<div class="resource-add-title console-data">添加' + esc(roleLabelOf(role)) + '候选</div>'
+    +   '<button type="button" class="resource-button" data-add-cancel>返回草稿</button>'
+    + '</div>'
     + '<div class="resource-field">'
     +   '<span class="resource-sub console-body">profileId</span>'
     +   '<input type="text" class="resource-input console-data" data-add-profile value="'
     +     esc(typeof add.profileId === 'string' ? add.profileId : '') + '">'
     + '</div>'
-    + '<div class="resource-field">'
-    +   '<span class="resource-sub console-body">endpoint</span>'
-    +   '<select class="resource-input console-data" data-add-endpoint'
-    +     (empty ? ' disabled' : '') + '>' + items + '</select>'
-    +   (empty ? '<span class="resource-sub console-body">全池没有已返回的端点</span>' : '')
-    + '</div>'
+    + endpointFieldHtml(
+      '<select class="resource-input console-data" data-add-endpoint'
+        + (empty ? ' disabled' : '') + '>' + items + '</select>',
+      empty ? '<span class="resource-sub console-body">全池没有已返回的端点</span>' : '',
+    )
     + '<div class="resource-sub console-body">runtime：pi（固定）</div>'
     + '<div class="resource-field">'
-    +   '<span class="resource-sub console-body">参数（key / value）</span>'
+    +   '<span class="resource-sub console-body">适配层参数</span>'
     +   '<div class="resource-facts">'
     +     facts.map((fact, index) => {
       const entry = fact && typeof fact === 'object' ? fact : {};
@@ -704,15 +749,13 @@ function addDrawerHtml(role, options, form, draftCount) {
     + '<div class="resource-sub console-body">顺序：加入后为第 '
     +   esc(String(draftCount + 1)) + ' 行（追加到末尾）</div>'
     + '<div class="resource-drawer-actions">'
-    +   '<button type="button" class="resource-button" data-add-enabled>'
-    +     (enabled ? '停用' : '启用') + '</button>'
+    +   switchHtml('data-add-enabled', enabled)
     + '</div>'
     + '<div class="resource-drawer-actions">'
     // 空选项时禁用：没有端点就存不出一条能被调度的候选，而它能存、能在列表里
     // 长得和别的行一样，直到调度永远失败。
     +   '<button type="button" class="resource-button" data-add-join'
     +     (empty ? ' disabled' : '') + '>加入角色草稿</button>'
-    +   '<button type="button" class="resource-button" data-add-cancel>返回草稿</button>'
     + '</div>'
     + '</aside>';
 }
@@ -762,6 +805,11 @@ export function resourcePageHtml(vm) {
   return '<section class="resource-console" data-resource-page>'
     + '<h1 class="fixed-page-title">模型资源</h1>'
     + '<div class="resource-tabs">' + tabs + '</div>'
+    // 白色底板从工具栏上方开始覆盖工具栏/表头/表体（画板 x224/y204 那块）。
+    // 只从表体开始画的话，添加按钮和修订号会落在纸色画布上，与表本体的白底
+    // 断成两块；而这段背景差异不能用行数或真实数据解释。
+    // 保存条与抽屉留在 panel 外：它们是 fixed 覆盖层，不是内容的一部分。
+    + '<div class="resource-panel">'
     + '<div class="resource-toolbar">'
     +   '<button type="button" class="resource-button" data-resource-add>添加候选</button>'
     +   '<span class="resource-sub console-body" data-resource-revision>'
@@ -776,6 +824,7 @@ export function resourcePageHtml(vm) {
     + '<div class="resource-table">'
     +   '<div class="resource-head console-body">' + head + '</div>'
     +   '<div class="resource-body">' + body + '</div>'
+    + '</div>'
     + '</div>'
     // 空角色加了第一条草稿也要有保存条：否则那一条既在抽屉里、又没有「未保存」的提示。
     + (rows.length || drafts.length ? saveBarHtml(label, revision, dirty, role, {
@@ -1200,6 +1249,14 @@ export async function renderResourcePage(container) {
     if (target.closest('[data-add-cancel]')) {
       state.adding = false;
       state.addForm = null;
+      paint();
+      return;
+    }
+    // 返回草稿（编辑抽屉）：只关抽屉。不清草稿、不发请求、不调 discard——
+    // 那个是保存条上「放弃草稿」的语义，把返回做成放弃，人随手一关就把刚改的
+    // 东西丢了。
+    if (target.closest('[data-draft-close]')) {
+      state.selectedProfileId = '';
       paint();
       return;
     }

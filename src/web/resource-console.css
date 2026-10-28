@@ -79,6 +79,29 @@
   height: 36px;
 }
 
+/* 白色底板从工具栏上方 8px 开始，盖住工具栏/表头/表体（画板 x224/y204 那块）。
+ * 负 margin 只把背景往上拉 8px，再配 padding-top:8px 把工具栏内容推回原位置：
+ * 不这么写就得给每个孩子单独加背景，那块背景会随错误行有无断成几块。 */
+.resource-console .resource-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: -8px;
+  padding-top: 8px;
+  background: var(--color-white);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--color-line);
+}
+
+.resource-console .resource-toolbar [data-resource-add] {
+  /* 画板按钮槽 128（不是内容的自然宽度）：只靠 padding 撑，中文四字会算成
+   * 86.22px，工具栏里就比设计短一截。 flex:0 0 而非仅 width：缺了 flex 基准
+   * 它仍会被 flex 布局压回内容宽。 */
+  width: 128px;
+  flex: 0 0 128px;
+  padding: 0;
+}
+
 .resource-console .resource-button {
   display: inline-flex;
   align-items: center;
@@ -123,12 +146,12 @@
  */
 
 .resource-console .resource-table {
-  /* 1px 线走内阴影不走 border：行内 1120 列宽 + 六个 4px gap + 左右 16 正好 1176，
-   * 也就是这张表的内容盒；真的给 1px border 会把内容盒挤成 1174，多出的 2px
-   * 让整张表在 1440 桌面上凭空多一条横向滚动条。窄屏仍靠下面的 overflow-x 滚。 */
-  box-shadow: inset 0 0 0 1px var(--color-line);
+  /* 底板已经上提到 .resource-panel：表再自己画一层白底 + 描边，就会在白底上
+   * 套出一块带边框的框（多一道内描边），与原稿的整块白底不一样。横向滚动
+   * 仍留在这层：它是真正装 1176 宽行的容器。 */
+  background: transparent;
+  box-shadow: none;
   border-radius: 8px;
-  background: var(--color-white);
   overflow-x: auto;
 }
 
@@ -202,6 +225,14 @@
   line-height: 20px;
 }
 
+/* 身份格：13px 且不用 ellipsis。短 id 已经在 shortId 里做过中间省略，
+ * 再用 14px + ellipsis 会把保留的尾巴再截一次——中间省略就白做了。 */
+.resource-console .resource-id {
+  font-size: 13px;
+  line-height: 20px;
+  text-overflow: clip;
+}
+
 /* 熔断那一格的字色只表达状态，不改行底色：整行变红会让人以为这条候选
  * 已经不可用，而熔断中的候选仍然在配置里、仍然会被复位。 */
 .resource-console .resource-tone-green { color: var(--color-green); font-weight: 500; }
@@ -270,12 +301,20 @@
   flex: 0 0 auto;
 }
 
+.resource-console .resource-save-actions [data-resource-discard] {
+  /* 画板槽 140：放弃按钮的可点区域是它自己的槽，不是内容的自然宽。
+   * 槽窄了整排会往右缩，主保存按钮（固定 156 槽）的 x 就跟着偏开 53。 */
+  width: 140px;
+  flex: 0 0 140px;
+  padding: 0;
+}
+
 /* 主按钮是「槽 156 + face 128」：画板上按钮比字宽，靠的是外槽留出的那圈边，
  * 直接把按钮做成 128 会让它在保存条里贴着右边的次按钮。 */
 .resource-console .resource-primary {
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   flex: 0 0 156px;
   height: 36px;
   padding: 0;
@@ -338,9 +377,106 @@
 }
 
 .resource-console .resource-drawer-title {
+  /* flex:1 让身份占满剩余宽（右上是返回按钮），min-width:0 允许它在极长
+   * profileId 下换行而不是把返回按钮顶出抽屉。 */
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   line-height: 20px;
   word-break: break-all;
+}
+
+/* 抽屉首行：左身份、右「返回草稿」。返回按钮固定 100×36，否则它会按内容
+ * 收缩，两条不同长度的 profileId 下按钮位置会跳。 */
+.resource-console .resource-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resource-console .resource-drawer-head [data-draft-close] {
+  flex: 0 0 100px;
+  width: 100px;
+  height: 36px;
+  padding: 0;
+}
+
+.resource-console .resource-drawer-head [data-add-cancel] {
+  flex: 0 0 100px;
+  width: 100px;
+  height: 36px;
+  padding: 0;
+}
+
+/* 添加抽屉的标题是 18/28（画板 43:794）：它不是身份，不能复用 13px 的
+ * resource-drawer-title，否则标题会比抽屉里的小字还矮。 */
+.resource-console .resource-add-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* 启停开关：34×20 的 track SVG + 文字。不复用 resource-button，因为按钮的
+ * 描边和 36px 高会把开关画成一个普通矩形，与画板上的开关槽不同形。 */
+.resource-console .resource-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* flex:none：34×20 是画板原尺寸，被 flex 压窄会变成一根细条。 */
+.resource-console .resource-switch-track {
+  width: 34px;
+  height: 20px;
+  flex: none;
+}
+
+/* 端点下拉的外框：原生 select 自带的箭头去不掉颜色，只能另包一层框自己画。 */
+.resource-console .resource-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+}
+
+/* appearance:none 去掉原生箭头，否则框里会出现两个箭头（一个原生的、
+ * 一个 resource-caret）。border/padding 归零是让 select 自己不再画一道框，
+ * 否则就会在 resource-select 里再套一个小一号的框。 */
+.resource-console .resource-select select {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  appearance: none;
+  color: inherit;
+  font: inherit;
+}
+
+/* 箭头用本地 SVG（与 console-shell.css 186 行同一份资产）：换成 unicode 字符
+ * 会在不同字体下大小/基线不一，而它是固定 16×16 的图。 */
+.resource-console .resource-caret {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background: url('./console-icon-chevron.svg') center / 16px 16px no-repeat;
+  pointer-events: none;
 }
 
 .resource-console .resource-drawer-heading {
