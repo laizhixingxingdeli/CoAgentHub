@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { taskContractHtml } from '../src/web/task-detail-contract-view.js';
 
@@ -27,8 +27,8 @@ const CSS = readFileSync(new URL('../src/web/task-detail-contract.css', import.m
 /** 断言要看规则、不看注释：注释里写着「不设 line-clamp」，按整份文件搜就会搜到自己。 */
 const CSS_RULES = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
 
-const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
-const document = window.document as unknown as Document;
+const window = Window ? new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' }) : undefined;
+const document = window?.document as unknown as Document;
 
 function mount(view: Record<string, unknown>, options: Record<string, unknown> = {}) {
   document.body.innerHTML = '<div id="view"></div>';
@@ -46,7 +46,7 @@ function mount(view: Record<string, unknown>, options: Record<string, unknown> =
   return { root, q, all, card };
 }
 
-test('修订号与契约原文按原文出现，缺失的 nonGoals 说未记录，allowedScope 只认所选工作项且无按钮', () => {
+test('修订号与契约原文按原文出现，缺失的 nonGoals 说未记录，allowedScope 只认所选工作项且无按钮', { skip: noHappyDom }, () => {
   // 一整句超过 80 字的 intent：页面上必须整句都在，不能被截成摘要。
   const intent = '本单只改契约页签的只读投影与渲染两层，把已经验收的投影原样铺成六格，'
     + '不得改动 task-detail-contract.js 里的判断，也不得顺手给这一页补上审批或恢复的入口，'
@@ -157,7 +157,7 @@ function columnDom(all: (selector: string) => HTMLElement[]) {
   return { left: fieldsOf(left), right: fieldsOf(right) };
 }
 
-test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/guardrails/allowedScope', () => {
+test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/guardrails/allowedScope', { skip: noHappyDom }, () => {
   const { all } = mount({
     missionId: 'CUI3-task-detail-20261026',
     contractRevision: 2,
@@ -198,7 +198,7 @@ test('六格分左三右三：左 intent/acceptance/constraints，右 nonGoals/g
   assert.equal(/line-clamp/.test(CSS_RULES), false, 'CSS 规则里出现了 line-clamp');
 });
 
-test('没有契约也没有工作项：三格说未记录，不抛错，仍然是只读', () => {
+test('没有契约也没有工作项：三格说未记录，不抛错，仍然是只读', { skip: noHappyDom }, () => {
   const { root, card } = mount({ missionId: 'CUI3-task-detail-20261026', workItems: [] });
 
   assert.equal(root.getAttribute('data-readonly'), 'true');

@@ -25,8 +25,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # The platform needs no install: tests that need Postgres skip themselves when it is absent.
+      # The platform needs no install: DOM 测试缺 happy-dom 时自己跳过，由 platform-dom 任务装依赖来跑。
       - run: node --test
+
+  platform-dom:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: node --test test/console-overview-dom.test.ts test/console-shell.test.ts test/resource-console-save.test.ts test/task-detail-contract-view.test.ts test/task-detail-controller.test.ts test/task-detail-delivery-view.test.ts test/task-detail-flow-view.test.ts test/task-detail-header-view.test.ts test/task-detail-output-view.test.ts test/task-detail-page.test.ts
 
   # Required job: a broken adapter or MCP server blocks a merge. The only exemption is the
   # single test that really resolves a hostname (see the last step), reported but not gating.

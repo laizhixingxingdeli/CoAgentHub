@@ -14,7 +14,7 @@
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { renderOverviewPage, overviewHtml } from '../src/web/overview.js';
 import {
@@ -160,7 +160,7 @@ afterEach(() => {
   window.close();
 });
 
-describe('筛选 / 加载更早 / 焦点与刷新保留', () => {
+describe('筛选 / 加载更早 / 焦点与刷新保留', { skip: noHappyDom }, () => {
   test('状态页签、暂停开关、搜索、加载更早都真的改集合，完整计数不被可见批次截断', async () => {
     const controller = mount();
     await controller.start();
@@ -274,7 +274,7 @@ describe('筛选 / 加载更早 / 焦点与刷新保留', () => {
   });
 });
 
-describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', () => {
+describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', { skip: noHappyDom }, () => {
   test('初次加载不说 0，初次失败与真正的空集合各自成句；刷新失败保留旧数据、最后成功时刻与筛选', async () => {
     mode = 'hold';
     const controller = mount();
@@ -427,7 +427,7 @@ describe('初次加载 / 初次失败 / 空集合 / 隐藏与晚响应', () => {
   });
 });
 
-test('补充只为可见任务取详情与尾部 Attempt：限并发、先出列表、失败不清列表、隐藏会取消', async () => {
+test('补充只为可见任务取详情与尾部 Attempt：限并发、先出列表、失败不清列表、隐藏会取消', { skip: noHappyDom }, async () => {
   const waveRows = Array.from({ length: 9 }, (_, i) => mission(`M-${String(i).padStart(2, '0')}`, {
     status: 'executing',
     updatedAt: new Date(Date.UTC(2026, 9, 26, 6, 0, 0) - i * 60_000).toISOString(),
