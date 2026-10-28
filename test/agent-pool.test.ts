@@ -1088,8 +1088,11 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.equal(existsSync(join(webRoot, 'pool.css')), false, '不另起 pool.css');
 
     const shell = readWeb('app.js');
-    assert.match(shell, /from '\.\/pool\.js'/);
-    assert.match(shell, /renderPoolPage/);
+    // 资源页改由 resource-console.js 画（只读投影 + 健康抽屉）。pool.js 文件仍在，
+    // 但它不再是 #/pool 的渲染入口：要求两个入口都在，等于让一条路由有两个实现。
+    assert.match(shell, /from '\.\/resource-console\.js'/);
+    assert.match(shell, /renderResourcePage/);
+    assert.equal(/from '\.\/pool\.js'/.test(shell), false, 'app.js 仍 import 了旧的 pool.js');
     assert.ok(shell.includes("'/pool'"), 'parseRoute 要认 #/pool');
     assert.equal(shell.includes('/resources'), false, '占位路由要删掉：两个地址指同一页，迟早分叉');
     // 认不出的 hash 仍打回项目页（回归：加路由时别把这条弄丢）。
