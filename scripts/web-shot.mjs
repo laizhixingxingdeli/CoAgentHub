@@ -41,6 +41,12 @@ import { join, resolve } from 'node:path';
 import { serveStatic } from '../src/api/static.ts';
 import { isDirectEntry } from '../src/direct-entry.ts';
 
+import { compareBoard } from './web-shot-compare.mjs';
+
+// 画板比对是纯函数，单独放一个文件：扫描 XML 的逻辑塞回这个脚本里，会让本来就长的
+// 浏览器流程再翻一圈，测试也没法不启动浏览器直接跑。这里只做接线。
+export { compareBoard } from './web-shot-compare.mjs';
+
 const ARTIFACTS = '.coagent-artifacts';
 const DEFAULT_API = 'http://127.0.0.1:3101';
 const DEFAULT_SIZE = { width: 1440, height: 1240 };
@@ -342,6 +348,32 @@ function assertWithinDeadline(deadline, label) {
   if (Date.now() > deadline) throw new Error(`页面 20 秒内没加载完（${label}）`);
 }
 
+/**
+ * 等字体就位，但和导航共用同一个 deadline。裸 await document.fonts.ready 时，
+ * 字体请求挂住（上游断了、字体文件 404 后浏览器重试）会让脚本无限等下去，
+ * 「总上限 20 秒」就形同虚设——那是这张卡最想堵的洞。
+ */
+async function waitForFonts(evaluate, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error('页面 20 秒内没加载完（字体）');
+
+  const fontsDone = evaluate('document.fonts.ready.then(() => true)');
+  // 超时先返回时这条还在飞；它之后失败若不接住，会变成未处理拒绝把进程带崩。
+  fontsDone.catch(() => {});
+
+  let timer;
+  const timedOut = new Promise((done) => {
+    timer = setTimeout(() => done('timeout'), remaining);
+  });
+  try {
+    if ((await Promise.race([fontsDone, timedOut])) === 'timeout') {
+      throw new Error('页面 20 秒内没加载完（字体）');
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 记账：在途请求、失败的 /api 请求、页面异常。 */
 function trackNetwork(cdp, sessionId) {
   cdp.on((message) => {
@@ -382,6 +414,71 @@ async function clickAll(cdp, selectors, deadline) {
     if (!clicked) throw new Error(`找不到要点击的元素：${selector}`);
     await waitForQuiet(cdp, deadline, `点击 ${selector} 之后`);
   }
+}
+
+/** 量哪些选择器：--measure 在前，--pair 的 selector 补在后面，按出现顺序去重。 */
+function measureSelectors(opts) {
+  const wanted = [];
+  for (const selector of [...opts.measures, ...opts.pairs.map((pair) => pair.selector)]) {
+    if (!wanted.includes(selector)) wanted.push(selector);
+  }
+  return wanted;
+}
+
+/** 契约点名的九个计算样式，键名保持带连字符的原样。 */
+const MEASURE_STYLE_PROPS = [
+  'font-size',
+  'line-height',
+  'font-weight',
+  'color',
+  'background-color',
+  'padding',
+  'gap',
+  'border-radius',
+  'border-width',
+];
+
+/**
+ * 在页面里量全部匹配元素。用 querySelectorAll 而不是 querySelector：一个选择器
+ * 命中多个元素是常态（列表项），只量第一个会悄悄漏掉「第 3 行折了」这类问题。
+ * 选择器与属性名都过 JSON.stringify，引号、= 、反斜杠原样进脚本，不会被拆开。
+ */
+async function measureAll(evaluate, selectors) {
+  const expression = `(() => {
+    const props = ${JSON.stringify(MEASURE_STYLE_PROPS)};
+    const out = {};
+    for (const selector of ${JSON.stringify(selectors)}) {
+      out[selector] = [...document.querySelectorAll(selector)].map((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const box = {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+        };
+        for (const prop of props) box[prop] = style.getPropertyValue(prop);
+        return box;
+      });
+    }
+    return out;
+  })()`;
+  return evaluate(expression);
+}
+
+/**
+ * 拿设计稿比对。layout.xml 只在这里读：compareBoard 是纯函数，读文件留在调用方，
+ * 测试才能内联一小段 XML 直接跑。文件不在就抛（交给 main 的 catch：退出码非 0）。
+ */
+function compareWithBoard(opts, measures) {
+  const xml = readFileSync(join(process.cwd(), '.impeccable', 'reference', 'layout.xml'), 'utf8');
+  const measured = {};
+  for (const pair of opts.pairs) {
+    const hits = measures[pair.selector];
+    // 比对只看第一个匹配元素：--pair 的语义是「这个节点的框」，多个命中说不清是哪个。
+    measured[pair.selector] = Array.isArray(hits) ? (hits[0] ?? null) : null;
+  }
+  return compareBoard({ xml, boardNode: opts.compare, pairs: opts.pairs, measured, tol: opts.tol });
 }
 
 /** 只留最近 10 组截图。png 与同名 json 算一组，按组内最新 mtime 排序。 */
@@ -531,18 +628,42 @@ async function drive({ cdp, pagePort, opts, shotsDir }) {
   await call('Page.navigate', { url });
 
   await waitForQuiet(wrapped, deadline, '首次加载');
-  await evaluate('document.fonts.ready.then(() => true)');
+  await waitForFonts(evaluate, deadline);
   await clickAll(wrapped, opts.clicks, deadline);
+
+  // 量在截图之前：点开的面板还没画上去就量，拿到的是空框或旧位置。
+  const selectors = measureSelectors(opts);
+  const measures = selectors.length > 0 ? await measureAll(evaluate, selectors) : {};
 
   const shot = await call('Page.captureScreenshot', { format: 'png' });
   mkdirSync(shotsDir, { recursive: true });
   const png = join(shotsDir, `${opts.name}.png`);
   // 同名覆盖：跑第二遍要看到的是新图，不是上一轮留下的。
   writeFileSync(png, Buffer.from(shot.data, 'base64'));
+
+  // 没 --compare 时 compare 字段留 null，也不读 layout.xml。
+  const compare = opts.compare ? compareWithBoard(opts, measures) : null;
+  let json;
+  // 工单的条件是「measures 非空或有 --compare」：纯截图时 measures 是空对象，不落 json；
+  // 有 --pair 的时候 measures 里已经有那些框（不管 --compare 写没写），就该落盘。
+  if (Object.keys(measures).length > 0 || compare) {
+    json = join(shotsDir, `${opts.name}.json`);
+    const payload = {
+      viewport: { width: opts.size.width, height: opts.size.height },
+      measures,
+      compare: compare
+        ? { board: opts.compare, tol: opts.tol, over: compare.over, missing: compare.missing, rows: compare.rows }
+        : null,
+    };
+    writeFileSync(json, `${JSON.stringify(payload, null, 2)}\n`);
+  }
+  // 只在产物都落地之后 prune 一次：先 prune 会把上一轮的 json 连同新图一起当旧的删掉。
   pruneShots(shotsDir);
 
   return {
     png,
+    json,
+    compareLines: compare ? compare.lines : [],
     seconds: ((Date.now() - startedAt) / 1000).toFixed(1),
     pageErrors: cdp.state.pageErrors,
     failedApi: cdp.state.failedApi,
@@ -570,12 +691,16 @@ async function main(argv) {
     cdp.state = { inflight: new Map(), failedApi: 0, pageErrors: 0 };
 
     const result = await drive({ cdp, pagePort, opts, shotsDir: join(artifactsRoot, 'shots') });
+    // 比对逐行打在摘要之前：超差是这一趟最想看的东西，压在摘要底下会被漏掉。
+    for (const line of result.compareLines) console.log(line);
     summary = [
       `截图 ${result.png}`,
+      ...(result.json ? [`json ${result.json}`] : []),
       `视口 ${opts.size.width}x${opts.size.height}`,
       `耗时 ${result.seconds}s`,
       `页面异常 ${result.pageErrors}`,
       `失败的 /api 请求 ${result.failedApi}`,
+      // 有超差也不改退出码：截图任务的成功与否只看「页面打开、图写出来了」。
       '浏览器已退出',
     ].join(' ');
   } finally {
