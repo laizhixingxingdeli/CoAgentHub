@@ -88,6 +88,9 @@
   gap: 16px;
   margin-top: -8px;
   padding-top: 8px;
+  /* 底板末尾余量 8px：少了这一项，有候选时底板底边与最后一行只差 0，而画板上
+   * 空底板恰好比内容多这 8px（264 = 表头/工具栏 + 空区 150 + 8）。 */
+  padding-bottom: 8px;
   background: var(--color-white);
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px var(--color-line);
@@ -243,6 +246,9 @@
 .resource-console .resource-empty {
   margin: 0;
   padding: 16px;
+  /* border-box：默认 content-box 会把 16px padding 算到 150 外面，空区比画板高 32。 */
+  box-sizing: border-box;
+  min-height: 150px;
   color: var(--color-muted);
   font-size: 14px;
   line-height: 22px;
@@ -266,17 +272,31 @@
   bottom: 24px;
   width: auto;
   max-width: 1176px;
-  height: 84px;
-  /* 极窄时条内自己横向滚：被裁掉的按钮只看得见一半等于不可达。 */
-  overflow-x: auto;
+  /* 高度由内容决定、只留 84 的下限：写死 height:84px 再配 overflow-x:auto，
+   * 长文案只能在 84 里滚，摘要列被挤成一字一行；overflow-x 还会把 overflow-y
+   * 一并算成 auto，按钮跟着摘要左移。无消息时仍恰好 84（min-height）。 */
+  min-height: 84px;
+  height: auto;
+  overflow: visible;
   z-index: 4;
   display: flex;
-  align-items: center;
-  gap: 16px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
   padding: 16px;
   border: 1px solid var(--color-line);
   border-radius: 8px;
   background: var(--color-white);
+}
+
+.resource-console .resource-save-main {
+  /* 摘要 + 动作一行：动作锚右（margin-left:auto），文案再长也只挤摘要。 */
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
 }
 
 .resource-console .resource-save-summary {
@@ -285,6 +305,14 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+/* 标题与子行都省略：窄视口下让它们一行内截断，而不是把摘要压成一字一行。 */
+.resource-console .resource-save-summary .resource-save-title,
+.resource-console .resource-save-summary .resource-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .resource-console .resource-save-title {
@@ -299,6 +327,23 @@
   gap: 16px;
   /* 保存条上两个按钮不会缩：窄屏时让摘要那一列被挤，而不是把按钮压成按不准的宽度。 */
   flex: 0 0 auto;
+  /* 动作组钉在右侧：消息换行或摘要变长时按钮 x 不动，否则同一页两个状态下
+   * 保存按钮会跑到不同位置，人得重新找。 */
+  margin-left: auto;
+}
+
+/* 消息在动作行**之下**（DESIGN.md：失败信息在下方），整宽、可换行、不截断：
+ * 后端原文是唯一能告诉人「到底哪错了」的东西，缩短它等于把错误藏起来。 */
+.resource-console .resource-save-message {
+  margin: 0;
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.resource-console .resource-save-latest {
+  width: 100%;
+  min-width: 0;
 }
 
 .resource-console .resource-save-actions [data-resource-discard] {
@@ -370,7 +415,9 @@
    * 12）之内：写死 920 会让抽屉底边压在保存条上，抽屉里的按钮和保存条互相盖住。 */
   height: min(920px, calc(100vh - 78px - 120px));
   overflow: auto;
-  padding: 16px;
+  /* 内容内缩 24：516 宽抽屉减两侧 24 得 468，与画板可用宽一致。写 16 会让端点框
+   * 与 facts 整体比原稿宽 16px，健康与开关也跟着上移/左偏。 */
+  padding: 24px;
   border: 1px solid var(--color-line);
   border-radius: 12px;
   background: var(--color-white);
@@ -550,20 +597,45 @@
 .resource-console .resource-facts {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
+/* 每行是「字段一组 + 删除在下一行」，不是三列：把删除塞进字段行会占掉
+ * key160+value300 之后再超出 468 可用宽，三个控件只能被挤窄。 */
 .resource-console .resource-fact {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
 }
 
-/* min-width: 0：输入框的默认宽度按 size 属性算，不加这句两个框会把
- * 「删除本行」按钮挤出抽屉（抽屉 516 宽），而挤出之后它就不在视野里了。 */
-.resource-console .resource-fact .resource-input {
-  flex: 1 1 0;
-  min-width: 0;
+.resource-console .resource-fact-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resource-console .resource-fact-fields .resource-input[data-fact-key], .resource-console .resource-fact-fields .resource-input[data-add-fact-key] {
+  /* 画板给的固定槽：key 160、value 300、输入高 42。用 flex:1 1 0 会两个框平分，
+   * 值与键长得一样宽，长模型名在 160 里被截。 */
+  flex: 0 0 160px;
+  width: 160px;
+  height: 42px;
+  box-sizing: border-box;
+}
+
+.resource-console .resource-fact-fields .resource-input[data-fact-value], .resource-console .resource-fact-fields .resource-input[data-add-fact-value] {
+  flex: 0 0 300px;
+  width: 300px;
+  height: 42px;
+  box-sizing: border-box;
+}
+
+.resource-console [data-fact-add], .resource-console [data-add-fact-add] {
+  /* 画板按钮槽 128：中文四字的自然宽只有 ~86，只靠 padding 撑会短一截。 */
+  width: 128px;
+  flex: 0 0 128px;
+  padding: 0;
 }
 
 .resource-console .resource-button-small {

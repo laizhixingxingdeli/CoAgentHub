@@ -313,6 +313,23 @@ test('endpoint 选项只来自真实配置且去重保序；脏判定按角色�
   assert.ok(html.includes('返回草稿'));
   assert.equal(html.includes('候选设置（草稿，未下发）'), false, '抽屉里不该多出这段设置标题');
   assert.equal(html.includes('profileId（只读）'), false, '身份已写在抽屉顶部，不再另画只读框');
+  // facts：删除本行是参数删除，必须在；但它不能和 key/value 挤在同一行，
+  // 否则 160+300+gap 再塞按钮就超出抽屉可用宽，三个控件只能一起被挤窄。
+  assert.ok(html.includes('data-fact-remove="0"'), '参数行缺删除本行');
+  assert.ok(html.includes('删除本行'));
+  const factFieldsAt = html.indexOf('resource-fact-fields');
+  assert.ok(factFieldsAt > 0, '参数 key/value 要包在 resource-fact-fields 里');
+  assert.equal(html.slice(factFieldsAt, html.indexOf('</div>', factFieldsAt)).includes('data-fact-remove'),
+    false, '删除本行不能和 key/value 在同一行');
+  // 开关与上移/下移分属两块：同排时看起来像同一个操作组，而它们改的是不同东西。
+  const switchAt = html.indexOf('data-draft-toggle');
+  const orderAt = html.indexOf('<div class="resource-drawer-actions">');
+  assert.ok(switchAt > 0 && orderAt > 0, '编辑抽屉缺开关或排序按钮');
+  assert.ok(html.indexOf('resource-drawer-switch') < switchAt, '开关要自己有 resource-drawer-switch 块');
+  assert.ok(orderAt > switchAt, '开关块要排在排序块前面');
+  const orderBlock = html.slice(orderAt, html.indexOf('</div>', orderAt));
+  assert.equal(orderBlock.includes('data-draft-toggle'), false, '排序块里不能再混开关');
+  assert.ok(orderBlock.includes('data-draft-move="-1"'));
   // 启停必须是 34×20 的开关图 + 状态文字；矩形按钮与画板的开关槽不同形。
   assert.ok(html.includes('/console-icon-switch-on.svg'), '启用态要引用开关 track SVG');
   assert.ok(html.includes('width="34" height="20"'), '开关 track 尺寸要是 34×20');
@@ -590,4 +607,74 @@ test('资源页 CSS：页名外边距归零，保存条与抽屉按视口收缩�
   assert.ok(caret.includes('16px 16px'));
   // appearance:none 是去掉原生箭头，否则框里会出现两只箭头。
   assert.ok(cssRule('.resource-console .resource-select select').includes('appearance: none'));
+
+  // 抽屉内容内缩 24：516 宽减两侧 24 得画板的 468 可用宽；16 会让端点框宽 482。
+  assert.ok(drawer.includes('padding: 24px'), '抽屉内容要内缩 24');
+  assert.equal(drawer.includes('padding: 16px'), false, '16px 会把可用宽变成 484');
+
+  // facts 槽位：key 160×42 / value 300×42 / 间距 8，都是画板给的固定值；
+  // 换成 flex:1 1 0 两个框会被等分。
+  const factFields = cssRule('.resource-console .resource-fact-fields');
+  assert.ok(factFields.includes('gap: 8px'));
+  const factKey = cssRule(
+    '.resource-console .resource-fact-fields .resource-input[data-fact-key], '
+    + '.resource-console .resource-fact-fields .resource-input[data-add-fact-key]',
+  );
+  assert.ok(factKey.includes('width: 160px'), '参数名槽要是 160');
+  assert.ok(factKey.includes('height: 42px'), '参数输入高要是 42');
+  const factValue = cssRule(
+    '.resource-console .resource-fact-fields .resource-input[data-fact-value], '
+    + '.resource-console .resource-fact-fields .resource-input[data-add-fact-value]',
+  );
+  assert.ok(factValue.includes('width: 300px'), '参数值槽要是 300');
+  const factAdd = cssRule(
+    '.resource-console [data-fact-add], .resource-console [data-add-fact-add]',
+  );
+  assert.ok(factAdd.includes('width: 128px'), '添加参数按钮槽要是 128');
+  assert.ok(factAdd.includes('flex: 0 0 128px'), '只写 width 会被 flex 压回内容宽');
+
+  // 保存条：高度由内容决定、只留 84 下限；写死 height:84 + overflow-x:auto 时
+  // 长文案在条里滚、摘要被挤成一字一行、按钮跟着左移。
+  assert.ok(savebar.includes('flex-direction: column'));
+  assert.ok(savebar.includes('min-height: 84px'), '无消息时条仍要恰好 84 高');
+  assert.equal(/(?:^|[\s;])height: 84px/.test(savebar), false, '不能再写死 84 高');
+  assert.equal(savebar.includes('overflow-x: auto'), false, 'overflow-x:auto 会让长文案在条内滚');
+
+  // 长失败原文：消息必须在摘要/动作行之下，且原文一字不少地留着。
+  const longMessage = '保存失败：候选池已变化，重复 profileId=coordinator-antigravity-claude-opus-4-6-thinking'
+    + ' 与已有的 coordinator-antigravity-claude-opus-4-6-thinking 冲突，请改掉后再保存。';
+  const failed = resourcePageHtml({
+    role: 'coordinator',
+    revision: 'r-1',
+    counts: { coordinator: 1 },
+    rows: [{ profileId: 'c1', endpoint: 'local' }],
+    drafts: [{ profileId: 'c1', endpoint: 'local' }],
+    dirty: true,
+    message: longMessage,
+  });
+  assert.ok(failed.includes(longMessage), '后端原文不能被截断');
+  assert.ok(failed.includes('data-resource-save-button'), '有消息时保存按钮仍在');
+  const mainStart = failed.indexOf('<div class="resource-save-main">');
+  assert.ok(mainStart >= 0, '摘要与动作要包在 resource-save-main 里');
+  // 用 div 标签配平找 resource-save-main 的结束：消息落在这个块之后才是「在下方」。
+  let depth = 0;
+  let mainEnd = -1;
+  const divTag = /<div\b|<\/div>/g;
+  divTag.lastIndex = mainStart;
+  for (let hit = divTag.exec(failed); hit; hit = divTag.exec(failed)) {
+    depth += hit[0] === '</div>' ? -1 : 1;
+    if (depth === 0) {
+      mainEnd = hit.index;
+      break;
+    }
+  }
+  assert.ok(mainEnd > mainStart, '找不到 resource-save-main 的结束');
+  assert.ok(failed.indexOf('data-resource-save-message') > mainEnd, '消息要排在摘要/动作行之下');
+
+  // 空角色：候选区 150 高、border-box（content-box 会把 16px padding 算到外面），
+  // 底板末尾余量 8px。panel 不能写死高度，否则真实行数一变就错。
+  assert.ok(cssRule('.resource-console .resource-empty').includes('min-height: 150px'));
+  assert.ok(cssRule('.resource-console .resource-empty').includes('box-sizing: border-box'));
+  assert.ok(panel.includes('padding-bottom: 8px'), '底板末尾余量要是 8');
+  assert.equal(/(?:^|[\s;])(?:min-)?height:/.test(panel), false, 'panel 不能写死高度');
 });

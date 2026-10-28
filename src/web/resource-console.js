@@ -533,38 +533,52 @@ function saveBarHtml(label, revision, dirty, role, flags) {
   const latest = view.latest && typeof view.latest === 'object' ? view.latest : null;
   const saveDisabled = busy || conflict || !dirty;
   const discardDisabled = busy || !dirty;
+  // 摘要/动作与消息**分两层**：放同一个 flex 行时，后端返回的长原文会把摘要那一列
+  // 挤成一字一行、整个条在 84px 里滚，按钮也跟着左移。文案放下面一行，动作锚在
+  // 右侧；条高度由内容决定，按钮 x 不随文案长度变。
   return '<div class="resource-savebar" data-resource-save'
     + (dirty ? ' data-dirty="1"' : '') + '>'
-    + '<div class="resource-save-summary">'
-    +   '<span class="resource-save-title console-body" data-resource-save-title>'
-    +     (dirty ? '有未保存修改' : '没有未保存修改') + '</span>'
-    +   '<span class="resource-sub console-body">' + esc(label + ' · 修订 ' + (revision || '未知')) + '</span>'
-    + '</div>'
-    + '<div class="resource-save-actions">'
-    +   '<button type="button" class="resource-primary" data-resource-save-button'
-    +     (saveDisabled ? ' disabled' : '') + '>'
-    +     '<span class="resource-primary-face console-body">'
-    +       (busy ? '保存中…' : '保存整个角色') + '</span>'
-    +   '</button>'
-    +   '<button type="button" class="resource-button" data-resource-discard'
-    +     (discardDisabled ? ' disabled' : '') + '>放弃草稿</button>'
-    +   (conflict
+    + '<div class="resource-save-main">'
+    +   '<div class="resource-save-summary">'
+    +     '<span class="resource-save-title console-body" data-resource-save-title>'
+    +       (dirty ? '有未保存修改' : '没有未保存修改') + '</span>'
+    +     '<span class="resource-sub console-body">' + esc(label + ' · 修订 ' + (revision || '未知')) + '</span>'
+    +   '</div>'
+    +   '<div class="resource-save-actions">'
+    +     '<button type="button" class="resource-primary" data-resource-save-button'
+    +       (saveDisabled ? ' disabled' : '') + '>'
+    +       '<span class="resource-primary-face console-body">'
+    +         (busy ? '保存中…' : '保存整个角色') + '</span>'
+    +     '</button>'
+    +     '<button type="button" class="resource-button" data-resource-discard'
+    +       (discardDisabled ? ' disabled' : '') + '>放弃草稿</button>'
+    +     (conflict
       ? '<button type="button" class="resource-button" data-resource-compare>重新读取最新</button>'
       : '')
+    +   '</div>'
     + '</div>'
     + (message
-      ? '<p class="resource-sub console-body" data-resource-save-message>' + esc(message) + '</p>'
+      ? '<p class="resource-sub console-body resource-save-message" data-resource-save-message>'
+      +   esc(message) + '</p>'
       : '')
     + (latest
-      ? '<pre class="resource-command" data-resource-latest>'
-      +   esc(JSON.stringify(latest[role] || [], null, 2)) + '</pre>'
-      + '<div><button type="button" class="resource-button" data-resource-rebase>'
-      +   '已比较，保留草稿重试</button></div>'
+      ? '<div class="resource-save-latest">'
+      +   '<pre class="resource-command" data-resource-latest>'
+      +     esc(JSON.stringify(latest[role] || [], null, 2)) + '</pre>'
+      +   '<div><button type="button" class="resource-button" data-resource-rebase>'
+      +     '已比较，保留草稿重试</button></div>'
+      + '</div>'
       : '')
     + '</div>';
 }
 
-/** facts 的每一行：key + value + 删本行。删的是参数，不是候选。 */
+/**
+ * facts 的每一行：key + value 一组，删本行单独一行。删的是参数，不是候选。
+ *
+ * 删除按钮**不能**放进 resource-fact-fields：那样 key160/value300/gap8 再加上按钮
+ * 就超出 468 的可用宽，浏览器只能把三样东西一起挤成窄三列。原稿是「框一组、
+ * 删除在下」，所以字段与按钮分成两层。
+ */
 function factsHtml(facts) {
   const rows = Array.isArray(facts) ? facts : [];
   return rows.map((fact, index) => {
@@ -572,10 +586,12 @@ function factsHtml(facts) {
     const key = typeof entry.key === 'string' ? entry.key : '';
     const value = typeof entry.value === 'string' ? entry.value : '';
     return '<div class="resource-fact" data-fact-row="' + index + '">'
-      + '<input type="text" class="resource-input console-data" data-fact-key="' + index
-      +   '" value="' + esc(key) + '" placeholder="key" aria-label="参数名">'
-      + '<input type="text" class="resource-input console-data" data-fact-value="' + index
-      +   '" value="' + esc(value) + '" placeholder="value" aria-label="参数值">'
+      + '<div class="resource-fact-fields">'
+      +   '<input type="text" class="resource-input console-data" data-fact-key="' + index
+      +     '" value="' + esc(key) + '" placeholder="key" aria-label="参数名">'
+      +   '<input type="text" class="resource-input console-data" data-fact-value="' + index
+      +     '" value="' + esc(value) + '" placeholder="value" aria-label="参数值">'
+      + '</div>'
       + '<button type="button" class="resource-button resource-button-small" data-fact-remove="'
       +   index + '">删除本行</button>'
       + '</div>';
@@ -665,8 +681,12 @@ function drawerHtml(candidate, options, index, total) {
     +   '<div class="resource-facts">' + factsHtml(row.facts) + '</div>'
     +   '<div><button type="button" class="resource-button" data-fact-add>添加参数</button></div>'
     + '</div>'
-    + '<div class="resource-drawer-actions">'
+    // 开关与排序分成上下两排：同一排里开关贴着上移/下移，人会以为它们是同一个
+    // 操作组（而启停改的是调度、排序改的是顺序，是两个不同的动作）。
+    + '<div class="resource-drawer-switch">'
     +   switchHtml('data-draft-toggle', enabled)
+    + '</div>'
+    + '<div class="resource-drawer-actions">'
     +   '<button type="button" class="resource-button" data-draft-move="-1"'
     +     (index <= 0 ? ' disabled' : '') + '>上移</button>'
     +   '<button type="button" class="resource-button" data-draft-move="1"'
@@ -730,13 +750,16 @@ function addDrawerHtml(role, options, form, draftCount) {
     +   '<div class="resource-facts">'
     +     facts.map((fact, index) => {
       const entry = fact && typeof fact === 'object' ? fact : {};
+      // 与编辑抽屉同形状：字段成组、删除在下，属性名仍是 data-add-fact-*。
       return '<div class="resource-fact" data-add-fact-row="' + index + '">'
-        + '<input type="text" class="resource-input console-data" data-add-fact-key="' + index
-        +   '" value="' + esc(typeof entry.key === 'string' ? entry.key : '')
-        +   '" placeholder="key" aria-label="参数名">'
-        + '<input type="text" class="resource-input console-data" data-add-fact-value="' + index
-        +   '" value="' + esc(typeof entry.value === 'string' ? entry.value : '')
-        +   '" placeholder="value" aria-label="参数值">'
+        + '<div class="resource-fact-fields">'
+        +   '<input type="text" class="resource-input console-data" data-add-fact-key="' + index
+        +     '" value="' + esc(typeof entry.key === 'string' ? entry.key : '')
+        +     '" placeholder="key" aria-label="参数名">'
+        +   '<input type="text" class="resource-input console-data" data-add-fact-value="' + index
+        +     '" value="' + esc(typeof entry.value === 'string' ? entry.value : '')
+        +     '" placeholder="value" aria-label="参数值">'
+        + '</div>'
         + '<button type="button" class="resource-button resource-button-small" data-add-fact-remove="'
         +   index + '">删除本行</button>'
         + '</div>';
