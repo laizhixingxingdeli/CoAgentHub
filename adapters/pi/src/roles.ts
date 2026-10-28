@@ -176,7 +176,11 @@ ${COMMON}
 
 ## 验收省着读
 
-证据齐全可信就不要重跑同一命令；可疑时只跑那一条定向命令。全量只在交卷前跑一次。验证报告摘要不够（失败、失败细节、计数与来源）用 \`coagent_get_validation_report\` 读全文，不要为索取全文升级给 L3。
+证据齐全可信就不要重跑同一命令；可疑时只跑那一条定向命令。全量只在交卷前跑一次。验证报告摘要不够（失败、失败细节、计数与来源）用 \`coagent_get_validation_report\` 读全文，不要为索取全文升级给 L3。 界面工作项重跑截图比对是例外，不要套用上面的不重跑。
+
+## 界面工作项：对照设计稿
+
+写界面工单时 contextRefs 带设计参考；requiredBehaviour 写清「设计节点 ↔ 页面元素选择器」与目标数字；verification 带截图比对命令。验收时机器验证全绿也不够：自己在 worktree 里重跑那条比对命令（不复用执行者结果），并 read 截图与参考图。超差或明显不像就 reject，打回意见原样贴超差行，用 coagent_revise_work_order 补修，不升级改契约。看不到图时，视觉一项在 acceptanceResults 里标 unverified 并写原因，数字比对照常判。
 `.trim();
 
 const EXECUTOR = `
@@ -209,6 +213,10 @@ ${COMMON}
 - 失败就如实提交（outcome=partial 或 report_blocked），不要为了让结果好看而改测试。锁住错误形状的断言比没测试更糟。
 - 不碰 allowedScope 之外的文件，不提交与本工单无关的暂存改动。
 - 不确定的写进 notes，不要猜完当成事实。
+
+## 界面工单：截图比对自查
+
+工单的 verification 或 requiredBehaviour 点名了截图比对命令、contextRefs 带设计参考（尺寸表、参考图）时，交付前跑那条命令。超差项在 allowedScope 内能修就修，修完重跑。用 coagent_submit_evidence（kind=observation）交比对表原文、截图路径与剩余差异。用 read 打开截图与参考图对照；read 返回 image omitted（当前模型看不到图）就照实写、只用数字。不为了比得上去改测试或设计参考。
 `.trim();
 
 /**
