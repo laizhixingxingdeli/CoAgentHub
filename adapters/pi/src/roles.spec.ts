@@ -265,8 +265,20 @@ test("精简后协调者与执行者提示词字节上限，且协调者含偏�
 	const executorBytes = Buffer.byteLength(executor, "utf8");
 	console.log(`coordinator bytes=${coordinatorBytes}`);
 	console.log(`executor bytes=${executorBytes}`);
-	assert.ok(coordinatorBytes <= 7 * 1024, `协调者提示词 ${coordinatorBytes} 字节，应 <= ${7 * 1024}`);
-	assert.ok(executorBytes <= 3584, `执行者提示词 ${executorBytes} 字节，应 <= 3584`);
+	assert.ok(coordinatorBytes <= 8 * 1024, `协调者提示词 ${coordinatorBytes} 字节，应 <= ${8 * 1024}`);
+	assert.ok(executorBytes <= 4096, `执行者提示词 ${executorBytes} 字节，应 <= 4096`);
 	assert.ok(coordinator.includes("不能判 pass"), "协调者应写明承认的偏差不能判 pass");
 	assert.ok(coordinator.includes("openRisks"), "协调者应写明交卷 openRisks 里的偏差");
+});
+
+test("界面工单提示词含截图比对自查与对照设计稿", () => {
+	const executor = systemPrompt("executor");
+	const coordinator = systemPrompt("coordinator");
+	assert.match(executor, /界面工单：截图比对自查/);
+	assert.match(executor, /image omitted/);
+	assert.match(executor, /不为了比得上去改测试或设计参考/);
+	assert.match(coordinator, /界面工作项：对照设计稿/);
+	assert.match(coordinator, /设计节点 ↔ 页面元素选择器/);
+	assert.match(coordinator, /不复用执行者结果/);
+	assert.match(coordinator, /界面工作项重跑截图比对是例外/);
 });
