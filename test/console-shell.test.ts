@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import {
   ALL_PROJECTS,
@@ -66,7 +66,7 @@ function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-describe('外壳说什么、算哪一格', () => {
+describe('外壳说什么、算哪一格', { skip: noHappyDom }, () => {
   const NOW = Date.UTC(2026, 9, 26, 6, 0, 0);
   const at = NOW - 5_000;
 
@@ -140,7 +140,7 @@ describe('外壳说什么、算哪一格', () => {
   });
 });
 
-describe('外壳的请求生命周期（真 DOM）', () => {
+describe('外壳的请求生命周期（真 DOM）', { skip: noHappyDom }, () => {
   test('项目来自真接口、时刻是真的读取时间；换页取消在飞的请求，旧响应不得覆盖新路由', async () => {
     const now = () => Date.UTC(2026, 9, 26, 6, 0, 0);
     const { window, document, shell } = mountShell(

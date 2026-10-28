@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { bindTaskFlow, taskFlowHtml } from '../src/web/task-detail-flow-view.js';
 
@@ -66,8 +66,8 @@ function activity(): Array<Record<string, unknown>> {
   ];
 }
 
-const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
-const document = window.document as unknown as Document;
+const window = Window ? new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' }) : undefined;
+const document = window?.document as unknown as Document;
 
 function mount(
   v: Record<string, unknown>,
@@ -89,7 +89,7 @@ const click = (el: Element | null): void => {
   el.dispatchEvent(new window.Event('click', { bubbles: true }) as unknown as Event);
 };
 
-test('未指定选择：选中未结束的工作项，近期环节只含它的已发生事件且旧在前，当前标记指向未结束的 Attempt', () => {
+test('未指定选择：选中未结束的工作项，近期环节只含它的已发生事件且旧在前，当前标记指向未结束的 Attempt', { skip: noHappyDom }, () => {
   const { root, q, all } = mount(view(), activity());
 
   // 选择落在还在跑的那张上，且已验收的那张只作为标记出现、不占选中位。
@@ -191,7 +191,7 @@ test('未指定选择：选中未结束的工作项，近期环节只含它的�
  * 两个数字必须是投影给的真值：夹具里 W-B 只有两次执行、两条环节。写死成样板里那对
  * 「15 个已发生环节 / 13 次执行」在屏幕上完全合理，而本单的事一条都对不上。
  */
-test('展开时标题写真实的环节数与执行次数，近期卡与白底白框都由 CSS 撤掉', () => {
+test('展开时标题写真实的环节数与执行次数，近期卡与白底白框都由 CSS 撤掉', { skip: noHappyDom }, () => {
   const { root, q, all } = mount(view(), activity(), { expanded: true });
 
   assert.equal(root.getAttribute('data-expanded'), 'true');
@@ -235,7 +235,7 @@ test('展开时标题写真实的环节数与执行次数，近期卡与白底�
  * 长 profile/model 要被看得全：卡槽 136px 放不下时，至少有一条能读到全文的路，
  * 且不能靠把卡撑高/撑宽——那会把后面的卡挤出可见区，而屏幕上看不出谁被挤走了。
  */
-test('长身份可以看全：title 与节点文字相同，卡槽仍是 274×136', () => {
+test('长身份可以看全：title 与节点文字相同，卡槽仍是 274×136', { skip: noHappyDom }, () => {
   const v = {
     missionId: 'CUI3-task-detail-20261026',
     coordinationMode: 'hierarchical',
@@ -282,7 +282,7 @@ test('长身份可以看全：title 与节点文字相同，卡槽仍是 274×13
   assert.ok(/height:\s*136px;/.test(stage), '卡片高度不再是 136px：' + stage);
 });
 
-test('自动改派环节显示平台徽章，不归协调者', () => {
+test('自动改派环节显示平台徽章，不归协调者', { skip: noHappyDom }, () => {
   const only = [
     {
       kind: 'work_item.auto_redispatched',
@@ -315,7 +315,7 @@ test('自动改派环节显示平台徽章，不归协调者', () => {
  * 14 张已验收单全铺出来会把标题带挤成一条收不住的线；选择器留在标题带里则会跟轮次、
  * 展开按钮抢同一行——两处都「看着还行」，只是排版不再是画板那一个。
  */
-test('选择器在白板外，已验收芯片只留相邻一项，定位当前与展开在标题带内', () => {
+test('选择器在白板外，已验收芯片只留相邻一项，定位当前与展开在标题带内', { skip: noHappyDom }, () => {
   const many = {
     missionId: 'CUI3-task-detail-20261026',
     coordinationMode: 'hierarchical',
@@ -373,7 +373,7 @@ test('选择器在白板外，已验收芯片只留相邻一项，定位当前�
  * 像“卡片变小了一点”；时刻只写 HH:MM 时跨天的历史全是同一个时刻；结果词写回状态词时
  * 「上游调用失败」就变成「已记录」。
  */
-test('历史行是标题/身份/时间三列，时间是本地 MM-DD HH:mm，结果与全文都可在 title 查看', () => {
+test('历史行是标题/身份/时间三列，时间是本地 MM-DD HH:mm，结果与全文都可在 title 查看', { skip: noHappyDom }, () => {
   const v = {
     missionId: 'CUI3-task-detail-20261026',
     coordinationMode: 'hierarchical',

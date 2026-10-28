@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 import { InMemoryAgentPoolRepository } from '../src/application/agent-pool.ts';
 import { createApi } from '../src/api/server.ts';
 import { buildPlatform } from '../src/main.ts';
@@ -139,7 +139,7 @@ function revisionOnPage(text: (selector: string) => string): string {
   return text('[data-resource-revision]').replace('配置修订 ', '');
 }
 
-test('保存只发一次整角色 POST：成功采用新 revision，另一个角色的脏草稿还在', async () => {
+test('保存只发一次整角色 POST：成功采用新 revision，另一个角色的脏草稿还在', { skip: noHappyDom }, async () => {
   await withIsolatedPage(async ({ base, container, posts, click, waitFor, text }) => {
     const revisionBefore = revisionOnPage(text);
     assert.notEqual(revisionBefore, '', '页面没显示修订号，后面的 CAS 断言无从比起');
@@ -181,7 +181,7 @@ test('保存只发一次整角色 POST：成功采用新 revision，另一个角
   });
 });
 
-test('外部改池后保存得到 STALE_POOL 不自动写回；重复 profileId 的 409 不禁用保存', async () => {
+test('外部改池后保存得到 STALE_POOL 不自动写回；重复 profileId 的 409 不禁用保存', { skip: noHappyDom }, async () => {
   await withIsolatedPage(async ({ base, agentPool, container, posts, click, waitFor, text }) => {
     const revisionBefore = revisionOnPage(text);
     assert.notEqual(revisionBefore, '', '页面没显示修订号，后面的 CAS 断言无从比起');

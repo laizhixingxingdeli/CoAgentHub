@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { bindTaskHeader, taskHeaderHtml } from '../src/web/task-detail-header-view.js';
 
@@ -44,8 +44,8 @@ const options = {
   nowIso: '2026-10-26T09:30:00.000Z',
 };
 
-const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
-const document = window.document as unknown as Document;
+const window = Window ? new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' }) : undefined;
+const document = window?.document as unknown as Document;
 
 function mount(view: Record<string, unknown>, opts: Record<string, unknown> = {}) {
   document.body.innerHTML = '<div id="view"></div>';
@@ -63,7 +63,7 @@ const click = (el: Element | null): void => {
   el.dispatchEvent(new window.Event('click', { bubbles: true }) as unknown as Event);
 };
 
-test('direct 且无成本上限：完整编号、原始 intent、状态与补修分开、主控未计且上限未知', () => {
+test('direct 且无成本上限：完整编号、原始 intent、状态与补修分开、主控未计且上限未知', { skip: noHappyDom }, () => {
   const html = taskHeaderHtml(directView(), options);
   const { container, root, q } = mount(directView());
 
@@ -105,7 +105,7 @@ test('direct 且无成本上限：完整编号、原始 intent、状态与补修
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(CSS), false, 'CSS 里出现了十六进制色值');
 });
 
-test('点击展开 intent 并切页签；已完成残留 waitInfo 仍是已结束，已上报费用带上限且不标估算', () => {
+test('点击展开 intent 并切页签；已完成残留 waitInfo 仍是已结束，已上报费用带上限且不标估算', { skip: noHappyDom }, () => {
   const { root, q } = mount(directView());
 
   // 展开：只翻 data-expanded 与按钮文案，身份不能被一次交互改掉。
@@ -155,7 +155,7 @@ function rule(styles: string, selector: string): string {
   return end < 0 ? '' : styles.slice(at + selector.length + 1, end);
 }
 
-test('页头是有返回链接的整幅白带，纵向基线落在画板上，页内不自加 padding', () => {
+test('页头是有返回链接的整幅白带，纵向基线落在画板上，页内不自加 padding', { skip: noHappyDom }, () => {
   const { q } = mount(directView());
 
   // 返回链接必须真的指向任务总览：做成不跳转的按钮，人点了留在原地还以为坏了。
@@ -195,7 +195,7 @@ test('页头是有返回链接的整幅白带，纵向基线落在画板上，�
   assert.ok(/padding:\s*0;/.test(rule(PAGE_CSS, '.td-page')), '.td-page 没有把 padding 归零');
 });
 
-test('状态槽位、下一步与只读费用框：unknown 与真实 0、缺 cap 与 cap 0、主控未计、开合与离页即关', async () => {
+test('状态槽位、下一步与只读费用框：unknown 与真实 0、缺 cap 与 cap 0、主控未计、开合与离页即关', { skip: noHappyDom }, async () => {
   // 等检视：waitInfo.action 是「核对交卷」，但它是**下一步**，不是状态词的一部分。
   // 拼进 .td-status-text 就会读成一个不存在的第七种状态（「等你检视 · 核对交卷」）。
   const review = mount({
