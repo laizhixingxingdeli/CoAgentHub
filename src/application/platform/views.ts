@@ -230,6 +230,11 @@ export async function getAttemptDetail(ctx: PlatformContext, missionId: string, 
         : attempt.output,
       outputRef: attempt.outputRef,
       toolActivity: attempt.toolActivity,
+      // 心跳只在这一层露出来，而且**没有就不放键**：空串或 null 会被界面当成
+      // "心跳存在但值是坏的"，从这里看出"从没心跳过"才是准确的。
+      ...(typeof attempt.heartbeatAt === 'string' && attempt.heartbeatAt.trim() !== ''
+        ? { heartbeatAt: attempt.heartbeatAt.trim() }
+        : {}),
     };
   }
 

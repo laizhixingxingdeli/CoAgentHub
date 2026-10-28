@@ -534,6 +534,8 @@ curl.exe -sS --noproxy '*' -X GET -H 'Authorization: Bearer <token>' 'http://127
 }
 ```
 
+`heartbeatAt` 可选，仅当该 Attempt 已有心跳时出现，是 ISO 字符串；没有心跳时响应不带这个键。
+
 ### GET /api/missions/:missionId/validation-reports/:reportId
 
 鉴权：控制面（可选resolver）。参数：两个路径ID。不存在或不属于此Mission统一404，不暴露跨Mission归属。

@@ -4207,3 +4207,42 @@ describe('HTTP agent 完整验证报告读取', () => {
     }
   });
 });
+
+describe('Attempt 详情投影心跳', () => {
+  test('未 beat 时详情与 HTTP JSON 都没有 heartbeatAt 键；beat 之后两处等于时钟 ISO', async () => {
+    const clock = new FixedClock();
+    const ids = new SequentialIds();
+    const deliveries = new InMemoryDeliveryRepository(clock, ids);
+    const platform = new Platform({
+      projects: new InMemoryProjectRepository(),
+      deliveries,
+      activity: new InMemoryActivityLog(clock),
+      clock,
+      ids,
+    });
+    const server = createApi({ platform, tokens: new RunTokenRegistry(), deliveries });
+    try {
+      await listenLoopback(server, 0);
+      const local = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      await platform.createMission({ projectId: 'P-hb', missionId: 'M-hb', contract: CONTRACT });
+      const { attemptId } = await platform.startCoordinatorAttempt('M-hb');
+
+      const before = await platform.getAttemptDetail('M-hb', attemptId);
+      assert.equal('heartbeatAt' in before, false);
+      const beforeHttp = await getJson(local, `/api/missions/M-hb/attempts/${attemptId}`);
+      assert.equal(beforeHttp.status, 200);
+      assert.equal('heartbeatAt' in beforeHttp.json, false);
+
+      await platform.beatAttempt('M-hb', attemptId);
+
+      const expected = clock.now().toISOString();
+      const after = await platform.getAttemptDetail('M-hb', attemptId);
+      assert.equal(after.heartbeatAt, expected);
+      const afterHttp = await getJson(local, `/api/missions/M-hb/attempts/${attemptId}`);
+      assert.equal(afterHttp.status, 200);
+      assert.equal(afterHttp.json.heartbeatAt, expected);
+    } finally {
+      await closeServer(server);
+    }
+  });
+});

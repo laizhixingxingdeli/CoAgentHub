@@ -1,0 +1,55 @@
+/*
+ * 固定页名字体与字体分工。
+ *
+ * 只有「任务总览」「模型资源」这类**固定页名**用衬线（DESIGN.md 的 Page 样式）；
+ * 动态任务内容用无衬线，编号、时间与计量用等宽。为什么不能整页都用衬线：
+ * 任务身份是一串长编号，衬线数字在 13-14px 上辨识度差，而且动态内容与固定
+ * 导航混成一种字体之后，「这是页面标题还是数据」就只剩字号一条线索。
+ *
+ * 为什么同源分发而不是引 Google Fonts 的在线地址：无构建、离线、内网部署下
+ * 在线字体拉不到，页面会先按回退字体排版再跳一下；更重要的是运行时不依赖
+ * 外网资源本来就是本仓的静态边界（src/api/static.ts 只发本地文件）。
+ * 子集只含固定页名用到的字（6436 字节），全量 Noto Serif SC 是十几 MB，
+ * 为十来个字拉一整份字体是拿首屏换装饰。
+ *
+ * 许可证随代码保留在同目录（console-font-OFL.txt）：再分发 OFL 字体必须带上
+ * 许可证原文，丢了就是许可违规，而它在页面上看不出来。
+ */
+@font-face {
+  font-family: 'Noto Serif SC Fixed';
+  src: url('./console-title.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  /* swap：字体没到之前先用回退字体排版，不把固定页名留成一片空白。
+   * 子集只有几个字，换字体时的跳动比「标题闪一下才出现」轻。 */
+  font-display: swap;
+}
+
+/*
+ * 固定页名。回退链保留微软雅黑：字体请求失败时（静态服务没认下 woff2、
+ * 或部署漏了文件）页面应该退化成中文无衬线，而不是退成衬线西文正文—
+ * 后者在中文下会一大片豆腐块。
+ */
+.fixed-page-title {
+  font-family: 'Noto Serif SC Fixed', 'Microsoft YaHei', sans-serif;
+  font-size: 32px;
+  font-weight: 500;
+  line-height: 44px;
+}
+
+/*
+ * 动态内容。**不**带衬线：任务编号、intent、状态文字都是运行时数据，
+ * 它们不该看起来像页面标题。Noto Sans SC 放在微软雅黑前面，
+ * 有 Web 字体时用 Web 字体，没有则本机雅黑。
+ */
+.console-body,
+.dynamic-task-name {
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* 编号、时间、计量。等宽是功能性的：长编号要能按字符对齐比较，
+ * 用比例字体时同一段编号在不同行宽度不同，肉眼对不齐也数不清位数。 */
+.console-data,
+.mission-identifier {
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+}

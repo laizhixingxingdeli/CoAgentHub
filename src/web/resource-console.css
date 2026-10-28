@@ -1,0 +1,679 @@
+/*
+ * 资源页（#/pool）的几何与配色。
+ *
+ * 选择器全部以 `.resource-console` 开头：这份文件只在资源页挂载时注入，
+ * 但选择器一旦裸写（`.resource-row`）就会漏到别的页面去——哪天任务详情页
+ * 也叫 row，改这里会静悄悄改坏那一页的外观。
+ *
+ * 颜色只用 tokens.css 的令牌，不写死色值：硬编码的白色/灰色在换主题或改基调时
+ * 会变成页面里唯一一块没跟上的色块，而那种错没人会当成 bug 报。
+ */
+
+.resource-console {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+  /* 不再加左右内缩：外壳的 .view 已经有 gutter，再缩一次表头就和页名不在一条线上。
+   * 画板上的「左右内缩 16」指的是行内的 padding（见 .resource-row）。 */
+  /* 保存条已脱离文档流贴在底边（见 .resource-savebar），不留这段空档时
+   * 最后一行候选会被它压住，而滚动到底也再没有可滚的余量。 */
+  padding-bottom: 100px;
+  color: var(--color-ink);
+}
+
+/* 页名归零：h1 自带 UA 外边距（上下各约 21px，合计约 43px），不清掉的话页签、
+ * 工具栏、表头会一起被顶下去，整页比外壳基线低约 43px。外壳的内容起点已经按
+ * 顶栏 68 + inset 28 对准了 y96（见 console-shell.css），所以只能在这里把这块
+ * 外边距归零；靠改外壳或负 margin 去抵会连页签和外壳一起拖上来。 */
+.resource-console > .fixed-page-title {
+  margin: 0;
+}
+
+.resource-console-loading {
+  padding: 16px;
+  color: var(--color-muted);
+}
+
+/* ===== 页签 ===== */
+
+.resource-console .resource-tabs {
+  display: flex;
+  gap: 12px;
+  height: 40px;
+  background: var(--color-nav);
+  /* 窄屏让页签条自己横向滚：把四个页签压窄比页面滚动更难看出还有第 4 个角色。 */
+  overflow-x: auto;
+}
+
+.resource-console .resource-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* flex: 0 0 180px：只写 width 会被 flex 压窄（默认 flex-shrink:1），
+   * 四个页签就不再是画板上那四个等宽格。 */
+  flex: 0 0 180px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.resource-console .resource-tab[data-active='1'] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ===== 工具栏 ===== */
+
+.resource-console .resource-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 36px;
+}
+
+/* 白色底板从工具栏上方 8px 开始，盖住工具栏/表头/表体（画板 x224/y204 那块）。
+ * 负 margin 只把背景往上拉 8px，再配 padding-top:8px 把工具栏内容推回原位置：
+ * 不这么写就得给每个孩子单独加背景，那块背景会随错误行有无断成几块。 */
+.resource-console .resource-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: -8px;
+  padding-top: 8px;
+  /* 底板末尾余量 8px：少了这一项，有候选时底板底边与最后一行只差 0，而画板上
+   * 空底板恰好比内容多这 8px（264 = 表头/工具栏 + 空区 150 + 8）。 */
+  padding-bottom: 8px;
+  background: var(--color-white);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--color-line);
+}
+
+.resource-console .resource-toolbar [data-resource-add] {
+  /* 画板按钮槽 128（不是内容的自然宽度）：只靠 padding 撑，中文四字会算成
+   * 86.22px，工具栏里就比设计短一截。 flex:0 0 而非仅 width：缺了 flex 基准
+   * 它仍会被 flex 布局压回内容宽。 */
+  width: 128px;
+  flex: 0 0 128px;
+  padding: 0;
+}
+
+.resource-console .resource-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+  color: var(--color-ink);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.resource-console .resource-button[disabled] {
+  background: var(--color-nav);
+  color: var(--color-muted);
+  cursor: not-allowed;
+}
+
+.resource-console .resource-sub {
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.resource-console .resource-error {
+  padding: 8px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-red-bg);
+  color: var(--color-red);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* ===== 候选表 =====
+ * 七列宽按画板写死：这七格是固定的语义槽位，用 flex:1 分配会让
+ * 「近 7 天」这种两行文字最长的列在最窄的屏幕上先被挤断句。
+ * 宽度加起来超过视口时横向滚，不写一套移动端布局。
+ */
+
+.resource-console .resource-table {
+  /* 底板已经上提到 .resource-panel：表再自己画一层白底 + 描边，就会在白底上
+   * 套出一块带边框的框（多一道内描边），与原稿的整块白底不一样。横向滚动
+   * 仍留在这层：它是真正装 1176 宽行的容器。 */
+  background: transparent;
+  box-shadow: none;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.resource-console .resource-head,
+.resource-console .resource-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 16px;
+  /* 七列 1120 + 六个 4px 间隙 + 左右 16 = 1176（画板宽度）。写成 min-width 而不是
+   * width：视口比它宽时行跟着拉满，比它窄时整表横向滚，列宽不会被压变形。 */
+  min-width: 1176px;
+}
+
+.resource-console .resource-head {
+  height: 30px;
+  background: var(--color-nav);
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* 表头与首行（或空态）之间的 16px 段间距，是画板上表头底到首行顶的距离。
+ * 不写这一段，两者会贴死，人一眼看不出哪一行是表头下的第一条数据。
+ * 间距加在表体上而不是给表整体上移：外壳起点本来就偏低，用负 margin 去抵
+ * 会把表头和外壳一起拖上来，页面上半截跟着错位。 */
+.resource-console .resource-body {
+  margin-top: 16px;
+}
+
+.resource-console .resource-row {
+  height: 64px;
+  background: var(--color-white);
+  cursor: pointer;
+}
+
+.resource-console .resource-row[data-selected='1'] {
+  background: var(--color-select);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.resource-console .resource-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* flex: 0 0 <宽>：只写 width 会被 flex 布局压窄（默认 flex-shrink:1），
+ * 七列宽就不再是画板上的那七个值，最窄的那一列先被折成两行。 */
+.resource-console .resource-col[data-col='1'] { flex: 0 0 32px; }
+.resource-console .resource-col[data-col='2'] { flex: 0 0 248px; }
+.resource-console .resource-col[data-col='3'] { flex: 0 0 64px; }
+.resource-console .resource-col[data-col='4'] { flex: 0 0 128px; }
+.resource-console .resource-col[data-col='5'] { flex: 0 0 232px; }
+.resource-console .resource-col[data-col='6'] { flex: 0 0 184px; }
+.resource-console .resource-col[data-col='7'] { flex: 0 0 232px; }
+
+.resource-console .resource-cell,
+.resource-console .resource-head .resource-col {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.resource-console .resource-head .resource-col {
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* 身份格：13px 且不用 ellipsis。短 id 已经在 shortId 里做过中间省略，
+ * 再用 14px + ellipsis 会把保留的尾巴再截一次——中间省略就白做了。 */
+.resource-console .resource-id {
+  font-size: 13px;
+  line-height: 20px;
+  text-overflow: clip;
+}
+
+/* 熔断那一格的字色只表达状态，不改行底色：整行变红会让人以为这条候选
+ * 已经不可用，而熔断中的候选仍然在配置里、仍然会被复位。 */
+.resource-console .resource-tone-green { color: var(--color-green); font-weight: 500; }
+.resource-console .resource-tone-amber { color: var(--color-amber); font-weight: 500; }
+.resource-console .resource-tone-red { color: var(--color-red); font-weight: 500; }
+.resource-console .resource-tone-unknown { color: var(--color-muted); font-weight: 500; }
+
+.resource-console .resource-empty {
+  margin: 0;
+  padding: 16px;
+  /* border-box：默认 content-box 会把 16px padding 算到 150 外面，空区比画板高 32。 */
+  box-sizing: border-box;
+  min-height: 150px;
+  color: var(--color-muted);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* ===== 保存条 =====
+ * 保存动作是下一张单，但条要在：它先显示草稿的脏/净状态，两个按钮都禁掉——
+ * 给人一个能按的保存按钮而它什么都不做，比没有按钮更糟。
+ */
+
+.resource-console .resource-savebar {
+  /* 贴在内容列底边的固定条（画板 x224 / y1012 / 1176×84）：留在文档流里它会跟着
+   * 表一起被滚走，人改完草稿想保存时条已经不在视野里。左边界与内容左 224 对齐
+   * 而不是写 left:0，否则它会盖到左导航上。
+   * 宽度靠 left/right 撑出来、再用 max-width 封顶：1440 视口下 1440-224-40 正好
+   * 是画板的 1176，而窄一点的桌面上写死 1176 会把右边的保存/放弃顶出屏幕，
+   * 那两个按钮就再也点不到了。 */
+  position: fixed;
+  left: 224px;
+  right: 40px;
+  bottom: 24px;
+  width: auto;
+  max-width: 1176px;
+  /* 高度由内容决定、只留 84 的下限：写死 height:84px 再配 overflow-x:auto，
+   * 长文案只能在 84 里滚，摘要列被挤成一字一行；overflow-x 还会把 overflow-y
+   * 一并算成 auto，按钮跟着摘要左移。无消息时仍恰好 84（min-height）。 */
+  min-height: 84px;
+  height: auto;
+  overflow: visible;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-white);
+}
+
+.resource-console .resource-save-main {
+  /* 摘要 + 动作一行：动作锚右（margin-left:auto），文案再长也只挤摘要。 */
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+}
+
+.resource-console .resource-save-summary {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 标题与子行都省略：窄视口下让它们一行内截断，而不是把摘要压成一字一行。 */
+.resource-console .resource-save-summary .resource-save-title,
+.resource-console .resource-save-summary .resource-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.resource-console .resource-save-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.resource-console .resource-save-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  /* 保存条上两个按钮不会缩：窄屏时让摘要那一列被挤，而不是把按钮压成按不准的宽度。 */
+  flex: 0 0 auto;
+  /* 动作组钉在右侧：消息换行或摘要变长时按钮 x 不动，否则同一页两个状态下
+   * 保存按钮会跑到不同位置，人得重新找。 */
+  margin-left: auto;
+}
+
+/* 消息在动作行**之下**（DESIGN.md：失败信息在下方），整宽、可换行、不截断：
+ * 后端原文是唯一能告诉人「到底哪错了」的东西，缩短它等于把错误藏起来。 */
+.resource-console .resource-save-message {
+  margin: 0;
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.resource-console .resource-save-latest {
+  width: 100%;
+  min-width: 0;
+}
+
+.resource-console .resource-save-actions [data-resource-discard] {
+  /* 画板槽 140：放弃按钮的可点区域是它自己的槽，不是内容的自然宽。
+   * 槽窄了整排会往右缩，主保存按钮（固定 156 槽）的 x 就跟着偏开 53。 */
+  width: 140px;
+  flex: 0 0 140px;
+  padding: 0;
+}
+
+/* 主按钮是「槽 156 + face 128」：画板上按钮比字宽，靠的是外槽留出的那圈边，
+ * 直接把按钮做成 128 会让它在保存条里贴着右边的次按钮。 */
+.resource-console .resource-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 156px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.resource-console .resource-primary-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 128px;
+  height: 36px;
+  border-radius: 5px;
+  background: var(--color-accent);
+  color: var(--color-white);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.resource-console .resource-primary[disabled] {
+  cursor: not-allowed;
+}
+
+.resource-console .resource-primary[disabled] .resource-primary-face {
+  background: var(--color-nav);
+  color: var(--color-muted);
+}
+
+/* ===== 健康抽屉（只读详情 + 草稿编辑） ===== */
+
+.resource-console .resource-drawer {
+  /* 画板上它是右侧覆盖层（x900 / y78 / 516×920、右距 24），不是表右边的一列：
+   * 留在文档流里抽屉会把表挤窄，滚动时还会被一起卷走。overflow:auto 让超长内容
+   * 在 920 内自己滚，而不是把底部两个按钮顶出可视区。 */
+  position: fixed;
+  top: 78px;
+  right: 24px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 516 是画板宽度；视口更窄时按 min() 缩到「视口 - 48」内（右距 24 + 左侧留 24），
+   * 不另写一套移动端布局。不能改用百分比封顶：它按包含块算，会把 right:24px
+   * 一起顶掉，抽屉贴到视口边、左边内容被裁。 */
+  width: min(516px, calc(100vw - 48px));
+  /* 画板上的抽屉是整块 920 高：内容短时也要撑到那个尺寸，否则同一份数据在
+   * 两条候选之间切换时抽屉会随内容伸缩，人每次都要重新找位置。
+   * 视口比画板矮时缩到 100vh-78（上边距）-120（底部保存条 84 + 下边距 24 + 间隙
+   * 12）之内：写死 920 会让抽屉底边压在保存条上，抽屉里的按钮和保存条互相盖住。 */
+  height: min(920px, calc(100vh - 78px - 120px));
+  overflow: auto;
+  /* 内容内缩 24：516 宽抽屉减两侧 24 得 468，与画板可用宽一致。写 16 会让端点框
+   * 与 facts 整体比原稿宽 16px，健康与开关也跟着上移/左偏。 */
+  padding: 24px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-white);
+}
+
+.resource-console .resource-drawer-title {
+  /* flex:1 让身份占满剩余宽（右上是返回按钮），min-width:0 允许它在极长
+   * profileId 下换行而不是把返回按钮顶出抽屉。 */
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-all;
+}
+
+/* 抽屉首行：左身份、右「返回草稿」。返回按钮固定 100×36，否则它会按内容
+ * 收缩，两条不同长度的 profileId 下按钮位置会跳。 */
+.resource-console .resource-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resource-console .resource-drawer-head [data-draft-close] {
+  flex: 0 0 100px;
+  width: 100px;
+  height: 36px;
+  padding: 0;
+}
+
+.resource-console .resource-drawer-head [data-add-cancel] {
+  flex: 0 0 100px;
+  width: 100px;
+  height: 36px;
+  padding: 0;
+}
+
+/* 添加抽屉的标题是 18/28（画板 43:794）：它不是身份，不能复用 13px 的
+ * resource-drawer-title，否则标题会比抽屉里的小字还矮。 */
+.resource-console .resource-add-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* 启停开关：34×20 的 track SVG + 文字。不复用 resource-button，因为按钮的
+ * 描边和 36px 高会把开关画成一个普通矩形，与画板上的开关槽不同形。 */
+.resource-console .resource-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* flex:none：34×20 是画板原尺寸，被 flex 压窄会变成一根细条。 */
+.resource-console .resource-switch-track {
+  width: 34px;
+  height: 20px;
+  flex: none;
+}
+
+/* 端点下拉的外框：原生 select 自带的箭头去不掉颜色，只能另包一层框自己画。 */
+.resource-console .resource-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+}
+
+/* appearance:none 去掉原生箭头，否则框里会出现两个箭头（一个原生的、
+ * 一个 resource-caret）。border/padding 归零是让 select 自己不再画一道框，
+ * 否则就会在 resource-select 里再套一个小一号的框。 */
+.resource-console .resource-select select {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  appearance: none;
+  color: inherit;
+  font: inherit;
+}
+
+/* 箭头用本地 SVG（与 console-shell.css 186 行同一份资产）：换成 unicode 字符
+ * 会在不同字体下大小/基线不一，而它是固定 16×16 的图。 */
+.resource-console .resource-caret {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background: url('./console-icon-chevron.svg') center / 16px 16px no-repeat;
+  pointer-events: none;
+}
+
+.resource-console .resource-drawer-heading {
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.resource-console .resource-drawer-line {
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.resource-console .resource-command {
+  max-height: 96px;
+  padding: 12px;
+  border-radius: 5px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 20px;
+  overflow: auto;
+  word-break: break-all;
+}
+
+/* 复制禁用：底与字都退到不可用那一档。只改 opacity 会让它在深色纸上
+ * 依然看着能按，而按下去什么都不发生时人以为是页面坏了。 */
+.resource-console .resource-button[data-copy-reset][disabled] {
+  background: var(--color-nav);
+  color: var(--color-muted);
+  border-color: var(--color-nav);
+}
+
+/* ===== 草稿编辑（抽屉里的可改控件 + 添加候选表单） =====
+ * 控件尺寸写死而不是靠内容撑：这几个格子（profileId / endpoint / key / value）
+ * 高度一致才对得上行，而 endpoint 的下拉和 facts 的输入框一旦高度不同，
+ * 一行里并排的控件就会错位——看起来像缺陷，但功能完全正常，最难被当成 bug 报。
+ */
+
+.resource-console .resource-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.resource-console .resource-input {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  background: var(--color-white);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* profileId 只读：做成文本框的样子但不可编辑，人一眼看出它是身份而不是参数。 */
+.resource-console .resource-readonly {
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px dashed var(--color-line);
+  border-radius: 5px;
+  background: var(--color-nav);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-all;
+}
+
+.resource-console .resource-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 每行是「字段一组 + 删除在下一行」，不是三列：把删除塞进字段行会占掉
+ * key160+value300 之后再超出 468 可用宽，三个控件只能被挤窄。 */
+.resource-console .resource-fact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.resource-console .resource-fact-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resource-console .resource-fact-fields .resource-input[data-fact-key], .resource-console .resource-fact-fields .resource-input[data-add-fact-key] {
+  /* 画板给的固定槽：key 160、value 300、输入高 42。用 flex:1 1 0 会两个框平分，
+   * 值与键长得一样宽，长模型名在 160 里被截。 */
+  flex: 0 0 160px;
+  width: 160px;
+  height: 42px;
+  box-sizing: border-box;
+}
+
+.resource-console .resource-fact-fields .resource-input[data-fact-value], .resource-console .resource-fact-fields .resource-input[data-add-fact-value] {
+  flex: 0 0 300px;
+  width: 300px;
+  height: 42px;
+  box-sizing: border-box;
+}
+
+.resource-console [data-fact-add], .resource-console [data-add-fact-add] {
+  /* 画板按钮槽 128：中文四字的自然宽只有 ~86，只靠 padding 撑会短一截。 */
+  width: 128px;
+  flex: 0 0 128px;
+  padding: 0;
+}
+
+.resource-console .resource-button-small {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.resource-console .resource-drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resource-console .resource-addform {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-white);
+}
+
+.resource-console .resource-addform .resource-field {
+  flex: 0 0 240px;
+  min-width: 0;
+}
+
+.resource-console .resource-addform .resource-input {
+  width: 100%;
+}
+
+.resource-console .resource-addform-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

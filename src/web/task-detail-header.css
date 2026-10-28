@@ -1,0 +1,382 @@
+/*
+ * 任务详情页头（画板 .impeccable/reference/figma-2-140.txt 的 2:140 页头与页签）。
+ *
+ * 为什么单开一个文件：页头的层级（身份 → 状态与附标 → 40px 事实带 → 页签）和
+ * 40px 这个数是这一块的排版事实。挤进全站样式里，任何一处手改都会顺带改到
+ * 任务总览和资源页，而「这一行高了 4px」在屏幕上不报错，只是越来越不像画板。
+ *
+ * 为什么全部挂在 .td-header 作用域下：这份文件与旧业务样式（ui.css 的 .card、
+ * .chip）同时在线，一条不限定作用域的 `.td-facts { height: 40px }` 会把别人的
+ * 信息行也压成 40px。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来。抄一份固定值，
+ * 改一处忘另一处之后两个界面各走各的颜色，而没人会把它当 bug 报。
+ */
+
+/* 页头是主栏上的一条整幅白色平铺带（画板 82:4091：left 184、top 69、1256 × 266），
+ * 底下压一条 1px 分界线（82:4092 的 top 334）。它不是浮在纸色上的圆角卡：以前写成
+ * background:none 时白带整个消失，页面变成一片纸色，页头的三段身份也就没有边界，
+ * 人分不清哪儿是页头、哪儿是下面那张白卡。
+ *
+ * 白带要铺到主栏两边（x184..1440），文字却仍在内容列起点 x224：外壳 .cs-shell .main
+ * 有 40px gutter，所以这里反向拉出 gutter 再补成 padding。直接加 padding 会从 x224
+ * 内缩到 x264；直接去掉 gutter 又会把整站列宽改掉。
+ *
+ * margin-top 用 1px - inset 而不是写死 -27px：外壳的 .view 有 padding-top 28px，
+ * 页头因此从 y96 起，而画板白带顶边是 y69。凭减法对齐，改外壳 inset 时差 1px 的
+ * 来源仍然一目了然；写死数字则下次调外壳就错位且没人知道为什么。 */
+.td-header {
+  display: flex;
+  flex-direction: column;
+  /* gap 归零：画板每一行的间距都不同（12 / 12 / 8 / 6 / 6），统一的 gap 会把后面
+   * 每一行都垫偏，最后页签落到白带外面。间距全部交给各块自己的 margin。 */
+  gap: 0;
+  margin-top: calc(1px - var(--shell-view-inset));
+  margin-right: calc(-1 * var(--shell-content-gutter));
+  margin-left: calc(-1 * var(--shell-content-gutter));
+  padding: 0;
+  /* 69 + 19 = 88：返回链接的顶边（画板 41:419）。 */
+  padding-top: 19px;
+  padding-right: var(--shell-content-gutter);
+  padding-left: var(--shell-content-gutter);
+  background: var(--color-white);
+  border: 0;
+  /* 这一像素就是画板 82:4092 的底部分界（y334）。页签自己不再画整行下边框，
+   * 否则两条线隔着 6px 叠在一起，看着像一条粗的毛边。 */
+  border-bottom: 1px solid var(--color-line);
+  border-radius: 0;
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  color: var(--color-ink);
+}
+
+/* 返回链接是页头最上一行（画板节点 41:419），字号 14/22，只占自己的宽度：
+ * 撑满整行的链接会让右侧空白也变成可点区域。margin 归零：白带上边距只由
+ * .td-header 的 padding-top 19px 给出，这里再留一点就会把标题整体推下去。 */
+.td-header .td-back {
+  align-self: flex-start;
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+/* 编号用等宽：同一串编号在页头、总览行与确认弹窗里要能按字符对齐比较，
+ * 比例字体下同一个字符在不同位置宽窄不同，肉眼对不齐也数不清位数。等宽族
+ * 在本仓是功能性的，不是装饰。
+ * margin-top 12 = 画板标题 y122 减返回行底边 y110。 */
+.td-header .td-mission-id {
+  margin: 12px 0 0;
+  font-family: 'IBM Plex Mono', Consolas, monospace;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 28px;
+  color: var(--color-ink);
+  /* 不省略：页头是身份的最后一道确认，截断过的编号复制出去对不上任何一条 Mission。 */
+  word-break: break-all;
+}
+
+/* intent 与展开按钮同行（画板 41:421 / 41:422）：按钮单独占一行会把身份块撑成
+ * 三行，短 intent 与长 intent 的页头高度也不一致，逐张截图看起来像两个页面。
+ * margin-top 12 = 画板 intent y162 减标题行底边 y150。 */
+.td-header .td-intent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 16px;
+  margin-top: 12px;
+}
+
+.td-header .td-intent {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-muted);
+  /* 收起时稳占两行（22 × 2 = 44）：只写 max-height 时短 intent 会把身份块压缩一行，
+   * 页头高度随文案变，截图逐张比对时对不上画板。展开由 data-expanded 放开。 */
+  min-height: 44px;
+  max-height: 44px;
+  overflow: hidden;
+}
+
+.td-header .td-intent[data-expanded='true'] {
+  max-height: none;
+  overflow: visible;
+}
+
+/* 展开按钮做成文字链接形态：它是 intent 的附属动作，长成一个按钮会跟页签抢
+ * 视觉权重，人先看到的是「展开」而不是任务本身。 */
+.td-header .td-intent-toggle {
+  justify-self: end;
+  align-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* 分三区且不换行：状态 / 附标 / 三块决策信息（处理人、恢复方式、下一步）。
+ * 列宽取源槽的横向位置：状态 x224 起、附标 x380 起（需 156px）、第三槽 x604 起（需 224px）。
+ * 允许换行时一长句处理人就被挤到下一行，状态与附标跟着散开，这一行读起来就是
+ * 一段短文本而不是三个含义。处理人、恢复方式与下一步仍各占一个节点：合成一句话
+ * 就分不清「谁该动」「会不会自己好」和「下一步干什么」。
+ * column-gap 归零：间距已经由固定列宽（156px / 224px）表达，再加 gap 会把第三槽
+ * 从 x604 推到右边，三行一起错位。
+ * margin-top 8 = 画板状态行 y214 减 intent 底边 y206；28 是 41:427 那一行的高度，
+ * 不给的话这一行只有 22px，后面的 6px 间距会跟着往上缩。
+ * 这里写死 height / max-height 并 overflow:hidden，不留成 min-height：min-height 只是
+ * 地板不是天花板，第三槽里任何一个子节点一旦换行或被包进块级元素，整行就会自己长到
+ * 68px，事实带和页签被顶离 y248 / y294——屏幕上不报错，只是整幅页头不再是 266 高。 */
+.td-header .td-status-row {
+  display: grid;
+  grid-template-columns: 156px 224px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0;
+  margin-top: 8px;
+  height: 28px;
+  max-height: 28px;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* 图标与状态词同一格、间隔 8px（画板 39:258 的 gap-[8px]）。inline-flex 而不是
+ * block：这格只占自己 156px 的列宽，多出来的空白不该把附标往后推。 */
+.td-header .td-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* 圆点不参与拉伸：flex 子项默认允许被压窄，一窄就把 16×16 画成椭圆。 */
+.td-header .td-status-dot {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+/* 状态语义色按 data-status-key，不按中文也不按 statusText：文案改一个字颜色就
+ * 默默退回墨色，屏幕上只是「有点不一样」，没人会当 bug 报。
+ * 颜色只从 tokens.css 的 --color-* 来，写死十六进制会和设计令牌分叉。 */
+.td-header .td-status-text[data-status-key='executing'] {
+  color: var(--color-running);
+}
+
+.td-header .td-status-text[data-status-key='awaiting_review'] {
+  color: var(--color-amber);
+}
+
+.td-header .td-status-text[data-status-key='completed'] {
+  color: var(--color-green);
+}
+
+.td-header .td-status-text[data-status-key='blocked'] {
+  color: var(--color-red);
+}
+
+.td-header .td-status-text[data-status-key='investigating'],
+.td-header .td-status-text[data-status-key='planning'] {
+  color: var(--color-muted);
+}
+
+/* 落在上表之外的状态（unknown 等）显式写 ink：不给值会让颜色回退到继承，
+ * 而继承链上任何一层改了色都会静默改变这一格。 */
+.td-header .td-status-text[data-status-key='unknown'] {
+  color: var(--color-ink);
+}
+
+/* 第三槽：处理人、恢复、下一步在同一行里横向排开。
+ * 必须横排而不是纵向堆叠：三行各自带着字号与行高，纵向排出来是 68px，把状态行撑过
+ * 画板的 28px，事实带与页签就跟着掉到 y248 / y294 以下，后面的 6px 间距不再对准画板。
+ * 用 flex 而不是让三个 span 自然流：自然流下它们会被挤成一句连读的长文本，读起来
+ * 分不清「谁该动」「会不会自己好」和「下一步干什么」。三个子节点仍各自独立，不合并。
+ * gap 12px 是三个子节点之间的最小可辨认间隔；min-width:0 让长文本在这行里被省略，
+ * 而不是把这一格顶宽、把右边界推出画板。 */
+.td-header .td-decision {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* 附标与状态词分两个节点：合成一句之后，「执行中 · 直接主控 · 补修」会被读成
+ * 一个不存在的第七种状态。这里给附标独立的小一号字与灰阶，视觉上也分开。 */
+.td-header .td-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+/* 三个子节点都省略而不是换行：在 28px 的状态行里，任何一个换行都等于把事实带和
+ * 页签整体下推。min-width:0 是前提——flex 子项默认 min-width:auto，长处理人名会把
+ * 这一行顶宽，ellipsis 就永远轮不到。 */
+.td-header .td-owner {
+  font-weight: 500;
+  color: var(--color-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.td-header .td-recovery {
+  font-size: 13px;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* 下一步是「该干什么」，比「谁在管」更急，所以字号回到 14 而不是跟着恢复方式缩成 13；
+ * 没有下一步时会显示「下一步：未知」，不能用灰色把它抹成不存在。 */
+.td-header .td-next {
+  font-size: 14px;
+  color: var(--color-ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== 40px 任务事实带 ===== */
+
+/* 单行四格：保障 / 协作 / 费用 / 时间。高度是画板值 40px，nav 底色与 16px 内缩进
+ * 让它和上面的身份、下面的页签明显分层——它与流程步骤不是一组。
+ * margin-top 6 = 画板事实带 y248 减状态行底边 y242。左右 padding 16 让事实文字
+ * 从 x240 起，与画板一致；圆角取画板的 rounded-[6px]。
+ *
+ * 用 grid 而不是 flex：源槽的列位是固定几何（保障 x240、协作 x414、费用 x624、
+ * 时间靠右），flex + gap 会随文案长短把后面几格整体拖走，逐张截图对不上画板。
+ * gap:0 —— 间距全部由前两列定宽（174px / 210px）表达，再叠 gap 就重复计了一遍。 */
+.td-header .td-facts {
+  height: 40px;
+  display: grid;
+  grid-template-columns: 174px 210px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0;
+  margin-top: 6px;
+  padding: 0 16px;
+  background: var(--color-nav);
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--color-ink);
+}
+
+/* 时间靠右：它是这一行的锚点，混在中间会让人以为它和费用是一组。
+ * 用 grid 的 justify-self 而不是 margin-left:auto —— 后者在网格里会让时间格先被
+ * 自动分配吃掉一份空间，费用那一格跟着被往左挤。 */
+.td-header .td-time {
+  justify-self: end;
+  font-size: 13px;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+/* ===== 页签 ===== */
+
+/* 页签带高 40px、间距 20px（画板 41:434 起三个 Console/Tab 的 top 同为 294），
+ * margin-top 6 = 294 减事实带底边 288。这里**不画**整行下边框：白带底边已经有
+ * 1px（y334），两条线只隔 6px，会在中间叠成一道脏边。选中页签自己的 2px
+ * 下边框照旧，它是页签的选中态，不是分隔线。 */
+.td-header .td-tabs {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 6px;
+  height: 40px;
+}
+
+.td-header .td-tab {
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  /* 清除 ui.css 全局 button 的圆角与底色：不清的话页面里会出现三个带白底的
+   * 圆角小卡片，与画板的纯文字页签不是一个东西，hover 时还会变灰。 */
+  border-radius: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+/* hover 也只改颜色：ui.css 的 button:hover 会改边框与底色，不覆盖的话鼠标一过
+ * 页签底下就多出一块浅灰底，看着像被选中的是这个。 */
+.td-header .td-tab:hover {
+  border-radius: 0;
+  background: none;
+  color: var(--color-ink);
+}
+
+/* 页签宽度按画板定值（41:434 = 110、41:436 = 150、41:438 = 100）、文字居中：
+ * 交给内容自适应时，「契约」这种两个字会比「交付与验证」窄一截，三个页签的
+ * 起始位置与画板对不上，选中下划线也跟着长短不一。 */
+.td-header .td-tab[data-tab='workflow'] {
+  width: 110px;
+}
+
+.td-header .td-tab[data-tab='delivery'] {
+  width: 150px;
+}
+
+.td-header .td-tab[data-tab='contract'] {
+  width: 100px;
+}
+
+/* 选中态只靠下边框 + 主色字：换成底色块会和事实带的 nav 底撞在一起，
+ * 人分不清哪一块是「当前页签」。border-radius 与 background 在这里再写一次：
+ * ui.css 的 button 规则不在本文件作用域内、优先级也不同，一遇上 hover 的
+ * 组合规则就可能把底又画回来。 */
+.td-header .td-tab[aria-selected='true'],
+.td-header .td-tab[aria-selected='true']:hover {
+  border-radius: 0;
+  background: none;
+  border-bottom-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ===== 费用格：看起来是文字，实际是打开明细的按钮 ===== */
+
+/* 覆掉 ui.css 全局 button 的边框 / 圆角 / 白底 / 固定 36px 高：不覆就是事实带中间
+ * 坐着一颗白底圆角按钮，与画板完全不同，而且 hover 变灰时更像一个控件。
+ * 尺寸回到 14/22：固定高度会让 40px 事实带里这一格上下留白不均。 */
+.td-header .td-cost {
+  display: inline;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
+  color: var(--color-ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.td-header .td-cost:hover {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--color-accent);
+}

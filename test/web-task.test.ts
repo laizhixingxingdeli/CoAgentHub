@@ -363,8 +363,8 @@ describe('任务页的文件形状', () => {
 
   test('app.js import task.js 并认得 #/missions/<id>', () => {
     const shell = read('app.js');
-    assert.match(shell, /from '\.\/task\.js'/);
-    assert.match(shell, /renderTaskPage/);
+    assert.match(shell, /from '\.\/task-detail-controller\.js'/);
+    assert.match(shell, /renderTaskDetailPage/);
     assert.ok(shell.includes('/missions/'), 'parseRoute 要认 #/missions/<id>');
     // 项目页仍在：任务页是加进去的第四种路由，不是替掉项目页。
     assert.match(shell, /from '\.\/projects\.js'/);
@@ -380,29 +380,28 @@ describe('任务页的文件形状', () => {
     assert.equal(/onclick=/.test(page), false, 'HTML 里内联 onclick：测得到形状测不到行为');
   });
 
-  test('侧栏用 sidebar 令牌，正文区不用', () => {
-    const html = read('index.html');
-    const nav = ruleBody(html, /\.nav\s*\{([^}]*)\}/s);
-    for (const token of ['--sidebar', '--sidebar-foreground']) {
-      assert.ok(nav.includes(`var(${token})`), `.nav 没引用 var(${token})`);
-    }
-    // 激活项归侧栏。写错一个字母不会报错，只会侧栏还是白的。
-    const active = ruleBody(html, /\.nav \.item\[data-active="1"\]\s*\{([^}]*)\}/s);
-    assert.ok(active.includes('var(--sidebar-accent)'), '激活项要用 var(--sidebar-accent)');
+  test('导航是 ink 底、正文区仍走纸面；外壳几何搬到 console-shell.css', () => {
+    // 一级导航从「白底侧栏 + 蓝字」改成已批准的 ink 深墨底 + 白字（DESIGN.md
+    // Elevation 一节、figma-2-47 的「一级导航」层）。断言的是**语义**——底色与
+    // 前景各取哪个令牌、正文区不跟着翻深——而不是某一段 CSS 逐字长什么样。
+    // 外壳的几何与配色搬到 console-shell.css 了：挤在 index.html 的 <style> 里，
+    // 旧业务样式会按顺序把外壳盖回去，而"被盖回去"只是一个没有报错的视觉偏差。
+    const css = read('console-shell.css');
+    const nav = ruleBody(css, /\.cs-shell \.nav\s*\{([^}]*)\}/s);
+    assert.match(nav, /background:\s*var\(--color-ink\)/, '导航底色是 ink');
+    assert.match(nav, /color:\s*var\(--color-white\)/, '导航前景是白字');
+    assert.equal(/--sidebar/.test(nav), false, '外壳不再接 --sidebar 兼容别名');
 
-    // 正文区域保持原样：侧栏黑不等于整页黑。
-    for (const [name, re] of [
-      ['.main', /^\.main\s*\{([^}]*)\}/m],
-      ['.topbar', /^\.topbar\s*\{([^}]*)\}/m],
-      ['.view', /^\.view\s*\{([^}]*)\}/m],
-      ['.card', /^\.card\s*\{([^}]*)\}/m],
-      ['.page', /^\.page\s*\{([^}]*)\}/m],
-    ] as [string, RegExp][]) {
-      const body = ruleBody(html, re);
-      assert.equal(/--sidebar/.test(body), false, `${name} 不该改成 sidebar 令牌`);
-    }
+    // 正文区域不跟着翻深：侧栏黑不等于整页黑。整页底色是 paper。
+    const main = ruleBody(css, /\.cs-shell \.main\s*\{([^}]*)\}/s);
+    assert.equal(/--color-ink|--sidebar/.test(main), false, `.main 不该改成深色：${main}`);
+    assert.match(ruleBody(css, /\.cs-shell\s*\{([^}]*)\}/s), /background:\s*var\(--color-paper\)/);
+    // 内容列的内缩也归外壳。
+    assert.match(ruleBody(css, /\.cs-shell \.view\s*\{([^}]*)\}/s), /padding/);
+
+    // 业务页自己的 .card 还是白卡 + 令牌，不因为换了外壳而变深。
+    const html = read('index.html');
     assert.match(ruleBody(html, /^\.card\s*\{([^}]*)\}/m), /var\(--card\)/);
-    assert.match(ruleBody(html, /^\.view\s*\{([^}]*)\}/m), /padding/);
   });
 
   test('任务页样式在 index.html 里，终端块用 --terminal-*', () => {

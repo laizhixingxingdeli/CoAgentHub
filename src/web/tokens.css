@@ -1,45 +1,151 @@
 /*
  * 设计令牌。
  *
- * 下面两个 :root 块是从 src/api/web.ts 的 <style> 里**逐字复制**的，一个 oklch 值都没改。
- * 为什么不许就地调色：观测面和正式页是同一个产品的两个视图，令牌分叉之后
- * 「执行中」在两边就不是一种颜色了，而没人会把它当成 bug 去修——只会觉得界面在漂。
- * 改颜色请去改 v4 的 index.css，然后两处一起搬。
+ * 分两层，读这个文件时按这个顺序找：
  *
- * 这个文件只放令牌：静态服务（src/api/static.ts）只认一层扁平文件名，
- * 没有 styles/ 目录可用，所以外壳的布局样式写在 index.html 的 <style> 里。
+ *   1. `--color-*` 等 `--color-` / `--radius-` / `--space-` / `--type-` 开头的
+ *      **设计值**：逐条对得上 DESIGN.md 的前置令牌（Figma 变量 `--color/paper`
+ *      落地成 CSS 就是 `--color-paper`，斜杠不合法）。画板与新壳层只认这一层。
+ *
+ *   2. 兼容别名：`--background` / `--accent` / `--status-*` 这类上一版的名字。
+ *      既有页面（index.html、ui.css、各 *.js）还在引用它们，所以不能删；
+ *      但它们**指回** `--color-*`，不是复制一份色值——复制之后改一处忘另一处，
+ *      两个界面就开始各走各的颜色，而没人会把它当成 bug 去修。
+ *
+ * 为什么不继续和 `src/api/web.ts` 的 <style> 逐字相同：观测面是内置的旧配色，
+ * 新画板是 DESIGN.md 的暖白纸面。强行让两者相等，等于让正式页一直显示旧色，
+ * 或者为了相等去改观测面——两个都不该由「令牌文件」这一层来决定。
+ * 观测面自己的颜色归 web.ts，正式页归这里；同源要求退化成「都从 DESIGN.md 取值」。
  */
 
-/* ===== 色彩令牌：与 v4 packages/frontend/web/src/index.css 同源 ===== */
+/* ===== 设计值：颜色（DESIGN.md 前置令牌） ===== */
 :root {
-  --radius: 0.75rem;
-  --background: oklch(0.991 0.001 106.423);
-  --foreground: oklch(0.257 0.017 248.477);
-  --card: oklch(1 0 0);
-  --muted: oklch(0.972 0.002 197.122);
-  --muted-foreground: oklch(0.577 0.027 250.248);
-  --accent: oklch(0.596 0.1 208.085);
-  --accent-foreground: oklch(0.983 0.007 197.036);
-  --accent-faint: oklch(0.96 0.015 202.053);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.929 0.005 228.822);
+  --color-paper: #f5f3ed;
+  --color-white: #ffffff;
+  --color-ink: #222b35;
+  --color-muted: #58616a;
+  --color-line: #d6d5ce;
+  --color-accent: #275d74;
+  /* running 只给「实际运行中」的圆点与文字。它和 accent 是两个量：
+   * 拿 accent 顶替 running，界面上「执行中」和「当前选择」就分不出主次了。 */
+  --color-running: #2457b2;
+  --color-select: #e6ecee;
+  --color-green: #35654b;
+  --color-green-bg: #e7eee7;
+  --color-amber: #8b5429;
+  --color-amber-bg: #f0e6d7;
+  --color-red: #a24138;
+  --color-red-bg: #f4e5e1;
+  --color-nav: #eceae2;
+  --color-disabled: #b7b9b5;
+}
 
-  --status-queued: oklch(0.659 0.029 246.525);
-  --status-running: oklch(0.596 0.1 208.085);
-  --status-done: oklch(0.579 0.101 159.037);
-  --status-failed: oklch(0.602 0.168 31.205);
-  --status-cancelled: oklch(0.654 0.009 84.583);
-  --status-unconfirmed: oklch(0.651 0.137 64.456);
+/* ===== 设计值：形状与间距（同一份前置令牌） ===== */
+:root {
+  --radius-control: 5px;
+  --radius-output: 8px;
+  --radius-region: 12px;
 
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-xxl: 32px;
+  --space-section: 44px;
+}
+
+/* 八个命名文字样式的字号与行高。字体族不写在这里：固定页名的衬线子集在
+ * console-fonts.css 里定义 @font-face，两处都写一遍就是两份来源，
+ * 改一处之后另一半还指着旧名字（字体加载失败时退回系统字，页面上看不出来）。 */
+:root {
+  --type-page-size: 32px;
+  --type-page-line: 44px;
+  --type-section-size: 18px;
+  --type-section-line: 28px;
+  --type-record-size: 16px;
+  --type-record-line: 24px;
+  --type-body-size: 14px;
+  --type-body-line: 22px;
+  --type-meta-size: 13px;
+  --type-meta-line: 20px;
+  --type-data-size: 13px;
+  --type-data-line: 20px;
+  --type-identifier-size: 20px;
+  --type-identifier-line: 28px;
+}
+
+/* ===== 兼容别名：上一版名字，指回设计值 ===== */
+:root {
+  --radius: var(--radius-region);
+  --background: var(--color-paper);
+  --foreground: var(--color-ink);
+  --card: var(--color-white);
+  --border: var(--color-line);
+  --accent: var(--color-accent);
+  --accent-foreground: var(--color-white);
+  --accent-faint: var(--color-select);
+  --destructive: var(--color-red);
+
+  /* --muted 在本仓里只当「浅底」用（禁用按钮的底、进度条的空槽），
+   * 而 DESIGN 的 muted 是**文字**灰。照字面映射会把禁用按钮和进度条空槽
+   * 刷成深灰，等于把「不可用」画成一块黑条。文字灰去 --muted-foreground。 */
+  --muted: var(--color-nav);
+  --muted-foreground: var(--color-muted);
+
+  /* 状态色。DESIGN 的约定是「失败与中止同为红色」，所以 cancelled 不再
+   * 单占一个灰色——灰色的位置留给「还没开始」（--status-queued）。
+   * 状态永远带文字（Do's），颜色只用来扫读。 */
+  --status-queued: var(--color-disabled);
+  --status-running: var(--color-running);
+  --status-done: var(--color-green);
+  --status-failed: var(--color-red);
+  --status-cancelled: var(--color-red);
+  --status-unconfirmed: var(--color-amber);
+
+  /* 侧栏在亮色画板里是 ink 深墨底 + 白字（Elevation 一节：一级导航改用 ink 底），
+   * 选中项是浅 select 底。不能直接复用 --card：亮色下 --card 是白的，
+   * 侧栏会跟着整块翻亮。 */
+  --sidebar: var(--color-ink);
+  --sidebar-foreground: var(--color-white);
+  --sidebar-accent: var(--color-select);
+}
+
+/*
+ * 角色色、终端色、输出区身份色：DESIGN.md 没有给这几个量。
+ * 沿用上一版 oklch 而不是就地发明新色相——发明出来的颜色在画板上没有依据，
+ * 也没法在检视时对照。等画板补上角色色再换，改动点就只在这三块。
+ * 终端块在明暗两个主题下都是深色的：它模拟的是终端，不是页面。
+ */
+:root {
   --role-coordinator: oklch(0.491 0.128 258.661);
   --role-reviewer: oklch(0.513 0.134 305.845);
   --role-executor: oklch(0.45 0.026 250.209);
 
-  /* 终端块在明暗两个主题下都是深色的——它模拟的是终端，不是页面。 */
   --terminal-bg: oklch(0.201 0.011 242.328);
   --terminal-fg: oklch(0.956 0.005 228.819);
   --terminal-dim: oklch(0.667 0.023 248.166);
+
+  /* 未知和平台共用同一种灰：认不出身份时**不能**默认协调者，否则一行没认出来的
+   * 输出就理直气壮地冒充 L2 的结论，而屏幕上完全看不出那是猜的。 */
+  --session-output-coordinator: oklch(0.75 0.11 250);
+  --session-output-executor: oklch(0.78 0.14 155);
+  --session-output-reviewer: oklch(0.75 0.13 305);
+  --session-output-platform: oklch(0.7 0.02 250);
+  --session-output-unknown: oklch(0.7 0.02 250);
 }
+
+/*
+ * 暗色主题：DESIGN.md 目前只有亮色画板（paper/ink 那一套），没有暗色给定值。
+ *
+ * 所以这里不发明一套「看起来还行」的暗色，而是把上一版的 oklch 值留在原位，
+ * 让 `data-theme="dark"` 下既有页面继续按旧配色读得清；亮色（默认）由上面的
+ * DESIGN 令牌接管。等画板给出暗色令牌，替换点就是这一块——把 oklch 换成
+ * var(--color-*)，别处不用动。
+ *
+ * 直接删掉这一块会更简单，但那等于悄悄取消暗色支持：app.js 仍然按
+ * prefers-color-scheme 打 data-theme，用户看到的却是亮色，没人会知道发生了什么。
+ */
 :root[data-theme="dark"] {
   --background: oklch(0.201 0.011 242.328);
   --foreground: oklch(0.956 0.005 228.819);
@@ -64,53 +170,11 @@
   --role-executor: oklch(0.631 0.026 250.209);
 
   --terminal-bg: oklch(0.17 0.01 242.328);
-}
 
-/*
- * 侧栏在明暗两个主题下都是深色的（设计稿如此，它是导航面不是内容面），
- * 所以不能复用 --card：亮色主题下 --card 是白的，侧栏会跟着整块翻亮。
- *
- * 为什么另起规则块，而不是把这三行塞进上面那两块 :root——那两块要和
- * src/api/web.ts 的 <style> 逐字比对（见 test/web-shell.test.ts
- * 「色彩令牌与观测面同源」，整段 includes），多一行属性就红，
- * 而红出来的信息是「令牌分叉了」，跟侧栏无关，谁来都得愣一下。
- *
- * 取值一律借自本文件已有的暗色 oklch，不发明新色相：观测面里没有侧栏，
- * 新色相等于在这份文件里开了第二个来源，两个界面的颜色迟早开始漂。
- */
-:root {
-  --sidebar: oklch(0.201 0.011 242.328);
-  --sidebar-foreground: oklch(0.956 0.005 228.819);
-  --sidebar-accent: oklch(0.75 0.112 205.427);
-}
-:root[data-theme="dark"] {
   --sidebar: oklch(0.17 0.01 242.328);
   --sidebar-foreground: oklch(0.956 0.005 228.819);
   --sidebar-accent: oklch(0.75 0.112 205.427);
-}
 
-/*
- * 任务输出区的会话身份色（Contract AC1）。
- *
- * 为什么另起一组 --session-output-*，而不是复用上面那三个 --role-*：
- *   --role-* 说的是「谁在干」（左侧环节色条、角色徽章、用量卡的颜色轴），
- *   而输出正文要的是「这行字是谁吐的」——两个轴在同一个颜色里混起来之后，
- *   改左边那一套会顺手把终端里的可读性改坏（--role-coordinator 是橙的，
- *   在深色终端底上远不如蓝的读得清）。所以这里单开一组，互不牵连。
- *
- * 亮暗两个主题里 pre.term 都是深色的（它模拟的是终端），所以两套都按
- * 「深底上的字」取值；暗色主题只是把亮度再抬一档，不换色相。
- * 未知和平台共用同一种灰：认不出身份时**不能**默认协调者，否则一行没认出来的
- * 输出就理直气壮地冒充 L2 的结论，而屏幕上完全看不出那是猜的。
- */
-:root {
-  --session-output-coordinator: oklch(0.75 0.11 250);
-  --session-output-executor: oklch(0.78 0.14 155);
-  --session-output-reviewer: oklch(0.75 0.13 305);
-  --session-output-platform: oklch(0.7 0.02 250);
-  --session-output-unknown: oklch(0.7 0.02 250);
-}
-:root[data-theme="dark"] {
   --session-output-coordinator: oklch(0.8 0.11 250);
   --session-output-executor: oklch(0.83 0.14 155);
   --session-output-reviewer: oklch(0.8 0.13 305);

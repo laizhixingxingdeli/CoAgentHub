@@ -1,0 +1,94 @@
+/*
+ * 任务费用明细框（画板 .impeccable/reference/figma-45-1588.txt 的 45:1588：
+ * 900 × 520、纸色底、line 边、圆角 12px、标题 18/28、正文 14/22、120×36 的返回按钮）。
+ *
+ * 为什么单开一张表而不是写进 task-detail-header.css：那份文件是 40px 事实带与页头
+ * 纵向基线的家，一份浮层的 900×520 混在里面，下次调页头基线的人会顺手改到浮层，
+ * 而屏幕上只是「弹窗位置偏了一点」，不报错。
+ *
+ * 全部挂在 .td-cost-detail 下：页面里同时在线 ui.css 和壳层样式，一条不限定作用域的
+ * `p { font-size: 18px }` 会把别处的正文一起改掉。
+ *
+ * 一个色值都不写死：颜色只从 tokens.css 的 --color-* 进来，抄一份固定值之后改一处
+ * 忘另一处，两个界面各走各的颜色，而没人会把它当 bug 报。
+ */
+
+/* fixed 居中而不是 absolute 挂在页头里：框要盖住整页（画板是在一屏中央的单块）。
+ * 挂在页头内会跟着页头滚走，滚到时间线以后就只剩半块。
+ * z-index 用 60：壳层导航与顶栏在这之下，框要么盖住它们，要么点得到导航上的
+ * 另一个任务——那正是「盒子开着却在别处点了东西」的那种错。 */
+.td-cost-detail {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 60;
+  width: 900px;
+  height: 520px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 23px;
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  color: var(--color-ink);
+  font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  overflow: auto;
+}
+
+/* hidden 必须真的隐藏：浏览器默认的 [hidden] 是 display:none，但本文件给了
+ * display 值之后它会被覆盖，框就会永远开着——「点关闭没反应」正是这么来的。 */
+.td-cost-detail[hidden] {
+  display: none;
+}
+
+.td-cost-detail .td-cost-detail-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 28px;
+  color: var(--color-ink);
+}
+
+/* 正文从标题下一行开始（画板 top 79 减标题 23 + 28 ≈ 28px 的间距），
+ * 行距 22：金额行、主控未计、上限行三句的字距要一致，混排时才看得出是一段。 */
+.td-cost-detail .td-cost-detail-body {
+  margin-top: 28px;
+}
+
+.td-cost-detail .td-cost-detail-line {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+  color: var(--color-ink);
+}
+
+/* 返回按钮贴框底（画板 top 459 = 520 - 36 - 25）：它固定在左下角，不跟着正文
+ * 长短走，这样内容为空（费用未知 + 上限未知）时按钮位置也不变。
+ * 覆掉 ui.css 全局 button 的圆角 8px 与 36px 灰底，按画板是 120×36 白底 line 边、圆角 5px。 */
+.td-cost-detail .td-cost-detail-back {
+  position: absolute;
+  left: 23px;
+  bottom: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  height: 36px;
+  padding: 0;
+  background: var(--color-white);
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  color: var(--color-ink);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.td-cost-detail .td-cost-detail-back:hover {
+  background: var(--color-white);
+  border-color: var(--color-muted);
+}

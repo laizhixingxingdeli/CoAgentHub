@@ -10,7 +10,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitWorktreeManager } from '../src/application/workspace.ts';
@@ -109,6 +109,52 @@ describe('静态资源：路径边界', () => {
     assert.match(calls.headers?.['content-type'] ?? '', /text\/css/);
     // 无构建意味着改完刷新就该看到；缓存住等于每次都要硬刷新。
     assert.equal(calls.headers?.['cache-control'], 'no-store');
+  });
+
+  test('同源字体：扁平 woff2 认得且 MIME 是 font/woff2', () => {
+    // 固定页名的衬线子集靠它排版。发不出去时页面**静默**退回微软雅黑——
+    // 屏幕上只是"看起来不太像设计稿"，没人会盯着报错日志查这件事。
+    //
+    // MIME 单独断言：发成 application/octet-stream 浏览器仍可能靠嗅探排上字，
+    // 但在 nosniff / 严格检查下会直接拒绝加载，症状同样是静默回退字体。
+    const font = Buffer.from([0x77, 0x4f, 0x46, 0x32, 0x00, 0x01, 0x00, 0x00]);
+    writeFileSync(join(assets, 'probe.woff2'), font);
+
+    const { res, calls } = recorder();
+    assert.equal(serveStatic('/probe.woff2', res as never, assets), true, 'woff2 该被认下');
+    assert.equal(calls.status, 200);
+    assert.equal(calls.headers?.['content-type'], 'font/woff2');
+    assert.deepEqual(calls.body, font, '字体必须原样字节吐出去，不能被当文本转码');
+
+    // 再打一次真实交付的字体：上面的断言只证明「扩展名认得」，
+    // 这条证明「交付的那个文件确实叫这个名、确实在 src/web/ 里」。
+    // 两条一起才把"静态服务能发"和"文件真的存在"接上。
+    const real = recorder();
+    assert.equal(serveStatic('/console-title.woff2', real.res as never), true, '交付的字体取不到');
+    assert.equal(real.calls.headers?.['content-type'], 'font/woff2');
+    assert.ok((real.calls.body as Buffer).length > 1000, '发出去的不是字体本体');
+  });
+
+  test('字体格式不得连带放开：ttf、json、txt 仍然拒绝', () => {
+    // 只开 woff2 一个字体格式。多开一个 ttf 就多一条能把任意二进制吐出去的路；
+    // json/txt 是实施参考与许可证留档（console-assets.json / console-font-OFL.txt），
+    // 它们随代码保留，但**不是**可请求的运行资源。
+    putAsset('leak.ttf', 'x');
+    putAsset('leak.json', '{}');
+    putAsset('leak.txt', 'x');
+    for (const path of ['/leak.ttf', '/leak.json', '/leak.txt']) {
+      const { res } = recorder();
+      assert.equal(serveStatic(path, res as never, assets), false, `${path} 不该被当静态资源`);
+    }
+  });
+
+  test('woff2 也不能穿目录', () => {
+    // 白名单正则里没有斜杠，所以带斜杠的字体路径连正则都过不了。
+    // 这条单独写：新增扩展名时最容易顺手把正则改成"先拼接再判断"。
+    for (const path of ['/../console-title.woff2', '/a/b.woff2', '/..%2fconsole-title.woff2', '/./x.woff2']) {
+      const { res } = recorder();
+      assert.equal(serveStatic(path, res as never, assets), false, `${path} 不该被认下`);
+    }
   });
 });
 

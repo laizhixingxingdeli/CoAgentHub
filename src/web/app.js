@@ -16,25 +16,25 @@ import { renderModelPriorityPage, leaveModelPriorityPage } from './model-priorit
 import { renderProjectCatalogPage } from './project-catalog.js';
 import { renderProjectSpecPage } from './project-spec.js';
 import { renderInboxPage } from './inbox.js';
-import { renderTaskPage } from './task.js';
+import { renderTaskDetailPage } from './task-detail-controller.js';
 import { renderAgentsPage } from './agents.js';
 import { renderSettingsPage } from './settings.js';
-import { renderPoolPage } from './pool.js';
+import { renderResourcePage, leaveResourcePage } from './resource-console.js';
 import { renderPlanRunListPage, renderPlanRunPage } from './plan-run.js';
 import { renderPlatformPage } from './platform.js';
+import { createShell } from './console-shell.js';
 
 /* ===== 主题 =====
- * 暗色令牌挂在 :root[data-theme="dark"] 上（与观测面同一套写法），所以这里
- * 只负责把这个属性写对，一个颜色都不复制。跟随系统而不是默认亮色：
- * 人已经在暗色环境里了，页面在夜里就该是块黑纸而不是一块白板。
+ * 外壳固定浅色，**不跟着系统的 prefers-color-scheme 翻暗**。
+ *
+ * 已批准的三张画板只有暖白纸面一套值（DESIGN.md 的 paper / ink）。按系统切到
+ * 暗色，等于把一套没评审过的配色推给人看；而 tokens.css 里那块
+ * :root[data-theme="dark"] 是给旧页面留的兼容，不是给外壳用的。
+ *
+ * 仍然把 data-theme="light" 写上：tokens.css 的暗色块挂在 [data-theme="dark"]
+ * 上，显式写 light 就不会有别的脚本（或历史 bookmark 里的状态）把它切过去。
  */
-const darkScheme = window.matchMedia('(prefers-color-scheme: dark)');
-function applyTheme() {
-  document.documentElement.dataset.theme = darkScheme.matches ? 'dark' : 'light';
-}
-applyTheme();
-// 系统中途切主题（macOS 的"日落到日出"）时跟着切，不要求人刷新。
-darkScheme.addEventListener('change', applyTheme);
+document.documentElement.dataset.theme = 'light';
 
 /* ===== 路由 ===== */
 
@@ -110,7 +110,12 @@ function parseRoute(hash) {
 
 const crumbs = document.getElementById('crumbs');
 const view = document.getElementById('view');
-const navItems = [...document.querySelectorAll('.nav [data-route]')];
+
+/**
+ * 外壳（导航选中态、顶栏项目控件、同步状态）在 console-shell.js。
+ * 这里只把「现在在哪」告诉它，一行业务数据都不传：外壳要的只有路由名。
+ */
+const shell = createShell();
 
 const node = (text, className) => {
   const span = document.createElement('span');
@@ -128,20 +133,16 @@ const link = (text, href) => {
   return a;
 };
 
+/**
+ * 导航高亮由外壳按**一级入口**决定（任务 / 资源），见 console-shell.js 的
+ * navKeyForRoute：这里不再逐个路由算一遍 active——同一个判断写两处，加一个路由
+ * 就会只改到一处，另一处的高亮停在上一个页面。
+ *
+ * 剩在这里的只有面包屑。它是**兼容层**：task.js 与 plan-run.js 会往 #crumbs 里
+ * 写片段，而一级入口收敛成两个之后这段不该再显示（它在 DOM 里但视觉隐藏）。
+ * 外壳自己画的那份不再假装知道 projectId —— 那是任务页的数据。
+ */
 function renderChrome(route) {
-  // 任务页归在「项目」下：它是从项目页的任务表点进去的，没有自己的入口。
-  const active = route.name === 'home' ? 'home' : route.name === 'mission' ? 'projects' : route.name === 'inbox' ? 'inbox'
-    : route.name === 'agents' ? 'agents'
-    : route.name === 'settings' ? 'settings'
-    : route.name === 'pool' ? 'pool'
-    : route.name === 'platform' ? 'platform'
-    : (route.name === 'plan-runs' || route.name === 'plan-run') ? 'plan-runs'
-    : 'projects';
-  for (const el of navItems) {
-    if (el.dataset.route === active) el.dataset.active = '1';
-    else el.removeAttribute('data-active');
-  }
-
   crumbs.replaceChildren();
   if (route.name === 'home') { crumbs.appendChild(node('首页', 'here')); return; }
   if (route.name === 'inbox') {
@@ -205,6 +206,11 @@ function render() {
   if (!(route.name === 'agents' && !route.agentId) && !leaveModelPriorityPage()) {
     history.replaceState(null, '', lastHash || '#/'); return;
   }
+  // 资源页本单没有草稿，leaveResourcePage 永远放行；仍然照同一模式调一次：
+  // 下一张单（保存草稿）要在这里拦人，留好这个位置比事后再插回滚少一次改动。
+  if (route.name !== 'pool' && !leaveResourcePage()) {
+    history.replaceState(null, '', lastHash || '#/'); return;
+  }
   lastHash = location.hash;
 
 
@@ -214,6 +220,9 @@ function render() {
   }
 
   renderChrome(route);
+  // 换页第一件事是让外壳重置自己在飞的那一轮请求：旧响应晚到会把项目名和同步
+  // 时刻写进新页面。update() 返回的 promise 不 await —— 业务页不该等顶栏。
+  void shell.update(route);
   if (route.name === 'home') { void renderOverviewPage(view); return; }
 
   if (route.name === 'inbox') {
@@ -233,7 +242,7 @@ function render() {
   }
 
   if (route.name === 'pool') {
-    void renderPoolPage(view);
+    void renderResourcePage(view);
     return;
   }
 
@@ -253,7 +262,9 @@ function render() {
   }
 
   if (route.name === 'mission') {
-    void renderTaskPage(view, route.missionId, route.selectedStep);
+    // view 是外壳给的 DOM 容器，不是 Mission JSON：控制器自己拉只读接口。
+    // 入口在这里取数会把"只读详情"变成外壳的职责，外壳就不再只管"在看哪"。
+    void renderTaskDetailPage(view, route.missionId, route.selectedStep);
     return;
   }
 

@@ -1081,13 +1081,18 @@ describe('资源池页（src/web/pool.js）', () => {
     assert.match(html, /<link rel="modulepreload" href="\/pool\.js" \/>/);
     // app.js 会 import 它；再写一个会执行的 <script> 就是执行两遍、监听注册两次。
     assert.equal(/<script[^>]+src="\/pool\.js"/.test(html), false, 'pool.js 被写成会执行的 script');
-    assert.match(html, /href="#\/agents"[^>]*data-route="agents"/);
-    assert.ok(html.includes('角色与模型</a>'), '主导航为角色与模型');
+    // 一级入口收敛为「任务」「资源」之后，资源池就是 #/pool 那一项；角色与模型仍是
+    // 可达的深链接（#/agents），但不再占主导航。
+    assert.match(html, /href="#\/pool"[^>]*data-nav="pool"/, '资源入口指向 #/pool');
+    assert.equal(/href="#\/agents"/.test(html), false, '角色与模型不再占主导航');
     assert.equal(existsSync(join(webRoot, 'pool.css')), false, '不另起 pool.css');
 
     const shell = readWeb('app.js');
-    assert.match(shell, /from '\.\/pool\.js'/);
-    assert.match(shell, /renderPoolPage/);
+    // 资源页改由 resource-console.js 画（只读投影 + 健康抽屉）。pool.js 文件仍在，
+    // 但它不再是 #/pool 的渲染入口：要求两个入口都在，等于让一条路由有两个实现。
+    assert.match(shell, /from '\.\/resource-console\.js'/);
+    assert.match(shell, /renderResourcePage/);
+    assert.equal(/from '\.\/pool\.js'/.test(shell), false, 'app.js 仍 import 了旧的 pool.js');
     assert.ok(shell.includes("'/pool'"), 'parseRoute 要认 #/pool');
     assert.equal(shell.includes('/resources'), false, '占位路由要删掉：两个地址指同一页，迟早分叉');
     // 认不出的 hash 仍打回项目页（回归：加路由时别把这条弄丢）。
