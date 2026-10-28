@@ -20,14 +20,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { taskDeliveryHtml } from '../src/web/task-detail-delivery-view.js';
 
 const CSS = readFileSync(new URL('../src/web/task-detail-delivery.css', import.meta.url), 'utf8');
 
-const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
-const document = window.document as unknown as Document;
+const window = Window ? new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' }) : undefined;
+const document = window?.document as unknown as Document;
 
 function mount(view: Record<string, unknown>, options: Record<string, unknown> = {}) {
   document.body.innerHTML = '<div id="view"></div>';
@@ -39,7 +39,7 @@ function mount(view: Record<string, unknown>, options: Record<string, unknown> =
   return { root, q };
 }
 
-test('重派未交回：机器层不说通过，交卷摘要不抄上一跳的文件', () => {
+test('重派未交回：机器层不说通过，交卷摘要不抄上一跳的文件', { skip: noHappyDom }, () => {
   // dispatch 不清旧结果：旧报告、旧交卷、旧验收都还挂在这一项上。
   const { root, q } = mount({
     missionId: 'CUI3-task-detail-20261026',
@@ -94,7 +94,7 @@ test('重派未交回：机器层不说通过，交卷摘要不抄上一跳的�
   assert.ok(root.getAttribute('data-current-returned'), '根节点没记当前是否交回');
 });
 
-test('direct 已交回未验收：外部主控验收待处理、独立复核不适用、master 只说未记录', () => {
+test('direct 已交回未验收：外部主控验收待处理、独立复核不适用、master 只说未记录', { skip: noHappyDom }, () => {
   const { q } = mount({
     missionId: 'CUI3-task-detail-20261026',
     status: 'executing',
@@ -147,7 +147,7 @@ test('direct 已交回未验收：外部主控验收待处理、独立复核不�
  * 只印 ISO 时一行被挤满且看的人要自己换算；只印本地时间则事后对不上台账。两者的
  * 错都不报错，只是屏幕上少了一个能核对的东西。
  */
-test('已交回：时间显示为本地时刻且 title 保留原 ISO；已跑命令带 data-ran-command', () => {
+test('已交回：时间显示为本地时刻且 title 保留原 ISO；已跑命令带 data-ran-command', { skip: noHappyDom }, () => {
   const formatTime = (iso: string) => '本地(' + iso + ')';
   const { root, q } = mount({
     missionId: 'CUI3-task-detail-20261026',
@@ -246,7 +246,7 @@ test('已交回：时间显示为本地时刻且 title 保留原 ISO；已跑命
  * 以前把逐条拼进角色层 detail，同一个验收句在明细和列表里各出现一遍，读的人
  * 会当成两条不同的结论；而六层全纵向堆起来时，六层加一起连视口都装不下。
  */
-test('六层是标签、状态、时间三栏；逐条验收只画一次', () => {
+test('六层是标签、状态、时间三栏；逐条验收只画一次', { skip: noHappyDom }, () => {
   const { q } = mount({
     missionId: 'CUI3-task-detail-20261026',
     status: 'executing',

@@ -22,12 +22,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { bindTaskOutput, taskOutputHtml } from '../src/web/task-detail-output-view.js';
 
-const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
-const document = window.document as unknown as Document;
+const window = Window ? new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' }) : undefined;
+const document = window?.document as unknown as Document;
 
 function mount(input: Record<string, unknown>, options: Record<string, unknown> = {}) {
   document.body.innerHTML = '<div id="view"></div>';
@@ -49,7 +49,7 @@ const click = (el: Element | null): void => {
 /** 面板是否可见：hidden 属性是唯一依据，不看 CSS（测试里没有层叠上下文）。 */
 const shown = (el: HTMLElement | null): boolean => el !== null && !el.hasAttribute('hidden');
 
-test('实时输出认当前 Attempt、历史选择认选中的那跳：缺失正文为未知，文件与用量不借别的账', () => {
+test('实时输出认当前 Attempt、历史选择认选中的那跳：缺失正文为未知，文件与用量不借别的账', { skip: noHappyDom }, () => {
   const { root, q, all } = mount({
     currentAttemptId: 'W-1.exec-2',
     selectedAttemptId: 'W-1.exec-1',
@@ -130,7 +130,7 @@ test('实时输出认当前 Attempt、历史选择认选中的那跳：缺失正
   assert.deepEqual(all('[data-panel]').map(shown), [false, true, false]);
 });
 
-test('概要写这一跳自己的身份、范围、费用与交回结果，实时行逐条分块且只含当前 Attempt', () => {
+test('概要写这一跳自己的身份、范围、费用与交回结果，实时行逐条分块且只含当前 Attempt', { skip: noHappyDom }, () => {
   const { q, all } = mount({
     currentAttemptId: 'W-1.exec-13',
     selectedAttemptId: 'W-1.exec-13',
@@ -217,7 +217,7 @@ test('概要写这一跳自己的身份、范围、费用与交回结果，实�
     '文件区拿 missionDiff 冒充了这一跳的文件清单');
 });
 
-test('心跳只渲染投影的结论：已结束不适用，超窗口才疑似停滞，缺失或非法只说未知', () => {
+test('心跳只渲染投影的结论：已结束不适用，超窗口才疑似停滞，缺失或非法只说未知', { skip: noHappyDom }, () => {
   /** nowIso 写死，绝不用当前时间：用 now 的话「早 100 秒」会随运行时刻自己失效。 */
   const NOW = '2026-10-26T10:00:00.000Z';
   const render = (status: string | null, heartbeatAt: unknown) => mount({

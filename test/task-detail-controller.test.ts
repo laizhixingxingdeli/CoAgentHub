@@ -23,7 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { createTaskDetailController } from '../src/web/task-detail-controller.js';
 
@@ -117,7 +117,7 @@ function missionActivity(): Array<Record<string, unknown>> {
 
 /* ============================ 用例 ============================ */
 
-test('页头用 Mission JSON 的真实字段；残留报告是当前未交回；心跳缺失只说心跳未知；游标续拉', async () => {
+test('页头用 Mission JSON 的真实字段；残留报告是当前未交回；心跳缺失只说心跳未知；游标续拉', { skip: noHappyDom }, async () => {
   const h = harness();
   const requested: string[] = [];
 
@@ -218,7 +218,7 @@ test('页头用 Mission JSON 的真实字段；残留报告是当前未交回；
   again.stop();
 });
 
-test('换任务时晚到的 view 不写到新任务页；隐藏时不发 live；别的 Attempt 的行不进实时正文', async () => {
+test('换任务时晚到的 view 不写到新任务页；隐藏时不发 live；别的 Attempt 的行不进实时正文', { skip: noHappyDom }, async () => {
   const h = harness();
   const requested: string[] = [];
   let visible = true;
@@ -325,7 +325,7 @@ test('换任务时晚到的 view 不写到新任务页；隐藏时不发 live；
   controller.stop();
 });
 
-test('容器被资源页接管且 hash 指向 #/pool 后，不调用 stop 也不再画回也不请求该 Mission', async () => {
+test('容器被资源页接管且 hash 指向 #/pool 后，不调用 stop 也不再画回也不请求该 Mission', { skip: noHappyDom }, async () => {
   const h = harness();
   const requested: string[] = [];
   let missionGets = 0;
@@ -407,7 +407,7 @@ test('容器被资源页接管且 hash 指向 #/pool 后，不调用 stop 也不
  * 这条验的是「接线接对了」：投影本身已经在交付测试里验过，但如果页面不传 activity 与
  * 完整报告，屏幕上就永远是未知，而事实明明就在只读数据里。
  */
-test('已验收：按 reportId 取完整报告，提交时间不再是未知，受评执行不是评审者', async () => {
+test('已验收：按 reportId 取完整报告，提交时间不再是未知，受评执行不是评审者', { skip: noHappyDom }, async () => {
   const h = harness();
   const requested: string[] = [];
 
@@ -537,7 +537,7 @@ test('已验收：按 reportId 取完整报告，提交时间不再是未知，�
  * null，于是控制器根本不拉 Attempt、左标题写着「无当前执行」、终端一片空白——人看不到
  * 上一次到底做到了哪一步，而数据其实就在只读接口里。
  */
-test('无 active 时左栏显示最近已结束 Attempt 的保存尾部，心跳不适用、data-live-attempt 为空且同一 id 不重拉', async () => {
+test('无 active 时左栏显示最近已结束 Attempt 的保存尾部，心跳不适用、data-live-attempt 为空且同一 id 不重拉', { skip: noHappyDom }, async () => {
   const h = harness();
   const requested: string[] = [];
 
@@ -645,7 +645,7 @@ test('无 active 时左栏显示最近已结束 Attempt 的保存尾部，心跳
  * 反过来，真正失败的 null（请求当场返回 null，这一轮没被作废）必须记住：已结束的 Attempt
  * 永远不会变，下一轮再拉只是每 3 秒白打一次接口。
  */
-test('第一次拉取被隐藏作废后回到可见再拉一次并显示尾部；当场返回 null 的 id 下一轮不再请求', async () => {
+test('第一次拉取被隐藏作废后回到可见再拉一次并显示尾部；当场返回 null 的 id 下一轮不再请求', { skip: noHappyDom }, async () => {
   /* ---------------- 第一段：在途请求因隐藏被作废 ---------------- */
 
   const h = harness();

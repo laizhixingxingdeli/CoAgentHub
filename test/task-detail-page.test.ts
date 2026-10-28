@@ -21,7 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { Window } from 'happy-dom';
+import { Window, noHappyDom } from './helpers/happy-dom.ts';
 
 import { bindTaskDetail, taskDetailHtml } from '../src/web/task-detail-page.js';
 
@@ -37,8 +37,8 @@ function rule(styles: string, selector: string): string {
   return end < 0 ? '' : styles.slice(at + selector.length + 1, end);
 }
 
-const window = new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' });
-const document = window.document as unknown as Document;
+const window = Window ? new Window({ url: 'http://127.0.0.1:3101/#/missions/CUI3-task-detail-20261026' }) : undefined;
+const document = window?.document as unknown as Document;
 
 function mount(model: Record<string, unknown>, handlers: Record<string, unknown> = {}) {
   document.body.innerHTML = '<div id="view"></div>';
@@ -194,7 +194,7 @@ function filesText(root: HTMLElement): string {
 
 /* ============================ 用例 ============================ */
 
-test('三页签切换显隐对应面板，展开 intent 不改 mission id，direct 页头不出现编造的模型名', () => {
+test('三页签切换显隐对应面板，展开 intent 不改 mission id，direct 页头不出现编造的模型名', { skip: noHappyDom }, () => {
   const model = {
     view: directView(),
     activity: [{ kind: 'mission.created', at: '2026-10-26T09:00:00.000Z' }],
@@ -253,7 +253,7 @@ test('三页签切换显隐对应面板，展开 intent 不改 mission id，dire
     '契约面板里挂了输出区');
 });
 
-test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-current，切工作项与切面板都不改实时 id', () => {
+test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-current，切工作项与切面板都不改实时 id', { skip: noHappyDom }, () => {
   const onSelectAttempt: string[] = [];
   const onWorkItem: string[] = [];
   const model = {
@@ -351,7 +351,7 @@ test('实时 Attempt 与历史 Attempt 相互独立：定位当前只选 data-cu
   assert.ok(/height:\s*444px;/.test(rule(OUTPUT_CSS, '.td-output .td-live-text')), '终端高度变了');
 });
 
-test('归属链齐全时文件页签列出这一跳的真实路径；换成上一跳则仍是未知且不列出别人的路径', () => {
+test('归属链齐全时文件页签列出这一跳的真实路径；换成上一跳则仍是未知且不列出别人的路径', { skip: noHappyDom }, () => {
   // W-906.exec-1：提交、修订 r2、VR-639、lastReview 四环都指向它，所以文件页签列它自己
   // 报的两条路径；exec-0 上一跳则必须回到「该尝试没有单独的文件清单」。
   const render = (selectedAttemptId: string) => mount({
@@ -387,7 +387,7 @@ test('归属链齐全时文件页签列出这一跳的真实路径；换成上�
  * 点完历史不收起时，人看不到自己刚选的那一跳，而屏幕上并不报错。第三条钉的是
  * 左侧实时那一跳不随历史选择而变（收起态才看得到它）。
  */
-test('展开纵向历史时页面没有输出双卡，点历史行回到常规工作流并只上报该行 attempt', () => {
+test('展开纵向历史时页面没有输出双卡，点历史行回到常规工作流并只上报该行 attempt', { skip: noHappyDom }, () => {
   const onSelectAttempt: string[] = [];
   const onUi: Array<Record<string, unknown>> = [];
   const { root, q } = mount({
