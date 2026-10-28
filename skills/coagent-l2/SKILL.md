@@ -17,6 +17,7 @@ Mission 建成 `coordinationMode: "direct"` 且本会话是主控时。**direct 
 
 - 工单要带非空的结构化 `validation.commands`（argv 加 `timeoutMs`）；只有 `verification` 文字说明不能当机器验证依据。
 - `review` 的 accept 用**当前受评 Attempt** 的可信机器验证报告；旧提交的报告或调用方自报的 `passed: true` 都不算。reject 必须写 `requiredChanges`。
+- 界面工作项对照验收：契约 contextRefs 带设计稿存档（.impeccable/reference/layout.xml 与对应参考图），acceptance 写「协调者用截图比对核对点名的设计节点，超差 0 项」。验收时自己在 Mission worktree 重跑工单里的截图比对命令（不复用执行者结果），超差就 reject 并原样贴超差行；终审先看这份比对证据，不再开浏览器逐像素量。大批量看图仍放子 agent。
 
 ## 等执行者时不要密查
 

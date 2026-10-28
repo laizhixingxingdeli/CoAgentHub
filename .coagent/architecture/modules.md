@@ -64,7 +64,7 @@
 | 目录 | 内容 |
 |---|---|
 | `test/` | `node --test`；`helpers/`，`fixtures/`（按字节比对，`-text`） |
-| `scripts/` | 离线用量报告 `context-replay-report.mjs`；只告警的源码度量 `code-metrics.ts` |
+| `scripts/` | 离线用量报告 `context-replay-report.mjs`；只告警的源码度量 `code-metrics.ts`；界面截图与设计稿尺寸比对 `web-shot.mjs`（比对在 `web-shot-compare.mjs`，规格 `specs/web-shot.md`） |
 | `.coagent/` | 本文件、project.md、specs/、architecture/decisions/ |
 
 ## 适配层：`adapters/pi`（pi 适配器）

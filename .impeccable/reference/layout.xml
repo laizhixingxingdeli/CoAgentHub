@@ -1,0 +1,2230 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CoAgentHub 控制台设计稿尺寸表。Figma 文件 fGZiQG7IlSFnXdqqkcCxX5（CoAgentHub · 任务进度与模型资源），
+  2026-10-28 用 Figma MCP get_metadata 导出，每个画板的 XML 原样未改。
+  <board> 属性：node 画板节点；names 是 ../review/p1-revision-manifest.json 里的语义名；
+  page 是对应的 hash 路由（不带开头的 #/）；state 是画板画的任务状态，对照时挑同状态的真实任务；
+  view 是页签与面板；png 是同目录 1:1 参考图（只有 6 张主画板有）；txt-match 是本画板元数据节点
+  在同名 txt（2026-10-26 冻结的生成代码，里面有字号、行高、内边距、颜色）里找得到几个。
+  坐标：子元素的 x/y 相对父元素，累加到画板根即画板内坐标；画板根自己的 x/y 是它在画布上的位置，比对时不算。
+  instance 只给外框尺寸，不展开内部。设计稿改了：整批重导本文件和 png，并改 exported 日期。
+-->
+<boards file="fGZiQG7IlSFnXdqqkcCxX5" exported="2026-10-28">
+<board node="2:47" names="overview,filter0" page="projects" state="总览：需要你处理 / 进行中 / 最近结束三组" view="任务列表" png="figma-2-47.png" txt="figma-2-47.txt" txt-match="55/57">
+<frame id="2:47" name="01 任务总览" x="0" y="0" width="1440" height="1120">
+  <frame id="41:158" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="41:159" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="41:160" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="41:161" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="41:163" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="41:165" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="41:166" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="41:170" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="41:171" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="41:173" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="41:174" name="任务总览 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4090" name="任务数据区域 / 白色底板" x="0" y="178" width="1176" height="734" />
+    <text id="41:175" name="任务总览" x="0" y="0" width="1176" height="44" />
+    <instance id="41:176" name="Console/Banner" x="0" y="56" width="1176" height="56" />
+    <frame id="41:179" name="任务工具栏" x="0" y="124" width="1176" height="42">
+      <instance id="41:180" name="Console/Field" x="0" y="0" width="360" height="42" />
+      <instance id="41:185" name="Console/Switch" x="376" y="0" width="210" height="32" />
+    </frame>
+    <frame id="41:190" name="六状态筛选" x="0" y="178" width="1176" height="40">
+      <instance id="41:191" name="Console/Tab" x="0" y="0" width="90" height="40" />
+      <instance id="41:193" name="Console/Tab" x="94" y="0" width="146" height="40" />
+      <instance id="41:195" name="Console/Tab" x="244" y="0" width="146" height="40" />
+      <instance id="41:197" name="Console/Tab" x="394" y="0" width="146" height="40" />
+      <instance id="41:199" name="Console/Tab" x="544" y="0" width="146" height="40" />
+      <instance id="41:201" name="Console/Tab" x="694" y="0" width="146" height="40" />
+      <instance id="41:203" name="Console/Tab" x="844" y="0" width="146" height="40" />
+    </frame>
+    <frame id="41:205" name="任务表头" x="0" y="230" width="1176" height="26">
+      <frame id="57:4000" name="表头 / 编号 / intent" x="16" y="0" width="400" height="26">
+        <text id="57:4001" name="编号 / intent" x="0" y="0" width="400" height="20" />
+      </frame>
+      <frame id="57:4002" name="表头 / 主状态 / 附加标记" x="420" y="0" width="194" height="26">
+        <text id="57:4003" name="主状态 / 附加标记" x="0" y="0" width="194" height="20" />
+      </frame>
+      <frame id="57:4004" name="表头 / 谁处理 / 下一步" x="618" y="0" width="290" height="26">
+        <text id="57:4005" name="谁处理 / 下一步" x="0" y="0" width="290" height="20" />
+      </frame>
+      <frame id="57:4006" name="表头 / 费用（标价折算）" x="912" y="0" width="144" height="26">
+        <text id="57:4007" name="费用（标价折算）" x="0" y="0" width="144" height="20" />
+      </frame>
+      <frame id="57:4008" name="表头 / 更新时间" x="1060" y="0" width="100" height="26">
+        <text id="57:4009" name="更新时间" x="0" y="0" width="100" height="20" />
+      </frame>
+    </frame>
+    <frame id="41:211" name="分组 / 需要你处理" x="0" y="268" width="1176" height="228">
+      <frame id="80:4090" name="分组标题 / 共享行内缩进" x="0" y="0" width="1176" height="28">
+        <text id="41:212" name="需要你处理" x="16" y="0" width="1144" height="28" />
+      </frame>
+      <instance id="41:213" name="任务行 / review" x="0" y="28" width="1176" height="64" />
+      <instance id="41:236" name="任务行 / upgrade" x="0" y="92" width="1176" height="64" />
+      <instance id="41:259" name="任务行 / direct" x="0" y="156" width="1176" height="64" />
+    </frame>
+    <frame id="41:282" name="分组 / 进行中" x="0" y="508" width="1176" height="228">
+      <frame id="80:4091" name="分组标题 / 共享行内缩进" x="0" y="0" width="1176" height="28">
+        <text id="41:283" name="进行中" x="16" y="0" width="1144" height="28" />
+      </frame>
+      <instance id="41:284" name="任务行 / active" x="0" y="28" width="1176" height="64" />
+      <instance id="41:304" name="任务行 / retry" x="0" y="92" width="1176" height="64" />
+      <instance id="41:328" name="任务行 / investigate" x="0" y="156" width="1176" height="64" />
+    </frame>
+    <frame id="41:351" name="分组 / 最近结束" x="0" y="748" width="1176" height="164">
+      <frame id="80:4092" name="分组标题 / 共享行内缩进" x="0" y="0" width="1176" height="28">
+        <text id="41:352" name="最近结束" x="16" y="0" width="1144" height="28" />
+      </frame>
+      <instance id="41:353" name="任务行 / complete" x="0" y="28" width="1176" height="64" />
+      <instance id="41:376" name="任务行 / aborted" x="0" y="92" width="1176" height="64" />
+    </frame>
+    <frame id="41:399" name="分页" x="0" y="924" width="1176" height="32">
+      <text id="41:400" name="显示 8 / 119" x="0" y="0" width="69" height="20" />
+      <text id="41:401" name="加载更早" x="85" y="0" width="56" height="22" />
+    </frame>
+  </frame>
+</frame>
+</board>
+<board node="2:140" names="detail" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="工作流页签" png="figma-2-140.png" txt="figma-2-140.txt" txt-match="61/64">
+<frame id="2:140" name="02 任务详情 · 三层" x="1520" y="0" width="1440" height="1240">
+  <frame id="82:4092" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4091" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4090" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="41:403" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="41:404" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="41:405" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="41:406" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="41:408" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="41:410" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="41:411" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="41:415" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="41:416" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="41:418" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="41:419" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="41:420" name="MiRing-Notification-Correlation-Recovery-20261014" x="224" y="122" width="1176" height="28" />
+  <text id="41:421" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="224" y="162" width="1080" height="44" />
+  <text id="41:422" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="41:423" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="41:427" name="补修" x="380" y="218" width="26" height="20" />
+  <text id="41:428" name="平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回" x="604" y="218" width="796" height="22" />
+  <text id="41:429" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="41:430" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="41:431" name="费用（标价折算）$2.11 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="41:432" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="41:434" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="41:436" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="41:438" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="41:440" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="41:444" name="W-683 已验收" x="550" y="357" width="80" height="20" />
+  <frame id="41:445" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4093" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="41:446" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="231" height="22" />
+    <text id="41:447" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="41:448" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="41:450" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4090" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4095" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4100" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4105" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="41:467" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4095" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4094" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="41:468" name="当前实时输出 · 当前执行（第 13 次）" x="24" y="20" width="307" height="28" />
+    <text id="41:469" name="最后输出 12 秒前 · 心跳 8 秒前" x="24" y="58" width="197" height="22" />
+    <frame id="41:470" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="41:471" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="180" />
+    </frame>
+  </frame>
+  <frame id="41:472" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4097" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4096" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="41:473" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="41:474" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="41:476" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="41:478" name="执行第 13 次" x="24" y="112" width="90" height="24" />
+    <text id="41:479" name="L1 · candidate-B · 中" x="24" y="146" width="408" height="20" />
+    <text id="41:480" name="冻结工单与允许范围" x="24" y="198" width="117" height="20" />
+    <text id="41:481" name="W-684 · 关联恢复路径的两个文件" x="24" y="224" width="408" height="60" />
+    <text id="41:482" name="候选变更" x="24" y="294" width="52" height="20" />
+    <text id="41:483" name="协调者因 A 上游失败改派 B；高 → 中。" x="24" y="320" width="408" height="66" />
+    <text id="41:484" name="本环节费用" x="24" y="396" width="65" height="20" />
+    <text id="41:485" name="$0.18 · 估算" x="24" y="420" width="85" height="22" />
+    <text id="41:486" name="交回结果" x="24" y="456" width="52" height="20" />
+    <text id="41:487" name="尚未交回" x="24" y="480" width="408" height="22" />
+  </frame>
+  <frame id="86:4091" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="41:488" names="direct" page="missions/&lt;id&gt;" state="直接主控 · 已暂停" view="工作流页签" png="figma-41-488.png" txt="figma-41-488.txt" txt-match="62/64">
+<frame id="41:488" name="02D 任务详情 · 直接主控" x="0" y="1240" width="1440" height="1240">
+  <frame id="82:4100" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4099" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4092" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="41:489" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="41:490" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="41:491" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="41:492" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="41:494" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="41:496" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="41:497" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="41:501" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="41:502" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="41:504" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="41:505" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="41:506" name="SmartCar-SceneMode-Policy-Recovery-20261018" x="224" y="122" width="1176" height="28" />
+  <text id="41:507" name="核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条" x="224" y="162" width="1080" height="44" />
+  <text id="41:508" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="41:509" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="41:513" name="已暂停 · 直接主控" x="380" y="218" width="110" height="20" />
+  <text id="41:514" name="用户处理 · 不会自动恢复 · 下一步：补充设备侧输入" x="604" y="218" width="796" height="22" />
+  <text id="41:515" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="41:516" name="协作方式：直接主控" x="414" y="255" width="126" height="22" />
+  <text id="41:517" name="平台可见 $1.06 · 不含主控会话 / 上限 $10" x="624" y="255" width="265" height="22" />
+  <text id="41:518" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="41:520" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="41:522" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="41:524" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="41:526" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="41:530" name="W-683 已验收" x="550" y="357" width="80" height="20" />
+  <frame id="41:531" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4101" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="41:532" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="231" height="22" />
+    <text id="41:533" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="41:534" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="41:536" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4110" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4115" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4120" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4125" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="41:553" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4103" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4102" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="41:554" name="最近执行输出 · 会话已结束" x="24" y="20" width="225" height="28" />
+    <text id="41:555" name="已暂停 · 最后输出 14:28 · 心跳不适用" x="24" y="58" width="248" height="22" />
+    <frame id="41:556" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="41:557" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="160" />
+    </frame>
+  </frame>
+  <frame id="41:558" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4105" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4104" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="41:559" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="41:560" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="41:562" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="41:564" name="验收、交卷前核对" x="24" y="112" width="128" height="24" />
+    <text id="41:565" name="主控 · 外部会话 · 平台不可见" x="24" y="146" width="408" height="20" />
+    <text id="41:566" name="冻结工单与允许范围" x="24" y="198" width="117" height="20" />
+    <text id="41:567" name="W-684 · 关联恢复路径的两个文件" x="24" y="224" width="408" height="60" />
+    <text id="41:568" name="候选变更" x="24" y="294" width="52" height="20" />
+    <text id="41:569" name="协调者因 A 上游失败改派 B；高 → 中。" x="24" y="320" width="408" height="66" />
+    <text id="41:570" name="本环节费用" x="24" y="396" width="65" height="20" />
+    <text id="41:571" name="主控会话：平台不可见" x="24" y="420" width="140" height="22" />
+    <text id="41:572" name="交回结果" x="24" y="456" width="52" height="20" />
+    <text id="41:573" name="等待设备侧输入" x="24" y="480" width="408" height="22" />
+  </frame>
+  <frame id="86:4093" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="41:574" names="review" page="missions/&lt;id&gt;" state="三层 · 等你检视" view="工作流页签" png="figma-41-574.png" txt="figma-41-574.txt" txt-match="61/64">
+<frame id="41:574" name="02R 任务详情 · 等你检视" x="1520" y="1240" width="1440" height="1240">
+  <frame id="82:4107" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4106" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4094" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="41:575" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="41:576" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="41:577" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="41:578" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="41:580" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="41:582" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="41:583" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="41:587" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="41:588" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="41:590" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="41:591" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="41:592" name="Vehicle-Resource-Validation-FinalReview-20261023" x="224" y="122" width="1176" height="28" />
+  <text id="41:593" name="核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，" x="224" y="162" width="1080" height="44" />
+  <text id="41:594" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="41:595" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="41:599" name="已升级" x="380" y="218" width="0" height="20" hidden="true" />
+  <text id="41:600" name="检视者处理 · 不会自动恢复 · 下一步：核对最终交卷" x="604" y="218" width="796" height="22" />
+  <text id="41:601" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="41:602" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="41:603" name="费用（标价折算）$3.42 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="41:604" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="41:606" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="41:608" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="41:610" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="41:612" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="41:616" name="W-683 已验收" x="550" y="357" width="87" height="20" />
+  <frame id="41:617" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4108" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="41:618" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="239" height="22" />
+    <text id="41:619" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="41:620" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="41:622" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4130" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4135" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4140" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4145" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="41:639" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4110" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4109" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="41:640" name="最近执行输出 · 会话已结束" x="24" y="20" width="225" height="28" />
+    <text id="41:641" name="最后输出 14:32 · 会话已结束" x="24" y="58" width="186" height="22" />
+    <frame id="41:642" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="41:643" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="160" />
+    </frame>
+  </frame>
+  <frame id="41:644" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4112" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4111" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="41:645" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="41:646" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="41:648" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="41:650" name="逐条验收与交卷" x="24" y="112" width="112" height="24" />
+    <text id="41:651" name="L2 · coordinator-01 · 高" x="24" y="146" width="408" height="20" />
+    <text id="41:652" name="冻结工单与允许范围" x="24" y="198" width="117" height="20" />
+    <text id="41:653" name="W-684 · 关联恢复路径的两个文件" x="24" y="224" width="408" height="60" />
+    <text id="41:654" name="候选变更" x="24" y="294" width="52" height="20" />
+    <text id="41:655" name="协调者因 A 上游失败改派 B；高 → 中。" x="24" y="320" width="408" height="66" />
+    <text id="41:656" name="本环节费用" x="24" y="396" width="65" height="20" />
+    <text id="41:657" name="$0.18 · 估算" x="24" y="420" width="85" height="22" />
+    <text id="41:658" name="交回结果" x="24" y="456" width="52" height="20" />
+    <text id="41:659" name="通过 3/3；已提交最终交卷" x="24" y="480" width="408" height="22" />
+  </frame>
+  <frame id="86:4095" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="2:214" names="resource,resource-coordinator" page="pool" state="模型资源" view="协调者页签" png="figma-2-214.png" txt="figma-2-214.txt" txt-match="51/52">
+<frame id="2:214" name="03 模型资源 · 协调者" x="3040" y="0" width="1440" height="1120">
+  <frame id="43:267" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="43:268" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="43:269" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="43:270" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="43:272" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="43:274" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="43:275" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="43:279" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="43:280" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="43:282" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="43:283" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4098" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="43:284" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="43:285" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="43:286" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="43:288" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="43:290" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="43:292" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="43:295" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="43:296" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="43:298" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="43:299" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="46:1646" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="46:1647" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="46:1648" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="46:1649" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="46:1650" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="46:1651" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="46:1652" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="46:1653" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="46:1654" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="46:1655" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="46:1656" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="46:1657" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="46:1658" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="46:1659" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="43:307" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="43:308" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="43:330" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="43:352" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="43:374" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="43:396" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="43:418" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="43:440" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="43:462" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="69:4036" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4037" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4038" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4039" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4040" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4043" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="43:492" names="resource-executor" page="pool" state="模型资源" view="执行者页签" png="figma-43-492.png" txt="figma-43-492.txt" txt-match="47/48">
+<frame id="43:492" name="03E 模型资源 · 执行者" x="3040" y="1240" width="1440" height="1120">
+  <frame id="43:493" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="43:494" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="43:495" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="43:496" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="43:498" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="43:500" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="43:501" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="43:505" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="43:506" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="43:508" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="43:509" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4113" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="370" />
+    <text id="43:510" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="43:511" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="43:512" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="43:514" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="43:516" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="43:518" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="43:521" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="43:522" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="43:524" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="223" height="20" />
+    </frame>
+    <frame id="43:525" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="46:1660" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="46:1661" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="46:1662" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="46:1663" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="46:1664" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="46:1665" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="46:1666" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="46:1667" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="46:1668" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="46:1669" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="46:1670" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="46:1671" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="46:1672" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="46:1673" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="43:533" name="候选列表" x="0" y="214" width="1176" height="256">
+      <instance id="43:534" name="资源行 / executor-01" x="0" y="0" width="1176" height="64" />
+      <instance id="43:556" name="资源行 / executor-02" x="0" y="64" width="1176" height="64" />
+      <instance id="43:578" name="资源行 / executor-03" x="0" y="128" width="1176" height="64" />
+      <instance id="43:600" name="资源行 / executor-04" x="0" y="192" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="69:4045" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4046" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4047" name="有 1 处未保存：适配层参数" x="0" y="0" width="814" height="22" />
+      <text id="69:4048" name="执行者角色 · 修订 b891c450 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4049" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4052" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="49:3990" names="selected-history" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="工作流页签 · 选中较早环节，输出仍是第 13 次" txt="figma-49-3990.txt" txt-match="61/64">
+<frame id="49:3990" name="02H 选中历史 · 输出保持第13次" x="0" y="17480" width="1440" height="1240">
+  <frame id="82:4178" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4177" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4120" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="49:3991" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="49:3992" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="49:3993" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="49:3994" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="49:3995" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="49:3996" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="49:3997" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="49:3998" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="49:3999" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="49:4001" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="49:4002" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="49:4003" name="MiRing-Notification-Correlation-Recovery-20261014" x="224" y="122" width="1176" height="28" />
+  <text id="49:4004" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="224" y="162" width="1080" height="44" />
+  <text id="49:4005" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="49:4006" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="49:4007" name="补修" x="380" y="218" width="26" height="20" />
+  <text id="49:4008" name="平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回" x="604" y="218" width="796" height="22" />
+  <text id="49:4009" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="49:4010" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="49:4011" name="费用（标价折算）$2.11 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="49:4012" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="49:4014" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="49:4015" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="49:4016" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="49:4017" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="49:4018" name="W-683 已验收" x="550" y="357" width="80" height="20" />
+  <frame id="49:4019" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4179" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="49:4020" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="231" height="22" />
+    <text id="49:4021" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="49:4022" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="49:4023" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4570" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4575" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4580" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4585" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="49:4028" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4181" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4180" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="49:4029" name="当前实时输出 · 当前执行（第 13 次）" x="24" y="20" width="307" height="28" />
+    <text id="49:4030" name="最后输出 12 秒前 · 心跳 8 秒前" x="24" y="58" width="197" height="22" />
+    <frame id="49:4031" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="49:4032" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="180" />
+    </frame>
+  </frame>
+  <frame id="49:4033" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4183" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4182" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="49:4034" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="49:4035" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="49:4036" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="49:4037" name="执行第 13 次" x="24" y="112" width="90" height="24" />
+    <text id="49:4038" name="L1 · candidate-B · 中" x="24" y="146" width="408" height="20" />
+    <text id="49:4039" name="冻结工单与允许范围" x="24" y="198" width="117" height="20" />
+    <text id="49:4040" name="W-684 · 关联恢复路径的两个文件" x="24" y="224" width="408" height="60" />
+    <text id="49:4041" name="候选变更" x="24" y="294" width="52" height="20" />
+    <text id="49:4042" name="协调者因 A 上游失败改派 B；高 → 中。" x="24" y="320" width="408" height="66" />
+    <text id="49:4043" name="本环节费用" x="24" y="396" width="65" height="20" />
+    <text id="49:4044" name="$0.18 · 估算" x="24" y="420" width="85" height="22" />
+    <text id="49:4045" name="交回结果" x="24" y="456" width="52" height="20" />
+    <text id="49:4046" name="尚未交回" x="24" y="480" width="408" height="22" />
+  </frame>
+  <frame id="86:4121" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1388" names="history-active" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="工作流页签 · 展开全部历史" txt="figma-45-1388.txt" txt-match="44/47">
+<frame id="45:1388" name="展开历史 · active" x="6080" y="3980" width="1440" height="1240">
+  <frame id="82:4131" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4130" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4108" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="45:1389" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="45:1390" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="45:1391" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="45:1392" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="45:1393" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="45:1394" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="45:1395" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="45:1396" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="45:1397" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="45:1399" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="45:1400" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="45:1401" name="MiRing-Notification-Correlation-Recovery-20261014" x="224" y="122" width="1176" height="28" />
+  <text id="45:1402" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="224" y="162" width="1080" height="44" />
+  <text id="45:1403" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="45:1404" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="45:1405" name="补修" x="380" y="218" width="26" height="20" />
+  <text id="45:1406" name="平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回" x="604" y="218" width="796" height="22" />
+  <text id="45:1407" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="45:1408" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="45:1409" name="费用（标价折算）$2.11 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="45:1410" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="45:1412" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="45:1413" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="45:1414" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <text id="45:1454" name="W-684 · 第 1–3 轮 · 全部 13 次已发生执行" x="224" y="358" width="406" height="28" />
+  <instance id="45:1455" name="Console/SecondaryButton" x="1256" y="350" width="144" height="36" />
+  <frame id="45:1457" name="纵向历史列表" x="224" y="406" width="1176" height="746">
+    <instance id="67:4150" name="Console/TimelineHistoryRow" x="0" y="0" width="1176" height="46" />
+    <instance id="67:4158" name="Console/TimelineHistoryRow" x="0" y="50" width="1176" height="46" />
+    <instance id="67:4166" name="Console/TimelineHistoryRow" x="0" y="100" width="1176" height="46" />
+    <instance id="67:4174" name="Console/TimelineHistoryRow" x="0" y="150" width="1176" height="46" />
+    <instance id="67:4182" name="Console/TimelineHistoryRow" x="0" y="200" width="1176" height="46" />
+    <instance id="67:4190" name="Console/TimelineHistoryRow" x="0" y="250" width="1176" height="46" />
+    <instance id="67:4198" name="Console/TimelineHistoryRow" x="0" y="300" width="1176" height="46" />
+    <instance id="67:4206" name="Console/TimelineHistoryRow" x="0" y="350" width="1176" height="46" />
+    <instance id="67:4214" name="Console/TimelineHistoryRow" x="0" y="400" width="1176" height="46" />
+    <instance id="67:4222" name="Console/TimelineHistoryRow" x="0" y="450" width="1176" height="46" />
+    <instance id="67:4230" name="Console/TimelineHistoryRow" x="0" y="500" width="1176" height="46" />
+    <instance id="67:4238" name="Console/TimelineHistoryRow" x="0" y="550" width="1176" height="46" />
+    <instance id="67:4246" name="Console/TimelineHistoryRow" x="0" y="600" width="1176" height="46" />
+    <instance id="67:4254" name="Console/TimelineHistoryRow" x="0" y="650" width="1176" height="46" />
+    <instance id="67:4262" name="Console/TimelineHistoryRow" x="0" y="700" width="1176" height="46" />
+  </frame>
+  <frame id="86:4109" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1593" names="history-direct" page="missions/&lt;id&gt;" state="直接主控 · 已暂停" view="工作流页签 · 展开全部历史" txt="figma-45-1593.txt" txt-match="45/47">
+<frame id="45:1593" name="展开历史 · direct" x="1520" y="5480" width="1440" height="1240">
+  <frame id="82:4140" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4139" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4112" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="45:1594" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="45:1595" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="45:1596" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="45:1597" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="45:1598" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="45:1599" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="45:1600" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="45:1601" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="45:1602" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="45:1604" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="45:1605" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="45:1606" name="SmartCar-SceneMode-Policy-Recovery-20261018" x="224" y="122" width="1176" height="28" />
+  <text id="45:1607" name="核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条" x="224" y="162" width="1080" height="44" />
+  <text id="45:1608" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="45:1609" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="45:1610" name="已暂停 · 直接主控" x="380" y="218" width="110" height="20" />
+  <text id="45:1611" name="用户处理 · 不会自动恢复 · 下一步：补充设备侧输入" x="604" y="218" width="796" height="22" />
+  <text id="45:1612" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="45:1613" name="协作方式：直接主控" x="414" y="255" width="126" height="22" />
+  <text id="45:1614" name="平台可见 $1.06 · 不含主控会话 / 上限 $10" x="624" y="255" width="265" height="22" />
+  <text id="45:1615" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="45:1617" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="45:1618" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="45:1619" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <text id="45:1659" name="W-684 · 第 1–3 轮 · 全部 13 次已发生执行" x="224" y="358" width="406" height="28" />
+  <instance id="45:1660" name="Console/SecondaryButton" x="1256" y="350" width="144" height="36" />
+  <frame id="45:1662" name="纵向历史列表" x="224" y="406" width="1176" height="746">
+    <instance id="67:4290" name="Console/TimelineHistoryRow" x="0" y="0" width="1176" height="46" />
+    <instance id="67:4298" name="Console/TimelineHistoryRow" x="0" y="50" width="1176" height="46" />
+    <instance id="67:4306" name="Console/TimelineHistoryRow" x="0" y="100" width="1176" height="46" />
+    <instance id="67:4314" name="Console/TimelineHistoryRow" x="0" y="150" width="1176" height="46" />
+    <instance id="67:4322" name="Console/TimelineHistoryRow" x="0" y="200" width="1176" height="46" />
+    <instance id="67:4330" name="Console/TimelineHistoryRow" x="0" y="250" width="1176" height="46" />
+    <instance id="67:4338" name="Console/TimelineHistoryRow" x="0" y="300" width="1176" height="46" />
+    <instance id="67:4346" name="Console/TimelineHistoryRow" x="0" y="350" width="1176" height="46" />
+    <instance id="67:4354" name="Console/TimelineHistoryRow" x="0" y="400" width="1176" height="46" />
+    <instance id="67:4362" name="Console/TimelineHistoryRow" x="0" y="450" width="1176" height="46" />
+    <instance id="67:4370" name="Console/TimelineHistoryRow" x="0" y="500" width="1176" height="46" />
+    <instance id="67:4378" name="Console/TimelineHistoryRow" x="0" y="550" width="1176" height="46" />
+    <instance id="67:4386" name="Console/TimelineHistoryRow" x="0" y="600" width="1176" height="46" />
+    <instance id="67:4394" name="Console/TimelineHistoryRow" x="0" y="650" width="1176" height="46" />
+    <instance id="67:4402" name="Console/TimelineHistoryRow" x="0" y="700" width="1176" height="46" />
+  </frame>
+  <frame id="86:4113" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1798" names="history-review" page="missions/&lt;id&gt;" state="三层 · 等你检视" view="工作流页签 · 展开全部历史" txt="figma-45-1798.txt" txt-match="44/47">
+<frame id="45:1798" name="展开历史 · review" x="6080" y="5480" width="1440" height="1240">
+  <frame id="82:4149" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4148" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4116" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="45:1799" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="45:1800" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="45:1801" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="45:1802" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="45:1803" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="45:1804" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="45:1805" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="45:1806" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="45:1807" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="45:1809" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="45:1810" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="45:1811" name="Vehicle-Resource-Validation-FinalReview-20261023" x="224" y="122" width="1176" height="28" />
+  <text id="45:1812" name="核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，" x="224" y="162" width="1080" height="44" />
+  <text id="45:1813" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="45:1814" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="45:1815" name="已升级" x="380" y="218" width="0" height="20" hidden="true" />
+  <text id="45:1816" name="检视者处理 · 不会自动恢复 · 下一步：核对最终交卷" x="604" y="218" width="796" height="22" />
+  <text id="45:1817" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="45:1818" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="45:1819" name="费用（标价折算）$3.42 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="45:1820" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="45:1822" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="45:1823" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="45:1824" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <text id="45:1864" name="W-684 · 第 1–3 轮 · 全部 13 次已发生执行" x="224" y="358" width="417" height="28" />
+  <instance id="45:1865" name="Console/SecondaryButton" x="1256" y="350" width="144" height="36" />
+  <frame id="45:1867" name="纵向历史列表" x="224" y="406" width="1176" height="746">
+    <instance id="67:4430" name="Console/TimelineHistoryRow" x="0" y="0" width="1176" height="46" />
+    <instance id="67:4438" name="Console/TimelineHistoryRow" x="0" y="50" width="1176" height="46" />
+    <instance id="67:4446" name="Console/TimelineHistoryRow" x="0" y="100" width="1176" height="46" />
+    <instance id="67:4454" name="Console/TimelineHistoryRow" x="0" y="150" width="1176" height="46" />
+    <instance id="67:4462" name="Console/TimelineHistoryRow" x="0" y="200" width="1176" height="46" />
+    <instance id="67:4470" name="Console/TimelineHistoryRow" x="0" y="250" width="1176" height="46" />
+    <instance id="67:4478" name="Console/TimelineHistoryRow" x="0" y="300" width="1176" height="46" />
+    <instance id="67:4486" name="Console/TimelineHistoryRow" x="0" y="350" width="1176" height="46" />
+    <instance id="67:4494" name="Console/TimelineHistoryRow" x="0" y="400" width="1176" height="46" />
+    <instance id="67:4502" name="Console/TimelineHistoryRow" x="0" y="450" width="1176" height="46" />
+    <instance id="67:4510" name="Console/TimelineHistoryRow" x="0" y="500" width="1176" height="46" />
+    <instance id="67:4518" name="Console/TimelineHistoryRow" x="0" y="550" width="1176" height="46" />
+    <instance id="67:4526" name="Console/TimelineHistoryRow" x="0" y="600" width="1176" height="46" />
+    <instance id="67:4534" name="Console/TimelineHistoryRow" x="0" y="650" width="1176" height="46" />
+    <instance id="67:4542" name="Console/TimelineHistoryRow" x="0" y="700" width="1176" height="46" />
+  </frame>
+  <frame id="86:4117" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1510" names="files-active" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="工作流页签 · 选中环节切到「文件」" txt="figma-45-1510.txt" txt-match="55/58">
+<frame id="45:1510" name="修改的文件 · active" x="7600" y="3980" width="1440" height="1240">
+  <frame id="82:4133" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4132" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4110" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="45:1511" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="45:1512" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="45:1513" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="45:1514" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="45:1515" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="45:1516" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="45:1517" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="45:1518" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="45:1519" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="45:1521" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="45:1522" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="45:1523" name="MiRing-Notification-Correlation-Recovery-20261014" x="224" y="122" width="1176" height="28" />
+  <text id="45:1524" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="224" y="162" width="1080" height="44" />
+  <text id="45:1525" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="45:1526" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="45:1527" name="补修" x="380" y="218" width="26" height="20" />
+  <text id="45:1528" name="平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回" x="604" y="218" width="796" height="22" />
+  <text id="45:1529" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="45:1530" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="45:1531" name="费用（标价折算）$2.11 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="45:1532" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="45:1534" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="45:1535" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="45:1536" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="45:1537" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="45:1538" name="W-683 已验收" x="550" y="357" width="80" height="20" />
+  <frame id="45:1539" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4134" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="45:1540" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="231" height="22" />
+    <text id="45:1541" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="45:1542" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="45:1543" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4270" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4275" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4280" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4285" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="45:1548" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4136" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4135" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="45:1549" name="当前实时输出 · 当前执行（第 13 次）" x="24" y="20" width="307" height="28" />
+    <text id="45:1550" name="最后输出 12 秒前 · 心跳 8 秒前" x="24" y="58" width="197" height="22" />
+    <frame id="45:1551" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="45:1552" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="180" />
+    </frame>
+  </frame>
+  <frame id="45:1553" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4138" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4137" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="45:1578" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="45:1579" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="45:1581" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="45:1583" name="src/application/correlation-recovery.ts" x="24" y="120" width="408" height="20" />
+    <text id="45:1584" name="+24 / −6 行" x="24" y="152" width="126" height="22" />
+    <text id="45:1585" name="test/correlation-recovery.test.ts" x="24" y="224" width="408" height="20" />
+    <text id="45:1586" name="+10 / −2 行" x="24" y="242" width="126" height="22" />
+  </frame>
+  <frame id="86:4111" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1715" names="files-direct" page="missions/&lt;id&gt;" state="直接主控 · 已暂停" view="工作流页签 · 选中环节切到「文件」" txt="figma-45-1715.txt" txt-match="56/58">
+<frame id="45:1715" name="修改的文件 · direct" x="3040" y="5480" width="1440" height="1240">
+  <frame id="82:4142" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4141" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4114" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="45:1716" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="45:1717" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="45:1718" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="45:1719" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="45:1720" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="45:1721" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="45:1722" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="45:1723" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="45:1724" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="45:1726" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="45:1727" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="45:1728" name="SmartCar-SceneMode-Policy-Recovery-20261018" x="224" y="122" width="1176" height="28" />
+  <text id="45:1729" name="核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条" x="224" y="162" width="1080" height="44" />
+  <text id="45:1730" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="45:1731" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="45:1732" name="已暂停 · 直接主控" x="380" y="218" width="110" height="20" />
+  <text id="45:1733" name="用户处理 · 不会自动恢复 · 下一步：补充设备侧输入" x="604" y="218" width="796" height="22" />
+  <text id="45:1734" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="45:1735" name="协作方式：直接主控" x="414" y="255" width="126" height="22" />
+  <text id="45:1736" name="平台可见 $1.06 · 不含主控会话 / 上限 $10" x="624" y="255" width="265" height="22" />
+  <text id="45:1737" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="45:1739" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="45:1740" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="45:1741" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="45:1742" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="45:1743" name="W-683 已验收" x="550" y="357" width="80" height="20" />
+  <frame id="45:1744" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4143" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="45:1745" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="231" height="22" />
+    <text id="45:1746" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="45:1747" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="45:1748" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4410" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4415" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4420" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4425" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="45:1753" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4145" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4144" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="45:1754" name="最近执行输出 · 会话已结束" x="24" y="20" width="225" height="28" />
+    <text id="45:1755" name="已暂停 · 最后输出 14:28 · 心跳不适用" x="24" y="58" width="248" height="22" />
+    <frame id="45:1756" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="45:1757" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="160" />
+    </frame>
+  </frame>
+  <frame id="45:1758" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4147" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4146" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="45:1783" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="45:1784" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="45:1786" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="45:1788" name="src/application/correlation-recovery.ts" x="24" y="120" width="408" height="20" />
+    <text id="45:1789" name="+24 / −6 行" x="24" y="152" width="126" height="22" />
+    <text id="45:1790" name="test/correlation-recovery.test.ts" x="24" y="224" width="408" height="20" />
+    <text id="45:1791" name="+10 / −2 行" x="24" y="242" width="126" height="22" />
+  </frame>
+  <frame id="86:4115" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1920" names="files-review" page="missions/&lt;id&gt;" state="三层 · 等你检视" view="工作流页签 · 选中环节切到「文件」" txt="figma-45-1920.txt" txt-match="55/58">
+<frame id="45:1920" name="修改的文件 · review" x="7600" y="5480" width="1440" height="1240">
+  <frame id="82:4151" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4150" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4118" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="45:1921" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="45:1922" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="45:1923" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="45:1924" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="45:1925" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="45:1926" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="45:1927" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="45:1928" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="45:1929" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="45:1931" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="45:1932" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="45:1933" name="Vehicle-Resource-Validation-FinalReview-20261023" x="224" y="122" width="1176" height="28" />
+  <text id="45:1934" name="核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，" x="224" y="162" width="1080" height="44" />
+  <text id="45:1935" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="45:1936" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="45:1937" name="已升级" x="380" y="218" width="0" height="20" hidden="true" />
+  <text id="45:1938" name="检视者处理 · 不会自动恢复 · 下一步：核对最终交卷" x="604" y="218" width="796" height="22" />
+  <text id="45:1939" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="45:1940" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="45:1941" name="费用（标价折算）$3.42 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="45:1942" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="45:1944" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="45:1945" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="45:1946" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <instance id="45:1947" name="Console/Field" x="224" y="346" width="300" height="42" />
+  <text id="45:1948" name="W-683 已验收" x="550" y="357" width="87" height="20" />
+  <frame id="45:1949" name="已发生环节" x="224" y="402" width="1176" height="194">
+    <frame id="82:4152" name="工作流标题带" x="0" y="0" width="1176" height="44" />
+    <text id="45:1950" name="W-684 · 第 3 轮 · 已记录 13 次执行" x="20" y="12" width="239" height="22" />
+    <text id="45:1951" name="展开较早 9 次" x="878" y="12" width="106" height="22" />
+    <instance id="45:1952" name="Console/SecondaryButton" x="1032" y="6" width="124" height="36" />
+    <frame id="45:1953" name="最近四次 / 自动布局" x="16" y="48" width="1144" height="136">
+      <instance id="67:4550" name="Console/TimelineStep" x="0" y="0" width="274" height="136" />
+      <instance id="67:4555" name="Console/TimelineStep" x="290" y="0" width="274" height="136" />
+      <instance id="67:4560" name="Console/TimelineStep" x="580" y="0" width="274" height="136" />
+      <instance id="67:4565" name="Console/TimelineStep" x="870" y="0" width="274" height="136" />
+    </frame>
+  </frame>
+  <frame id="45:1958" name="实时输出区" x="224" y="622" width="704" height="566">
+    <frame id="82:4154" name="功能区标题分隔" x="0" y="86" width="704" height="1" />
+    <frame id="82:4153" name="功能区标题带" x="0" y="0" width="704" height="86" />
+    <text id="45:1959" name="最近执行输出 · 会话已结束" x="24" y="20" width="225" height="28" />
+    <text id="45:1960" name="最后输出 14:32 · 会话已结束" x="24" y="58" width="186" height="22" />
+    <frame id="45:1961" name="输出正文" x="24" y="98" width="656" height="444">
+      <text id="45:1962" name="14:27:08 [平台] 候选由 candidate-A 改派 candidate-B
+14:27" x="18" y="18" width="620" height="160" />
+    </frame>
+  </frame>
+  <frame id="45:1963" name="选中环节" x="944" y="622" width="456" height="566">
+    <frame id="82:4156" name="功能区标题分隔" x="0" y="102" width="456" height="1" />
+    <frame id="82:4155" name="功能区标题带" x="0" y="0" width="456" height="102" />
+    <text id="45:1988" name="选中环节" x="24" y="18" width="72" height="28" />
+    <instance id="45:1989" name="Console/Tab" x="24" y="56" width="90" height="40" />
+    <instance id="45:1991" name="Console/Tab" x="148" y="56" width="180" height="40" />
+    <text id="45:1993" name="src/application/correlation-recovery.ts" x="24" y="120" width="408" height="20" />
+    <text id="45:1994" name="+24 / −6 行" x="24" y="152" width="68" height="22" />
+    <text id="45:1995" name="test/correlation-recovery.test.ts" x="24" y="224" width="408" height="20" />
+    <text id="45:1996" name="+10 / −2 行" x="24" y="242" width="68" height="22" />
+  </frame>
+  <frame id="86:4119" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="44:1440" names="evidence-active" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="交付与验证页签" txt="figma-44-1440.txt" txt-match="74/77">
+<frame id="44:1440" name="04 交付与验证 · active" x="7600" y="2480" width="1440" height="1240">
+  <frame id="82:4121" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4120" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4098" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="44:1441" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="44:1442" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="44:1443" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="44:1444" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="44:1445" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="44:1446" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="44:1447" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="44:1448" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="44:1449" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="44:1451" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="44:1452" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="44:1453" name="MiRing-Notification-Correlation-Recovery-20261014" x="224" y="122" width="1176" height="28" />
+  <text id="44:1454" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="224" y="162" width="1080" height="44" />
+  <text id="44:1455" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="44:1456" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="44:1457" name="补修" x="380" y="218" width="26" height="20" />
+  <text id="44:1458" name="平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回" x="604" y="218" width="796" height="22" />
+  <text id="44:1459" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="44:1460" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="44:1461" name="费用（标价折算）$2.11 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="44:1462" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="44:1464" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="44:1465" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="44:1466" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <frame id="70:4153" name="分层验证 / 各层状态独立" x="224" y="360" width="784" height="770">
+    <frame id="70:4154" name="机器验证" x="0" y="0" width="784" height="112">
+      <text id="70:4155" name="机器验证" x="18" y="16" width="150" height="22" />
+      <text id="70:4156" name="未通过 · 上次交回" x="180" y="16" width="430" height="22" />
+      <text id="70:4157" name="VR-1179 · 第 11 次 · 23 项，1 失败
+受评提交 4ad918c · 去重边界断言" x="180" y="48" width="570" height="44" />
+      <text id="70:4158" name="14:24" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4159" name="协调者验收" x="0" y="124" width="784" height="142">
+      <text id="70:4160" name="协调者验收" x="18" y="16" width="150" height="22" />
+      <text id="70:4161" name="被打回 · 补修中" x="180" y="16" width="430" height="22" />
+      <text id="70:4162" name="第 11 次未满足验收条件 1；第 13 次尚未交回。" x="180" y="48" width="570" height="22" />
+      <text id="70:4163" name="14:25" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4164" name="独立复核" x="0" y="278" width="784" height="112">
+      <text id="70:4165" name="独立复核" x="18" y="16" width="150" height="22" />
+      <text id="70:4166" name="不适用" x="180" y="16" width="430" height="22" />
+      <text id="70:4167" name="标准保障不要求独立复核。" x="180" y="48" width="570" height="22" />
+      <text id="70:4168" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4169" name="检视者终审" x="0" y="402" width="784" height="112">
+      <text id="70:4170" name="检视者终审" x="18" y="16" width="150" height="22" />
+      <text id="70:4171" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4172" name="当前没有最终交卷；不会继承上一轮结果。" x="180" y="48" width="570" height="22" />
+      <text id="70:4173" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4174" name="合入集成分支" x="0" y="526" width="784" height="112">
+      <text id="70:4175" name="合入集成分支" x="18" y="16" width="150" height="22" />
+      <text id="70:4176" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4177" name="没有已记录的合入证据。" x="180" y="48" width="570" height="22" />
+      <text id="70:4178" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4179" name="合入 master" x="0" y="650" width="784" height="112">
+      <text id="70:4180" name="合入 master" x="18" y="16" width="150" height="22" />
+      <text id="70:4181" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4182" name="需要用户明确说“合”。" x="180" y="48" width="570" height="22" />
+      <text id="70:4183" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+  </frame>
+  <frame id="70:4184" name="交卷摘要" x="1024" y="360" width="376" height="770">
+    <text id="70:4185" name="当前交付状态" x="21" y="21" width="108" height="28" />
+    <frame id="70:4186" name="当前工单" x="21" y="71" width="336" height="92">
+      <text id="70:4187" name="当前工单" x="0" y="0" width="52" height="20" />
+      <text id="70:4188" name="W-684 · 第 13 次运行中" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4189" name="最终交卷" x="21" y="185" width="336" height="92">
+      <text id="70:4190" name="最终交卷" x="0" y="0" width="52" height="20" />
+      <text id="70:4191" name="尚未提交" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4192" name="最终受评提交与行数" x="21" y="299" width="336" height="92">
+      <text id="70:4193" name="最终受评提交与行数" x="0" y="0" width="117" height="20" />
+      <text id="70:4194" name="未知 · 等执行者交回" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4195" name="上次失败" x="21" y="413" width="336" height="92">
+      <text id="70:4196" name="上次失败" x="0" y="0" width="52" height="20" />
+      <text id="70:4197" name="第 11 次 · 4ad918c · VR-1179" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4198" name="当前验证命令" x="21" y="527" width="336" height="92">
+      <text id="70:4199" name="当前验证命令" x="0" y="0" width="78" height="20" />
+      <text id="70:4200" name="node --test test/notification-recovery.test.ts" x="0" y="26" width="336" height="22" />
+    </frame>
+  </frame>
+  <frame id="86:4099" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="44:1558" names="evidence-direct" page="missions/&lt;id&gt;" state="直接主控 · 已暂停" view="交付与验证页签" txt="figma-44-1558.txt" txt-match="75/77">
+<frame id="44:1558" name="04 交付与验证 · direct" x="0" y="3980" width="1440" height="1240">
+  <frame id="82:4123" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4122" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4100" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="44:1559" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="44:1560" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="44:1561" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="44:1562" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="44:1563" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="44:1564" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="44:1565" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="44:1566" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="44:1567" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="44:1569" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="44:1570" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="44:1571" name="SmartCar-SceneMode-Policy-Recovery-20261018" x="224" y="122" width="1176" height="28" />
+  <text id="44:1572" name="核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条" x="224" y="162" width="1080" height="44" />
+  <text id="44:1573" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="44:1574" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="44:1575" name="已暂停 · 直接主控" x="380" y="218" width="110" height="20" />
+  <text id="44:1576" name="用户处理 · 不会自动恢复 · 下一步：补充设备侧输入" x="604" y="218" width="796" height="22" />
+  <text id="44:1577" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="44:1578" name="协作方式：直接主控" x="414" y="255" width="126" height="22" />
+  <text id="44:1579" name="平台可见 $1.06 · 不含主控会话 / 上限 $10" x="624" y="255" width="265" height="22" />
+  <text id="44:1580" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="44:1582" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="44:1583" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="44:1584" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <frame id="70:4201" name="分层验证 / 各层状态独立" x="224" y="360" width="784" height="770">
+    <frame id="70:4202" name="机器验证" x="0" y="0" width="784" height="112">
+      <text id="70:4203" name="机器验证" x="18" y="16" width="150" height="22" />
+      <text id="70:4204" name="等待设备输入" x="180" y="16" width="430" height="22" />
+      <text id="70:4205" name="设备侧输入未齐；没有本轮可信验证报告。" x="180" y="48" width="570" height="22" />
+      <text id="70:4206" name="14:28" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4207" name="主控验收" x="0" y="124" width="784" height="142">
+      <text id="70:4208" name="主控验收" x="18" y="16" width="150" height="22" />
+      <text id="70:4209" name="等待用户" x="180" y="16" width="430" height="22" />
+      <text id="70:4210" name="外部主控核对设备侧输入；模型与费用平台不可见。" x="180" y="48" width="570" height="22" />
+      <text id="70:4211" name="14:28" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4212" name="独立复核" x="0" y="278" width="784" height="112">
+      <text id="70:4213" name="独立复核" x="18" y="16" width="150" height="22" />
+      <text id="70:4214" name="不适用" x="180" y="16" width="430" height="22" />
+      <text id="70:4215" name="标准保障不要求独立复核。" x="180" y="48" width="570" height="22" />
+      <text id="70:4216" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4217" name="检视者终审" x="0" y="402" width="784" height="112">
+      <text id="70:4218" name="检视者终审" x="18" y="16" width="150" height="22" />
+      <text id="70:4219" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4220" name="尚未最终交卷。" x="180" y="48" width="570" height="22" />
+      <text id="70:4221" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4222" name="合入集成分支" x="0" y="526" width="784" height="112">
+      <text id="70:4223" name="合入集成分支" x="18" y="16" width="150" height="22" />
+      <text id="70:4224" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4225" name="没有已记录的合入证据。" x="180" y="48" width="570" height="22" />
+      <text id="70:4226" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4227" name="合入 master" x="0" y="650" width="784" height="112">
+      <text id="70:4228" name="合入 master" x="18" y="16" width="150" height="22" />
+      <text id="70:4229" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4230" name="需要用户明确说“合”。" x="180" y="48" width="570" height="22" />
+      <text id="70:4231" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+  </frame>
+  <frame id="70:4232" name="交卷摘要" x="1024" y="360" width="376" height="770">
+    <text id="70:4233" name="暂停中的交付状态" x="21" y="21" width="144" height="28" />
+    <frame id="70:4234" name="当前工单" x="21" y="71" width="336" height="92">
+      <text id="70:4235" name="当前工单" x="0" y="0" width="52" height="20" />
+      <text id="70:4236" name="W-712 · 已暂停" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4237" name="最后执行" x="21" y="185" width="336" height="92">
+      <text id="70:4238" name="最后执行" x="0" y="0" width="52" height="20" />
+      <text id="70:4239" name="第 13 次已交回 · 14:27" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4240" name="最终交卷" x="21" y="299" width="336" height="92">
+      <text id="70:4241" name="最终交卷" x="0" y="0" width="52" height="20" />
+      <text id="70:4242" name="尚未提交；等待设备侧输入" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4243" name="最终受评提交与行数" x="21" y="413" width="336" height="92">
+      <text id="70:4244" name="最终受评提交与行数" x="0" y="0" width="117" height="20" />
+      <text id="70:4245" name="未知" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4246" name="主控与费用" x="21" y="527" width="336" height="92">
+      <text id="70:4247" name="主控与费用" x="0" y="0" width="65" height="20" />
+      <text id="70:4248" name="外部会话 · 平台不可见" x="0" y="26" width="336" height="22" />
+    </frame>
+  </frame>
+  <frame id="86:4101" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="44:1322" names="evidence-review" page="missions/&lt;id&gt;" state="三层 · 等你检视" view="交付与验证页签" txt="figma-44-1322.txt" txt-match="74/77">
+<frame id="44:1322" name="04 交付与验证 · review" x="6080" y="2480" width="1440" height="1240">
+  <frame id="82:4119" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4118" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4096" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="44:1323" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="44:1324" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="44:1325" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="44:1326" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="44:1327" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="44:1328" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="44:1329" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="44:1330" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="44:1331" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="44:1333" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="44:1334" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="44:1335" name="Vehicle-Resource-Validation-FinalReview-20261023" x="224" y="122" width="1176" height="28" />
+  <text id="44:1336" name="核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，" x="224" y="162" width="1080" height="44" />
+  <text id="44:1337" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="44:1338" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="44:1339" name="已升级" x="380" y="218" width="0" height="20" hidden="true" />
+  <text id="44:1340" name="检视者处理 · 不会自动恢复 · 下一步：核对最终交卷" x="604" y="218" width="796" height="22" />
+  <text id="44:1341" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="44:1342" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="44:1343" name="费用（标价折算）$3.42 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="44:1344" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="44:1346" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="44:1347" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="44:1348" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <frame id="70:4249" name="分层验证 / 各层状态独立" x="224" y="360" width="784" height="770">
+    <frame id="70:4250" name="机器验证" x="0" y="0" width="784" height="112">
+      <text id="70:4251" name="机器验证" x="18" y="16" width="150" height="22" />
+      <text id="70:4252" name="通过" x="180" y="16" width="430" height="22" />
+      <text id="70:4253" name="VR-1182 · node --test 412 项，0 失败
+受评提交 7c1e9a2" x="180" y="48" width="570" height="44" />
+      <text id="70:4254" name="14:24" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4255" name="协调者验收" x="0" y="124" width="784" height="142">
+      <text id="70:4256" name="协调者验收" x="18" y="16" width="150" height="22" />
+      <text id="70:4257" name="通过 3/3" x="180" y="16" width="430" height="22" />
+      <text id="70:4258" name="1. 索引恢复不丢条目
+2. 更新中断不重复索引
+3. 范围与契约一致、可信验证通过" x="180" y="48" width="570" height="66" />
+      <text id="70:4259" name="14:31" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4260" name="独立复核" x="0" y="278" width="784" height="112">
+      <text id="70:4261" name="独立复核" x="18" y="16" width="150" height="22" />
+      <text id="70:4262" name="不适用" x="180" y="16" width="430" height="22" />
+      <text id="70:4263" name="仅高保障任务需要。" x="180" y="48" width="570" height="22" />
+      <text id="70:4264" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4265" name="检视者终审" x="0" y="402" width="784" height="112">
+      <text id="70:4266" name="检视者终审" x="18" y="16" width="150" height="22" />
+      <text id="70:4267" name="待处理" x="180" y="16" width="430" height="22" />
+      <text id="70:4268" name="在检视者会话核对最终交卷。" x="180" y="48" width="570" height="22" />
+      <text id="70:4269" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4270" name="合入集成分支" x="0" y="526" width="784" height="112">
+      <text id="70:4271" name="合入集成分支" x="18" y="16" width="150" height="22" />
+      <text id="70:4272" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4273" name="终审通过后另行记录。" x="180" y="48" width="570" height="22" />
+      <text id="70:4274" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+    <frame id="70:4275" name="合入 master" x="0" y="650" width="784" height="112">
+      <text id="70:4276" name="合入 master" x="18" y="16" width="150" height="22" />
+      <text id="70:4277" name="未开始" x="180" y="16" width="430" height="22" />
+      <text id="70:4278" name="需要用户明确说“合”。" x="180" y="48" width="570" height="22" />
+      <text id="70:4279" name="未知" x="676" y="18" width="90" height="20" />
+    </frame>
+  </frame>
+  <frame id="70:4280" name="交卷摘要" x="1024" y="360" width="376" height="770">
+    <text id="70:4281" name="交卷摘要" x="21" y="21" width="72" height="28" />
+    <frame id="70:4282" name="提交时间" x="21" y="71" width="336" height="92">
+      <text id="70:4283" name="提交时间" x="0" y="0" width="52" height="20" />
+      <text id="70:4284" name="10-25 14:31" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4285" name="受评执行" x="21" y="185" width="336" height="92">
+      <text id="70:4286" name="受评执行" x="0" y="0" width="52" height="20" />
+      <text id="70:4287" name="W-1102 · 第 13 次 · 7c1e9a2" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4288" name="修改范围" x="21" y="299" width="336" height="92">
+      <text id="70:4289" name="修改范围" x="0" y="0" width="52" height="20" />
+      <text id="70:4290" name="2 个文件 · +34 / −8 行" x="0" y="26" width="336" height="22" />
+    </frame>
+    <frame id="70:4291" name="文件" x="21" y="413" width="336" height="112">
+      <text id="70:4292" name="文件" x="0" y="0" width="26" height="20" />
+      <text id="70:4293" name="src/catalog/resource-index.ts
+test/resource-index-" x="0" y="26" width="336" height="44" />
+    </frame>
+    <frame id="70:4294" name="验证命令" x="21" y="547" width="336" height="92">
+      <text id="70:4295" name="验证命令" x="0" y="0" width="52" height="20" />
+      <text id="70:4296" name="node --test · VR-1182" x="0" y="26" width="336" height="22" />
+    </frame>
+  </frame>
+  <frame id="86:4097" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="44:1676" names="intent-active" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="契约页签" txt="figma-44-1676.txt" txt-match="46/49">
+<frame id="44:1676" name="契约全文 · active" x="1520" y="3980" width="1440" height="1240">
+  <frame id="82:4125" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4124" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4102" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="44:1677" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="44:1678" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="44:1679" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="44:1680" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="44:1681" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="44:1682" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="44:1683" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="44:1684" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="44:1685" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="44:1687" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="44:1688" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="44:1689" name="MiRing-Notification-Correlation-Recovery-20261014" x="224" y="122" width="1176" height="28" />
+  <text id="44:1690" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="224" y="162" width="1080" height="44" />
+  <text id="44:1691" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="44:1692" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="44:1693" name="补修" x="380" y="218" width="26" height="20" />
+  <text id="44:1694" name="平台处理 · 执行者运行中 · 下一步：等第 13 次执行交回" x="604" y="218" width="796" height="22" />
+  <text id="44:1695" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="44:1696" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="44:1697" name="费用（标价折算）$2.11 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="44:1698" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="44:1700" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="44:1701" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="44:1702" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <frame id="70:4090" name="契约内容" x="224" y="362" width="1176" height="792">
+    <text id="70:4091" name="契约修订 3 · W-684 · 只读" x="0" y="0" width="164" height="20" />
+    <frame id="70:4092" name="intent · 任务意图" x="0" y="42" width="572" height="216">
+      <text id="70:4093" name="intent · 任务意图" x="21" y="21" width="150" height="28" />
+      <text id="70:4094" name="调查通知到达后关联恢复路径的不一致行为，修复跨会话事件边界。第 3 轮仅修改冻结工单中列出的关联与恢" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4095" name="acceptance · 验收条件" x="0" y="274" width="572" height="204">
+      <text id="70:4096" name="acceptance · 验收条件" x="21" y="21" width="195" height="28" />
+      <text id="70:4097" name="1. 恢复后不重复分发通知
+2. 关联结果保留原始会话来源
+3. 修改仅涉及冻结范围并提交定向验证" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4098" name="constraints · 约束" x="0" y="494" width="572" height="154">
+      <text id="70:4099" name="constraints · 约束" x="21" y="21" width="158" height="28" />
+      <text id="70:4100" name="• 不改变既有通知接口的数据形状
+• 复用已记录的失败证据" x="21" y="59" width="530" height="44" />
+    </frame>
+    <frame id="70:4101" name="nonGoals · 不做什么" x="604" y="42" width="572" height="154">
+      <text id="70:4102" name="nonGoals · 不做什么" x="21" y="21" width="180" height="28" />
+      <text id="70:4103" name="• 不扩展通知功能或新增设置
+• 本票不执行 master 合入" x="21" y="59" width="530" height="44" />
+    </frame>
+    <frame id="70:4104" name="guardrails · 护栏" x="604" y="212" width="572" height="204">
+      <text id="70:4105" name="guardrails · 护栏" x="21" y="21" width="149" height="28" />
+      <text id="70:4106" name="• 不读取或输出凭据
+• 不扩大 allowedScope
+• 机器通过不代替角色验收" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4107" name="allowedScope · 允许范围" x="604" y="432" width="572" height="216">
+      <text id="70:4108" name="allowedScope · 允许范围" x="21" y="21" width="219" height="28" />
+      <text id="70:4109" name="src/application/notification-recovery.ts
+test/noti" x="21" y="59" width="530" height="40" />
+    </frame>
+  </frame>
+  <frame id="86:4103" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="44:1750" names="intent-direct" page="missions/&lt;id&gt;" state="直接主控 · 已暂停" view="契约页签" txt="figma-44-1750.txt" txt-match="47/49">
+<frame id="44:1750" name="契约全文 · direct" x="3040" y="3980" width="1440" height="1240">
+  <frame id="82:4127" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4126" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4104" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="44:1751" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="44:1752" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="44:1753" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="44:1754" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="44:1755" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="44:1756" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="44:1757" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="44:1758" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="44:1759" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="44:1761" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="44:1762" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="44:1763" name="SmartCar-SceneMode-Policy-Recovery-20261018" x="224" y="122" width="1176" height="28" />
+  <text id="44:1764" name="核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条" x="224" y="162" width="1080" height="44" />
+  <text id="44:1765" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="44:1766" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="44:1767" name="已暂停 · 直接主控" x="380" y="218" width="110" height="20" />
+  <text id="44:1768" name="用户处理 · 不会自动恢复 · 下一步：补充设备侧输入" x="604" y="218" width="796" height="22" />
+  <text id="44:1769" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="44:1770" name="协作方式：直接主控" x="414" y="255" width="126" height="22" />
+  <text id="44:1771" name="平台可见 $1.06 · 不含主控会话 / 上限 $10" x="624" y="255" width="265" height="22" />
+  <text id="44:1772" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="44:1774" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="44:1775" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="44:1776" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <frame id="70:4111" name="契约内容" x="224" y="362" width="1176" height="792">
+    <text id="70:4112" name="契约修订 2 · W-712 · 只读" x="0" y="0" width="164" height="20" />
+    <frame id="70:4113" name="intent · 任务意图" x="0" y="42" width="572" height="216">
+      <text id="70:4114" name="intent · 任务意图" x="21" y="21" width="150" height="28" />
+      <text id="70:4115" name="核对场景切换后的策略优先级与异常恢复，确保恢复过程不会覆盖用户配置；由当前外部会话负责冻结工单、逐条" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4116" name="acceptance · 验收条件" x="0" y="274" width="572" height="204">
+      <text id="70:4117" name="acceptance · 验收条件" x="21" y="21" width="195" height="28" />
+      <text id="70:4118" name="1. 异常恢复不覆盖用户配置
+2. 场景切换后的策略优先级保持一致
+3. 提交可复核的设备侧输入与验" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4119" name="constraints · 约束" x="0" y="494" width="572" height="154">
+      <text id="70:4120" name="constraints · 约束" x="21" y="21" width="158" height="28" />
+      <text id="70:4121" name="• 主控模型与费用对平台不可见
+• 等待设备输入期间不继续派发" x="21" y="59" width="530" height="44" />
+    </frame>
+    <frame id="70:4122" name="nonGoals · 不做什么" x="604" y="42" width="572" height="154">
+      <text id="70:4123" name="nonGoals · 不做什么" x="21" y="21" width="180" height="28" />
+      <text id="70:4124" name="• 不引入平台协调者会话
+• 不改用户已有配置" x="21" y="59" width="530" height="44" />
+    </frame>
+    <frame id="70:4125" name="guardrails · 护栏" x="604" y="212" width="572" height="204">
+      <text id="70:4126" name="guardrails · 护栏" x="21" y="21" width="149" height="28" />
+      <text id="70:4127" name="• 只在主控冻结的工单范围内实施
+• 不得将主控未知费用填为零
+• 保存设备原始证据" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4128" name="allowedScope · 允许范围" x="604" y="432" width="572" height="216">
+      <text id="70:4129" name="allowedScope · 允许范围" x="21" y="21" width="219" height="28" />
+      <text id="70:4130" name="src/scene/policy-recovery.ts
+test/scene-policy-rec" x="21" y="59" width="530" height="40" />
+    </frame>
+  </frame>
+  <frame id="86:4105" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="44:1824" names="intent-review" page="missions/&lt;id&gt;" state="三层 · 等你检视" view="契约页签" txt="figma-44-1824.txt" txt-match="46/49">
+<frame id="44:1824" name="契约全文 · review" x="4560" y="3980" width="1440" height="1240">
+  <frame id="82:4129" name="任务页头 / 底部分界" x="224" y="334" width="1176" height="1" />
+  <frame id="82:4128" name="任务页头 / 白色信息层" x="184" y="69" width="1256" height="266" />
+  <frame id="86:4106" name="任务事实 / 独立信息带" x="224" y="248" width="1176" height="40" />
+  <frame id="44:1825" name="一级导航" x="0" y="0" width="184" height="1240">
+    <text id="44:1826" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="44:1827" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="44:1828" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="44:1829" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="44:1830" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="44:1831" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="44:1832" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="44:1833" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="44:1835" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <text id="44:1836" name="返回任务列表" x="224" y="88" width="84" height="22" />
+  <text id="44:1837" name="Vehicle-Resource-Validation-FinalReview-20261023" x="224" y="122" width="1176" height="28" />
+  <text id="44:1838" name="核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，" x="224" y="162" width="1080" height="44" />
+  <text id="44:1839" name="展开 intent" x="1310" y="166" width="71" height="22" />
+  <instance id="44:1840" name="Console/Status" x="224" y="214" width="142" height="28" />
+  <text id="44:1841" name="已升级" x="380" y="218" width="0" height="20" hidden="true" />
+  <text id="44:1842" name="检视者处理 · 不会自动恢复 · 下一步：核对最终交卷" x="604" y="218" width="796" height="22" />
+  <text id="44:1843" name="执行保障：标准" x="240" y="255" width="98" height="22" />
+  <text id="44:1844" name="协作方式：三层" x="414" y="255" width="98" height="22" />
+  <text id="44:1845" name="费用（标价折算）$3.42 / 上限 $10 · 部分为估算" x="624" y="255" width="304" height="22" />
+  <text id="44:1846" name="运行 12 分钟 · 创建于 10-25 14:20" x="1036" y="256" width="348" height="20" />
+  <instance id="44:1848" name="Console/Tab" x="224" y="294" width="110" height="40" />
+  <instance id="44:1849" name="Console/Tab" x="354" y="294" width="150" height="40" />
+  <instance id="44:1850" name="Console/Tab" x="524" y="294" width="100" height="40" />
+  <frame id="70:4132" name="契约内容" x="224" y="362" width="1176" height="792">
+    <text id="70:4133" name="契约修订 4 · W-1102 · 只读" x="0" y="0" width="171" height="20" />
+    <frame id="70:4134" name="intent · 任务意图" x="0" y="42" width="572" height="216">
+      <text id="70:4135" name="intent · 任务意图" x="21" y="21" width="150" height="28" />
+      <text id="70:4136" name="核对车辆资源目录的索引与恢复行为，验证更新中断后资源索引不会丢失或重复；保留已有定向验证和全量报告，" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4137" name="acceptance · 验收条件" x="0" y="274" width="572" height="204">
+      <text id="70:4138" name="acceptance · 验收条件" x="21" y="21" width="195" height="28" />
+      <text id="70:4139" name="1. 资源索引恢复后不丢失条目
+2. 更新中断后不产生重复索引
+3. 提交范围与契约一致并通过可信验" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4140" name="constraints · 约束" x="0" y="494" width="572" height="154">
+      <text id="70:4141" name="constraints · 约束" x="21" y="21" width="158" height="28" />
+      <text id="70:4142" name="• 保留既有资源目录接口
+• 可信报告必须绑定受评提交" x="21" y="59" width="530" height="44" />
+    </frame>
+    <frame id="70:4143" name="nonGoals · 不做什么" x="604" y="42" width="572" height="154">
+      <text id="70:4144" name="nonGoals · 不做什么" x="21" y="21" width="180" height="28" />
+      <text id="70:4145" name="• 本票不改资源授权策略
+• 终审前不执行合入" x="21" y="59" width="530" height="44" />
+    </frame>
+    <frame id="70:4146" name="guardrails · 护栏" x="604" y="212" width="572" height="204">
+      <text id="70:4147" name="guardrails · 护栏" x="21" y="21" width="149" height="28" />
+      <text id="70:4148" name="• 角色验收与检视者终审分别记录
+• 未合入 master 不标为 master 已完成
+• 保留全" x="21" y="59" width="530" height="66" />
+    </frame>
+    <frame id="70:4149" name="allowedScope · 允许范围" x="604" y="432" width="572" height="216">
+      <text id="70:4150" name="allowedScope · 允许范围" x="21" y="21" width="219" height="28" />
+      <text id="70:4151" name="src/catalog/resource-index.ts
+test/resource-index-" x="21" y="59" width="530" height="40" />
+    </frame>
+  </frame>
+  <frame id="86:4107" name="任务事实与页签 / 分隔" x="224" y="292" width="1176" height="1" />
+</frame>
+</board>
+<board node="45:1588" names="cost-active" page="missions/&lt;id&gt;" state="三层 · 执行中（补修）" view="费用明细弹层（900×520）" txt="figma-45-1588.txt" txt-match="4/4">
+<frame id="45:1588" name="cost-active" x="0" y="5480" width="900" height="520">
+  <text id="45:1589" name="任务费用明细（标价折算）" x="24" y="24" width="852" height="28" />
+  <text id="45:1590" name="平台标价折算费用 ≈$2.11，其中部分为估算。
+
+上限：$10（本任务合成示例）
+数据质量：上报 " x="24" y="80" width="852" height="44" />
+  <instance id="45:1591" name="Console/SecondaryButton" x="24" y="460" width="120" height="36" />
+</frame>
+</board>
+<board node="43:630" names="edit" page="pool" state="模型资源" view="协调者页签 · 右侧编辑面板（正常候选）" txt="figma-43-630.txt" txt-match="75/77">
+<frame id="43:630" name="03A 编辑候选" x="0" y="2480" width="1440" height="1120">
+  <frame id="43:631" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="43:632" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="43:633" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="43:634" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="43:635" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="43:636" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="43:637" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="43:638" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="43:639" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="43:641" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="43:642" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4114" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="43:643" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="43:644" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="43:645" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="43:646" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="43:647" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="43:648" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="43:650" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="43:651" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="43:652" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="43:653" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="46:1674" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="46:1675" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="46:1676" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="46:1677" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="46:1678" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="46:1679" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="46:1680" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="46:1681" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="46:1682" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="46:1683" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="46:1684" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="46:1685" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="46:1686" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="46:1687" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="43:661" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="43:662" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="43:663" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="43:664" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="43:665" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="43:666" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="43:667" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="43:668" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="43:669" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="43:675" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4063" name="候选标识" x="24" y="20" width="344" height="40" />
+    <instance id="69:4064" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4066" name="profileId 只读 · runtime = pi · 与角色共用草稿" x="24" y="70" width="468" height="20" />
+    <text id="69:4067" name="端点" x="24" y="106" width="26" height="20" />
+    <instance id="69:4068" name="Console/Field" x="24" y="130" width="468" height="42" />
+    <text id="69:4072" name="适配层参数" x="24" y="188" width="70" height="22" />
+    <instance id="69:4073" name="Console/Field" x="24" y="218" width="160" height="42" />
+    <instance id="69:4075" name="Console/Field" x="192" y="218" width="300" height="42" />
+    <instance id="69:4077" name="Console/Field" x="24" y="268" width="160" height="42" />
+    <instance id="69:4079" name="Console/Field" x="192" y="268" width="300" height="42" />
+    <instance id="69:4081" name="Console/Field" x="24" y="318" width="160" height="42" />
+    <instance id="69:4083" name="Console/Field" x="192" y="318" width="300" height="42" />
+    <instance id="69:4085" name="Console/SecondaryButton" x="24" y="372" width="128" height="36" />
+    <instance id="69:4088" name="Console/Switch" x="24" y="424" width="210" height="32" />
+    <instance id="69:4092" name="Console/SecondaryButton" x="24" y="470" width="108" height="36" />
+    <instance id="69:4094" name="Console/SecondaryButton" x="148" y="470" width="108" height="36" />
+    <text id="69:4096" name="健康详情（只读）" x="24" y="532" width="112" height="22" />
+    <text id="69:4097" name="正常" x="24" y="562" width="468" height="22" />
+    <text id="69:4098" name="最近失败：无失败记录" x="24" y="592" width="468" height="20" />
+    <text id="69:4099" name="额度说明：剩 8% · 11-01 重置" x="24" y="640" width="468" height="20" />
+    <text id="69:4100" name="平台给出的复位命令原文" x="24" y="692" width="143" height="20" />
+    <frame id="69:4101" name="复位命令" x="24" y="718" width="468" height="96">
+      <text id="69:4102" name="平台未提供复位命令" x="12" y="12" width="444" height="20" />
+    </frame>
+    <instance id="69:4103" name="Console/SecondaryButton" x="24" y="828" width="128" height="36" />
+  </frame>
+  <frame id="69:4054" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4055" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4056" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4057" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4058" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4061" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="43:712" names="edit-open" page="pool" state="模型资源" view="协调者页签 · 右侧面板（熔断候选，额度耗尽）" txt="figma-43-712.txt" txt-match="75/77">
+<frame id="43:712" name="03B 熔断候选详情" x="1520" y="2480" width="1440" height="1120">
+  <frame id="43:713" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="43:714" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="43:715" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="43:716" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="43:717" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="43:718" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="43:719" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="43:720" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="43:721" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="43:723" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="43:724" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4115" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="43:725" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="43:726" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="43:727" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="43:728" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="43:729" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="43:730" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="43:732" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="43:733" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="43:734" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="43:735" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="46:1688" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="46:1689" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="46:1690" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="46:1691" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="46:1692" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="46:1693" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="46:1694" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="46:1695" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="46:1696" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="46:1697" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="46:1698" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="46:1699" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="46:1700" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="46:1701" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="43:743" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="43:744" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="43:745" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="43:746" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="43:747" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="43:748" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="43:749" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="43:750" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="43:751" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="43:757" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4115" name="候选标识" x="24" y="20" width="344" height="20" />
+    <instance id="69:4116" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4118" name="profileId 只读 · runtime = pi · 与角色共用草稿" x="24" y="70" width="468" height="20" />
+    <text id="69:4119" name="端点" x="24" y="106" width="26" height="20" />
+    <instance id="69:4120" name="Console/Field" x="24" y="130" width="468" height="42" />
+    <text id="69:4124" name="适配层参数" x="24" y="188" width="70" height="22" />
+    <instance id="69:4125" name="Console/Field" x="24" y="218" width="160" height="42" />
+    <instance id="69:4127" name="Console/Field" x="192" y="218" width="300" height="42" />
+    <instance id="69:4129" name="Console/Field" x="24" y="268" width="160" height="42" />
+    <instance id="69:4131" name="Console/Field" x="192" y="268" width="300" height="42" />
+    <instance id="69:4133" name="Console/Field" x="24" y="318" width="160" height="42" />
+    <instance id="69:4135" name="Console/Field" x="192" y="318" width="300" height="42" />
+    <instance id="69:4137" name="Console/SecondaryButton" x="24" y="372" width="128" height="36" />
+    <instance id="69:4140" name="Console/Switch" x="24" y="424" width="210" height="32" />
+    <instance id="69:4144" name="Console/SecondaryButton" x="24" y="470" width="108" height="36" />
+    <instance id="69:4146" name="Console/SecondaryButton" x="148" y="470" width="108" height="36" />
+    <text id="69:4148" name="健康详情（只读）" x="24" y="532" width="112" height="22" />
+    <text id="69:4149" name="熔断 · 额度耗尽" x="24" y="562" width="468" height="22" />
+    <text id="69:4150" name="最近失败：10-25 13:58 · quota" x="24" y="592" width="468" height="20" />
+    <text id="69:4151" name="额度已用完，适配层没有给出重置时间——不会自动恢复，要等充值后人工复位。" x="24" y="640" width="468" height="20" />
+    <text id="69:4152" name="平台给出的复位命令原文" x="24" y="692" width="143" height="20" />
+    <frame id="69:4153" name="复位命令" x="24" y="718" width="468" height="96">
+      <text id="69:4154" name="node src/l3.ts candidate reset coordinator-openrou" x="12" y="12" width="444" height="40" />
+    </frame>
+    <instance id="69:4155" name="Console/SecondaryButton" x="24" y="828" width="128" height="36" />
+  </frame>
+  <frame id="69:4106" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4107" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4108" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4109" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4110" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4113" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="43:794" names="add-candidate" page="pool" state="模型资源" view="协调者页签 · 右侧面板（添加候选）" txt="figma-43-794.txt" txt-match="70/72">
+<frame id="43:794" name="03C 添加候选" x="3040" y="2480" width="1440" height="1120">
+  <frame id="43:795" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="43:796" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="43:797" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="43:798" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="43:799" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="43:800" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="43:801" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="43:802" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="43:803" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="43:805" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="43:806" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4116" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="43:807" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="43:808" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="43:809" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="43:810" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="43:811" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="43:812" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="43:814" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="43:815" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="43:816" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="43:817" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="46:1702" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="46:1703" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="46:1704" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="46:1705" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="46:1706" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="46:1707" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="46:1708" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="46:1709" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="46:1710" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="46:1711" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="46:1712" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="46:1713" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="46:1714" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="46:1715" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="43:825" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="43:826" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="43:827" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="43:828" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="43:829" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="43:830" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="43:831" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="43:832" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="43:833" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="43:839" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4167" name="添加候选" x="24" y="20" width="344" height="28" />
+    <instance id="69:4168" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4171" name="profileId" x="24" y="106" width="52" height="20" />
+    <instance id="69:4172" name="Console/Field" x="24" y="130" width="468" height="42" />
+    <text id="69:4174" name="端点" x="24" y="190" width="26" height="20" />
+    <instance id="69:4175" name="Console/Field" x="24" y="214" width="468" height="42" />
+    <text id="69:4179" name="runtime：pi（固定）" x="24" y="274" width="135" height="22" />
+    <text id="69:4180" name="适配层参数" x="24" y="322" width="70" height="22" />
+    <instance id="69:4181" name="Console/Field" x="24" y="354" width="160" height="42" />
+    <instance id="69:4183" name="Console/Field" x="192" y="354" width="300" height="42" />
+    <instance id="69:4185" name="Console/Field" x="24" y="404" width="160" height="42" />
+    <instance id="69:4187" name="Console/Field" x="192" y="404" width="300" height="42" />
+    <instance id="69:4189" name="Console/Field" x="24" y="454" width="160" height="42" />
+    <instance id="69:4191" name="Console/Field" x="192" y="454" width="300" height="42" />
+    <instance id="69:4193" name="Console/SecondaryButton" x="24" y="516" width="128" height="36" />
+    <text id="69:4196" name="顺序" x="24" y="572" width="26" height="20" />
+    <instance id="69:4197" name="Console/Field" x="24" y="596" width="140" height="42" />
+    <instance id="69:4199" name="Console/Switch" x="24" y="660" width="210" height="32" />
+    <instance id="69:4203" name="Console/PrimaryButton" x="24" y="724" width="164" height="36" />
+  </frame>
+  <frame id="69:4158" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4159" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4160" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4161" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4162" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4165" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="43:871" names="conflict" page="pool" state="模型资源" view="协调者页签 · 右侧面板（配置冲突）" txt="figma-43-871.txt" txt-match="71/73">
+<frame id="43:871" name="03D 配置冲突" x="4560" y="2480" width="1440" height="1120">
+  <frame id="43:872" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="43:873" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="43:874" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="43:875" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="43:876" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="43:877" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="43:878" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="43:879" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="43:880" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="43:882" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="43:883" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4117" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="43:884" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="43:885" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="43:886" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="43:887" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="43:888" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="43:889" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="43:891" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="43:892" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="43:893" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="43:894" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="46:1716" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="46:1717" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="46:1718" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="46:1719" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="46:1720" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="46:1721" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="46:1722" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="46:1723" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="46:1724" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="46:1725" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="46:1726" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="46:1727" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="46:1728" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="46:1729" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="43:902" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="43:903" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="43:904" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="43:905" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="43:906" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="43:907" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="43:908" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="43:909" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="43:910" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="43:916" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4216" name="候选标识" x="24" y="20" width="344" height="40" />
+    <instance id="69:4217" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4219" name="profileId 只读 · runtime = pi · 与角色共用草稿" x="24" y="70" width="468" height="20" />
+    <instance id="69:4220" name="Console/Banner" x="24" y="106" width="468" height="68" />
+    <instance id="69:4223" name="Console/SecondaryButton" x="24" y="186" width="210" height="36" />
+    <text id="69:4225" name="端点" x="24" y="244" width="26" height="20" />
+    <instance id="69:4226" name="Console/Field" x="24" y="268" width="468" height="42" />
+    <text id="69:4230" name="适配层参数" x="24" y="326" width="70" height="22" />
+    <instance id="69:4231" name="Console/Field" x="24" y="356" width="160" height="42" />
+    <instance id="69:4233" name="Console/Field" x="192" y="356" width="300" height="42" />
+    <instance id="69:4235" name="Console/Field" x="24" y="406" width="160" height="42" />
+    <instance id="69:4237" name="Console/Field" x="192" y="406" width="300" height="42" />
+    <instance id="69:4239" name="Console/Field" x="24" y="456" width="160" height="42" />
+    <instance id="69:4241" name="Console/Field" x="192" y="456" width="300" height="42" />
+    <instance id="69:4243" name="Console/SecondaryButton" x="24" y="510" width="128" height="36" />
+    <instance id="69:4246" name="Console/Switch" x="24" y="562" width="210" height="32" />
+    <instance id="69:4250" name="Console/SecondaryButton" x="24" y="608" width="108" height="36" />
+    <instance id="69:4252" name="Console/SecondaryButton" x="148" y="608" width="108" height="36" />
+    <text id="69:4254" name="健康详情" x="24" y="666" width="56" height="22" />
+    <text id="69:4255" name="正常 · 无失败记录" x="24" y="694" width="468" height="22" />
+  </frame>
+  <frame id="69:4207" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4208" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4209" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4210" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4211" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4214" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="48:3834" names="edit-coordinator-03" page="pool" state="模型资源" view="协调者页签 · 编辑 coordinator-03（试探中）" txt="figma-48-3834.txt" txt-match="75/77">
+<frame id="48:3834" name="03 编辑 / coordinator-03" x="3040" y="14480" width="1440" height="1120">
+  <frame id="48:3835" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="48:3836" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="48:3837" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="48:3838" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="48:3839" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="48:3840" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="48:3841" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="48:3842" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="48:3843" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="48:3845" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="48:3846" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4167" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="48:3847" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="48:3848" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="48:3849" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="48:3850" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="48:3851" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="48:3852" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="48:3854" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="48:3855" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="48:3856" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="48:3857" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="48:3858" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="48:3859" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="48:3860" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="48:3861" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="48:3862" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="48:3863" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="48:3864" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="48:3865" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="48:3866" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="48:3867" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="48:3868" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="48:3869" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="48:3870" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="48:3871" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="48:3872" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="48:3873" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="48:3874" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="48:3875" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="48:3876" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="48:3877" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="48:3878" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="48:3879" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="48:3880" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="48:3886" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4266" name="候选标识" x="24" y="20" width="344" height="20" />
+    <instance id="69:4267" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4269" name="profileId 只读 · runtime = pi · 与角色共用草稿" x="24" y="70" width="468" height="20" />
+    <text id="69:4270" name="端点" x="24" y="106" width="26" height="20" />
+    <instance id="69:4271" name="Console/Field" x="24" y="130" width="468" height="42" />
+    <text id="69:4275" name="适配层参数" x="24" y="188" width="70" height="22" />
+    <instance id="69:4276" name="Console/Field" x="24" y="218" width="160" height="42" />
+    <instance id="69:4278" name="Console/Field" x="192" y="218" width="300" height="42" />
+    <instance id="69:4280" name="Console/Field" x="24" y="268" width="160" height="42" />
+    <instance id="69:4282" name="Console/Field" x="192" y="268" width="300" height="42" />
+    <instance id="69:4284" name="Console/Field" x="24" y="318" width="160" height="42" />
+    <instance id="69:4286" name="Console/Field" x="192" y="318" width="300" height="42" />
+    <instance id="69:4288" name="Console/SecondaryButton" x="24" y="372" width="128" height="36" />
+    <instance id="69:4291" name="Console/Switch" x="24" y="424" width="210" height="32" />
+    <instance id="69:4295" name="Console/SecondaryButton" x="24" y="470" width="108" height="36" />
+    <instance id="69:4297" name="Console/SecondaryButton" x="148" y="470" width="108" height="36" />
+    <text id="69:4299" name="健康详情（只读）" x="24" y="532" width="112" height="22" />
+    <text id="69:4300" name="试探中 · 网络暂时失败" x="24" y="562" width="468" height="22" />
+    <text id="69:4301" name="最近失败：10-25 14:12 · upstream_network" x="24" y="592" width="468" height="20" />
+    <text id="69:4302" name="额度说明：剩 73% · 11-04 重置" x="24" y="640" width="468" height="20" />
+    <text id="69:4303" name="平台给出的复位命令原文" x="24" y="692" width="143" height="20" />
+    <frame id="69:4304" name="复位命令" x="24" y="718" width="468" height="96">
+      <text id="69:4305" name="平台未提供复位命令" x="12" y="12" width="444" height="20" />
+    </frame>
+    <instance id="69:4306" name="Console/SecondaryButton" x="24" y="828" width="128" height="36" />
+  </frame>
+  <frame id="69:4257" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4258" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4259" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4260" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4261" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4264" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="48:3923" names="edit-coordinator-04" page="pool" state="模型资源" view="协调者页签 · 编辑 coordinator-04（健康未知）" txt="figma-48-3923.txt" txt-match="75/77">
+<frame id="48:3923" name="03 编辑 / coordinator-04" x="4560" y="14480" width="1440" height="1120">
+  <frame id="48:3924" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="48:3925" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="48:3926" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="48:3927" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="48:3928" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="48:3929" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="48:3930" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="48:3931" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="48:3932" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="48:3934" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="48:3935" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4168" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="48:3936" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="48:3937" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="48:3938" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="48:3939" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="48:3940" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="48:3941" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="48:3943" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="48:3944" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="48:3945" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="48:3946" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="48:3947" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="48:3948" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="48:3949" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="48:3950" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="48:3951" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="48:3952" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="48:3953" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="48:3954" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="48:3955" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="48:3956" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="48:3957" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="48:3958" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="48:3959" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="48:3960" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="48:3961" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="48:3962" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="48:3963" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="48:3964" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="48:3965" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="48:3966" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="48:3967" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="48:3968" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="48:3969" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="48:3975" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4318" name="候选标识" x="24" y="20" width="344" height="20" />
+    <instance id="69:4319" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4321" name="profileId 只读 · runtime = pi · 与角色共用草稿" x="24" y="70" width="468" height="20" />
+    <text id="69:4322" name="端点" x="24" y="106" width="26" height="20" />
+    <instance id="69:4323" name="Console/Field" x="24" y="130" width="468" height="42" />
+    <text id="69:4327" name="适配层参数" x="24" y="188" width="70" height="22" />
+    <instance id="69:4328" name="Console/Field" x="24" y="218" width="160" height="42" />
+    <instance id="69:4330" name="Console/Field" x="192" y="218" width="300" height="42" />
+    <instance id="69:4332" name="Console/Field" x="24" y="268" width="160" height="42" />
+    <instance id="69:4334" name="Console/Field" x="192" y="268" width="300" height="42" />
+    <instance id="69:4336" name="Console/Field" x="24" y="318" width="160" height="42" />
+    <instance id="69:4338" name="Console/Field" x="192" y="318" width="300" height="42" />
+    <instance id="69:4340" name="Console/SecondaryButton" x="24" y="372" width="128" height="36" />
+    <instance id="69:4343" name="Console/Switch" x="24" y="424" width="210" height="32" />
+    <instance id="69:4347" name="Console/SecondaryButton" x="24" y="470" width="108" height="36" />
+    <instance id="69:4349" name="Console/SecondaryButton" x="148" y="470" width="108" height="36" />
+    <text id="69:4351" name="健康详情（只读）" x="24" y="532" width="112" height="22" />
+    <text id="69:4352" name="未知 · 健康未返回" x="24" y="562" width="468" height="22" />
+    <text id="69:4353" name="最近失败：未知" x="24" y="592" width="468" height="20" />
+    <text id="69:4354" name="额度说明：平台未返回" x="24" y="640" width="468" height="20" />
+    <text id="69:4355" name="平台给出的复位命令原文" x="24" y="692" width="143" height="20" />
+    <frame id="69:4356" name="复位命令" x="24" y="718" width="468" height="96">
+      <text id="69:4357" name="平台未提供复位命令" x="12" y="12" width="444" height="20" />
+    </frame>
+    <instance id="69:4358" name="Console/SecondaryButton" x="24" y="828" width="128" height="36" />
+  </frame>
+  <frame id="69:4309" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4310" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4311" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4312" name="协调者角色 · 修订 2f3bb069 · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4313" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4316" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="49:4094" names="reloaded" page="pool" state="模型资源" view="协调者页签 · 重新载入后保留草稿" txt="figma-49-4094.txt" txt-match="75/77">
+<frame id="49:4094" name="03R 已重新载入 · 保留草稿" x="6080" y="17480" width="1440" height="1120">
+  <frame id="49:4095" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="49:4096" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="49:4097" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="49:4098" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="49:4099" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="49:4100" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="49:4101" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="49:4102" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="49:4103" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="49:4105" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="49:4106" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4184" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="626" />
+    <text id="49:4107" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="49:4108" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="49:4109" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="49:4110" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="49:4111" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="49:4112" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="49:4114" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="49:4115" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="49:4116" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="222" height="20" />
+    </frame>
+    <frame id="49:4117" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="49:4118" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="49:4119" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="49:4120" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="49:4121" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="49:4122" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="49:4123" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="49:4124" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="49:4125" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="49:4126" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="49:4127" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="49:4128" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="49:4129" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="49:4130" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="49:4131" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="49:4132" name="候选列表" x="0" y="214" width="1176" height="512">
+      <instance id="49:4133" name="资源行 / coordinator-01" x="0" y="0" width="1176" height="64" />
+      <instance id="49:4134" name="资源行 / coordinator-02" x="0" y="64" width="1176" height="64" />
+      <instance id="49:4135" name="资源行 / coordinator-03" x="0" y="128" width="1176" height="64" />
+      <instance id="49:4136" name="资源行 / coordinator-04" x="0" y="192" width="1176" height="64" />
+      <instance id="49:4137" name="资源行 / coordinator-05" x="0" y="256" width="1176" height="64" />
+      <instance id="49:4138" name="资源行 / coordinator-06" x="0" y="320" width="1176" height="64" />
+      <instance id="49:4139" name="资源行 / coordinator-07" x="0" y="384" width="1176" height="64" />
+      <instance id="49:4140" name="资源行 / coordinator-08" x="0" y="448" width="1176" height="64" />
+    </frame>
+  </frame>
+  <frame id="49:4146" name="右侧编辑面板" x="900" y="78" width="516" height="920">
+    <text id="69:4786" name="候选标识" x="24" y="20" width="344" height="40" />
+    <instance id="69:4787" name="Console/SecondaryButton" x="392" y="12" width="100" height="36" />
+    <text id="69:4789" name="profileId 只读 · runtime = pi · 与角色共用草稿" x="24" y="70" width="468" height="20" />
+    <text id="69:4790" name="端点" x="24" y="106" width="26" height="20" />
+    <instance id="69:4791" name="Console/Field" x="24" y="130" width="468" height="42" />
+    <text id="69:4795" name="适配层参数" x="24" y="188" width="70" height="22" />
+    <instance id="69:4796" name="Console/Field" x="24" y="218" width="160" height="42" />
+    <instance id="69:4798" name="Console/Field" x="192" y="218" width="300" height="42" />
+    <instance id="69:4800" name="Console/Field" x="24" y="268" width="160" height="42" />
+    <instance id="69:4802" name="Console/Field" x="192" y="268" width="300" height="42" />
+    <instance id="69:4804" name="Console/Field" x="24" y="318" width="160" height="42" />
+    <instance id="69:4806" name="Console/Field" x="192" y="318" width="300" height="42" />
+    <instance id="69:4808" name="Console/SecondaryButton" x="24" y="372" width="128" height="36" />
+    <instance id="69:4811" name="Console/Switch" x="24" y="424" width="210" height="32" />
+    <instance id="69:4815" name="Console/SecondaryButton" x="24" y="470" width="108" height="36" />
+    <instance id="69:4817" name="Console/SecondaryButton" x="148" y="470" width="108" height="36" />
+    <text id="69:4819" name="健康详情（只读）" x="24" y="532" width="112" height="22" />
+    <text id="69:4820" name="正常" x="24" y="562" width="468" height="22" />
+    <text id="69:4821" name="最近失败：无失败记录" x="24" y="592" width="468" height="20" />
+    <text id="69:4822" name="额度说明：剩 8% · 11-01 重置" x="24" y="640" width="468" height="20" />
+    <text id="69:4823" name="平台给出的复位命令原文" x="24" y="692" width="143" height="20" />
+    <frame id="69:4824" name="复位命令" x="24" y="718" width="468" height="96">
+      <text id="69:4825" name="平台未提供复位命令" x="12" y="12" width="444" height="20" />
+    </frame>
+    <instance id="69:4826" name="Console/SecondaryButton" x="24" y="828" width="128" height="36" />
+  </frame>
+  <frame id="69:4777" name="角色统一草稿保存条" x="224" y="1012" width="1176" height="84">
+    <frame id="69:4778" name="角色草稿摘要" x="17" y="18" width="814" height="48">
+      <text id="69:4779" name="有 2 处未保存：顺序、启用" x="0" y="0" width="814" height="22" />
+      <text id="69:4780" name="协调者角色 · 修订 2f3bb06a · 整个角色一起提交；不打断运行中的执行" x="0" y="24" width="814" height="20" />
+    </frame>
+    <instance id="69:4781" name="Console/PrimaryButton" x="847" y="24" width="156" height="36" />
+    <instance id="69:4784" name="Console/SecondaryButton" x="1019" y="24" width="140" height="36" />
+  </frame>
+</frame>
+</board>
+<board node="48:3380" names="resource-independent_reviewer" page="pool" state="模型资源" view="独立复核页签 · 空角色" txt="figma-48-3380.txt" txt-match="38/39">
+<frame id="48:3380" name="03 空角色 / independent_reviewer" x="0" y="14480" width="1440" height="1120">
+  <frame id="48:3381" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="48:3382" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="48:3383" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="48:3384" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="48:3385" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="48:3386" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="48:3387" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="48:3388" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="48:3389" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="48:3391" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="48:3392" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4165" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="264" />
+    <text id="48:3393" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="48:3394" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="48:3395" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="48:3396" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="48:3397" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="48:3398" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="48:3400" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="48:3401" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="48:3402" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="191" height="20" />
+    </frame>
+    <frame id="48:3403" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="48:3404" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="48:3405" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="48:3406" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="48:3407" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="48:3408" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="48:3409" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="48:3410" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="48:3411" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="48:3412" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="48:3413" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="48:3414" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="48:3415" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="48:3416" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="48:3417" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="48:3418" name="候选列表" x="0" y="214" width="1176" height="150">
+      <text id="48:3600" name="候选为空，该角色无法调度；为空不等于可以自审。" x="0" y="0" width="322" height="22" />
+    </frame>
+  </frame>
+</frame>
+</board>
+<board node="48:3607" names="resource-classifier" page="pool" state="模型资源" view="分类页签 · 空角色" txt="figma-48-3607.txt" txt-match="38/39">
+<frame id="48:3607" name="03 空角色 / classifier" x="1520" y="14480" width="1440" height="1120">
+  <frame id="48:3608" name="一级导航" x="0" y="0" width="184" height="1120">
+    <text id="48:3609" name="CoAgentHub" x="16" y="16" width="109" height="28" />
+    <frame id="48:3610" name="导航间距" x="16" y="54" width="1" height="42" />
+    <instance id="48:3611" name="Console/NavItem" x="16" y="106" width="152" height="40" />
+    <instance id="48:3612" name="Console/NavItem" x="16" y="156" width="152" height="40" />
+  </frame>
+  <frame id="48:3613" name="项目与同步状态" x="224" y="18" width="1176" height="42">
+    <instance id="48:3614" name="Console/Field" x="0" y="0" width="256" height="42" />
+    <frame id="48:3615" name="空白" x="272" y="20.5" width="711" height="1" />
+    <text id="48:3616" name="最近同步 14:32:08 · 服务正常" x="999" y="11" width="177" height="20" />
+  </frame>
+  <frame id="48:3618" name="分隔线" x="224" y="68" width="1176" height="1" />
+  <frame id="48:3619" name="资源页 / 自动布局" x="224" y="96" width="1176" height="996">
+    <frame id="82:4166" name="候选数据区域 / 白色底板" x="0" y="108" width="1176" height="264" />
+    <text id="48:3620" name="模型资源" x="0" y="0" width="1176" height="44" />
+    <frame id="48:3621" name="角色页签" x="0" y="60" width="1176" height="40">
+      <instance id="48:3622" name="Console/Tab" x="0" y="0" width="180" height="40" />
+      <instance id="48:3623" name="Console/Tab" x="192" y="0" width="180" height="40" />
+      <instance id="48:3624" name="Console/Tab" x="384" y="0" width="180" height="40" />
+      <instance id="48:3625" name="Console/Tab" x="576" y="0" width="180" height="40" />
+    </frame>
+    <frame id="48:3627" name="候选管理" x="0" y="116" width="1176" height="36">
+      <instance id="48:3628" name="Console/SecondaryButton" x="0" y="0" width="128" height="36" />
+      <text id="48:3629" name="配置修订 2f3bb069 · 修改仅在保存后生效" x="144" y="0" width="191" height="20" />
+    </frame>
+    <frame id="48:3630" name="资源列头" x="0" y="168" width="1176" height="30">
+      <frame id="48:3631" name="表头 / 顺序" x="16" y="0" width="32" height="26">
+        <text id="48:3632" name="顺序" x="0" y="0" width="32" height="20" />
+      </frame>
+      <frame id="48:3633" name="表头 / 候选 / endpoint" x="52" y="0" width="248" height="26">
+        <text id="48:3634" name="候选 / endpoint" x="0" y="0" width="248" height="20" />
+      </frame>
+      <frame id="48:3635" name="表头 / 启用" x="304" y="0" width="64" height="26">
+        <text id="48:3636" name="启用" x="0" y="0" width="64" height="20" />
+      </frame>
+      <frame id="48:3637" name="表头 / 熔断" x="372" y="0" width="128" height="26">
+        <text id="48:3638" name="熔断" x="0" y="0" width="128" height="20" />
+      </frame>
+      <frame id="48:3639" name="表头 / 近 7 天" x="504" y="0" width="232" height="26">
+        <text id="48:3640" name="近 7 天" x="0" y="0" width="232" height="20" />
+      </frame>
+      <frame id="48:3641" name="表头 / 额度" x="740" y="0" width="184" height="26">
+        <text id="48:3642" name="额度" x="0" y="0" width="184" height="20" />
+      </frame>
+      <frame id="48:3643" name="表头 / 占用" x="928" y="0" width="232" height="26">
+        <text id="48:3644" name="占用" x="0" y="0" width="232" height="20" />
+      </frame>
+    </frame>
+    <frame id="48:3645" name="候选列表" x="0" y="214" width="1176" height="150">
+      <text id="48:3827" name="候选为空，该角色无法调度；为空不等于可以自审。" x="0" y="0" width="322" height="22" />
+    </frame>
+  </frame>
+</frame>
+</board>
+<board node="45:2089" names="endpoints" page="pool" state="模型资源" view="适配层端点清单弹层（900×520）" txt="figma-45-2089.txt" txt-match="4/4">
+<frame id="45:2089" name="endpoints" x="6080" y="9980" width="900" height="520">
+  <text id="45:2090" name="适配层端点清单" x="24" y="24" width="852" height="28" />
+  <text id="45:2091" name="sample/planner-1
+sample/planner-2
+sample/executor-" x="24" y="80" width="852" height="44" />
+  <instance id="45:2092" name="Console/SecondaryButton" x="24" y="460" width="120" height="36" />
+</frame>
+</board>
+<board node="45:2052" names="data-states" page="-" state="数据状态参考页，不是真实页面" view="服务未运行 / 数据过期 / 首次加载 / 空项目 / 局部失败 / 未知值 / 可能停滞 / 预算门禁" txt="figma-45-2052.txt" txt-match="29/29">
+<frame id="45:2052" name="data-states" x="3040" y="9980" width="1440" height="1380">
+  <text id="45:2053" name="数据状态与出现位置" x="24" y="24" width="1392" height="28" />
+  <text id="45:2054" name="顶栏下方：服务未运行横幅；同步位：数据过期；列表内部：首次加载、空项目、局部失败、未知值。" x="24" y="80" width="1392" height="22" />
+  <instance id="45:2055" name="Console/SecondaryButton" x="24" y="1320" width="120" height="36" />
+  <instance id="45:2057" name="Console/Banner" x="24" y="150" width="1392" height="70" />
+  <text id="45:2060" name="顶栏同步状态 · 数据过期" x="24" y="250" width="161" height="22" />
+  <text id="45:2061" name="最近同步 14:32:08 · 数据已过期" x="24" y="286" width="204" height="22" />
+  <text id="45:2062" name="列表内部 · 首次加载" x="24" y="350" width="133" height="22" />
+  <frame id="45:2063" name="骨架行" x="24" y="390" width="1392" height="44">
+    <frame id="45:2064" name="骨架编号" x="16" y="12" width="420" height="10" />
+    <frame id="45:2065" name="骨架状态" x="620" y="12" width="140" height="10" />
+  </frame>
+  <frame id="45:2066" name="骨架行" x="24" y="444" width="1392" height="44">
+    <frame id="45:2067" name="骨架编号" x="16" y="12" width="420" height="10" />
+    <frame id="45:2068" name="骨架状态" x="620" y="12" width="140" height="10" />
+  </frame>
+  <frame id="45:2069" name="骨架行" x="24" y="498" width="1392" height="44">
+    <frame id="45:2070" name="骨架编号" x="16" y="12" width="420" height="10" />
+    <frame id="45:2071" name="骨架状态" x="620" y="12" width="140" height="10" />
+  </frame>
+  <text id="45:2072" name="内容区 · 空项目" x="24" y="600" width="105" height="22" />
+  <text id="45:2073" name="这个项目还没有任务 · 任务由检视者会话创建" x="24" y="638" width="287" height="22" />
+  <text id="45:2074" name="仅出错单元格 · 局部失败" x="24" y="715" width="161" height="22" />
+  <text id="45:2075" name="coordinator-04     正常     近 7 天：读取失败     占用：空闲" x="24" y="753" width="1000" height="44" />
+  <text id="45:2076" name="读取失败" x="730" y="753" width="56" height="22" />
+  <text id="45:2077" name="字段位置 · 未知值" x="24" y="835" width="119" height="22" />
+  <text id="45:2078" name="费用：未知    思考档：未知    主控模型：平台不可见" x="24" y="873" width="320" height="22" />
+  <text id="45:2079" name="实时输出区 · 可能停滞" x="24" y="950" width="147" height="22" />
+  <text id="45:2080" name="最后输出 4 分钟前 · 心跳 3 分钟前 · 可能卡住，检查当前会话" x="24" y="988" width="392" height="22" />
+  <text id="45:2081" name="费用区 · 预算门禁" x="24" y="1065" width="119" height="22" />
+  <text id="45:2082" name="$8.40 / $10 · 接近上限" x="24" y="1103" width="149" height="22" />
+  <text id="45:2083" name="$10 / $10 · 已停，等检视者批准追加预算" x="24" y="1140" width="262" height="22" />
+</frame>
+</board>
+</boards>
